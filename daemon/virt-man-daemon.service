@@ -1,0 +1,18 @@
+[Unit]
+Description=virt-man-daemon (libvirt HTTP control daemon)
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/virt-man-daemon
+Restart=on-failure
+RestartSec=3
+# Token and TLS key live under /etc/virt-man; run as a user in the libvirt
+# group, or root if libvirt access needs it. install.sh runs the daemon as
+# root by default; set User=libvirt-qemu + supplementary group if preferred.
+# User=libvirt-qemu
+# SupplementaryGroups=libvirt
+
+[Install]
+WantedBy=multi-user.target

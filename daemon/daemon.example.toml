@@ -1,0 +1,21 @@
+# Example config for virt-man-daemon.
+# Default location: /etc/virt-man/daemon.toml (override with VIRT_MAN_CONFIG).
+
+# HTTPS API listen address.
+http_addr = "127.0.0.1:8443"
+
+# Unix socket path. Omitted: /run/virt-man/daemon.sock as root, or
+# $XDG_RUNTIME_DIR/virt-man/daemon.sock otherwise.
+# unix_socket = "/run/virt-man/daemon.sock"
+
+# File containing the pre-generated auth token (written by the panel app).
+token_path = "/etc/virt-man/token"
+
+# Directory for the self-signed TLS certificate/key (created on first run).
+cert_dir = "/etc/virt-man/certs"
+
+# Optional: serve an externally-provided certificate instead of the
+# self-generated one. Both must be set.
+# [tls]
+# cert = "/etc/virt-man/tls/cert.pem"
+# key = "/etc/virt-man/tls/key.pem"
