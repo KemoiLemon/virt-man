@@ -1,0 +1,125 @@
+// Backend client. The SPA talks same-origin to virt-man-web: /auth, /users,
+// /me, /keys, /connections for the backend API, and /proxy/{id}/... for the
+// daemon. Fetch always sends credentials (session cookie).
+
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function handle<T>(res: Response): Promise<T> {
+  if (res.status === 204) return undefined as T;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new ApiError(res.status, (data as any).error ?? res.statusText);
+  }
+  return data as T;
+}
+
+function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const hasBody = body !== undefined;
+  return fetch(url, {
+    method,
+    credentials: "same-origin",
+    headers: hasBody ? { "Content-Type": "application/json" } : undefined,
+    body: hasBody ? JSON.stringify(body) : undefined,
+  }).then(handle<T>);
+}
+
+export const api = {
+  get: <T>(url: string) => request<T>("GET", url),
+  post: <T>(url: string, body?: unknown) => request<T>("POST", url, body),
+  put: <T>(url: string, body?: unknown) => request<T>("PUT", url, body),
+  del: <T>(url: string) => request<T>("DELETE", url),
+  postRaw: <T = unknown>(url: string, body: Blob | ArrayBuffer | Uint8Array, contentType = "application/octet-stream") =>
+    fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": contentType },
+      body: body as BodyInit,
+    }).then(handle<T>),
+};
+
+// ---------------------------------------------------------------- types
+
+export interface User {
+  id: string;
+  username: string;
+  role: "admin" | "operator" | "viewer";
+  nickname: string;
+  avatar: string | null;
+  scopes: Record<string, "read" | "write" | "none">;
+}
+
+export interface Connection {
+  id: string;
+  name: string;
+  url: string;
+  fingerprint: string | null;
+  has_token: boolean;
+  has_cert: boolean;
+}
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  key?: string;
+}
+
+export interface DomainSummary {
+  name: string;
+  id: number;
+  state: string;
+  active: boolean;
+  persistent: boolean;
+}
+
+export interface Graphics {
+  kind: string;
+  host: string;
+  port: number;
+}
+
+export interface NetworkSummary {
+  name: string;
+  bridge: string;
+  active: boolean;
+  persistent: boolean;
+}
+
+export interface PoolSummary {
+  name: string;
+  active: boolean;
+  persistent: boolean;
+  capacity: number | null;
+  allocation: number | null;
+  available: number | null;
+}
+
+export interface VolumeSummary {
+  name: string;
+  path: string;
+  capacity: number;
+  allocation: number;
+}
+
+export interface Task {
+  id: number;
+  label: string;
+  status: "running" | "done" | "failed";
+  message: string;
+}
+
+// Daemon calls go through the proxy.
+export function daemonUrl(connId: string, path: string): string {
+  return `/proxy/${connId}${path}`;
+}
+
+export function consoleUrl(connId: string, domain: string): string {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/proxy/${connId}/console/domains/${encodeURIComponent(domain)}`;
+}

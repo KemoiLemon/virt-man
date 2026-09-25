@@ -1,0 +1,31 @@
+[package]
+name = "virt-man-web"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rcgen = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+libc = "0.2"
+
+# auth
+bcrypt = "0.15"
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+
+# daemon proxy (TLS-pinned)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-no-provider", "stream"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"

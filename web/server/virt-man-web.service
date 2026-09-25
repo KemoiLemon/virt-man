@@ -1,0 +1,19 @@
+[Unit]
+Description=virt-man-web (web UI + daemon proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/virt-man-web
+Restart=on-failure
+RestartSec=3
+# Proxmox-style HTTPS on 0.0.0.0:8006. The self-signed cert is generated on
+# first run under /var/lib/virt-man/tls.
+Environment=VIRT_MAN_WEB_BIND=0.0.0.0
+Environment=VIRT_MAN_WEB_PORT=8006
+Environment=VIRT_MAN_WEB_DATA=/var/lib/virt-man
+Environment=VIRT_MAN_WEB_DIST=/usr/local/share/virt-man/dist
+
+[Install]
+WantedBy=multi-user.target
