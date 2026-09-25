@@ -1,30 +1,32 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "client",
+  "productName": "virt-man",
   "version": "0.1.0",
-  "identifier": "top.kemoi.virt-man-client",
+  "identifier": "dev.vmman.app",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
-    "frontendDist": "../dist"
+    "frontendDist": "../stub"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "client",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "virt-man",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' http: https: ws: wss: data: blob:; style-src 'self' 'unsafe-inline' http: https:; script-src 'self' 'unsafe-inline' http: https:; img-src 'self' data: blob: http: https:"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "appimage"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
