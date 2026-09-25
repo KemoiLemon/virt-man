@@ -1,0 +1,17 @@
+# Rust
+daemon/target/
+web/server/target/
+
+# Node
+node_modules/
+web/dist/
+client/node_modules/
+
+# Tauri
+client/src-tauri/target/
+client/src-tauri/gen/schemas/
+
+# Misc
+*.log
+.DS_Store
+.pi/
