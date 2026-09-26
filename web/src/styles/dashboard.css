@@ -108,3 +108,27 @@
    share of the card). */
 #nets-list .net-actions { flex-wrap: nowrap; gap: 4px; }
 #nets-list .net-actions .btn { flex: 1 1 0; padding-top: 7px; padding-bottom: 7px; }
+
+/* The create card is a button in the same grid: a striped border marks it as
+   an affordance rather than a real network, and it stays present even when
+   there are no networks. The stripe is a repeating-linear-gradient border. */
+.net-create-card {
+  background: var(--input-bg);
+  border: 1px solid transparent;
+  border-image: repeating-linear-gradient(
+    45deg,
+    var(--hover-line) 0 8px,
+    var(--panel) 8px 16px
+  ) 1;
+  color: var(--dim);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  min-height: 84px;
+}
+.net-create-card:hover { color: var(--accent); border-image: repeating-linear-gradient(
+  45deg, var(--accent) 0 8px, var(--panel) 8px 16px) 1; }
+.net-create-card .storage-card-title { flex: none; }

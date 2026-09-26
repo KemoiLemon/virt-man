@@ -1525,6 +1525,11 @@ async function loadNetworks() {
       if (n.forward === "nat") return "NAT";
       return "Isolated";
     };
+    const createCard = `
+      <button class="storage-card net-card net-create-card" id="net-create-card">
+        <span class="storage-card-icon">${ic.plus()}</span>
+        <span class="storage-card-title">Create network</span>
+      </button>`;
     setHtml(list, nets.map((n) => `
       <div class="storage-card net-card ${n.active ? "ok" : ""}">
         <div class="storage-card-head">
@@ -1543,7 +1548,9 @@ async function loadNetworks() {
           <button class="btn icon" data-net-edit="${esc(n.name)}" title="Edit">${ic.edit()}</button>
           <button class="btn danger icon" data-delnet="${esc(n.name)}" title="Delete">${ic.trash()}</button>
         </div>
-      </div>`).join("") || `<div class="empty">No networks.</div>`);
+      </div>`).join("") + createCard);
+    const createBtn = $("#net-create-card");
+    if (createBtn) createBtn.onclick = () => openCreateNetwork();
     list.querySelectorAll("[data-net-toggle]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => netAction(
         (b as HTMLElement).dataset.netAction === "start" ? "start" : "stop",

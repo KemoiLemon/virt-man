@@ -101,8 +101,15 @@ check("Networks tab renders cards with type, subnet and merged controls", () => 
   assert.ok(first.querySelector("[data-delnet]"), "delete button");
 });
 
+check("the create-network card is present with a plus icon", () => {
+  const create = document.querySelector("#net-create-card");
+  assert.ok(create, "create card present");
+  assert.ok(create.querySelector("svg"), "plus icon rendered");
+  assert.match(create.textContent, /Create network/);
+});
+
 check("start/stop and autostart highlights follow their state", () => {
-  for (const c of document.querySelectorAll("#nets-list .net-card")) {
+  for (const c of document.querySelectorAll("#nets-list .net-card:not(.net-create-card)")) {
     const toggle = c.querySelector("[data-net-toggle]");
     const cardActive = c.querySelector(".storage-card-head .badge.on")?.textContent.trim() === "Active";
     assert.equal(toggle.classList.contains("on"), cardActive,
