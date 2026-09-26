@@ -1538,7 +1538,11 @@ function openFirewallEditor(netName: string) {
       (b as HTMLElement).onclick = () => {
         read();
         const tr = (b as HTMLElement).closest("tr")!;
-        rules.splice([...tr.parentElement!.children].indexOf(tr), 1);
+        // Index among the DATA rows only: tbody children include the header
+        // <tr>, so counting them would splice the wrong rule (and the first
+        // rule would never delete).
+        const rows = [...el.querySelectorAll("[data-r-dir]")].map((s) => (s as HTMLElement).closest("tr")!);
+        rules.splice(rows.indexOf(tr), 1);
         render();
       };
     });
@@ -1546,7 +1550,8 @@ function openFirewallEditor(netName: string) {
       (b as HTMLElement).onclick = () => {
         read();
         const tr = (b as HTMLElement).closest("tr")!;
-        forwards.splice([...tr.parentElement!.children].indexOf(tr), 1);
+        const rows = [...el.querySelectorAll("[data-f-lanip]")].map((s) => (s as HTMLElement).closest("tr")!);
+        forwards.splice(rows.indexOf(tr), 1);
         render();
       };
     });
@@ -2262,7 +2267,9 @@ async function renderVmBody(vm: string) {
         (b as HTMLElement).onclick = () => {
           readRules();
           const tr = (b as HTMLElement).closest("tr")!;
-          vmRules.splice([...tr.parentElement!.children].indexOf(tr), 1);
+          // Same header-offset bug as the network editor: count data rows.
+          const rows = [...rulesBody.querySelectorAll("[data-r-dir]")].map((s) => (s as HTMLElement).closest("tr")!);
+          vmRules.splice(rows.indexOf(tr), 1);
           renderRules();
         };
       });
