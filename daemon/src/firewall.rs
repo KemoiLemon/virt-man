@@ -25,7 +25,14 @@ use std::path::Path;
 
 pub const FIREWALL_PATH: &str = "/etc/virt-man/firewall.json";
 
-pub type FirewallMap = HashMap<String, NetworkFirewall>;
+/// Everything persisted to disk: network rules/forwards and per-VM rules.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FirewallStore {
+    #[serde(default)]
+    pub networks: HashMap<String, NetworkFirewall>,
+    #[serde(default)]
+    pub vms: HashMap<String, VmFirewall>,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkFirewall {
@@ -33,6 +40,12 @@ pub struct NetworkFirewall {
     pub rules: Vec<Rule>,
     #[serde(default)]
     pub forwards: Vec<Forward>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VmFirewall {
+    #[serde(default)]
+    pub rules: Vec<Rule>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -63,20 +76,26 @@ impl NetworkFirewall {
     }
 }
 
-pub fn load(path: &Path) -> Result<FirewallMap, String> {
+impl VmFirewall {
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+}
+
+pub fn load(path: &Path) -> Result<FirewallStore, String> {
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(FirewallStore::default());
     }
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
-pub fn save(path: &Path, map: &FirewallMap) -> Result<(), String> {
+pub fn save(path: &Path, store: &FirewallStore) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let text = serde_json::to_vec_pretty(map).map_err(|e| format!("serialize firewall: {e}"))?;
+    let text = serde_json::to_vec_pretty(store).map_err(|e| format!("serialize firewall: {e}"))?;
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
@@ -235,9 +254,15 @@ pub struct RenderedNet<'a> {
     pub forwards: &'a [Forward],
 }
 
+/// One VM's firewall rules, matched by the guest's interface MAC addresses.
+pub struct RenderedVm<'a> {
+    pub macs: Vec<String>,
+    pub rules: &'a [Rule],
+}
+
 /// Build the complete nftables script for the `virt-man` table. Pure, so the
 /// rule mapping is unit-testable without touching the host.
-pub fn render_ruleset(nets: &[RenderedNet]) -> String {
+pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
     let mut rules = Vec::new();
     let mut forwards = Vec::new();
     for n in nets {
@@ -250,6 +275,13 @@ pub fn render_ruleset(nets: &[RenderedNet]) -> String {
             if let Some(line) = render_forward(f, &n.subnet) {
                 forwards.push(line);
             }
+        }
+    }
+    // A VM with no NIC cannot be matched by MAC, so skip it rather than emit
+    // an unscoped host-wide rule.
+    for v in vms.iter().filter(|v| !v.macs.is_empty()) {
+        for r in v.rules {
+            rules.extend(render_vm_rule(r, &v.macs));
         }
     }
 
@@ -274,13 +306,10 @@ pub fn render_ruleset(nets: &[RenderedNet]) -> String {
     out
 }
 
-fn render_rule(r: &Rule, subnet: &str) -> Option<String> {
+/// The IP/port/protocol matches common to every rule, independent of whether
+/// it is scoped to a network subnet or a VM's MAC.
+fn rule_matches(r: &Rule) -> Vec<String> {
     let mut m = Vec::new();
-    match r.direction.as_str() {
-        "in" => m.push(format!("ip daddr {subnet}")),
-        "out" => m.push(format!("ip saddr {subnet}")),
-        _ => {}
-    }
     if !r.src_ip.is_empty() {
         m.push(format!("ip saddr {}", r.src_ip));
     }
@@ -306,12 +335,46 @@ fn render_rule(r: &Rule, subnet: &str) -> Option<String> {
         "icmp" => m.push("meta l4proto icmp".to_string()),
         _ => {}
     }
-    let action = match r.action.as_str() {
+    m
+}
+
+fn action_of(r: &Rule) -> &str {
+    match r.action.as_str() {
         "drop" => "drop",
         "reject" => "reject",
         _ => "accept",
+    }
+}
+
+fn render_rule(r: &Rule, subnet: &str) -> Option<String> {
+    let mut m = match r.direction.as_str() {
+        "in" => vec![format!("ip daddr {subnet}")],
+        "out" => vec![format!("ip saddr {subnet}")],
+        _ => Vec::new(),
     };
-    Some(format!("{} {action}", m.join(" ")))
+    m.extend(rule_matches(r));
+    Some(format!("{} {}", m.join(" "), action_of(r)))
+}
+
+/// Render one VM rule. "forward" matches the guest's MAC in either direction,
+/// so it emits two rules (source and destination) rather than a single
+/// unscoped one.
+fn render_vm_rule(r: &Rule, macs: &[String]) -> Vec<String> {
+    let set = format!("{{ {} }}", macs.join(", "));
+    let scopes: Vec<String> = match r.direction.as_str() {
+        "in" => vec![format!("ether daddr {set}")],
+        "out" => vec![format!("ether saddr {set}")],
+        _ => vec![format!("ether saddr {set}"), format!("ether daddr {set}")],
+    };
+    let matches = rule_matches(r);
+    scopes
+        .into_iter()
+        .map(|scope| {
+            let mut m = vec![scope];
+            m.extend(matches.iter().cloned());
+            format!("{} {}", m.join(" "), action_of(r))
+        })
+        .collect()
 }
 
 fn render_forward(f: &Forward, subnet: &str) -> Option<String> {
@@ -481,9 +544,53 @@ mod tests {
             rules: &[in_rule],
             forwards: &[],
         }];
-        let out = render_ruleset(&nets);
+        let out = render_ruleset(&nets, &[]);
         assert!(out.contains("hook forward priority filter - 1"));
         assert!(out.contains("hook prerouting priority dstnat - 1"));
         assert!(out.contains("ip daddr 192.168.167.0/24 accept"));
+    }
+
+    #[test]
+    fn a_vm_rule_matches_the_guest_mac_by_direction() {
+        let macs = vec!["52:54:00:aa:bb:cc".to_string()];
+        let in_rule = Rule {
+            direction: "in".into(),
+            proto: "tcp".into(),
+            dst_port: "443".into(),
+            ..base()
+        };
+        let lines = render_vm_rule(&in_rule, &macs);
+        assert_eq!(
+            lines,
+            vec!["ether daddr { 52:54:00:aa:bb:cc } tcp dport 443 accept".to_string()]
+        );
+
+        // forward emits both directions.
+        let fwd = Rule {
+            direction: "forward".into(),
+            ..base()
+        };
+        let lines = render_vm_rule(&fwd, &macs);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("ether saddr"));
+        assert!(lines[1].starts_with("ether daddr"));
+    }
+
+    #[test]
+    fn a_vm_with_no_macs_contributes_no_rules() {
+        let vm = RenderedVm {
+            macs: vec![],
+            rules: &[Rule {
+                direction: "in".into(),
+                ..base()
+            }],
+        };
+        let out = render_ruleset(&[], &[vm]);
+        // The chain header says "policy accept"; no rule line may contain an
+        // ether match (a NIC-less VM cannot be scoped).
+        assert!(
+            !out.contains("ether "),
+            "no unscoped rules for a NIC-less VM"
+        );
     }
 }

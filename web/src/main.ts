@@ -267,7 +267,6 @@ function renderSetup() {
     <div class="auth-box">
       <div class="auth-logo">virt-<span>man</span></div>
       <div class="modal-body">
-        <p class="hint">First run — create the admin account.</p>
         <label class="field"><span>Username</span><input id="su" autocomplete="username"></label>
         <label class="field"><span>Password (min 8 chars)</span><input id="sp" type="password" autocomplete="new-password"></label>
         <label class="field"><span>Nickname</span><input id="sn"></label>
@@ -941,9 +940,7 @@ async function loadAdmin(root: Element) {
         api.get<User[]>("/users"),
       ]);
       const owner = (id?: string) => users.find((u) => u.id === id)?.username ?? "—";
-setHtml(area, `<div class="hw-note">A key's permissions are capped by its owner's: it can narrow
-        their access but never exceed it. Revoking takes effect immediately.</div>
-        <table class="grid">
+setHtml(area, `<table class="grid">
           <tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Permissions</th><th class="col-actions"></th></tr>
           ${keys.map((k) => {
             const listed = Object.keys(k.scopes ?? {});
@@ -971,9 +968,7 @@ setHtml(area, `<div class="hw-note">A key's permissions are capped by its owner'
     }
 
     if (adminTab === "roles") {
-setHtml(area, `<div class="hw-note">A role supplies the default permission for each scope. Built-in
-        roles can be retuned but not renamed or deleted.</div>
-        <table class="grid">
+setHtml(area, `<table class="grid">
           <tr><th>Role</th>${adminScopes.map((s) => `<th>${esc(s)}</th>`).join("")}<th class="col-actions"></th></tr>
           ${adminRoles.map((r) => `
             <tr>
@@ -1050,7 +1045,6 @@ function openEditRole(role: RoleDef | null, root: Element) {
     role ? `Role — ${esc(role.name)}` : "New role",
     `<label class="field"><span>Name</span>
        <input id="er-name" value="${esc(role?.name ?? "")}" placeholder="backup-operator" ${builtin ? "disabled" : ""}></label>
-     ${builtin ? `<div class="hw-note">Built-in roles cannot be renamed, but their permissions are yours to set.</div>` : ""}
      <div class="section-title">Permissions</div>
      <div class="grid2 perm-grid">
        ${adminScopes.map((s) => `
@@ -1091,14 +1085,12 @@ function openAddKey(users: User[], root: Element) {
     `<div class="grid2">
        <label class="field"><span>Name</span>
          <input id="nk-name" placeholder="leave blank for a random name">
-         <small class="hint">Blank generates a readable name, e.g. brisk-otter-4f2a.</small></label>
+         </label>
        <label class="field"><span>Owner</span><select id="nk-owner">
          ${users.map((u) => `<option value="${u.id}" ${u.id === user?.id ? "selected" : ""}>${esc(u.username)}</option>`).join("")}
        </select></label>
      </div>
      <div class="section-title">Permissions</div>
-     <div class="hw-note">Each scope is a ceiling: the key gets the weaker of this and the
-       owner's own permission, so it can never outrank them.</div>
      <div class="grid2 perm-grid">
        ${adminScopes.map((s) => `
          <label class="field"><span>${esc(s)}</span>
@@ -1164,7 +1156,6 @@ function openEditUser(u: User, root: Element) {
      <label class="field"><span>Reset password (blank = leave unchanged)</span>
        <input id="eu-pass" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
      <div class="section-title">Permission overrides</div>
-     <div class="hw-note">Each scope inherits from the role unless overridden here.</div>
      <div class="grid2 perm-grid">
        ${adminScopes.map((s) => `
          <label class="field"><span>${esc(s)}</span>
@@ -1403,10 +1394,6 @@ async function loadFilters() {
   try {
     const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
     setHtml(list, `
-      <div class="hw-note" style="margin-bottom:14px">Firewall rules and NAT port
-        forwards are defined per network and enforced on the daemon host. Rules
-        apply to routed traffic; port forwards rewrite a WAN destination to an
-        internal address.</div>
       <table class="grid">
         <tr><th>Network</th><th>Type</th><th>Subnet</th><th class="col-actions"></th></tr>
         ${nets.map((n) => `
@@ -1430,6 +1417,79 @@ async function loadFilters() {
 }
 
 /// Rules + port-forward editor for one network.
+/// Shared firewall-editor helpers: option lists, row templates, and reading
+/// rows back from the DOM before a re-render.
+const FW_DIRS = ["in", "out", "forward"];
+const FW_ACTIONS = ["accept", "drop", "reject"];
+const FW_PROTOS = ["tcp", "udp", "icmp", "any"];
+
+function fwOpt(list: string[], sel: string): string {
+  return list.map((v) => `<option value="${v}" ${v === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
+}
+
+function fwRuleRow(r: FirewallRule): string {
+  return `
+    <tr>
+      <td><select data-r-dir>${fwOpt(FW_DIRS, r.direction)}</select></td>
+      <td><select data-r-action>${fwOpt(FW_ACTIONS, r.action)}</select></td>
+      <td><select data-r-proto>${fwOpt(FW_PROTOS, r.proto)}</select></td>
+      <td><input data-r-src placeholder="any" value="${esc(r.src_ip)}"></td>
+      <td><input data-r-dst placeholder="any" value="${esc(r.dst_ip)}"></td>
+      <td><input data-r-sport placeholder="any" value="${esc(r.src_port)}"></td>
+      <td><input data-r-dport placeholder="any" value="${esc(r.dst_port)}"></td>
+      <td><button class="btn danger icon" data-r-del title="Remove">${ic.trash()}</button></td>
+    </tr>`;
+}
+
+function fwFwdRow(f: FirewallForward): string {
+  return `
+    <tr>
+      <td><input data-f-wanip placeholder="0.0.0.0 = any" value="${f.wan_ip === "0.0.0.0" ? "" : esc(f.wan_ip)}"></td>
+      <td><select data-f-proto>${fwOpt(["tcp", "udp"], f.proto)}</select></td>
+      <td><input data-f-wstart type="number" min="1" max="65535" value="${f.wan_start}"></td>
+      <td><input data-f-wend type="number" min="1" max="65535" value="${f.wan_end}"></td>
+      <td><input data-f-lanip placeholder="192.168.x.x" value="${esc(f.lan_ip)}"></td>
+      <td><input data-f-lstart type="number" min="1" max="65535" value="${f.lan_start}"></td>
+      <td><input data-f-lend type="number" min="1" max="65535" value="${f.lan_end}"></td>
+      <td><button class="btn danger icon" data-f-del title="Remove">${ic.trash()}</button></td>
+    </tr>`;
+}
+
+function blankRule(): FirewallRule {
+  return { direction: "in", action: "accept", proto: "any", src_ip: "", dst_ip: "", src_port: "", dst_port: "" };
+}
+
+function readFwRuleRows(root: Element): FirewallRule[] {
+  return [...root.querySelectorAll("[data-r-dir]")].map((s) => {
+    const tr = (s as HTMLElement).closest("tr")!;
+    return {
+      direction: (tr.querySelector("[data-r-dir]") as HTMLSelectElement).value as FirewallRule["direction"],
+      action: (tr.querySelector("[data-r-action]") as HTMLSelectElement).value as FirewallRule["action"],
+      proto: (tr.querySelector("[data-r-proto]") as HTMLSelectElement).value as FirewallRule["proto"],
+      src_ip: (tr.querySelector("[data-r-src]") as HTMLInputElement).value,
+      dst_ip: (tr.querySelector("[data-r-dst]") as HTMLInputElement).value,
+      src_port: (tr.querySelector("[data-r-sport]") as HTMLInputElement).value,
+      dst_port: (tr.querySelector("[data-r-dport]") as HTMLInputElement).value,
+    };
+  });
+}
+
+function readFwFwdRows(root: Element): FirewallForward[] {
+  return [...root.querySelectorAll("[data-f-lanip]")].map((s) => {
+    const tr = (s as HTMLElement).closest("tr")!;
+    return {
+      proto: (tr.querySelector("[data-f-proto]") as HTMLSelectElement).value as FirewallForward["proto"],
+      wan_ip: (tr.querySelector("[data-f-wanip]") as HTMLInputElement).value || "0.0.0.0",
+      wan_start: +(tr.querySelector("[data-f-wstart]") as HTMLInputElement).value,
+      wan_end: +(tr.querySelector("[data-f-wend]") as HTMLInputElement).value,
+      lan_ip: (tr.querySelector("[data-f-lanip]") as HTMLInputElement).value,
+      lan_start: +(tr.querySelector("[data-f-lstart]") as HTMLInputElement).value,
+      lan_end: +(tr.querySelector("[data-f-lend]") as HTMLInputElement).value,
+    };
+  });
+}
+
+/// Network firewall editor: rules and NAT port forwards, in a wide modal.
 function openFirewallEditor(netName: string) {
   if (!selectedConn) return;
   let rules: FirewallRule[] = [];
@@ -1443,81 +1503,30 @@ function openFirewallEditor(netName: string) {
   );
   el.querySelector(".modal")?.classList.add("wide");
 
-  const opt = (list: string[], sel: string) =>
-    list.map((v) => `<option value="${v}" ${v === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
-
-  const ruleRow = (r: FirewallRule) => `
-    <tr>
-      <td><select data-r-dir>${opt(["in", "out", "forward"], r.direction)}</select></td>
-      <td><select data-r-action>${opt(["accept", "drop", "reject"], r.action)}</select></td>
-      <td><select data-r-proto>${opt(["tcp", "udp", "icmp", "any"], r.proto)}</select></td>
-      <td><input data-r-src placeholder="any" value="${esc(r.src_ip)}"></td>
-      <td><input data-r-dst placeholder="any" value="${esc(r.dst_ip)}"></td>
-      <td><input data-r-sport placeholder="any" value="${esc(r.src_port)}"></td>
-      <td><input data-r-dport placeholder="any" value="${esc(r.dst_port)}"></td>
-      <td><button class="btn danger icon" data-r-del title="Remove">${ic.trash()}</button></td>
-    </tr>`;
-
-  const fwdRow = (f: FirewallForward) => `
-    <tr>
-      <td><input data-f-wanip placeholder="0.0.0.0 = any" value="${f.wan_ip === "0.0.0.0" ? "" : esc(f.wan_ip)}"></td>
-      <td><select data-f-proto>${opt(["tcp", "udp"], f.proto)}</select></td>
-      <td><input data-f-wstart type="number" min="1" max="65535" value="${f.wan_start}"></td>
-      <td><input data-f-wend type="number" min="1" max="65535" value="${f.wan_end}"></td>
-      <td><input data-f-lanip placeholder="192.168.x.x" value="${esc(f.lan_ip)}"></td>
-      <td><input data-f-lstart type="number" min="1" max="65535" value="${f.lan_start}"></td>
-      <td><input data-f-lend type="number" min="1" max="65535" value="${f.lan_end}"></td>
-      <td><button class="btn danger icon" data-f-del title="Remove">${ic.trash()}</button></td>
-    </tr>`;
-
-  // Capture the current DOM rows back into the working copies, so add/remove
-  // (which re-render) never discard in-progress field edits.
-  function read() {
-    // Walk up from the per-row inputs so the header row is never included.
-    const rows = [...el.querySelectorAll("#fw-body [data-r-dir]")]
-      .map((s) => (s as HTMLElement).closest("tr")!);
-    rules = rows.map((tr) => ({
-      direction: (tr.querySelector("[data-r-dir]") as HTMLSelectElement).value as FirewallRule["direction"],
-      action: (tr.querySelector("[data-r-action]") as HTMLSelectElement).value as FirewallRule["action"],
-      proto: (tr.querySelector("[data-r-proto]") as HTMLSelectElement).value as FirewallRule["proto"],
-      src_ip: (tr.querySelector("[data-r-src]") as HTMLInputElement).value,
-      dst_ip: (tr.querySelector("[data-r-dst]") as HTMLInputElement).value,
-      src_port: (tr.querySelector("[data-r-sport]") as HTMLInputElement).value,
-      dst_port: (tr.querySelector("[data-r-dport]") as HTMLInputElement).value,
-    }));
-    const frows = [...el.querySelectorAll("#fw-body [data-f-lanip]")]
-      .map((s) => (s as HTMLElement).closest("tr")!);
-    forwards = frows.map((tr) => ({
-      proto: (tr.querySelector("[data-f-proto]") as HTMLSelectElement).value as FirewallForward["proto"],
-      wan_ip: (tr.querySelector("[data-f-wanip]") as HTMLInputElement).value || "0.0.0.0",
-      wan_start: +(tr.querySelector("[data-f-wstart]") as HTMLInputElement).value,
-      wan_end: +(tr.querySelector("[data-f-wend]") as HTMLInputElement).value,
-      lan_ip: (tr.querySelector("[data-f-lanip]") as HTMLInputElement).value,
-      lan_start: +(tr.querySelector("[data-f-lstart]") as HTMLInputElement).value,
-      lan_end: +(tr.querySelector("[data-f-lend]") as HTMLInputElement).value,
-    }));
-  }
+  const read = () => {
+    rules = readFwRuleRows(el);
+    forwards = readFwFwdRows(el);
+  };
 
   function render() {
     setHtml($("#fw-body", el), `
       <div class="section-title">Rules</div>
       <table class="grid">
         <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
-        ${rules.map(ruleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
+        ${rules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="fw-add-rule">${ic.plus(14)} Add rule</button></div>
 
       <div class="section-title" style="margin-top:18px">NAT port forwards</div>
       <table class="grid">
         <tr><th>WAN</th><th>Proto</th><th>WAN start</th><th>WAN end</th><th>Internal IP</th><th>Start</th><th>End</th><th></th></tr>
-        ${forwards.map(fwdRow).join("") || `<tr><td colspan="8" class="empty">No port forwards.</td></tr>`}
+        ${forwards.map(fwFwdRow).join("") || `<tr><td colspan="8" class="empty">No port forwards.</td></tr>`}
       </table>
-      <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>
-      <div class="hw-note">WAN <code>0.0.0.0</code> forwards on every address except the guest subnet; set a specific WAN IP to forward only that address.</div>`);
+      <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>`);
 
     $("#fw-add-rule", el).onclick = () => {
       read();
-      rules.push({ direction: "in", action: "accept", proto: "any", src_ip: "", dst_ip: "", src_port: "", dst_port: "" });
+      rules.push(blankRule());
       render();
     };
     $("#fw-add-fwd", el).onclick = () => {
@@ -1543,7 +1552,6 @@ function openFirewallEditor(netName: string) {
     });
   }
 
-  // Load the persisted rules, then bind inputs to the working copies on save.
   api.get<{ rules: FirewallRule[]; forwards: FirewallForward[] }>(
     `/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`)
     .then((fw) => {
@@ -2136,7 +2144,7 @@ async function renderVmBody(vm: string) {
         <div class="grid2">
           <label class="field"><span>Name</span>
             <input id="opt-name" value="${esc(vm)}">
-            <small class="hint">Renaming needs the guest shut off.</small></label>
+            </label>
           <label class="field"><span>Title</span>
             <input id="opt-title" value="${esc(title)}" placeholder="short label"></label>
         </div>
@@ -2214,56 +2222,52 @@ async function renderVmBody(vm: string) {
   }
 
   if (vmTab === "firewall") {
+    // Inline rules editor, scoped to this guest by its interface MACs.
+    const rulesBody = body;
+    let vmRules: FirewallRule[] = [];
     try {
-      const [fw, filters] = await Promise.all([
-        api.get<{ interfaces: { mac: string; network: string; filter: string | null }[] }>(
-          `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`),
-        api.get<{ name: string }[]>(`/proxy/${selectedConn}/filters`),
-      ]);
-      const current = fw.interfaces.find((i) => i.filter)?.filter ?? "";
-      const names = filters.map((f) => f.name).sort((a, b) => a.localeCompare(b));
+      const fw = await api.get<{ rules: FirewallRule[] }>(
+        `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`);
+      vmRules = fw.rules ?? [];
+    } catch {
+      vmRules = [];
+    }
 
-      setHtml(body, `
-        <div class="actions">
-          <button class="btn primary" id="fw-apply">${ic.firewall(14)} Apply to all interfaces</button>
-          <span class="hw-locked">Takes effect when the guest next starts.</span>
-        </div>
-        <label class="field" style="max-width:420px"><span>Network filter</span>
-          <select id="fw-filter">
-            <option value="" ${current ? "" : "selected"}>none (unfiltered)</option>
-            ${names.map((n) =>
-              `<option value="${esc(n)}" ${n === current ? "selected" : ""}>${esc(n)}</option>`).join("")}
-          </select></label>
-        <div class="hw-note">libvirt nwfilters are applied per interface via
-          <code>&lt;filterref&gt;</code>. <code>clean-traffic</code> blocks MAC/IP
-          spoofing; the <code>no-*</code> filters each block one class of traffic.</div>
-        <div class="section-title" style="margin-top:16px">Interfaces</div>
+    const readRules = () => { vmRules = readFwRuleRows(rulesBody); };
+    const renderRules = () => {
+      setHtml(rulesBody, `
         <table class="grid">
-          <tr><th>MAC</th><th>Network</th><th>Filter</th></tr>
-          ${fw.interfaces.map((i) => `
-            <tr>
-              <td>${esc(i.mac || "—")}</td>
-              <td>${esc(i.network || "—")}</td>
-              <td>${i.filter
-                ? `<span class="state on">${esc(i.filter)}</span>`
-                : `<span class="state">none</span>`}</td>
-            </tr>`).join("") || `<tr><td colspan="3" class="empty">This guest has no network interfaces.</td></tr>`}
-        </table>`);
-
-      $("#fw-apply")?.addEventListener("click", async () => {
-        const value = ($("#fw-filter") as HTMLSelectElement).value;
+          <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
+          ${vmRules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
+        </table>
+        <div class="actions">
+          <button class="btn" id="vmfw-add">${ic.plus(14)} Add rule</button>
+          <button class="btn primary" id="vmfw-apply">${ic.firewall(14)} Apply</button>
+        </div>`);
+      $("#vmfw-add", rulesBody).onclick = () => {
+        readRules();
+        vmRules.push(blankRule());
+        renderRules();
+      };
+      $("#vmfw-apply", rulesBody).onclick = async () => {
+        readRules();
         try {
-          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`,
-            { filter: value || null });
-          toast(value ? `Applied ${value}` : "Filter cleared");
-          void renderVmBody(vm);
+          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`, { rules: vmRules });
+          toast("Firewall applied");
         } catch (e) {
           toast((e as Error).message, "bad");
         }
+      };
+      rulesBody.querySelectorAll("[data-r-del]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = () => {
+          readRules();
+          const tr = (b as HTMLElement).closest("tr")!;
+          vmRules.splice([...tr.parentElement!.children].indexOf(tr), 1);
+          renderRules();
+        };
       });
-    } catch (e) {
-      setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
-    }
+    };
+    renderRules();
     return;
   }
 
@@ -2310,7 +2314,7 @@ async function renderVmBody(vm: string) {
           ${running ? `<span class="hw-locked">Changes apply after the guest is restarted.</span>` : ""}
         </div>
         <div class="hwtable">${rows}${devRows}</div>
-        ${devices.length ? "" : `<div class="hw-note" style="margin-top:12px">No extra devices. Use Edit hardware to add one.</div>`}`);
+        `);
       $("#hw-edit")?.addEventListener("click", () => void openHardwareEditor({ vm }));
     } catch (e) {
       setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -2632,7 +2636,6 @@ function offerInstallScript(script: string): HTMLElement | null {
   const el = openModal(
     "Daemon not reachable",
     `
-    <p class="hint">The daemon is not answering yet. Run this script on the daemon (hypervisor) host, then leave this dialog open — the connection is pinned automatically once it is up.</p>
     <label class="field"><span>Install script</span>
       <textarea id="install-script" rows="14" readonly spellcheck="false">${esc(script)}</textarea>
     </label>
@@ -2833,7 +2836,6 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
       }));
       return `<div class="hw-page active">
         <h3 class="hw-title">${esc(t.label)}</h3>
-        <div class="hw-note">${esc(t.blurb)}</div>
         ${fields.join("")}
         <div class="actions"><button class="btn danger" id="hw-remove">${ic.trash(14)} Remove device</button></div>
       </div>`;
@@ -2845,14 +2847,12 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           <h3 class="hw-title">Processors</h3>
           <label class="field"><span>vCPUs</span>
             <input id="g-cpus" type="number" min="1" max="128" value="${general.cpus}"></label>
-          <div class="hw-note">Written to the domain as <code>&lt;vcpu&gt;</code>.</div>
         </div>`;
       case "memory":
         return `<div class="hw-page active">
           <h3 class="hw-title">Memory</h3>
           <label class="field"><span>Memory (MB)</span>
             <input id="g-mem" type="number" min="128" step="256" value="${general.memory_mb}"></label>
-          <div class="hw-note">Written as <code>&lt;memory unit="KiB"&gt;</code>.</div>
         </div>`;
       case "disk":
         return `<div class="hw-page active">
@@ -2863,28 +2863,24 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
             <input id="g-size" type="number" min="1" value="${newDisk.size_gb}"></label>
           <label class="field"><span>Format</span>
             <select id="g-format">${opt(["qcow2", "raw"], newDisk.format)}</select></label>
-          <div class="hw-note">A volume is created in the pool, then attached as the boot disk.</div>
         </div>`;
       case "display":
         return `<div class="hw-page active">
           <h3 class="hw-title">Display</h3>
           <label class="field"><span>Graphics</span>
             <select id="g-gfx">${opt(["vnc", "spice"], general.graphics)}</select></label>
-          <div class="hw-note">Served through the daemon's console proxy.</div>
         </div>`;
       case "firmware":
         return `<div class="hw-page active">
           <h3 class="hw-title">BIOS</h3>
           <label class="field"><span>Firmware</span>
             <select id="g-fw">${opt(["uefi", "bios"], general.firmware)}</select></label>
-          <div class="hw-note">UEFI loads OVMF via <code>&lt;loader&gt;</code>.</div>
         </div>`;
       default:
         return `<div class="hw-page active">
           <h3 class="hw-title">General</h3>
           <label class="field"><span>Name</span>
             <input id="g-name" value="${esc(general.name)}" placeholder="arch-box"></label>
-          ${editing ? `<div class="hw-note">Renaming needs the guest shut off and takes effect on save.</div>` : ""}
         </div>`;
     }
   }
@@ -2990,7 +2986,6 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
         </aside>
         <div class="add-hw-form">
           <div class="hw-title">${esc(t.label)}</div>
-          <div class="hw-note">${esc(t.blurb)}</div>
           <div class="add-hw-fields">${fields.join("")}</div>
           <div class="field add-hw-preview"><span>LIBVIRT XML PREVIEW</span>
             <code>${esc(preview)}</code></div>
@@ -3323,7 +3318,6 @@ function openProfile() {
        <div class="who">
          <b id="pf-who-name">${esc(user.nickname)}</b>
          <span id="pf-who-user">@${esc(user.username)} · ${esc(user.role)}</span>
-         <span class="hint">Click the picture to crop a new avatar.</span>
        </div>
      </div>
 

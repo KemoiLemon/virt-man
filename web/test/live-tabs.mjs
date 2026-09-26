@@ -188,27 +188,16 @@ check("Options tab shows editable metadata read from the guest", () => {
 tabNamed("Firewall")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1800);
 
-check("VM Firewall tab offers host filters and lists interfaces", () => {
+check("VM Firewall tab is a rules editor with add and apply", () => {
   assert.equal(document.querySelector(".tabbar .tab.active")?.textContent.trim(), "Firewall");
-  const sel = document.querySelector("#fw-filter");
-  assert.ok(sel, "filter selector present");
-  assert.ok(sel.options.length > 5, `${sel.options.length} options (none + host filters)`);
-  assert.equal(sel.options[0].value, "", "first option clears the filter");
-  assert.ok([...sel.options].some((o) => o.value === "clean-traffic"),
-    "real host filters offered");
-  assert.ok(document.querySelector("#fw-apply"), "apply button");
-
-  const rows = [...document.querySelectorAll("table.grid tr")].slice(1);
-  assert.ok(rows.length >= 1, `${rows.length} interface row(s)`);
-  const mac = rows[0].querySelector("td")?.textContent.trim();
-  assert.match(mac, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i, `real MAC shown (${mac})`);
-  results.push(["info", `interface: ${mac}`]);
+  assert.ok(document.querySelector("#vmfw-add"), "add-rule action");
+  assert.ok(document.querySelector("#vmfw-apply"), "apply action");
+  assert.ok(document.querySelector("#vmfw-add").querySelector("svg"), "add-rule has an icon");
 });
 
-check("the themed listbox replaced the native filter select", () => {
-  const sel = document.querySelector("#fw-filter");
-  assert.equal(window.getComputedStyle(sel).display, "none", "native select hidden");
-  assert.ok(sel.nextElementSibling?.classList.contains("select-trigger"), "themed trigger");
+check("the VM rules table starts with the no-rules empty state", () => {
+  const body = document.querySelector("#vm-body")?.textContent ?? "";
+  assert.match(body, /No rules/, "empty state for a guest without rules");
 });
 
 for (const [state, name] of results) {

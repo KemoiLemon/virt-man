@@ -33,8 +33,8 @@ async fn run() -> Result<(), String> {
     // persistent across reboot, so the daemon restores the virt-man table.
     let fw_path = std::path::PathBuf::from(firewall::FIREWALL_PATH);
     if fw_path.exists()
-        && let Ok(map) = firewall::load(&fw_path)
-        && let Err(e) = api::firewall::reapply(map).await
+        && let Ok(store) = firewall::load(&fw_path)
+        && let Err(e) = api::firewall::apply_store(store).await
     {
         tracing::warn!("failed to re-apply firewall rules: {e}");
     }
