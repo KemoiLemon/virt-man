@@ -97,8 +97,8 @@
 #nets-list .storage-card-head { flex-wrap: wrap; gap: 8px 10px; }
 /* Bridge and subnet stack vertically, one spec per row, with less space
    before the controls. */
-#nets-list .specs { grid-template-columns: 1fr; margin-bottom: 8px; }
+#nets-list .specs { grid-template-columns: 1fr; margin-bottom: 6px; }
 /* Controls share one row and are sized evenly (each flexes to fill an equal
-   share of the card), with flatter buttons. */
+   share of the card). */
 #nets-list .net-actions { flex-wrap: nowrap; gap: 4px; }
-#nets-list .net-actions .btn { flex: 1 1 0; padding-top: 3px; padding-bottom: 3px; }
+#nets-list .net-actions .btn { flex: 1 1 0; padding-top: 7px; padding-bottom: 7px; }
