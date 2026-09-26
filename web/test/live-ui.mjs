@@ -213,8 +213,8 @@ await (async () => {
     const tabs = [...document.querySelectorAll(".tabbar .tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["Summary", "Console", "XML"],
-      "all three VM tabs render",
+      ["Summary", "Hardware", "Console", "XML"],
+      "all VM tabs render",
     );
     assert.equal(
       document.querySelectorAll(".tabbar .tab.active").length,
