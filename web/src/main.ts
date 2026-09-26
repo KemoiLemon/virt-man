@@ -51,6 +51,9 @@ let volumesOpen: string | null = null;
 let renderedPools: string[] = [];
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
+/// Which disk the summary's Disks card is graphing, per VM, so the 1s poll
+/// does not reset the user's selection back to the first disk.
+let summaryDiskSel: Record<string, string> = {};
 let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
 /// Which section of the admin panel modal is showing.
 let adminTab: "users" | "roles" | "keys" = "users";
@@ -2410,8 +2413,15 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       const block = m[0];
       const src = block.match(/<source\b[^>]*>/)?.[0] ?? "";
       const dev = xattr(block.match(/<target\b[^>]*>/)?.[0] ?? "", "dev");
-      const volume = xattr(src, "volume") || xattr(src, "file");
-      return { dev, label: volume || (m[1] === "cdrom" ? "empty" : "—") };
+      const kind = m[1] === "cdrom" ? "cdrom" : "disk";
+      return {
+        dev: dev || (kind === "cdrom" ? "cdrom" : "disk"),
+        kind,
+        pool: xattr(src, "pool"),
+        volume: xattr(src, "volume"),
+        file: xattr(src, "file"),
+        label: xattr(src, "volume") || xattr(src, "file") || (kind === "cdrom" ? "empty" : "—"),
+      };
     });
     const nics = [...xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)].map((m) => {
       const block = m[0];
@@ -2425,7 +2435,34 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     const bios = /pflash|OVMF/i.test(xml) ? "UEFI (OVMF)" : "BIOS (SeaBIOS)";
     const display = /<graphics[^>]*type=['"]spice/.test(xml) ? "spice" : "vnc";
 
-    const factCard = (icon: string, label: string, value: string, facts: [string, string][]) => `
+    // Allocation/usage for volume-backed disks comes from the pool's volume
+    // table; file-backed disks have no volume record, so they show path only.
+    const volUsage = new Map<string, { capacity: number; allocation: number }>();
+    const backingPools = new Set(disks.map((x) => x.pool).filter(Boolean) as string[]);
+    for (const pool of backingPools) {
+      try {
+        const vols = await api.get<VolumeSummary[]>(
+          `/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
+        for (const v of vols) volUsage.set(`${pool}/${v.name}`, { capacity: v.capacity ?? 0, allocation: v.allocation ?? 0 });
+      } catch { /* a missing pool just leaves its disks without usage data */ }
+    }
+    // The selected disk must stay selected across the 1s poll; if it vanished
+    // (disk removed), fall back to the first disk.
+    const diskSel = summaryDiskSel[vm] && disks.some((x) => x.dev === summaryDiskSel[vm])
+      ? summaryDiskSel[vm]
+      : disks[0]?.dev;
+    const selDisk = disks.find((x) => x.dev === diskSel);
+    const selUsage = selDisk?.pool && selDisk?.volume
+      ? volUsage.get(`${selDisk.pool}/${selDisk.volume}`)
+      : undefined;
+    // A cdrom has no allocation meaning; a file disk has no usage record.
+    const selAlloc = selUsage?.allocation ?? 0;
+    const selCap = selUsage?.capacity ?? 0;
+    const selPct = selCap > 0 ? Math.max(0, Math.min(100, (selAlloc / selCap) * 100)) : 0;
+    const selDiskKey = `${vm}:${selDisk?.dev ?? "disk"}`;
+    const diskHist = addDiskSample(selDiskKey, selPct);
+
+    const factCard = (icon: string, label: string, value: string, facts: [string, string][], foot = "") => `
       <div class="metric">
         <div class="metric-head">
           <span class="metric-ic">${icon}</span>
@@ -2437,6 +2474,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
             ? facts.map(([k, v]) => `<div class="fact"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join("")
             : `<div class="fact"><b>—</b><span>None</span></div>`}
         </div>
+        ${foot ? `<div class="metric-foot">${foot}</div>` : ""}
       </div>`;
 
     const fwFacts: [string, string][] = [
@@ -2484,11 +2522,38 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         </div>
       </div>
 
-      ${factCard(ic.disk(), "Disks", `${disks.length}`, disks.map((x) => [x.dev || "disk", x.label]))}
-      ${factCard(ic.network(), "Network", `${nics.length}`, nics.map((x) => [x.net || "network", x.model || "virtio"]))}
-      ${factCard(ic.firewall(), "Firewall", `${fw.rules.length}`, fwFacts)}
-      ${factCard(ic.cpu(), "Hardware", `${devices.length}`, hwFacts)}
+      <div class="metric ${running ? "ok" : ""}">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.disk()}</span>
+          <b>Disks</b>
+          <span class="metric-value">${selCap > 0 ? pct(selPct) : disks.length}</span>
+        </div>
+        ${disks.length > 1 ? `<label class="field"><span>Disk</span>
+          <select id="disk-sel">${disks.map((x) =>
+            `<option value="${esc(x.dev)}" ${x.dev === diskSel ? "selected" : ""}>${esc(x.dev)} — ${esc(x.label)}</option>`).join("")}
+          </select></label>` : ""}
+        <div class="meter"><div class="meter-fill ${selPct > 85 ? "hot" : ""}" style="width:${selPct.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(diskHist, "disk")}
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot">
+          <span>${selCap > 0 ? `${fmtBytes(selAlloc)} used` : "usage unknown"}</span>
+          <span>${selCap > 0 ? fmtBytes(selCap) : esc(selDisk?.label ?? "—")}</span>
+        </div>
+      </div>
+
+      ${factCard(ic.network(), "Network", `${nics.length}`, nics.map((x) => [x.net || "network", x.model || "virtio"]),
+        `<span>${nics.length} NIC</span><span>${[...new Set(nics.map((x) => x.model).filter(Boolean))].join(", ") || "virtio"}</span>`)}
+      ${factCard(ic.firewall(), "Firewall", `${fw.rules.length}`, fwFacts,
+        `<span>in ${capLabel(fw.policy.in)}</span><span>out ${capLabel(fw.policy.out)} · fwd ${capLabel(fw.policy.forward)}</span>`)}
+      ${factCard(ic.cpu(), "Hardware", `${devices.length}`, hwFacts,
+        `<span>${esc(bios)}</span><span>${esc(display)}</span>`)}
     </div>`);
+
+    $("#disk-sel", body)?.addEventListener("change", (e: Event) => {
+      summaryDiskSel[vm] = (e.target as HTMLSelectElement).value;
+    });
   } catch (e) {
     setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
   }

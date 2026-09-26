@@ -254,8 +254,13 @@ await (async () => {
       assert.ok(spark.querySelector(".spark-line"), "sparkline has a trace");
     }
 
-    // The four inventory cards hold facts, not meter/spark pairs.
-    for (const label of ["Disks", "Network", "Firewall", "Hardware"]) {
+    // Disks is a live metric card (selectable disk + allocation graph); the
+    // other three inventory cards hold facts, not meter/spark pairs.
+    const disksCard = metrics.find((x) => x.querySelector("b")?.textContent.trim() === "Disks");
+    assert.ok(disksCard, "Disks card");
+    assert.ok(disksCard.querySelector(".meter .meter-fill"), "Disks card has a meter");
+    assert.ok(disksCard.querySelector("svg.spark"), "Disks card has an allocation sparkline");
+    for (const label of ["Network", "Firewall", "Hardware"]) {
       const m = metrics.find((x) => x.querySelector("b")?.textContent.trim() === label);
       assert.ok(m, `${label} card`);
       assert.ok(m.querySelector(".factgrid .fact"), `${label} card has a fact grid`);
