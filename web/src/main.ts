@@ -8,7 +8,7 @@ import { ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
-import { addHostSample, addSample, fmtBytes, pct, sparkline } from "./stats";
+import { addDiskSample, addHostSample, addSample, fmtBytes, pct, sparkline } from "./stats";
 import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { domainXml, esc, networkXml, poolXml, volumeXml } from "./xml";
@@ -715,6 +715,7 @@ async function loadDcDashboard() {
   const diskTotal = pools.reduce((a, { p }) => a + (p.capacity ?? 0), 0);
   const diskUsed = pools.reduce((a, { p }) => a + (p.allocation ?? 0), 0);
   const diskNow = diskTotal > 0 ? Math.max(0, Math.min(100, (diskUsed / diskTotal) * 100)) : 0;
+  const disk = addDiskSample("datacenter", diskNow);
   const activeNets = nets.filter(({ n }) => n.active).length;
   const activePools = pools.filter(({ p }) => p.active).length;
   const byId = new Map(live.map(({ c, h, pools: ps }) => [c.id, { h, pools: ps }] as const));
@@ -767,6 +768,10 @@ async function loadDcDashboard() {
           <span class="metric-value">${diskNow.toFixed(diskNow >= 10 ? 0 : 1)}%</span>
         </div>
         <div class="meter"><div class="meter-fill ${diskNow > 85 ? "hot" : ""}" style="width:${diskNow.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(disk)}
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+        </div>
         <div class="metric-foot">
           <span>${fmtBytes(diskUsed)} used</span>
           <span>${fmtBytes(diskTotal)} total</span>

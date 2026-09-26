@@ -147,6 +147,21 @@ export function addHostSample(
   return { cpu: entry.cpu.slice(), mem: entry.mem.slice(), cpuNow, memNow };
 }
 
+/// Per-key disk-usage history (the Datacenter dashboard's Total Disk graph).
+/// Disk has no host-stats source: it is derived from storage-pool allocation,
+/// which is only known client-side, so it gets its own series.
+const diskSeries = new Map<string, number[]>();
+
+export function addDiskSample(key: string, pctValue: number): number[] {
+  let entry = diskSeries.get(key);
+  if (!entry) {
+    entry = blank().cpu;
+    diskSeries.set(key, entry);
+  }
+  push(entry, clampPercent(pctValue));
+  return entry.slice();
+}
+
 /** Current series without recording a new sample. */
 export function peekSeries(name: string): { cpu: number[]; mem: number[] } {
   const entry = series.get(name) ?? blank();

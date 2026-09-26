@@ -128,6 +128,14 @@ test("sparkline variants select the themed colour class", () => {
   assert.match(stats.sparkline([1, 2], "mem"), /class="spark mem"/);
 });
 
+test("addDiskSample tracks a clamped disk-usage series", () => {
+  const s = stats.addDiskSample("dc", 42);
+  assert.equal(s.length, 60, "a full 60-sample window");
+  assert.equal(s[59], 42, "newest sample pinned to the right edge");
+  assert.equal(stats.addDiskSample("dc", 150)[59], 100, "clamps to 100");
+  assert.equal(stats.addDiskSample("dc", -5)[59], 0, "clamps to 0");
+});
+
 test("fmtBytes renders human-readable sizes", () => {
   assert.equal(stats.fmtBytes(0), "0 B");
   assert.equal(stats.fmtBytes(null), "—");
