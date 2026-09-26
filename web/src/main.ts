@@ -2041,6 +2041,7 @@ async function renderVm() {
   const content = $("#content");
   const vm = selectedVm;
   const title = treeVms[selectedConn]?.find((x) => x.name === vm)?.title || vm;
+  const running = treeVms[selectedConn]?.find((x) => x.name === vm)?.active === true;
 setHtml(content, `
     <div class="dhead"><span class="dtitle">${esc(title)}</span></div>
     <div class="tabbar">
@@ -2051,10 +2052,11 @@ setHtml(content, `
       <button class="tab ${vmTab === "firewall" ? "active" : ""}" data-vmtab="firewall">${ic.firewall(14)} Firewall</button>
       <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">${ic.xml(14)} XML</button>
       <div class="tabbar-actions row-actions">
-        <button class="btn icon" id="vm-start" title="Start">${ic.start()}</button>
-        <button class="btn icon" id="vm-shutdown" title="Shutdown">${ic.stop()}</button>
-        <button class="btn icon" id="vm-reboot" title="Reboot">${ic.reboot()}</button>
-        <button class="btn icon" id="vm-destroy" title="Force stop">${ic.forceStop()}</button>
+        <button class="btn icon" id="vm-start" title="Start" ${running ? "disabled" : ""}>${ic.start()}</button>
+        <button class="btn icon" id="vm-shutdown" title="Shutdown" ${running ? "" : "disabled"}>${ic.stop()}</button>
+        <button class="btn icon" id="vm-reboot" title="Reboot" ${running ? "" : "disabled"}>${ic.reboot()}</button>
+        <button class="btn icon" id="vm-reset" title="Reset" ${running ? "" : "disabled"}>${ic.reset()}</button>
+        <button class="btn icon" id="vm-destroy" title="Force stop" ${running ? "" : "disabled"}>${ic.forceStop()}</button>
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
@@ -2071,6 +2073,7 @@ setHtml(content, `
   });
   $("#vm-start").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/start`, "POST").then(renderVm);
   $("#vm-shutdown").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/shutdown`, "POST").then(renderVm);
+  $("#vm-reset").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reset`, "POST").then(renderVm);
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(renderVm);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(renderVm);
   $("#vm-delete").onclick = () => deleteVm(vm);

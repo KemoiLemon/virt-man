@@ -165,11 +165,28 @@ await wait(1500);
 check("VM detail actions live on the tab bar as icon buttons", () => {
   const actions = document.querySelector(".tabbar .tabbar-actions");
   assert.ok(actions, "VM tab bar carries the actions");
-  for (const id of ["#vm-start", "#vm-shutdown", "#vm-reboot", "#vm-destroy", "#vm-delete"]) {
+  for (const id of ["#vm-start", "#vm-shutdown", "#vm-reboot", "#vm-reset", "#vm-destroy", "#vm-delete"]) {
     assert.ok(actions.querySelector(id), `${id} present`);
   }
   assert.equal(document.querySelectorAll(".dhead + .actions").length, 0,
     "no separate action strip under the title");
+});
+
+check("VM actions enable by state: stopped greys runtime buttons, running greys start", () => {
+  const actions = document.querySelector(".tabbar .tabbar-actions");
+  const start = actions.querySelector("#vm-start");
+  const shutdown = actions.querySelector("#vm-shutdown");
+  const reboot = actions.querySelector("#vm-reboot");
+  const reset = actions.querySelector("#vm-reset");
+  const destroy = actions.querySelector("#vm-destroy");
+  const del = actions.querySelector("#vm-delete");
+  // The test VM is shut off: start + delete enabled, runtime actions greyed.
+  assert.ok(!start.disabled, "start enabled while stopped");
+  assert.ok(!del.disabled, "delete always enabled");
+  assert.ok(shutdown.disabled, "shutdown disabled while stopped");
+  assert.ok(reboot.disabled, "reboot disabled while stopped");
+  assert.ok(reset.disabled, "reset disabled while stopped");
+  assert.ok(destroy.disabled, "destroy disabled while stopped");
 });
 
 for (const [state, name] of results) {
