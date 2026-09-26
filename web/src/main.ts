@@ -35,6 +35,8 @@ let connTab: "dashboard" | "vms" | "networks" | "storage" | "firewall" = "dashbo
 /// Pool whose volume table is expanded; survives the 1s pool poll so the
 /// table is re-rendered in place instead of vanishing every second.
 let volumesOpen: string | null = null;
+/// Pool names last rendered, so the poll can diff and skip a full rebuild.
+let renderedPools: string[] = [];
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
 let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
@@ -1718,24 +1720,27 @@ async function loadPools() {
     const pools = await api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`);
     const list = $("#pools-list");
     if (!list) return;
-setHtml(list, pools.map((p) => {
-      // Allocation vs capacity is the real usage figure libvirt reports.
-      const used = p.allocation ?? 0;
-      const cap = p.capacity ?? 0;
-      const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
-      return `
-      <div class="storage-card ${p.active ? "ok" : ""}">
+    const names = pools.map((p) => p.name);
+    const shapeChanged = renderedPools.join("|") !== names.join("|");
+    if (shapeChanged) {
+      renderedPools = names;
+      setHtml(list, pools.map((p) => {
+        const used = p.allocation ?? 0;
+        const cap = p.capacity ?? 0;
+        const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+        return `
+      <div class="storage-card ${p.active ? "ok" : ""}" data-pool-card="${cssId(p.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.storage()}</span>
           <span class="storage-card-title">${esc(p.name)}</span>
-          <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
+          <span class="badge" data-pool-active>${p.active ? "Active" : "Inactive"}</span>
         </div>
-        <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
-        <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
+        <div class="metric-value" data-pool-pct>${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
+        <div class="meter"><div class="meter-fill" data-pool-fill style="width:${usedPct.toFixed(1)}%"></div></div>
         <div class="metric-foot">
-          <span>${fmtBytes(used)} used</span>
-          <span>${fmtBytes(p.available)} free</span>
-          <span>${fmtBytes(cap)} total</span>
+          <span data-pool-used>${fmtBytes(used)} used</span>
+          <span data-pool-free>${fmtBytes(p.available)} free</span>
+          <span data-pool-cap>${fmtBytes(cap)} total</span>
         </div>
         <div class="storage-card-actions">
           <button class="btn" data-vols="${esc(p.name)}">${ic.disk(14)} Volumes</button>
@@ -1744,24 +1749,54 @@ setHtml(list, pools.map((p) => {
         </div>
       </div>
       <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`;
-    }).join("") || `<div class="empty">No pools.</div>`);
-    list.querySelectorAll("[data-vols]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => {
-        const pool = (b as HTMLElement).dataset.vols!;
-        // Toggle: clicking the open pool collapses it, otherwise expand it.
-        volumesOpen = volumesOpen === pool ? null : pool;
-        loadVolumes(pool);
-      };
-    });
-    list.querySelectorAll("[data-upload]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => openUpload((b as HTMLElement).dataset.upload!);
-    });
-    list.querySelectorAll("[data-delpool]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => deletePool((b as HTMLElement).dataset.delpool!);
-    });
-    // The 1s poll re-renders this whole list, wiping the volume table; restore
-    // the expanded pool's table in place so it does not blink out.
-    if (volumesOpen) void loadVolumes(volumesOpen);
+      }).join("") || `<div class="empty">No pools.</div>`);
+      list.querySelectorAll("[data-vols]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = () => {
+          const pool = (b as HTMLElement).dataset.vols!;
+          // Toggle: clicking the open pool collapses it, otherwise expand it.
+          volumesOpen = volumesOpen === pool ? null : pool;
+          loadVolumes(pool);
+        };
+      });
+      list.querySelectorAll("[data-upload]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = () => openUpload((b as HTMLElement).dataset.upload!);
+      });
+      list.querySelectorAll("[data-delpool]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = () => deletePool((b as HTMLElement).dataset.delpool!);
+      });
+      // A full rebuild wiped the expanded pool's table; restore it in place.
+      if (volumesOpen) void loadVolumes(volumesOpen);
+      return;
+    }
+
+    // Same pools as before: update the dynamic numbers in place, leaving the
+    // volume table untouched so it does not flicker every poll tick.
+    for (const p of pools) {
+      const card = $(`[data-pool-card="${cssId(p.name)}"]`, list);
+      if (!card) continue;
+      const used = p.allocation ?? 0;
+      const cap = p.capacity ?? 0;
+      const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+      const fill = card.querySelector("[data-pool-fill]");
+      if (fill) {
+        (fill as HTMLElement).style.width = `${usedPct.toFixed(1)}%`;
+        fill.classList.toggle("hot", usedPct > 85);
+      }
+      const pctEl = card.querySelector("[data-pool-pct]");
+      if (pctEl) pctEl.textContent = `${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%`;
+      const usedEl = card.querySelector("[data-pool-used]");
+      if (usedEl) usedEl.textContent = `${fmtBytes(used)} used`;
+      const freeEl = card.querySelector("[data-pool-free]");
+      if (freeEl) freeEl.textContent = `${fmtBytes(p.available)} free`;
+      const capEl = card.querySelector("[data-pool-cap]");
+      if (capEl) capEl.textContent = `${fmtBytes(cap)} total`;
+      const badge = card.querySelector("[data-pool-active]");
+      if (badge) {
+        badge.textContent = p.active ? "Active" : "Inactive";
+        badge.classList.toggle("on", p.active);
+      }
+      card.classList.toggle("ok", p.active);
+    }
   } catch (e) {
     const list = $("#pools-list");
     if (list) setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
