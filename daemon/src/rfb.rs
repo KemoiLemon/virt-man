@@ -52,7 +52,12 @@ impl Rect {
         let y = self.y.min(o.y);
         let r = (self.x + self.w).max(o.x + o.w);
         let b = (self.y + self.h).max(o.y + o.h);
-        Rect { x, y, w: r - x, h: b - y }
+        Rect {
+            x,
+            y,
+            w: r - x,
+            h: b - y,
+        }
     }
 }
 
@@ -126,7 +131,12 @@ impl Session {
         // repaint into bands made it visibly assemble in strips; a whole screen
         // is only a few tens of milliseconds, which reads as instant when it
         // lands in a single paint.
-        let full = Rect { x: 0, y: 0, w: f.w, h: f.h };
+        let full = Rect {
+            x: 0,
+            y: 0,
+            w: f.w,
+            h: f.h,
+        };
         let rect = match f.damage {
             Some(d) if since >= f.damage_base => d,
             _ => full,
@@ -151,7 +161,13 @@ impl Session {
         f.damage = None;
         f.damage_base = f.seq;
 
-        Some(Update { seq: f.seq, w: f.w, h: f.h, rect, pixels })
+        Some(Update {
+            seq: f.seq,
+            w: f.w,
+            h: f.h,
+            rect,
+            pixels,
+        })
     }
 
     fn fail(&self, e: String) {
@@ -250,7 +266,7 @@ pub const OUR_FORMAT: PixOrder = PixOrder { r: 2, g: 1, b: 0 };
 /// Convert one Raw rectangle (32bpp, little-endian, `ord` layout) into RGBA.
 pub fn raw_to_rgba(src: &[u8], ord: PixOrder, out: &mut [u8]) {
     debug_assert_eq!(src.len(), out.len());
-    for (s, d) in src.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
+    for (s, d) in src.as_chunks::<4>().0.iter().zip(out.chunks_exact_mut(4)) {
         d[0] = s[ord.r];
         d[1] = s[ord.g];
         d[2] = s[ord.b];
@@ -304,7 +320,9 @@ pub fn blit_changed(
         }
         // Narrow to the changed span within the row.
         let first = (0..ws).find(|i| old[i * 4..i * 4 + 4] != new[i * 4..i * 4 + 4]);
-        let last = (0..ws).rev().find(|i| old[i * 4..i * 4 + 4] != new[i * 4..i * 4 + 4]);
+        let last = (0..ws)
+            .rev()
+            .find(|i| old[i * 4..i * 4 + 4] != new[i * 4..i * 4 + 4]);
         if let (Some(a), Some(b)) = (first, last) {
             left = left.min(a);
             right = right.max(b);
@@ -327,16 +345,7 @@ pub fn blit_changed(
 
 /// CopyRect: move a block already present in the framebuffer.
 /// Copies through a temporary so overlapping regions stay correct.
-pub fn copy_rect(
-    fb: &mut [u8],
-    fb_w: u16,
-    sx: u16,
-    sy: u16,
-    dx: u16,
-    dy: u16,
-    w: u16,
-    h: u16,
-) {
+pub fn copy_rect(fb: &mut [u8], fb_w: u16, sx: u16, sy: u16, dx: u16, dy: u16, w: u16, h: u16) {
     let stride = fb_w as usize * 4;
     let mut tmp = vec![0u8; w as usize * h as usize * 4];
     for row in 0..h as usize {
@@ -468,18 +477,18 @@ pub fn connect(id: &str, host: &str, port: u16) -> R<Arc<Session>> {
     let worker = sess.clone();
     let vm = id.to_string();
     std::thread::spawn(move || {
-        if let Err(e) = reader_loop(&worker, s) {
-            if worker.is_running() {
-                worker.fail(e);
-            }
+        if let Err(e) = reader_loop(&worker, s)
+            && worker.is_running()
+        {
+            worker.fail(e);
         }
         worker.running.store(false, Ordering::Relaxed);
         // Drop the registry entry so a later connect starts clean.
         let mut reg = registry().lock().unwrap();
-        if let Some(cur) = reg.get(&vm) {
-            if Arc::ptr_eq(cur, &worker) {
-                reg.remove(&vm);
-            }
+        if let Some(cur) = reg.get(&vm)
+            && Arc::ptr_eq(cur, &worker)
+        {
+            reg.remove(&vm);
         }
     });
 
@@ -660,7 +669,10 @@ mod tests {
         let mut fb = vec![0u8; 2 * 2 * 4];
         fb[0..4].copy_from_slice(&[255, 255, 255, 255]);
         copy_rect(&mut fb, 2, 0, 0, 1, 1, 1, 1);
-        assert_eq!(&fb[(1 * 2 + 1) * 4..(1 * 2 + 1) * 4 + 4], [255, 255, 255, 255]);
+        assert_eq!(
+            &fb[(1 * 2 + 1) * 4..(1 * 2 + 1) * 4 + 4],
+            [255, 255, 255, 255]
+        );
         assert_eq!(&fb[0..4], [255, 255, 255, 255], "source stays put");
     }
 
@@ -675,14 +687,53 @@ mod tests {
             damage_base: 0,
         };
         assert!(f.damage.is_none(), "a fresh frame has no damage");
-        f.touch(Rect { x: 10, y: 10, w: 4, h: 4 });
-        assert_eq!(f.damage, Some(Rect { x: 10, y: 10, w: 4, h: 4 }));
+        f.touch(Rect {
+            x: 10,
+            y: 10,
+            w: 4,
+            h: 4,
+        });
+        assert_eq!(
+            f.damage,
+            Some(Rect {
+                x: 10,
+                y: 10,
+                w: 4,
+                h: 4
+            })
+        );
         // A second region expands the union, never replaces it.
-        f.touch(Rect { x: 20, y: 30, w: 4, h: 2 });
-        assert_eq!(f.damage, Some(Rect { x: 10, y: 10, w: 14, h: 22 }));
+        f.touch(Rect {
+            x: 20,
+            y: 30,
+            w: 4,
+            h: 2,
+        });
+        assert_eq!(
+            f.damage,
+            Some(Rect {
+                x: 10,
+                y: 10,
+                w: 14,
+                h: 22
+            })
+        );
         // Empty rectangles are ignored.
-        f.touch(Rect { x: 0, y: 0, w: 0, h: 0 });
-        assert_eq!(f.damage, Some(Rect { x: 10, y: 10, w: 14, h: 22 }));
+        f.touch(Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        });
+        assert_eq!(
+            f.damage,
+            Some(Rect {
+                x: 10,
+                y: 10,
+                w: 14,
+                h: 22
+            })
+        );
     }
 
     #[test]
@@ -702,7 +753,11 @@ mod tests {
         let at = (9 * 16 + 5) * 4;
         incoming[at..at + 4].copy_from_slice(&[1, 2, 3, 4]);
         let d = blit_changed(&mut fb, 16, 0, 0, 16, 16, &incoming).expect("change missed");
-        assert_eq!((d.x, d.y, d.w, d.h), (5, 9, 1, 1), "damage must be the single pixel");
+        assert_eq!(
+            (d.x, d.y, d.w, d.h),
+            (5, 9, 1, 1),
+            "damage must be the single pixel"
+        );
         // And the framebuffer really took the new pixel.
         assert_eq!(&fb[at..at + 4], &[1, 2, 3, 4]);
         // A second identical blit is now a no-op.
@@ -726,7 +781,7 @@ mod tests {
                 w,
                 h,
                 seq: 1,
-                damage: None,      // no damage yet => a new viewer gets it all
+                damage: None, // no damage yet => a new viewer gets it all
                 damage_base: 0,
             }),
             frame_ready: Condvar::new(),
@@ -757,7 +812,16 @@ mod tests {
 
     #[test]
     fn damage_rect_stays_inside_the_framebuffer() {
-        let r = clamp_rect(Rect { x: 60, y: 60, w: 999, h: 999 }, 64, 64);
+        let r = clamp_rect(
+            Rect {
+                x: 60,
+                y: 60,
+                w: 999,
+                h: 999,
+            },
+            64,
+            64,
+        );
         assert_eq!(r.x + r.w, 64, "width must not run past the buffer");
         assert_eq!(r.y + r.h, 64, "height must not run past the buffer");
     }

@@ -93,7 +93,9 @@ pub fn parse_all_graphics(xml: &str) -> Vec<Graphics> {
     let mut out = Vec::new();
     let mut rest = xml;
     while let Some(start) = rest.find("<graphics") {
-        let Some(rel_end) = rest[start..].find('>') else { break };
+        let Some(rel_end) = rest[start..].find('>') else {
+            break;
+        };
         let end = start + rel_end;
         let tag = &rest[start..=end];
 
@@ -110,7 +112,11 @@ pub fn parse_all_graphics(xml: &str) -> Vec<Graphics> {
                 .or_else(|| nested_listen_address(&rest[start..body_end]))
                 .unwrap_or("127.0.0.1")
                 .to_string();
-            out.push(Graphics { kind: kind.to_string(), host, port });
+            out.push(Graphics {
+                kind: kind.to_string(),
+                host,
+                port,
+            });
         }
         rest = &rest[end + 1..];
     }
