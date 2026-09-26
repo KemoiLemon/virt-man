@@ -3,6 +3,9 @@ import type { Connection, DomainSummary, NetworkSummary, PoolSummary, User, Volu
 import { attachConsole, isTauri, tauriWindow } from "./console";
 import DOMPurify from "dompurify";
 import { ic } from "./icons";
+import { enhanceSelects } from "./listbox";
+import { addSample, fmtBytes, pct, sparkline } from "./stats";
+import type { DomainStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { domainXml, esc, networkXml, poolXml, volumeXml } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
@@ -11,8 +14,11 @@ import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 /// esc() at the call site; DOMPurify is the sanitizing backstop the XSS rule
 /// requires.
 function setHtml(el: Element, html: string) {
-  // pi-lens-ignore: no-inner-html-js
+  // pi-lens-ignore: no-inner-html, no-inner-html-js
   el.innerHTML = DOMPurify.sanitize(html);
+  // Every render path funnels through here, so this is the one place that has
+  // to swap native <select> elements for the themed listbox.
+  enhanceSelects(el);
 }
 
 // ---------------------------------------------------------------- state
@@ -26,6 +32,9 @@ let selectedVm: string | null = null;
 let vmTab: "summary" | "console" | "xml" = "summary";
 let dcTab: "servers" | "users" = "servers";
 let pollTimer: number | null = null;
+/// VMs per connection, so the sidebar tree can nest guests under their server
+/// without every render refetching.
+const treeVms: Record<string, DomainSummary[]> = {};
 
 const $ = (sel: string, root: ParentNode = document): any =>
   root.querySelector(sel);
@@ -64,6 +73,7 @@ async function boot() {
   if (status.auth_disabled) {
     authDisabled = true;
     user = { id: "local", username: "local", role: "admin", nickname: "local", avatar: null, scopes: {} };
+    await loadConnections();
     renderApp();
     return;
   }
@@ -71,9 +81,20 @@ async function boot() {
   try {
     const me = await api.get<User>("/auth/me");
     user = me;
+    await loadConnections();
     renderApp();
   } catch {
     renderLogin();
+  }
+}
+
+/// Fetch the saved daemon connections. Without this the sidebar tree and the
+/// Datacenter table render empty on every load until one is added or removed.
+async function loadConnections() {
+  try {
+    connections = await api.get<Connection[]>("/connections");
+  } catch {
+    connections = [];
   }
 }
 
@@ -150,15 +171,16 @@ setHtml(app, `
       <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
       <button class="btn" id="webui-btn">${ic.webui()} Connect to WebUI</button>
       ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
-      ${isTauri() ? `<span style="margin-left:auto;display:flex;gap:6px">
-        <button class="btn icon" id="win-min" title="Minimise">${ic.min()}</button>
-        <button class="btn icon" id="win-max" title="Maximise">${ic.max()}</button>
-        <button class="btn icon danger" id="win-close" title="Close">${ic.close()}</button>
+      ${isTauri() ? `<span class="window-controls">
+        <button class="win-btn" id="win-min" title="Minimise">${ic.min()}</button>
+        <button class="win-btn" id="win-max" title="Maximise">${ic.max()}</button>
+        <button class="win-btn close" id="win-close" title="Close">${ic.close()}</button>
       </span>` : ""}
     </div>
     <div class="layout">
       <div class="pane list-pane">
-        <div class="tree" id="tree"></div>
+        <div class="restree" id="tree"></div>
+        <button class="tree-add" id="add-conn-row">${ic.plus(14)} Add Server</button>
         ${authDisabled ? "" : `<div class="side-profile" id="profile-btn"></div>`}
       </div>
       <div class="pane">
@@ -173,6 +195,7 @@ setHtml(app, `
   $("#theme-btn").onclick = toggleTheme;
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
   $("#webui-btn").onclick = connectToWebui;
+  $("#add-conn-row").onclick = () => openConnectionDialog();
   $("#tasks-close").onclick = () => $("#tasks").classList.add("hidden");
 
   onTasks(renderTasks);
@@ -243,22 +266,46 @@ async function connectToWebui() {
 
 // ---------------------------------------------------------------- tree
 
+/// Nested resource tree: Datacenter root -> servers -> guests, mirroring
+/// vm-man's sidebar. Guests come from the per-connection cache, so opening a
+/// server reveals its VMs inline instead of only in the content pane.
 function renderTree() {
   const tree = $("#tree");
-  const connRows = connections
-    .map(
-      (c) => `
-      <div class="tree-row ${c.id === selectedConn ? "sel" : ""}" data-conn="${c.id}">
-        <span class="dot"></span>
-        <span class="tname">${esc(c.name)}</span>
-        <span class="state">daemon</span>
-      </div>`,
-    )
+  if (!tree) return;
+
+  const serverRows = connections
+    .map((c) => {
+      const selected = c.id === selectedConn && !selectedVm;
+      const vms = treeVms[c.id] ?? [];
+      const running = vms.filter((v) => v.active).length;
+      const guestRows =
+        c.id === selectedConn
+          ? vms
+              .map(
+                (v) => `
+      <button class="tree-row tree-vm ${selectedVm === v.name ? "sel" : ""}" data-vm="${esc(v.name)}">
+        <span class="tree-ic ${v.active ? "on" : ""}">${ic.vm()}</span>
+        <span class="tree-label">${esc(v.name)}</span>
+        <span class="tree-state ${v.active ? "on" : ""}">${esc(v.state)}</span>
+      </button>`,
+              )
+              .join("")
+          : "";
+      return `
+      <button class="tree-row tree-group ${selected ? "sel" : ""}" data-conn="${c.id}">
+        <span class="tree-ic ${running > 0 ? "on" : ""}">${ic.server()}</span>
+        <span class="tree-label">${esc(c.name)}</span>
+        <span class="tree-state">${vms.length ? `${running}/${vms.length}` : ""}</span>
+      </button>${guestRows}`;
+    })
     .join("");
-setHtml(tree, `
-    <div class="tree-row node ${selectedConn === null ? "sel" : ""}" id="dc-row">Datacenter</div>
-    ${connRows}
-    <div class="tree-row node" id="add-conn-row" style="color:var(--accent)"><span>${ic.plus()} Add Server</span></div>`);
+
+  setHtml(tree, `
+    <button class="tree-row tree-root ${selectedConn === null ? "sel" : ""}" id="dc-row">
+      <span class="tree-ic">${ic.datacenter()}</span>
+      <span class="tree-label">Datacenter</span>
+    </button>
+    ${serverRows || `<div class="tree-empty">No servers yet — add one below.</div>`}`);
 
   $("#dc-row").onclick = () => {
     selectedConn = null;
@@ -267,7 +314,6 @@ setHtml(tree, `
     renderTree();
     renderDc();
   };
-  $("#add-conn-row").onclick = () => openConnectionDialog();
   tree.querySelectorAll("[data-conn]").forEach((row: Element) => {
     (row as HTMLElement).onclick = () => {
       selectedConn = (row as HTMLElement).dataset.conn!;
@@ -275,8 +321,33 @@ setHtml(tree, `
       connTab = "vms";
       renderTree();
       renderConn();
+      void refreshTreeVms();
     };
   });
+  tree.querySelectorAll("[data-vm]").forEach((row: Element) => {
+    (row as HTMLElement).onclick = () => {
+      selectedVm = (row as HTMLElement).dataset.vm!;
+      vmTab = "summary";
+      renderTree();
+      renderVm();
+    };
+  });
+}
+
+/// Refresh the guest list backing the tree for the selected server.
+async function refreshTreeVms() {
+  if (!selectedConn) return;
+  const conn = selectedConn;
+  try {
+    const vms = await api.get<DomainSummary[]>(`/proxy/${conn}/domains`);
+    const changed = JSON.stringify(treeVms[conn]) !== JSON.stringify(vms);
+    treeVms[conn] = vms;
+    // Only re-render when something actually moved, so the tree does not
+    // flicker or fight the user's clicks on every poll.
+    if (changed) renderTree();
+  } catch {
+    /* the content pane surfaces connection errors */
+  }
 }
 
 function renderProfileBtn() {
@@ -295,14 +366,39 @@ function renderProfileBtn() {
 
 function renderDc() {
   const content = $("#content");
-  const tabs = dcTab === "servers"
-    ? `<div class="actions">
-        <button class="btn primary" id="dc-add">Add Server</button>
-        ${authDisabled ? "" : `<button class="btn" id="dc-users">Users &amp; API keys</button>`}
+  // Real tabbar; the Users tab is hidden when the local app disables auth.
+  const tabs = `<div class="tabbar">
+      <button class="tab ${dcTab === "servers" ? "active" : ""}" data-dctab="servers">${ic.server(14)} Servers</button>
+      ${authDisabled ? "" : `<button class="tab ${dcTab === "users" ? "active" : ""}" data-dctab="users">${ic.users(14)} Users &amp; API keys</button>`}
+    </div>`;
+  const addBar = dcTab === "servers"
+    ? `<div class="actions" style="margin-top:14px"><button class="btn primary" id="dc-add">${ic.plus(14)} Add Server</button></div>`
+    : "";
+  // Aggregate cards across every known server, from the tree's guest cache.
+  const allVms = Object.values(treeVms).flat();
+  const runningVms = allVms.filter((v) => v.active).length;
+  const cards = dcTab === "servers"
+    ? `<div class="cards">
+        <div class="card">
+          <span class="card-ic">${ic.server(20)}</span>
+          <div><b>${connections.length}</b><i>SERVERS</i></div>
+        </div>
+        <div class="card">
+          <span class="card-ic">${ic.vms(20)}</span>
+          <div><b>${allVms.length}</b><i>GUESTS</i></div>
+        </div>
+        <div class="card ${runningVms > 0 ? "ok" : ""}">
+          <span class="card-ic">${ic.start(20)}</span>
+          <div><b>${runningVms}</b><i>RUNNING</i></div>
+        </div>
+        <div class="card">
+          <span class="card-ic">${ic.stop(20)}</span>
+          <div><b>${allVms.length - runningVms}</b><i>STOPPED</i></div>
+        </div>
       </div>`
-    : `<div class="actions"><button class="btn" id="dc-back">Back to servers</button></div>`;
+    : "";
   const body = dcTab === "servers"
-    ? `<div class="section-title">Servers</div>
+    ? `${cards}<div class="section-title">Servers</div>
        <table class="grid">
          <tr><th>Name</th><th>URL</th><th>Cert</th><th></th></tr>
          ${connections.map((c) => `
@@ -317,11 +413,15 @@ function renderDc() {
            </tr>`).join("") || `<tr><td colspan="4" class="empty">No servers yet — add one.</td></tr>`}
        </table>`
     : `<div id="users-area">loading…</div>`;
-setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
+setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${addBar}${body}`);
 
   $("#dc-add")?.addEventListener("click", () => openConnectionDialog());
-  $("#dc-users")?.addEventListener("click", () => { dcTab = "users"; renderDc(); });
-  $("#dc-back")?.addEventListener("click", () => { dcTab = "servers"; renderDc(); });
+  content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
+    (b as HTMLElement).onclick = () => {
+      dcTab = (b as HTMLElement).dataset.dctab as typeof dcTab;
+      renderDc();
+    };
+  });
   content.querySelectorAll("[data-test]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => testConnection((b as HTMLElement).dataset.test!);
   });
@@ -414,13 +514,13 @@ async function renderConn() {
 setHtml(content, `
     <div class="dhead"><span class="dtitle">${esc(conn.name)}</span>
       <span class="badge">daemon</span>
-      <span class="actions" style="margin:0;margin-left:auto">
-        <button class="btn" data-tab="vms">VMs</button>
-        <button class="btn" data-tab="networks">Networks</button>
-        <button class="btn" data-tab="storage">Storage</button>
-      </span>
     </div>
     <div class="dsub">${esc(conn.url)}${conn.fingerprint ? " · " + conn.fingerprint : ""}</div>
+    <div class="tabbar">
+      <button class="tab ${connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
+      <button class="tab ${connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
+      <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
+    </div>
     <div id="conn-body"></div>`);
   content.querySelectorAll("[data-tab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
@@ -525,18 +625,33 @@ async function loadPools() {
     const pools = await api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`);
     const list = $("#pools-list");
     if (!list) return;
-setHtml(list, pools.map((p) => `
-      <div class="specs" style="margin-bottom:8px">
-        <div class="spec"><b>Pool</b><span>${esc(p.name)} <span class="state ${p.active ? "on" : ""}">${p.active ? ic.circleDot() : ic.circle()}</span></span></div>
-        <div class="spec"><b>Capacity</b><span>${fmtBytes(p.capacity)}</span></div>
-        <div class="spec"><b>Available</b><span>${fmtBytes(p.available)}</span></div>
+setHtml(list, pools.map((p) => {
+      // Allocation vs capacity is the real usage figure libvirt reports.
+      const used = p.allocation ?? 0;
+      const cap = p.capacity ?? 0;
+      const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+      return `
+      <div class="storage-card ${p.active ? "ok" : ""}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.storage()}</span>
+          <span class="storage-card-title">${esc(p.name)}</span>
+          <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
+        </div>
+        <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
+        <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
+        <div class="metric-foot">
+          <span>${fmtBytes(used)} used</span>
+          <span>${fmtBytes(p.available)} free</span>
+          <span>${fmtBytes(cap)} total</span>
+        </div>
+        <div class="storage-card-actions">
+          <button class="btn" data-vols="${esc(p.name)}">${ic.disk(14)} Volumes</button>
+          <button class="btn" data-upload="${esc(p.name)}">${ic.upload(14)} Upload ISO</button>
+          <button class="btn danger icon" data-delpool="${esc(p.name)}">${ic.trash()}</button>
+        </div>
       </div>
-      <div class="actions" style="margin-bottom:12px">
-        <button class="btn" data-vols="${esc(p.name)}">Volumes</button>
-        <button class="btn" data-upload="${esc(p.name)}">Upload ISO</button>
-        <button class="btn danger icon" data-delpool="${esc(p.name)}">${ic.trash()}</button>
-      </div>
-      <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`).join("") || `<div class="empty">No pools.</div>`);
+      <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`;
+    }).join("") || `<div class="empty">No pools.</div>`);
     list.querySelectorAll("[data-vols]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => loadVolumes((b as HTMLElement).dataset.vols!);
     });
@@ -582,19 +697,18 @@ async function renderVm() {
   const content = $("#content");
   const vm = selectedVm;
 setHtml(content, `
-    <div class="dhead"><span class="dtitle">${esc(vm)}</span>
-      <span class="actions" style="margin:0;margin-left:auto">
-        <button class="btn" data-vmtab="summary">Summary</button>
-        <button class="btn" data-vmtab="console">Console</button>
-        <button class="btn" data-vmtab="xml">XML</button>
-      </span>
-    </div>
-    <div class="actions" style="margin-top:10px">
-      <button class="btn" id="vm-start">Start</button>
-      <button class="btn" id="vm-shutdown">Shutdown</button>
+    <div class="dhead"><span class="dtitle">${esc(vm)}</span></div>
+    <div class="actions">
+      <button class="btn" id="vm-start">${ic.start(14)} Start</button>
+      <button class="btn" id="vm-shutdown">${ic.stop(14)} Shutdown</button>
       <button class="btn" id="vm-destroy">Force stop</button>
-      <button class="btn" id="vm-reboot">Reboot</button>
-      <button class="btn danger" id="vm-delete">Delete</button>
+      <button class="btn" id="vm-reboot">${ic.reboot(14)} Reboot</button>
+      <button class="btn danger" id="vm-delete">${ic.trash(14)} Delete</button>
+    </div>
+    <div class="tabbar">
+      <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
+      <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
+      <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">XML</button>
     </div>
     <div id="vm-body"></div>`);
   content.querySelectorAll("[data-vmtab]").forEach((b: Element) => {
@@ -639,11 +753,56 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     }
     return;
   }
-  // summary
+  // summary: live CPU/memory metrics with sparklines, then the facts grid.
   try {
-    const d = await api.get<any>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}`);
-    const g = await api.get<{ graphics: { kind: string; host: string; port: number } | null }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/graphics`);
-setHtml(body, `<div class="specs">
+    const [d, g, s] = await Promise.all([
+      api.get<any>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}`),
+      api.get<{ graphics: { kind: string; host: string; port: number } | null }>(
+        `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/graphics`),
+      api.get<DomainStats>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/stats`),
+    ]);
+
+    const { cpu, mem, cpuNow, memNow } = addSample(s);
+    const running = s.state === "running";
+    const usedKib = s.usable_kib != null
+      ? Math.max(0, s.memory_kib - s.usable_kib)
+      : (s.rss_kib ?? s.memory_kib);
+
+    setHtml(body, `
+    <div class="sumgrid vm-sumgrid">
+      <div class="metric ${running ? "ok" : ""}">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.cpu()}</span>
+          <b>CPU</b>
+          <span class="metric-value">${pct(cpuNow)}</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(cpu)}
+          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot"><span>${s.vcpus} vCPU</span><span>host ${s.host.cpus} CPU</span></div>
+      </div>
+
+      <div class="metric ${running ? "ok" : ""}">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.memory()}</span>
+          <b>Memory</b>
+          <span class="metric-value">${pct(memNow)}</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(mem, "mem")}
+          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot">
+          <span>${fmtBytes(usedKib * 1024)} used</span>
+          <span>${fmtBytes(s.max_memory_kib * 1024)} max</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="specs">
       <div class="spec"><b>State</b><span>${esc(d.state)}</span></div>
       <div class="spec"><b>ID</b><span>${d.id}</span></div>
       <div class="spec"><b>UUID</b><span>${esc(d.uuid ?? "—")}</span></div>
@@ -1172,6 +1331,8 @@ function startPolling() {
   if (pollTimer) window.clearInterval(pollTimer);
   pollTimer = window.setInterval(() => {
     if (!user) return;
+    // Keep the sidebar's guest states live regardless of the open pane.
+    void refreshTreeVms();
     if (selectedConn && !selectedVm) {
       if (connTab === "vms") loadVms();
       else if (connTab === "networks") loadNetworks();
@@ -1183,19 +1344,6 @@ function startPolling() {
 }
 
 // ---------------------------------------------------------------- helpers
-
-function fmtBytes(n: number | null | undefined): string {
-  if (n == null) return "—";
-  if (n === 0) return "0 B";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${units[i]}`;
-}
 
 function cssId(s: string): string {
   return s.replace(/[^a-zA-Z0-9]/g, "_");
