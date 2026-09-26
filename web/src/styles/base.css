@@ -238,6 +238,20 @@ body {
   display: flex; justify-content: flex-end; gap: 8px;
 }
 
+/* ------------------------------------------------------ create resource */
+.create-resource-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px;
+}
+.create-resource-card {
+  background: var(--panel2); border: 1px solid var(--line2); color: var(--fg);
+  padding: 14px; font: inherit; cursor: pointer; text-align: left;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+}
+.create-resource-card:hover { border-color: var(--accent); }
+.create-resource-card .metric-ic { color: var(--accent); }
+.create-resource-card b { font-size: 13px; }
+.create-resource-card small { font-size: 11px; color: var(--dim); line-height: 1.4; }
+
 /* --------------------------------------------------------- command palette */
 .tayne-back {
   position: fixed; inset: 0; background: var(--shade);

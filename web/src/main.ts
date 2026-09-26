@@ -1228,6 +1228,7 @@ setHtml(content, `
       <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
       <button class="tab ${connTab === "firewall" ? "active" : ""}" data-tab="firewall">${ic.firewall(14)} Firewall</button>
       <div class="tabbar-actions">
+        ${connTab === "dashboard" ? `<button class="btn primary" id="create-resource">${ic.plus(14)} Create Resource</button>` : ""}
         ${connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
         ${connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create Network</button>` : ""}
         ${connTab === "storage" ? `<button class="btn primary" id="create-pool">${ic.plus(14)} Create Pool</button>` : ""}
@@ -1251,6 +1252,7 @@ async function renderConnBody() {
   // body only carries the list itself.
   if (connTab === "dashboard") {
     setHtml(body, `<div id="dash">loading…</div>`);
+    $("#create-resource")?.addEventListener("click", () => openCreateResource());
     await loadDashboard();
   } else if (connTab === "vms") {
     setHtml(body, `<div id="vms-list">loading…</div>`);
@@ -2506,6 +2508,31 @@ async function loadFormData(conn: string) {
   return { pools, nets };
 }
 
+/// Create a volume for every "new volume" disk in the device list, then rewrite
+/// the device to reference it, so the XML builder can attach it like an
+/// existing volume. Called before defining the domain in both create and edit.
+async function createPendingVolumes(
+  conn: string,
+  vmName: string,
+  devices: HwDevice[],
+  set: (msg: string) => void,
+) {
+  for (let i = 0; i < devices.length; i++) {
+    const d = devices[i];
+    if (d.kind !== "disk" || (d.fields.mode ?? "existing") !== "new") continue;
+    const pool = (d.fields.pool ?? "").trim();
+    const sizeGb = Math.max(1, +(d.fields.size_gb ?? "") || 1);
+    const format = (d.fields.format ?? "qcow2") === "raw" ? "raw" : "qcow2";
+    const name = `${vmName}-disk${i + 1}-${sizeGb}gb.${format}`;
+    set(`creating ${sizeGb} GB volume ${name}`);
+    await api.post(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`, {
+      xml: volumeXml({ name, capacity_gb: sizeGb, format }),
+    });
+    d.fields.volume = name;
+    delete d.fields.mode;
+  }
+}
+
 /// Proxmox-style hardware editor: device list on the LEFT, the selected
 /// device's form on the right. Used for both "Create VM" and editing an
 /// existing guest's hardware, so the two can never drift apart.
@@ -2752,7 +2779,16 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
 
     const renderAdd = async () => {
       const t = hwType(kind)!;
-      const fields = await Promise.all(t.fields.map(async (f) => {
+      const fieldValue = (key: string) => {
+        if (draft[key] !== undefined) return draft[key];
+        return t.fields.find((x) => x.key === key)?.value ?? "";
+      };
+      // showWhen keeps the form to only the fields relevant to the current
+      // mode (e.g. an existing-volume disk shows pool+volume, a new-volume
+      // disk shows pool+size+format).
+      const visible = t.fields.filter((f) =>
+        !f.showWhen || fieldValue(f.showWhen.key) === f.showWhen.value);
+      const fields = await Promise.all(visible.map(async (f) => {
         const val = draft[f.key] ?? f.value ?? "";
         if (f.type === "select") {
           let list: string[] = (f.options ?? []).map((o) => o.value);
@@ -2847,6 +2883,8 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           if (selectedVm === oldName) selectedVm = target;
         }
         set("rebuilding domain definition");
+        // Create any "new volume" disks before the XML references them.
+        await createPendingVolumes(conn, target, devices, set);
         // Strip the devices this editor owns, then splice the current set back
         // in, so libvirt-added devices we do not model survive the round trip.
         const stripped = baseXml
@@ -2855,6 +2893,8 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           .replace(/<rng\b[\s\S]*?<\/rng>\s*/g, "")
           .replace(/<memballoon\b[^>]*\/>\s*/g, "")
           .replace(/<channel\b[\s\S]*?org\.qemu\.guest_agent[\s\S]*?<\/channel>\s*/g, "")
+          .replace(/<tpm\b[\s\S]*?<\/tpm>\s*/g, "")
+          .replace(/<watchdog\b[^>]*\/?>\s*/g, "")
           .replace(/<vcpu([^>]*)>\d+<\/vcpu>/, `<vcpu$1>${general.cpus}</vcpu>`)
           .replace(/<memory([^>]*)>\d+<\/memory>/, `<memory$1>${general.memory_mb * 1024}</memory>`)
           .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`)
@@ -2892,6 +2932,8 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
       await api.post(`/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`, {
         xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }),
       });
+      // Create any additional "new volume" disks before defining the domain.
+      await createPendingVolumes(conn, form.name, devices, set);
       set("defining domain");
       await api.postXml(`/proxy/${conn}/domains?start=true`, withDevices(domainXml(form), devices));
     });
@@ -2905,6 +2947,43 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
 /// Back-compat entry point used by the VMs tab button.
 function openCreateVm() {
   void openHardwareEditor();
+}
+
+/// Dashboard "Create Resource": pick VM / Network / Storage Pool, then hand
+/// off to the existing create flows.
+function openCreateResource() {
+  if (!selectedConn) return;
+  const el = openModal(
+    "Create Resource",
+    `<div class="create-resource-grid">
+      <button class="create-resource-card" data-create="vm">
+        <span class="metric-ic">${ic.vm()}</span>
+        <b>Virtual Machine</b>
+        <small>Full hardware editor: CPU, memory, disks and more</small>
+      </button>
+      <button class="create-resource-card" data-create="network">
+        <span class="metric-ic">${ic.network()}</span>
+        <b>Network</b>
+        <small>NAT, bridge or isolated with DHCP and DNS</small>
+      </button>
+      <button class="create-resource-card" data-create="pool">
+        <span class="metric-ic">${ic.storage()}</span>
+        <b>Storage Pool</b>
+        <small>Directory, LVM or filesystem-backed pool</small>
+      </button>
+    </div>`,
+    `<button class="btn" id="cr-cancel">Cancel</button>`,
+  );
+  $("#cr-cancel", el).onclick = () => el.remove();
+  el.querySelectorAll("[data-create]").forEach((b: Element) => {
+    (b as HTMLElement).onclick = () => {
+      const kind = (b as HTMLElement).dataset.create!;
+      el.remove();
+      if (kind === "vm") openCreateVm();
+      else if (kind === "network") openCreateNetwork();
+      else openCreatePool();
+    };
+  });
 }
 
 function openCreatePool() {

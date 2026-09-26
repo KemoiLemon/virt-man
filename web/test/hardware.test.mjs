@@ -63,6 +63,30 @@ test("validation rejects a device missing required fields", () => {
   assert.equal(hw.validateDevice({ kind: "memballoon", fields: {} }), null, "fieldless device passes");
 });
 
+test("a new-volume disk needs a pool and size, not an existing volume", () => {
+  assert.ok(
+    hw.validateDevice({ kind: "disk", fields: { mode: "new", pool: "p" } }),
+    "new disk without size is rejected",
+  );
+  assert.equal(
+    hw.validateDevice({ kind: "disk", fields: { mode: "new", pool: "p", size_gb: "10" } }), null,
+    "a new disk with a size passes",
+  );
+  const xml = hw.deviceXml({ kind: "disk", fields: { mode: "new", pool: "p", size_gb: "20", format: "raw" } }, 1);
+  assert.match(xml, /volume="\(new 20 GB raw\)"/, "preview marks the pending volume");
+});
+
+test("TPM and watchdog serialise to their libvirt elements", () => {
+  assert.match(
+    hw.deviceXml({ kind: "tpm", fields: { version: "2.0" } }),
+    /<tpm model="tpm-crb">[\s\S]*version="2\.0"/,
+  );
+  assert.match(
+    hw.deviceXml({ kind: "watchdog", fields: { action: "poweroff" } }),
+    /<watchdog model="i6300esb" action="poweroff"\/>/,
+  );
+});
+
 const SAMPLE = `<domain type="kvm">
   <name>alpine</name>
   <vcpu>2</vcpu>

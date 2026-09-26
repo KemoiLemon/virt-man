@@ -21,6 +21,8 @@ export interface HwField {
   max?: number;
   options?: { value: string; label: string }[];
   hint?: string;
+  /** Only show this field when another field equals this value. */
+  showWhen?: { key: string; value: string };
 }
 
 export interface HwType {
@@ -35,12 +37,28 @@ export interface HwType {
 export const HW_CATALOG: HwType[] = [
   {
     id: "disk",
-    label: "Extra Disk",
-    blurb: "Attach another volume from a storage pool",
+    label: "Hard Disk",
+    blurb: "Attach an existing volume, or create a new one with a size",
     icon: "disk",
     fields: [
+      {
+        key: "mode", label: "Source", type: "select", value: "existing",
+        options: [
+          { value: "existing", label: "Existing volume" },
+          { value: "new", label: "New volume" },
+        ],
+      },
       { key: "pool", label: "Storage pool", type: "select", options: [] },
-      { key: "volume", label: "Volume", type: "select", options: [] },
+      { key: "volume", label: "Volume", type: "select", options: [], showWhen: { key: "mode", value: "existing" } },
+      { key: "size_gb", label: "Disk size (GB)", type: "number", min: 1, value: "10", placeholder: "10", showWhen: { key: "mode", value: "new" } },
+      {
+        key: "format", label: "Format", type: "select", value: "qcow2",
+        options: [
+          { value: "qcow2", label: "qcow2" },
+          { value: "raw", label: "raw" },
+        ],
+        showWhen: { key: "mode", value: "new" },
+      },
       {
         key: "bus", label: "Bus", type: "select", value: "virtio",
         options: [
@@ -124,6 +142,39 @@ export const HW_CATALOG: HwType[] = [
     icon: "cpu",
     fields: [],
   },
+  {
+    id: "tpm",
+    label: "TPM",
+    blurb: "Emulated Trusted Platform Module (tpm-crb)",
+    icon: "lock",
+    fields: [
+      {
+        key: "version", label: "Version", type: "select", value: "2.0",
+        options: [
+          { value: "2.0", label: "2.0" },
+          { value: "1.2", label: "1.2" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "watchdog",
+    label: "Watchdog",
+    blurb: "i6300esb watchdog — fires when the guest hangs",
+    icon: "firewall",
+    fields: [
+      {
+        key: "action", label: "Action", type: "select", value: "reset",
+        options: [
+          { value: "reset", label: "reset" },
+          { value: "poweroff", label: "poweroff" },
+          { value: "shutdown", label: "shutdown" },
+          { value: "pause", label: "pause" },
+          { value: "none", label: "none" },
+        ],
+      },
+    ],
+  },
 ];
 
 export function hwType(id: string): HwType | undefined {
@@ -152,9 +203,11 @@ export function deviceXml(d: HwDevice, index = 1): string {
   switch (d.kind) {
     case "disk": {
       const bus = f("bus") || "virtio";
+      const newMode = (d.fields.mode ?? "existing") === "new";
+      const vol = newMode ? `(new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"})` : f("volume");
       return `<disk type="volume" device="disk">
       <driver name="qemu" type="qcow2"/>
-      <source pool="${esc(f("pool"))}" volume="${esc(f("volume"))}"/>
+      <source pool="${esc(f("pool"))}" volume="${esc(vol)}"/>
       <target dev="${diskTarget(bus, index)}" bus="${esc(bus)}"/>
     </disk>`;
     }
@@ -190,6 +243,12 @@ export function deviceXml(d: HwDevice, index = 1): string {
       return `<channel type="unix">
       <target type="virtio" name="org.qemu.guest_agent.0"/>
     </channel>`;
+    case "tpm":
+      return `<tpm model="tpm-crb">
+      <backend type="emulator" version="${esc(f("version") || "2.0")}"/>
+    </tpm>`;
+    case "watchdog":
+      return `<watchdog model="i6300esb" action="${esc(f("action") || "reset")}"/>`;
     default:
       return "";
   }
@@ -199,7 +258,12 @@ export function deviceXml(d: HwDevice, index = 1): string {
 export function deviceSummary(d: HwDevice): string {
   const f = (k: string) => (d.fields[k] ?? "").trim();
   switch (d.kind) {
-    case "disk": return `${f("pool")}/${f("volume")} (${f("bus") || "virtio"})`;
+    case "disk": {
+      if ((d.fields.mode ?? "existing") === "new") {
+        return `${f("pool")}/new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"}`;
+      }
+      return `${f("pool")}/${f("volume")} (${f("bus") || "virtio"})`;
+    }
     case "cdrom": return `${f("pool")}/${f("volume")}`;
     case "interface": return `${f("network")} (${f("model") || "virtio"})`;
     case "hostdev": return `${f("domain")}:${f("bus")}:${f("slot")}.${f("function")}`;
@@ -207,6 +271,8 @@ export function deviceSummary(d: HwDevice): string {
     case "rng": return f("backend") || "/dev/urandom";
     case "memballoon": return "virtio";
     case "channel": return "org.qemu.guest_agent.0";
+    case "tpm": return `emulated ${f("version") || "2.0"}`;
+    case "watchdog": return `i6300esb (${f("action") || "reset"})`;
     default: return d.kind;
   }
 }
@@ -220,7 +286,12 @@ export function validateDevice(d: HwDevice): string | null {
     return null;
   };
   switch (d.kind) {
-    case "disk": return need(["pool", "volume"], "An extra disk");
+    case "disk": {
+      if ((d.fields.mode ?? "existing") === "new") {
+        return need(["pool", "size_gb"], "A new disk");
+      }
+      return need(["pool", "volume"], "A hard disk");
+    }
     case "cdrom": return need(["pool", "volume"], "A CD/DVD drive");
     case "interface": return need(["network"], "A network device");
     case "hostdev": return need(["bus", "slot", "function"], "PCI passthrough");
@@ -280,6 +351,13 @@ export function devicesFromXml(xml: string): HwDevice[] {
   }
   if (/<memballoon\b/.test(xml)) out.push({ kind: "memballoon", fields: {} });
   if (/org\.qemu\.guest_agent/.test(xml)) out.push({ kind: "channel", fields: {} });
+  if (/<tpm\b/.test(xml)) {
+    const version = /version=["']([^"']+)/.exec(xml)?.[1] ?? "2.0";
+    out.push({ kind: "tpm", fields: { version } });
+  }
+  for (const m of xml.matchAll(/<watchdog\b[^>]*\/?>/g)) {
+    out.push({ kind: "watchdog", fields: { action: attr(m[0], "action") } });
+  }
   for (const m of xml.matchAll(/<rng\b[\s\S]*?<\/rng>/g)) {
     const backend = m[0].match(/<backend[^>]*>([^<]*)<\/backend>/)?.[1] ?? "";
     out.push({ kind: "rng", fields: { backend } });
