@@ -541,49 +541,65 @@ function renderDc() {
       </div>`;
   // Every guest across every server, so a VM is reachable directly from here
   // instead of only through the sidebar.
-  const guestRows = connections
+  const guestCards = connections
     .flatMap((c) => (treeVms[c.id] ?? []).map((v) => ({ conn: c, vm: v })))
     .map(({ conn, vm }) => `
-      <tr>
-        <td class="tname" style="cursor:pointer" data-open-vm="${esc(vm.name)}" data-open-conn="${conn.id}">${esc(vm.name)}</td>
-        <td>${esc(conn.name)}</td>
-        <td><span class="state ${vm.active ? "on" : ""}">${esc(vm.state)}</span></td>
-        <td class="col-actions">
-          <div class="row-actions">
-            <button class="btn icon" data-dc-start="${esc(vm.name)}" data-conn="${conn.id}" title="Start" ${vm.active ? "disabled" : ""}>${ic.start()}</button>
-            <button class="btn icon" data-dc-stop="${esc(vm.name)}" data-conn="${conn.id}" title="Shutdown" ${vm.active ? "" : "disabled"}>${ic.stop()}</button>
-            <button class="btn icon" data-dc-console="${esc(vm.name)}" data-conn="${conn.id}" title="Console">${ic.vm()}</button>
-            <button class="btn icon" data-dc-hwedit="${esc(vm.name)}" data-conn="${conn.id}" title="Edit hardware">${ic.edit()}</button>
-          </div>
-        </td>
-      </tr>`).join("");
+      <div class="storage-card ${vm.active ? "ok" : ""}" data-dc-vm="${esc(vm.name)}" data-dc-vm-conn="${conn.id}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.vm()}</span>
+          <span class="storage-card-title">${esc(vm.name)}</span>
+          <span class="badge">${esc(conn.name)}</span>
+          <span class="badge ${vm.active ? "on" : ""}">${vm.active ? "Active" : "Inactive"}</span>
+        </div>
+        <div class="specs">
+          <div class="spec"><b>vCPUs</b><span>${vm.vcpus || "—"}</span></div>
+          <div class="spec"><b>Memory</b><span>${vm.memory_mb ? fmtBytes(vm.memory_mb * 1024) : "—"}</span></div>
+        </div>
+        <div class="storage-card-actions net-actions">
+          <button class="btn icon ${vm.active ? "on" : ""}" data-dc-toggle="${esc(vm.name)}" data-dc-toggle-conn="${conn.id}" data-dc-action="${vm.active ? "stop" : "start"}" title="${vm.active ? "Shutdown" : "Start"}">${vm.active ? ic.stop() : ic.start()}</button>
+          <button class="btn icon" data-dc-console="${esc(vm.name)}" data-conn="${conn.id}" title="Console">${ic.vm()}</button>
+          <button class="btn icon" data-dc-hwedit="${esc(vm.name)}" data-conn="${conn.id}" title="Edit hardware">${ic.edit()}</button>
+        </div>
+      </div>`).join("");
+
+  const serverCards = connections.map((c) => `
+      <div class="storage-card" data-open-conn-row="${c.id}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.server()}</span>
+          <span class="storage-card-title">${esc(c.name)}</span>
+          <span class="badge">${esc(c.url)}</span>
+        </div>
+        <div class="specs">
+          <div class="spec"><b>URL</b><span>${esc(c.url)}</span></div>
+          <div class="spec"><b>Cert</b><span>${c.fingerprint ? esc(c.fingerprint) : "—"}</span></div>
+        </div>
+        <div class="storage-card-actions net-actions">
+          <button class="btn icon" data-edit="${c.id}" title="Edit server">${ic.edit()}</button>
+          <button class="btn danger icon" data-del="${c.id}" title="Remove server">${ic.trash()}</button>
+        </div>
+      </div>`).join("");
 
   let body: string;
   if (dcTab === "dashboard") {
     body = `<div id="dc-dash">loading…</div>`;
   } else if (dcTab === "servers") {
     body = `${cards}<div class="section-title">Servers</div>
-       <table class="grid">
-         <tr><th>Name</th><th>URL</th><th>Cert</th><th class="col-actions"></th></tr>
-         ${connections.map((c) => `
-           <tr>
-             <td class="tname" style="cursor:pointer" data-open-conn-row="${c.id}">${esc(c.name)}</td>
-             <td>${esc(c.url)}</td>
-             <td>${c.fingerprint ? c.fingerprint.slice(0, 17) + "…" : "—"}</td>
-             <td class="col-actions">
-               <div class="row-actions">
-                 <button class="btn icon" data-edit="${c.id}" title="Edit server">${ic.edit()}</button>
-                 <button class="btn danger icon" data-del="${c.id}" title="Remove server">${ic.trash()}</button>
-               </div>
-             </td>
-           </tr>`).join("") || `<tr><td colspan="4" class="empty">No servers yet — add one.</td></tr>`}
-       </table>`;
+       <div class="card-grid">
+         ${serverCards}
+         <button class="storage-card create-card" id="dc-server-create">
+           <span class="storage-card-icon">${ic.plus()}</span>
+           <span class="storage-card-title">Add Server</span>
+         </button>
+       </div>`;
   } else if (dcTab === "guests") {
     body = `${cards}<div class="section-title">Guests</div>
-       <table class="grid">
-         <tr><th>Name</th><th>Server</th><th>State</th><th class="col-actions"></th></tr>
-         ${guestRows || `<tr><td colspan="4" class="empty">${connections.length ? "No guests on any server." : "Add a server to see its guests."}</td></tr>`}
-       </table>`;
+       <div class="card-grid">
+         ${guestCards}
+         <button class="storage-card create-card" id="dc-guest-create">
+           <span class="storage-card-icon">${ic.plus()}</span>
+           <span class="storage-card-title">Create Guest</span>
+         </button>
+       </div>`;
   } else {
     body = `<div id="users-area">loading…</div>`;
   }
@@ -592,6 +608,8 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
   if (dcTab === "dashboard") void loadDcDashboard();
 
   $("#dc-add")?.addEventListener("click", () => openConnectionDialog());
+  $("#dc-server-create")?.addEventListener("click", () => openConnectionDialog());
+  $("#dc-guest-create")?.addEventListener("click", () => openCreateVm());
   content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
       dcTab = (b as HTMLElement).dataset.dctab as typeof dcTab;
@@ -599,15 +617,22 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
     };
   });
   content.querySelectorAll("[data-edit]").forEach((b: Element) => {
-    (b as HTMLElement).onclick = () => openConnectionDialog((b as HTMLElement).dataset.edit!);
+    (b as HTMLElement).onclick = (e) => {
+      e.stopPropagation();
+      openConnectionDialog((b as HTMLElement).dataset.edit!);
+    };
   });
   content.querySelectorAll("[data-del]").forEach((b: Element) => {
-    (b as HTMLElement).onclick = () => deleteConnection((b as HTMLElement).dataset.del!);
+    (b as HTMLElement).onclick = (e) => {
+      e.stopPropagation();
+      void deleteConnection((b as HTMLElement).dataset.del!);
+    };
   });
 
-  // Selecting a server row opens that server's view.
+  // Selecting a server card opens that server's view (buttons stop propagation).
   content.querySelectorAll("[data-open-conn-row]").forEach((r: Element) => {
-    (r as HTMLElement).onclick = () => {
+    (r as HTMLElement).onclick = (e) => {
+      if ((e.target as Element).closest?.("[data-edit], [data-del]")) return;
       selectedConn = (r as HTMLElement).dataset.openConnRow!;
       selectedVm = null;
       connTab = "dashboard";
@@ -616,7 +641,7 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
     };
   });
 
-  /// Open a guest from the Datacenter table, switching server if needed.
+  /// Open a guest from the Datacenter cards, switching server if needed.
   const openVm = (connId: string, vm: string, tab: typeof vmTab) => {
     leaveCurrentView();
     selectedConn = connId;
@@ -625,9 +650,19 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
     renderTree();
     void renderVm();
   };
-  content.querySelectorAll("[data-open-vm]").forEach((r: Element) => {
-    const el = r as HTMLElement;
-    el.onclick = () => openVm(el.dataset.openConn!, el.dataset.openVm!, "summary");
+  content.querySelectorAll("[data-dc-vm]").forEach((card: Element) => {
+    (card as HTMLElement).onclick = () =>
+      openVm((card as HTMLElement).dataset.dcVmConn!, (card as HTMLElement).dataset.dcVm!, "summary");
+  });
+  content.querySelectorAll("[data-dc-toggle]").forEach((b: Element) => {
+    const el = b as HTMLElement;
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      const start = el.dataset.dcAction === "start";
+      await act(`/proxy/${el.dataset.dcToggleConn}/domains/${encodeURIComponent(el.dataset.dcToggle!)}/${start ? "start" : "shutdown"}`, "POST");
+      await refreshTreeVms();
+      renderDc();
+    };
   });
   content.querySelectorAll("[data-dc-console]").forEach((b: Element) => {
     const el = b as HTMLElement;
@@ -645,24 +680,7 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
       void openHardwareEditor({ vm: el.dataset.dcHwedit! });
     };
   });
-  content.querySelectorAll("[data-dc-start]").forEach((b: Element) => {
-    const el = b as HTMLElement;
-    el.onclick = async (e) => {
-      e.stopPropagation();
-      await act(`/proxy/${el.dataset.conn}/domains/${encodeURIComponent(el.dataset.dcStart!)}/start`, "POST");
-      await refreshTreeVms();
-      renderDc();
-    };
-  });
-  content.querySelectorAll("[data-dc-stop]").forEach((b: Element) => {
-    const el = b as HTMLElement;
-    el.onclick = async (e) => {
-      e.stopPropagation();
-      await act(`/proxy/${el.dataset.conn}/domains/${encodeURIComponent(el.dataset.dcStop!)}/shutdown`, "POST");
-      await refreshTreeVms();
-      renderDc();
-    };
-  });
+
 }
 
 /// Datacenter dashboard: aggregate every reachable server's host metrics into
@@ -1260,15 +1278,16 @@ async function renderConnBody() {
     $("#create-resource")?.addEventListener("click", () => openCreateResource());
     await loadDashboard();
   } else if (connTab === "vms") {
-    setHtml(body, `<div id="vms-list">loading…</div>`);
+    setHtml(body, `<div id="vms-list" class="card-grid">loading…</div>`);
     $("#create-vm")?.addEventListener("click", () => openCreateVm());
     await loadVms();
   } else if (connTab === "networks") {
-    setHtml(body, `<div id="nets-list">loading…</div>`);
+    setHtml(body, `<div id="nets-list" class="card-grid">loading…</div>`);
     $("#create-net")?.addEventListener("click", () => openCreateNetwork());
     await loadNetworks();
   } else if (connTab === "storage") {
     setHtml(body, `<div id="pools-list">loading…</div>`);
+    renderedPools = []; // fresh container: force a full render on first load
     $("#create-pool")?.addEventListener("click", () => openCreatePool());
     await loadPools();
   } else {
@@ -1452,67 +1471,69 @@ async function loadVms() {
     const vms = await api.get<DomainSummary[]>(`/proxy/${selectedConn}/domains`);
     const list = $("#vms-list");
     if (!list) return;
-setHtml(list, `<table class="grid">
-      <tr><th>Name</th><th>State</th><th class="col-actions"></th></tr>
-      ${vms.map((v) => `
-        <tr>
-          <td class="tname" style="cursor:pointer" data-vm="${esc(v.name)}">${esc(v.name)}</td>
-          <td><span class="state ${v.active ? "on" : ""}">${esc(v.state)}</span></td>
-          <td class="col-actions">
-            <div class="row-actions">
-              <button class="btn icon" data-start="${esc(v.name)}" title="Start" ${v.active ? "disabled" : ""}>${ic.start()}</button>
-              <button class="btn icon" data-stop="${esc(v.name)}" title="Shutdown" ${v.active ? "" : "disabled"}>${ic.stop()}</button>
-              <button class="btn icon" data-console="${esc(v.name)}" title="Console">${ic.vm()}</button>
-              <button class="btn icon" data-hwedit="${esc(v.name)}" title="Edit hardware">${ic.edit()}</button>
-              <button class="btn danger icon" data-delvm="${esc(v.name)}" title="Delete">${ic.trash()}</button>
-            </div>
-          </td>
-        </tr>`).join("") || `<tr><td colspan="3" class="empty">No VMs.</td></tr>`}
-    </table>`);
-    list.querySelectorAll("[data-vm]").forEach((r: Element) => {
-      (r as HTMLElement).onclick = () => {
-        selectedVm = (r as HTMLElement).dataset.vm!;
+    const createCard = `
+      <button class="storage-card create-card" id="vm-create-card">
+        <span class="storage-card-icon">${ic.plus()}</span>
+        <span class="storage-card-title">Create VM</span>
+      </button>`;
+    setHtml(list, vms.map((v) => `
+      <div class="storage-card ${v.active ? "ok" : ""}" data-vm-open="${esc(v.name)}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.vm()}</span>
+          <span class="storage-card-title">${esc(v.name)}</span>
+          <span class="badge ${v.active ? "on" : ""}">${v.active ? "Active" : "Inactive"}</span>
+        </div>
+        <div class="specs">
+          <div class="spec"><b>vCPUs</b><span>${v.vcpus || "—"}</span></div>
+          <div class="spec"><b>Memory</b><span>${v.memory_mb ? fmtBytes(v.memory_mb * 1024) : "—"}</span></div>
+        </div>
+        <div class="storage-card-actions net-actions">
+          <button class="btn icon ${v.active ? "on" : ""}" data-vm-toggle="${esc(v.name)}" data-vm-action="${v.active ? "stop" : "start"}" title="${v.active ? "Shutdown" : "Start"}">${v.active ? ic.stop() : ic.start()}</button>
+          <button class="btn icon" data-vm-console="${esc(v.name)}" title="Console">${ic.vm()}</button>
+          <button class="btn icon" data-vm-edit="${esc(v.name)}" title="Edit hardware">${ic.edit()}</button>
+          <button class="btn danger icon" data-vm-del="${esc(v.name)}" title="Delete">${ic.trash()}</button>
+        </div>
+      </div>`).join("") + createCard);
+    const createBtn = $("#vm-create-card");
+    if (createBtn) createBtn.onclick = () => openCreateVm();
+    // The whole card opens the guest; action buttons stop propagation.
+    list.querySelectorAll("[data-vm-open]").forEach((card: Element) => {
+      (card as HTMLElement).onclick = () => {
+        selectedVm = (card as HTMLElement).dataset.vmOpen!;
         vmTab = "summary";
         renderVm();
       };
     });
-    list.querySelectorAll("[data-start]").forEach((b: Element) => {
+    list.querySelectorAll("[data-vm-toggle]").forEach((b: Element) => {
       (b as HTMLElement).onclick = async (e) => {
         e.stopPropagation();
-        const n = (b as HTMLElement).dataset.start!;
-        await act(`/proxy/${selectedConn}/domains/${encodeURIComponent(n)}/start`, "POST");
-        loadVms();
-      };
-    });
-    list.querySelectorAll("[data-stop]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = async (e) => {
-        e.stopPropagation();
-        const n = (b as HTMLElement).dataset.stop!;
-        await act(`/proxy/${selectedConn}/domains/${encodeURIComponent(n)}/shutdown`, "POST");
+        const n = (b as HTMLElement).dataset.vmToggle!;
+        const start = (b as HTMLElement).dataset.vmAction === "start";
+        await act(`/proxy/${selectedConn}/domains/${encodeURIComponent(n)}/${start ? "start" : "shutdown"}`, "POST");
         loadVms();
       };
     });
     // Jump straight to the console tab for that guest.
-    list.querySelectorAll("[data-console]").forEach((b: Element) => {
+    list.querySelectorAll("[data-vm-console]").forEach((b: Element) => {
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
         leaveCurrentView();
-        selectedVm = (b as HTMLElement).dataset.console!;
+        selectedVm = (b as HTMLElement).dataset.vmConsole!;
         vmTab = "console";
         renderTree();
         void renderVm();
       };
     });
-    list.querySelectorAll("[data-hwedit]").forEach((b: Element) => {
+    list.querySelectorAll("[data-vm-edit]").forEach((b: Element) => {
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
-        void openHardwareEditor({ vm: (b as HTMLElement).dataset.hwedit! });
+        void openHardwareEditor({ vm: (b as HTMLElement).dataset.vmEdit! });
       };
     });
-    list.querySelectorAll("[data-delvm]").forEach((b: Element) => {
+    list.querySelectorAll("[data-vm-del]").forEach((b: Element) => {
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
-        void deleteVm((b as HTMLElement).dataset.delvm!);
+        void deleteVm((b as HTMLElement).dataset.vmDel!);
       };
     });
   } catch (e) {
@@ -2997,7 +3018,49 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
 
 /// Back-compat entry point used by the VMs tab button.
 function openCreateVm() {
-  void openHardwareEditor();
+  if (selectedConn) {
+    void openHardwareEditor();
+    return;
+  }
+  // No daemon selected (e.g. the Datacenter Guests tab): pick one first.
+  void pickDaemon().then((id) => {
+    if (!id) return;
+    selectedConn = id;
+    renderTree();
+    void openHardwareEditor();
+  });
+}
+
+/// Modal listing the saved daemons; resolves to the chosen connection id, or
+/// null when dismissed. Used before creating a guest from the Datacenter.
+function pickDaemon(): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (!connections.length) {
+      toast("Add a server first", "bad");
+      resolve(null);
+      return;
+    }
+    const el = openModal(
+      "Create guest — select daemon",
+      `<div class="create-resource-grid">
+        ${connections.map((c) => `
+          <button class="create-resource-card" data-pick-conn="${c.id}">
+            <span class="metric-ic">${ic.server()}</span>
+            <b>${esc(c.name)}</b>
+            <small>${esc(c.url)}</small>
+          </button>`).join("")}
+      </div>`,
+      `<button class="btn" id="pick-cancel">Cancel</button>`,
+    );
+    $("#pick-cancel", el).onclick = () => { el.remove(); resolve(null); };
+    el.querySelectorAll("[data-pick-conn]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => {
+        const id = (b as HTMLElement).dataset.pickConn!;
+        el.remove();
+        resolve(id);
+      };
+    });
+  });
 }
 
 /// Dashboard "Create Resource": pick VM / Network / Storage Pool, then hand

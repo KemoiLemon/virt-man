@@ -109,6 +109,8 @@ export interface DomainSummary {
   state: string;
   active: boolean;
   persistent: boolean;
+  vcpus: number;
+  memory_mb: number;
 }
 
 export interface Graphics {

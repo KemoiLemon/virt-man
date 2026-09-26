@@ -101,8 +101,8 @@ check("Datacenter has Dashboard, Servers and Guests tabs", () => {
   assert.deepEqual(tabs[0], "Dashboard", `Dashboard is the first tab (${tabs})`);
   assert.ok(tabs.includes("Servers"), `Servers tab (${tabs})`);
   assert.ok(tabs.includes("Guests"), `Guests tab (${tabs})`);
-  // The landing dashboard has no guest table either; guests are their own tab.
-  assert.equal(document.querySelectorAll("[data-open-vm]").length, 0,
+  // The landing dashboard has no guest cards either; guests are their own tab.
+  assert.equal(document.querySelectorAll("[data-dc-vm]").length, 0,
     "guests are not listed on the Dashboard tab");
 });
 
@@ -126,28 +126,28 @@ await wait(900);
 check("Guests tab lists every guest", () => {
   const active = document.querySelector(".tabbar .tab.active")?.textContent.trim();
   assert.equal(active, "Guests", "Guests tab is active");
-  const rows = [...document.querySelectorAll("[data-open-vm]")];
-  assert.ok(rows.length > 0, `${rows.length} guest row(s) listed`);
-  results.push(["info", `guests listed: ${rows.map((r) => r.textContent.trim()).join(", ")}`]);
+  const cards = [...document.querySelectorAll("[data-dc-vm]")];
+  assert.ok(cards.length > 0, `${cards.length} guest card(s) listed`);
+  results.push(["info", `guests listed: ${cards.map((r) => r.querySelector(".storage-card-title")?.textContent.trim()).join(", ")}`]);
 });
 
-check("each guest row shows its server and state", () => {
-  const row = document.querySelector("[data-open-vm]").closest("tr");
-  const cells = [...row.querySelectorAll("td")].map((c) => c.textContent.trim());
-  assert.ok(cells[1], `server column populated (${cells[1]})`);
-  assert.ok(row.querySelector(".state"), "state badge present");
+check("each guest card shows its server and state", () => {
+  const card = document.querySelector("[data-dc-vm]");
+  const badges = [...card.querySelectorAll(".badge")].map((b) => b.textContent.trim());
+  assert.ok(badges.some((b) => /Active|Inactive/.test(b)), `state badge (${badges})`);
+  assert.ok(badges.length >= 2, `server badge present (${badges})`);
 });
 
-check("guest rows carry quick actions", () => {
-  const row = document.querySelector("[data-open-vm]").closest("tr");
-  for (const sel of ["[data-dc-start]", "[data-dc-stop]", "[data-dc-console]", "[data-dc-hwedit]"]) {
-    assert.ok(row.querySelector(sel), `${sel} present`);
+check("guest cards carry quick actions", () => {
+  const card = document.querySelector("[data-dc-vm]");
+  for (const sel of ["[data-dc-toggle]", "[data-dc-console]", "[data-dc-hwedit]"]) {
+    assert.ok(card.querySelector(sel), `${sel} present`);
   }
 });
 
-// Clicking a guest name in the table must open that VM.
-const name = document.querySelector("[data-open-vm]").dataset.openVm;
-document.querySelector("[data-open-vm]")
+// Clicking a guest card must open that VM.
+const name = document.querySelector("[data-dc-vm]").dataset.dcVm;
+document.querySelector("[data-dc-vm]")
   .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1600);
 
@@ -195,10 +195,10 @@ await wait(1200);
   .find((t) => t.textContent.trim() === "Servers")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(800);
-check("server rows are selectable from the table", () => {
-  const cell = document.querySelector("[data-open-conn-row]");
-  assert.ok(cell, "server name is clickable");
-  cell.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("server cards are selectable", () => {
+  const card = document.querySelector("[data-open-conn-row]");
+  assert.ok(card, "server card is clickable");
+  card.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 });
 await wait(1400);
 check("clicking a server opens its view", () => {

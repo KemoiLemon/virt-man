@@ -48,12 +48,15 @@ fn domain_summary(d: &Domain) -> Value {
         .get_state()
         .map(|(s, _)| domain_state_name(s))
         .unwrap_or("unknown");
+    let info = d.get_info().ok();
     json!({
         "name": d.get_name().unwrap_or_default(),
         "id": d.get_id().unwrap_or(0),
         "state": state,
         "active": d.is_active().unwrap_or(false),
         "persistent": d.is_persistent().unwrap_or(false),
+        "vcpus": info.as_ref().map(|i| i.nr_virt_cpu).unwrap_or(0),
+        "memory_mb": info.as_ref().map(|i| i.memory / 1024).unwrap_or(0),
     })
 }
 

@@ -88,15 +88,17 @@ check("server rows expose an edit button, not a test button", () => {
   assert.ok(document.querySelector("[data-del]"), "delete button still present");
 });
 
-check("action column hugs its buttons", () => {
-  const th = document.querySelector("table.grid th.col-actions");
-  const td = document.querySelector("table.grid td.col-actions");
-  assert.ok(th && td, "action column is marked");
-  assert.ok(td.querySelector(".row-actions"), "buttons share a flex row");
+check("server cards expose edit and delete icon buttons", () => {
+  const card = document.querySelector("[data-open-conn-row]");
+  assert.ok(card, "server card present");
+  const actions = card.querySelector(".net-actions");
+  assert.ok(actions, "buttons share a flex row");
   assert.equal(
-    td.querySelectorAll(".row-actions .btn").length, 2,
+    actions.querySelectorAll(".btn").length, 2,
     "exactly the edit + delete buttons",
   );
+  assert.ok(actions.querySelector("[data-edit]"), "edit present");
+  assert.ok(actions.querySelector("[data-del]"), "delete present");
 });
 
 // Edit dialog must prefill from the existing connection.

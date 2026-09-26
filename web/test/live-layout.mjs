@@ -108,11 +108,16 @@ check("tabs have clearance above the content", () => {
     `tab bar reserves space below it (${px(bar, "marginBottom")}px)`);
 });
 
-check("datacenter table uses the compact action column", () => {
-  const td = document.querySelector("table.grid td.col-actions");
-  assert.ok(td, "action column present");
-  assert.equal(window.getComputedStyle(td).whiteSpace, "nowrap", "column does not wrap");
-  assert.ok(td.querySelector(".row-actions"), "buttons share a flex row");
+check("datacenter servers render as cards with icon action buttons", () => {
+  const cards = [...document.querySelectorAll("#content .card-grid .storage-card")];
+  assert.ok(cards.length > 0, `${cards.length} server card(s)`);
+  const first = cards[0];
+  const actions = first.querySelector(".net-actions");
+  assert.ok(actions, "card actions share a row");
+  const buttons = [...actions.querySelectorAll(".btn")];
+  assert.ok(buttons.every((b) => b.classList.contains("icon")), "all server actions are icon buttons");
+  assert.ok(first.querySelector("[data-edit]"), "edit action present");
+  assert.ok(first.querySelector("[data-del]"), "delete action present");
 });
 
 // VM list: actions must mirror the datacenter table and gain edit + console.
@@ -125,34 +130,31 @@ await wait(1500);
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(800);
 
-check("VM table matches the datacenter table's action layout", () => {
-  const td = document.querySelector("#vms-list table.grid td.col-actions");
-  assert.ok(td, "VM rows use .col-actions like the datacenter table");
-  const row = td.querySelector(".row-actions");
-  assert.ok(row, "VM buttons share the same .row-actions wrapper");
-  const buttons = [...row.querySelectorAll(".btn")];
-  assert.ok(buttons.every((b) => b.classList.contains("icon")),
-    "all VM actions are icon buttons, like the datacenter row");
+check("VM cards mirror the server cards' action layout", () => {
+  const card = document.querySelector("#vms-list [data-vm-open]");
+  assert.ok(card, "VM cards use the same card style as servers");
+  const actions = card.querySelector(".net-actions");
+  assert.ok(actions, "VM buttons share a row");
+  const buttons = [...actions.querySelectorAll(".btn")];
+  assert.ok(buttons.every((b) => b.classList.contains("icon")), "all VM actions are icon buttons");
 });
 
-check("VM quick actions include console and edit", () => {
-  const row = document.querySelector("#vms-list .row-actions");
-  assert.ok(row.querySelector("[data-console]"), "console button present");
-  assert.ok(row.querySelector("[data-hwedit]"), "edit button present");
-  assert.ok(row.querySelector("[data-start]"), "start retained");
-  assert.ok(row.querySelector("[data-stop]"), "stop retained");
-  assert.ok(row.querySelector("[data-delvm]"), "delete present");
+check("VM quick actions include console, edit and a merged start/stop toggle", () => {
+  const card = document.querySelector("#vms-list [data-vm-open]");
+  assert.ok(card.querySelector("[data-vm-toggle]"), "merged start/stop toggle present");
+  assert.ok(card.querySelector("[data-vm-console]"), "console button present");
+  assert.ok(card.querySelector("[data-vm-edit]"), "edit button present");
+  assert.ok(card.querySelector("[data-vm-del]"), "delete present");
   results.push(["info",
-    `VM quick actions: ${[...row.querySelectorAll(".btn")].map((b) => b.title).join(", ")}`]);
+    `VM quick actions: ${[...card.querySelectorAll(".btn")].map((b) => b.title).join(", ")}`]);
 });
 
-check("start/stop reflect the guest's current state", () => {
-  const row = document.querySelector("#vms-list tr:nth-child(2)");
-  const running = /running/.test(row?.querySelector(".state")?.textContent ?? "");
-  const start = row.querySelector("[data-start]");
-  const stop = row.querySelector("[data-stop]");
-  assert.equal(start.disabled, running, "start disabled only while running");
-  assert.equal(stop.disabled, !running, "stop disabled only while stopped");
+check("the start/stop toggle highlights the running state", () => {
+  const card = document.querySelector("#vms-list [data-vm-open]");
+  const running = card.querySelector(".badge.on")?.textContent.trim() === "Active";
+  const toggle = card.querySelector("[data-vm-toggle]");
+  assert.equal(toggle.classList.contains("on"), running,
+    "toggle highlights only while the guest is active");
 });
 
 // VM detail view.

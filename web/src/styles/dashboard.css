@@ -89,32 +89,32 @@
 .storage-card-title { font-size: 13px; font-weight: 700; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .storage-card-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 
-/* The Networks tab is a card grid, not the stacked pool list: cards flow into
-   columns and the grid gap replaces the storage-card bottom margin. Network
-   cards carry stacked specs plus four controls, so they get a wider minimum. */
-/* All implicit rows get equal height, so the create card (and a lone create
-   card on its own row) is the same height as a real network card. */
-#nets-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; grid-auto-rows: 1fr; }
-#nets-list .storage-card { margin-bottom: 0; padding: 16px 17px; }
-#nets-list .storage-card-head { flex-wrap: wrap; gap: 8px 10px; }
+/* Card grids: the Networks, VMs, Datacenter Servers and Datacenter Guests
+   tabs flow into columns instead of tables, with stacked specs and evenly
+   sized action rows. All implicit rows are equal height so a lone create card
+   matches a real card. */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; grid-auto-rows: 1fr; }
+.card-grid .storage-card { margin-bottom: 0; padding: 16px 17px; }
+.card-grid .storage-card-head { flex-wrap: wrap; gap: 8px 10px; }
 /* The card header reads a touch larger so the name, type and state do not
    look cramped at the wider card width. The icon and name sit a little right
    of the card edge, leaving the badges flush. */
-#nets-list .storage-card-title { font-size: 15px; }
-#nets-list .storage-card-head .badge { font-size: 11px; }
-#nets-list .storage-card-icon { margin-left: 5px; }
-/* Bridge and subnet stack vertically, one spec per row, with less space
-   before the controls. */
-#nets-list .specs { grid-template-columns: 1fr; margin-bottom: 2px; }
+.card-grid .storage-card-title { font-size: 15px; }
+.card-grid .storage-card-head .badge { font-size: 11px; }
+.card-grid .storage-card-icon { margin-left: 5px; }
+/* Specs stack vertically, one per row, with a small gap before the controls. */
+.card-grid .specs { grid-template-columns: 1fr; margin-bottom: 2px; }
 /* Controls share one row and are sized evenly (each flexes to fill an equal
    share of the card). */
-#nets-list .net-actions { flex-wrap: nowrap; gap: 4px; }
-#nets-list .net-actions .btn { flex: 1 1 0; padding-top: 7px; padding-bottom: 7px; }
+.card-grid .net-actions, .card-grid .card-actions { flex-wrap: nowrap; gap: 4px; }
+.card-grid .net-actions .btn, .card-grid .card-actions .btn { flex: 1 1 0; padding-top: 7px; padding-bottom: 7px; }
+/* A card whose whole surface opens the detail view should look clickable. */
+.card-grid .storage-card[data-open] { cursor: pointer; }
 
 /* The create card is a button in the same grid: a striped border marks it as
-   an affordance rather than a real network, and it stays present even when
-   there are no networks. The stripe is a repeating-linear-gradient border. */
-.net-create-card {
+   an affordance rather than a real resource, and it stays present even when
+   there is nothing else. The stripe is a repeating-linear-gradient border. */
+.create-card, .net-create-card {
   background: var(--input-bg);
   border: 1px solid transparent;
   border-image: repeating-linear-gradient(
@@ -132,6 +132,6 @@
   height: 100%;
   min-height: 0;
 }
-.net-create-card:hover { color: var(--accent); border-image: repeating-linear-gradient(
+.create-card:hover, .net-create-card:hover { color: var(--accent); border-image: repeating-linear-gradient(
   45deg, var(--accent) 0 8px, var(--panel) 8px 16px) 1; }
-.net-create-card .storage-card-title { flex: none; }
+.create-card .storage-card-title, .net-create-card .storage-card-title { flex: none; }
