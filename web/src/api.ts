@@ -105,6 +105,7 @@ export interface ApiKey {
 
 export interface DomainSummary {
   name: string;
+  title?: string;
   id: number;
   state: string;
   active: boolean;

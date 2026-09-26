@@ -46,8 +46,19 @@ fn domain_summary(d: &Domain) -> Value {
         .map(|(s, _)| domain_state_name(s))
         .unwrap_or("unknown");
     let info = d.get_info().ok();
+    // Display title: <title> metadata, if the guest set one.
+    let mut title = None;
+    if let Ok(xml) = d.get_xml_desc(0)
+        && let Some(i) = xml.find("<title>")
+    {
+        let rest = &xml[i + 7..];
+        if let Some(j) = rest.find("</title>") {
+            title = Some(rest[..j].trim().to_string());
+        }
+    }
     json!({
         "name": d.get_name().unwrap_or_default(),
+        "title": title,
         "id": d.get_id().unwrap_or(0),
         "state": state,
         "active": d.is_active().unwrap_or(false),

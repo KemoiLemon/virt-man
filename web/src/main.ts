@@ -422,7 +422,7 @@ function renderTree() {
       <button class="tree-row tree-vm ${selectedVm === v.name && selectedConn === c.id ? "sel" : ""}"
         data-vm="${esc(v.name)}" data-vm-conn="${c.id}">
         <span class="tree-ic ${v.active ? "on" : ""}">${ic.vm()}</span>
-        <span class="tree-label">${esc(v.name)}</span>
+        <span class="tree-label">${esc(v.title || v.name)}</span>
         <span class="tree-state ${v.active ? "on" : ""}">${esc(capLabel(v.state))}</span>
       </button>`,
               )
@@ -566,7 +566,7 @@ function renderDc() {
       <div class="storage-card ${vm.active ? "ok" : ""}" data-open data-dc-vm="${esc(vm.name)}" data-dc-vm-conn="${conn.id}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.vm()}</span>
-          <span class="storage-card-title">${esc(vm.name)}</span>
+          <span class="storage-card-title">${esc(vm.title || vm.name)}</span>
           <span class="badge">${esc(conn.name)}</span>
           <span class="badge ${vm.active ? "on" : ""}">${vm.active ? "Active" : "Inactive"}</span>
         </div>
@@ -1645,7 +1645,7 @@ async function loadVms() {
       <div class="storage-card ${v.active ? "ok" : ""}" data-open data-vm-open="${esc(v.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.vm()}</span>
-          <span class="storage-card-title">${esc(v.name)}</span>
+          <span class="storage-card-title">${esc(v.title || v.name)}</span>
           <span class="badge ${v.active ? "on" : ""}">${v.active ? "Active" : "Inactive"}</span>
         </div>
         <div class="specs">
@@ -2023,8 +2023,9 @@ async function renderVm() {
   if (!selectedConn || !selectedVm) return;
   const content = $("#content");
   const vm = selectedVm;
+  const title = treeVms[selectedConn]?.find((x) => x.name === vm)?.title || vm;
 setHtml(content, `
-    <div class="dhead"><span class="dtitle">${esc(vm)}</span></div>
+    <div class="dhead"><span class="dtitle">${esc(title)}</span></div>
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
       <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
