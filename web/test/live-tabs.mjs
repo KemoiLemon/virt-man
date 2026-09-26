@@ -175,14 +175,13 @@ check("Options tab shows editable metadata read from the guest", () => {
   assert.ok(document.querySelector("#opt-boot"), "boot device selector");
   assert.ok(document.querySelector("#opt-save"), "save button");
   // Lifecycle facts must come from the real domain, not placeholders.
-  const specs = [...document.querySelectorAll(".spec b")].map((b) => b.textContent.trim());
-  for (const want of ["On Poweroff", "On Reboot", "Machine", "Architecture"]) {
-    assert.ok(specs.includes(want), `${want} shown (${specs})`);
+  const lifecycle = [...document.querySelectorAll(".hwrow-label b")].map((b) => b.textContent.trim());
+  for (const want of ["On Poweroff", "On Reboot", "On Crash", "Machine", "Architecture"]) {
+    assert.ok(lifecycle.includes(want), `${want} shown (${lifecycle})`);
   }
-  const machine = [...document.querySelectorAll(".spec")]
-    .find((s) => s.querySelector("b")?.textContent.trim() === "Machine")
-    ?.querySelector("span")?.textContent.trim();
-  assert.match(machine, /pc-|q35/, `real machine type (${machine})`);
+  const machineRow = [...document.querySelectorAll(".hwrow")]
+    .find((s) => s.querySelector(".hwrow-label b")?.textContent.trim() === "Machine");
+  assert.match(machineRow?.querySelector(".hwctl")?.textContent ?? "", /pc-|q35/, `real machine type`);
 });
 
 tabNamed("Firewall")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

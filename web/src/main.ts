@@ -2057,6 +2057,9 @@ setHtml(content, `
 async function renderVmBody(vm: string) {
   if (!selectedConn) return;
   const body = $("#vm-body");
+  // Only the Hardware tab stretches to fill the pane; every other tab scrolls
+  // normally. Drop the class here and let the hardware branch re-add it.
+  body.parentElement?.classList.remove("vm-fill");
   if (vmTab === "console") {
     const zoomLabel = (z: number) => (z === 0 ? "Fit" : `${Math.round(z * 100)}%`);
     const vvUrl = `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/console/vv`;
@@ -2220,14 +2223,38 @@ async function renderVmBody(vm: string) {
             <div class="hwctl hwctl-static">${esc(info.uuid ?? "—")}</div>
           </div>
         </div>
-        <div class="section-title" style="margin-top:16px">Lifecycle</div>
-        <div class="specs">
-          <div class="spec"><b>On Poweroff</b><span>${esc(onPoweroff)}</span></div>
-          <div class="spec"><b>On Reboot</b><span>${esc(onReboot)}</span></div>
-          <div class="spec"><b>On Crash</b><span>${esc(onCrash)}</span></div>
-          <div class="spec"><b>Persistence</b><span>${esc(capLabel(autostartHint))}</span></div>
-          <div class="spec"><b>Machine</b><span>${esc(machine)}</span></div>
-          <div class="spec"><b>Architecture</b><span>${esc(arch)}</span></div>
+        <div class="section-title" style="margin-top:18px">Lifecycle</div>
+        <div class="hwtable">
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.stop()}</span>
+            <div class="hwrow-label"><b>On Poweroff</b></div>
+            <div class="hwctl hwctl-static">${esc(capLabel(onPoweroff))}</div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.reboot()}</span>
+            <div class="hwrow-label"><b>On Reboot</b></div>
+            <div class="hwctl hwctl-static">${esc(capLabel(onReboot))}</div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.forceStop()}</span>
+            <div class="hwrow-label"><b>On Crash</b></div>
+            <div class="hwctl hwctl-static">${esc(capLabel(onCrash))}</div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.autostart()}</span>
+            <div class="hwrow-label"><b>Persistence</b></div>
+            <div class="hwctl hwctl-static">${esc(capLabel(autostartHint))}</div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.cpu()}</span>
+            <div class="hwrow-label"><b>Machine</b></div>
+            <div class="hwctl hwctl-static">${esc(machine)}</div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.server()}</span>
+            <div class="hwrow-label"><b>Architecture</b></div>
+            <div class="hwctl hwctl-static">${esc(arch)}</div>
+          </div>
         </div>`);
 
       $("#opt-save")?.addEventListener("click", async () => {
@@ -2357,14 +2384,17 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     }
     return;
   }
-  // summary: live CPU/memory metrics with sparklines, then the facts grid.
+  // summary: six cards — CPU, Memory, Disks, Network, Firewall, Hardware.
   try {
-    const [d, g, s] = await Promise.all([
+    const [d, s, xr, fw] = await Promise.all([
       api.get<any>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}`),
-      api.get<{ graphics: { kind: string; host: string; port: number } | null }>(
-        `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/graphics`),
       api.get<DomainStats>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/stats`),
+      api.get<{ xml: string }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/xml`),
+      api.get<{ rules: FirewallRule[]; policy: FirewallPolicy }>(
+        `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`)
+        .catch(() => ({ rules: [] as FirewallRule[], policy: blankPolicy() })),
     ]);
+    const xml = xr.xml;
 
     const { cpu, mem, cpuNow, memNow } = addSample(s);
     const running = s.state === "running";
@@ -2372,23 +2402,57 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       ? Math.max(0, s.memory_kib - s.usable_kib)
       : (s.rss_kib ?? s.memory_kib);
 
-    setHtml(body, `
-    <div class="sumgrid vm-sumgrid">
-      <div class="metric status-metric ${running ? "ok" : ""}">
+    // Disks and NICs come straight from the domain XML so file-backed and
+    // volume-backed devices both show, not just the ones the editor models.
+    const xattr = (tag: string, name: string) =>
+      tag.match(new RegExp(`${name}\\s*=\\s*['"]([^'"]*)['"]`))?.[1] ?? "";
+    const disks = [...xml.matchAll(/<disk\b[^>]*device=['"](disk|cdrom)['"][\s\S]*?<\/disk>/g)].map((m) => {
+      const block = m[0];
+      const src = block.match(/<source\b[^>]*>/)?.[0] ?? "";
+      const dev = xattr(block.match(/<target\b[^>]*>/)?.[0] ?? "", "dev");
+      const volume = xattr(src, "volume") || xattr(src, "file");
+      return { dev, label: volume || (m[1] === "cdrom" ? "empty" : "—") };
+    });
+    const nics = [...xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)].map((m) => {
+      const block = m[0];
+      return {
+        net: xattr(block.match(/<source\b[^>]*>/)?.[0] ?? "", "network"),
+        model: xattr(block.match(/<model\b[^>]*>/)?.[0] ?? "", "type"),
+      };
+    });
+    const devices = devicesFromXml(xml);
+    const other = devices.filter((x) => x.kind !== "disk" && x.kind !== "cdrom" && x.kind !== "interface");
+    const bios = /pflash|OVMF/i.test(xml) ? "UEFI (OVMF)" : "BIOS (SeaBIOS)";
+    const display = /<graphics[^>]*type=['"]spice/.test(xml) ? "spice" : "vnc";
+
+    const factCard = (icon: string, label: string, value: string, facts: [string, string][]) => `
+      <div class="metric">
         <div class="metric-head">
-          <span class="metric-ic">${running ? ic.start() : ic.stop()}</span>
-          <b>Status</b>
-          <span class="metric-value">${esc(capLabel(d.state))}</span>
+          <span class="metric-ic">${icon}</span>
+          <b>${label}</b>
+          <span class="metric-value">${value}</span>
         </div>
         <div class="factgrid">
-          <div class="fact"><b>State</b><span>${esc(capLabel(d.state))}</span></div>
-          <div class="fact"><b>ID</b><span>${d.id}</span></div>
-          <div class="fact"><b>UUID</b><span>${esc(d.uuid ?? "—")}</span></div>
-          <div class="fact"><b>Persistence</b><span>${d.persistent ? "Persistent" : "Transient"}</span></div>
-          <div class="fact"><b>Graphics</b><span>${esc(g.graphics?.kind ?? "none")}${g.graphics ? ` ${esc(g.graphics.host)}:${g.graphics.port}` : ""}</span></div>
+          ${facts.length
+            ? facts.map(([k, v]) => `<div class="fact"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join("")
+            : `<div class="fact"><b>—</b><span>None</span></div>`}
         </div>
-      </div>
+      </div>`;
 
+    const fwFacts: [string, string][] = [
+      ["Rules", `${fw.rules.length} active`],
+      ["In", capLabel(fw.policy.in)],
+      ["Out", capLabel(fw.policy.out)],
+      ["Forward", capLabel(fw.policy.forward)],
+    ];
+    const hwFacts: [string, string][] = [
+      ["BIOS", bios],
+      ["Display", display],
+      ...other.map((x) => [hwType(x.kind)?.label ?? x.kind, deviceSummary(x)] as [string, string]),
+    ];
+
+    setHtml(body, `
+    <div class="sumgrid vm-sumgrid">
       <div class="metric ${running ? "ok" : ""}">
         <div class="metric-head">
           <span class="metric-ic">${ic.cpu()}</span>
@@ -2400,7 +2464,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           ${sparkline(cpu)}
           <div class="chart-axis"><span>-1m</span><span>now</span></div>
         </div>
-        <div class="metric-foot"><span>${s.vcpus} vCPU</span><span>host ${s.host.cpus} CPU</span></div>
+        <div class="metric-foot"><span>${s.vcpus} vCPU</span><span>${esc(capLabel(d.state))}</span></div>
       </div>
 
       <div class="metric ${running ? "ok" : ""}">
@@ -2419,6 +2483,11 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           <span>${fmtBytes(s.max_memory_kib * 1024)} max</span>
         </div>
       </div>
+
+      ${factCard(ic.disk(), "Disks", `${disks.length}`, disks.map((x) => [x.dev || "disk", x.label]))}
+      ${factCard(ic.network(), "Network", `${nics.length}`, nics.map((x) => [x.net || "network", x.model || "virtio"]))}
+      ${factCard(ic.firewall(), "Firewall", `${fw.rules.length}`, fwFacts)}
+      ${factCard(ic.cpu(), "Hardware", `${devices.length}`, hwFacts)}
     </div>`);
   } catch (e) {
     setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -2842,6 +2911,8 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
   let bodyHost: HTMLElement;
   if (inline) {
     host = $("#vm-body") as HTMLElement;
+    // Let the editor fill the pane below the tab bar.
+    host.parentElement?.classList.add("vm-fill");
     setHtml(host, `<div class="hw-inline">
       <div class="hw-inline-body"></div>
       <div class="hw-foot">

@@ -69,7 +69,7 @@
 .hw-inline {
   display: flex; flex-direction: column;
   border: 1px solid var(--line);
-  height: 600px; max-height: calc(100vh - 180px);
+  flex: 1 1 auto; min-height: 420px;
 }
 .hw-inline-body { flex: 1 1 auto; min-height: 0; display: flex; }
 .hw-inline-body .hw-body { flex: 1; }
@@ -77,6 +77,10 @@
   flex: 0 0 auto; display: flex; gap: 8px; justify-content: flex-end;
   padding: 10px 12px; border-top: 1px solid var(--line); background: var(--panel2);
 }
+/* The Hardware tab fills the whole pane below the tab bar, so the editor
+   stretches down to the bottom edge instead of a fixed 600px box. */
+.detail.vm-fill { display: flex; flex-direction: column; }
+.detail.vm-fill > #vm-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 
 /* Custom devices appended below the fixed device pages. */
 .hw-custom-list { border-top: 1px solid var(--line); }

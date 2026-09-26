@@ -236,12 +236,12 @@ await (async () => {
 
   // The Summary tab is open again; it must carry the live dashboard widgets.
   await new Promise((r) => window.setTimeout(r, 800));
-  check("VM summary renders a status card plus live metrics", () => {
+  check("VM summary shows six cards — CPU, Memory, Disks, Network, Firewall, Hardware", () => {
     const metrics = [...document.querySelectorAll(".metric")];
     const labels = metrics.map((m) => m.querySelector("b")?.textContent.trim());
-    assert.ok(labels.includes("CPU"), `CPU metric present (${labels})`);
-    assert.ok(labels.includes("Memory"), `Memory metric present (${labels})`);
-    assert.ok(labels.includes("Status"), `Status card present (${labels})`);
+    for (const want of ["CPU", "Memory", "Disks", "Network", "Firewall", "Hardware"]) {
+      assert.ok(labels.includes(want), `${want} card present (${labels})`);
+    }
 
     for (const label of ["CPU", "Memory"]) {
       const m = metrics.find((x) => x.querySelector("b")?.textContent.trim() === label);
@@ -254,9 +254,12 @@ await (async () => {
       assert.ok(spark.querySelector(".spark-line"), "sparkline has a trace");
     }
 
-    // The status card holds the VM facts, not another meter/spark pair.
-    const status = metrics.find((x) => x.querySelector("b")?.textContent.trim() === "Status");
-    assert.ok(status.querySelector(".factgrid .fact"), "status card has a fact grid");
+    // The four inventory cards hold facts, not meter/spark pairs.
+    for (const label of ["Disks", "Network", "Firewall", "Hardware"]) {
+      const m = metrics.find((x) => x.querySelector("b")?.textContent.trim() === label);
+      assert.ok(m, `${label} card`);
+      assert.ok(m.querySelector(".factgrid .fact"), `${label} card has a fact grid`);
+    }
 
     // Memory must reflect the real guest, not a placeholder.
     const memFoot = metrics

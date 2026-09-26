@@ -43,7 +43,7 @@
 .meter-fill.system { background: var(--storage-system); }
 
 /* VM status card: headline state plus a fact grid, matching vm-man. */
-.status-metric .factgrid {
+.metric .factgrid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px 14px;
 }
