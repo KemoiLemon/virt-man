@@ -243,6 +243,9 @@ body {
 }
 .x:hover { color: var(--fg); }
 .modal-body { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+/* .actions and .section-title carry bottom margins sized for the .detail pane;
+   inside a flex-gap modal body they would double the spacing. */
+.modal-body > .actions, .modal-body > .section-title { margin-bottom: 0; }
 .modal-foot {
   padding: 10px 13px; border-top: 1px solid var(--line);
   display: flex; justify-content: flex-end; gap: 8px;
@@ -433,18 +436,16 @@ table.grid tr:hover td { background: var(--hover); }
 .side-profile .who b { display: block; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-profile .who span { color: var(--dim); font-size: 10px; letter-spacing: 1px; }
 
-/* Profile popover: opens upward from the sidebar profile button. */
-.pop-menu {
-  position: fixed; z-index: 150; width: 280px;
-  background: var(--panel); border: 1px solid var(--accent);
-  box-shadow: 0 12px 32px var(--shade); padding: 12px;
-  transform: translateY(-100%); display: flex; flex-direction: column; gap: 10px;
+/* Profile card identity header. Padding matches .spec (9px 11px), the theme's
+   standard inset for a bordered panel block. */
+.profile-id {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--panel2); border: 1px solid var(--line);
+  padding: 9px 11px;
 }
-.pop-menu.down { transform: none; }
-.pop-head { display: flex; align-items: center; gap: 12px; }
-.pop-head .who { min-width: 0; }
-.pop-head .who b { display: block; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pop-head .who span { color: var(--dim); font-size: 11px; }
+.profile-id .who { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.profile-id .who b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.profile-id .who span { color: var(--dim); font-size: 11px; }
 .pop-avatar {
   border: 0; padding: 0; background: none; cursor: pointer; flex: 0 0 auto;
   position: relative;
@@ -456,4 +457,3 @@ table.grid tr:hover td { background: var(--hover); }
   background: var(--accent); color: var(--accent-fg); display: flex; align-items: center; justify-content: center;
 }
 .pop-avatar .camera-badge .ico { width: 11px; height: 11px; }
-.pop-sec { border-top: 1px solid var(--line); padding-top: 10px; }

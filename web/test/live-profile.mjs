@@ -1,4 +1,5 @@
-// Profile popover + full-profile modal, against the real auth-enabled backend.
+// Unified profile card, against the real auth-enabled backend. Also proves a
+// username change actually lands server-side and repaints the UI.
 //
 // The system service serves HTTPS with a self-signed cert, so this one runs
 // with NODE_TLS_REJECT_UNAUTHORIZED=0 (Node's undici accepts the cert):
@@ -88,30 +89,70 @@ check("profile button renders in the sidebar after login", () => {
   assert.ok(document.querySelector("#profile-btn .avatar"), "avatar shown in the button");
 });
 
-// Open the popover.
+// One click opens the unified card — no popover step.
 document.querySelector("#profile-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(300);
+await wait(600);
 
-check("profile popover opens with avatar, username and password", () => {
-  const menu = document.querySelector(".pop-menu");
-  assert.ok(menu, "popover present");
-  assert.ok(menu.querySelector("#pm-avatar .avatar"), "avatar in the popover");
-  assert.ok(menu.querySelector("#pm-user"), "username field");
-  assert.ok(menu.querySelector("#pm-pass"), "current-password field");
-  assert.ok(menu.querySelector("#pm-pass2"), "new-password field");
-  assert.ok(menu.querySelector("#pm-user-save"), "save username button");
-  assert.ok(menu.querySelector("#pm-pass-save"), "change password button");
-});
-
-check("full-profile button opens the modal with nickname and API keys", () => {
-  document.querySelector("#pm-full").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("one card holds identity, both names, password and API keys", () => {
+  assert.ok(!document.querySelector(".pop-menu"), "no popover layer any more");
   const modal = document.querySelector(".modal-back.open");
-  assert.ok(modal, "full profile modal open");
-  assert.ok(!document.querySelector(".pop-menu"), "popover closed when the modal opened");
-  assert.ok(modal.querySelector("#pf-nick"), "nickname field");
-  assert.ok(modal.querySelector("#pf-avatar-btn .avatar"), "avatar change button");
+  assert.ok(modal, "profile card open");
+  assert.ok(modal.querySelector(".profile-id"), "identity header present");
+  assert.ok(modal.querySelector("#pf-avatar-btn .avatar"), "avatar is the crop trigger");
+  assert.ok(modal.querySelector("#pf-nick"), "display name field");
+  assert.ok(modal.querySelector("#pf-user"), "username field");
+  assert.ok(modal.querySelector("#pf-pass"), "current-password field");
+  assert.ok(modal.querySelector("#pf-pass2"), "new-password field");
   assert.ok(modal.querySelector("#pf-keys"), "API key list");
   assert.ok(modal.querySelector("#pf-newkey"), "new API key button");
+});
+
+check("card padding follows the theme, not ad-hoc values", () => {
+  const id = document.querySelector(".profile-id");
+  const cs = window.getComputedStyle(id);
+  // Same inset as .spec, the theme's standard bordered-block padding.
+  assert.equal(cs.padding, "9px 11px", `identity header uses the theme inset (got ${cs.padding})`);
+  // .actions inside a flex-gap modal body must not double up its .detail margin.
+  const actions = document.querySelector(".modal-body > .actions");
+  assert.equal(window.getComputedStyle(actions).marginBottom, "0px",
+    "actions rows do not stack their detail-pane margin on the modal gap");
+});
+
+// The real bug: saving a username must change it server-side AND repaint.
+const origUser = (await window.fetch("/auth/me").then((r) => r.json())).username;
+document.querySelector("#pf-user").value = "renamed-admin";
+document.querySelector("#pf-nick").value = "Renamed";
+document.querySelector("#pf-save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1200);
+
+const afterSave = await window.fetch("/auth/me").then((r) => r.json());
+
+check("saving changes the username on the server", () => {
+  assert.equal(afterSave.username, "renamed-admin", "server reports the new username");
+  assert.equal(afterSave.nickname, "Renamed", "server reports the new display name");
+});
+
+check("the card and sidebar both repaint after saving", () => {
+  assert.equal(document.querySelector("#pf-who-user").textContent.split(" · ")[0], "@renamed-admin",
+    "card header shows the new username");
+  assert.equal(document.querySelector("#pf-who-name").textContent, "Renamed",
+    "card header shows the new display name");
+  assert.equal(document.querySelector("#profile-btn .who b").textContent, "Renamed",
+    "sidebar shows the new display name");
+  assert.match(document.querySelector(".topbar .host").textContent, /Renamed/,
+    "topbar shows the new display name");
+});
+
+// Restore the account exactly as it was, so the suite is repeatable.
+await window.fetch("/me", {
+  method: "PUT",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ username: origUser, nickname: "Admin" }),
+});
+const restored = await window.fetch("/auth/me").then((r) => r.json());
+check("account restored for repeatability", () => {
+  assert.equal(restored.username, origUser, `username back to ${origUser}`);
+  assert.equal(restored.nickname, "Admin", "nickname back to Admin");
 });
 
 const fails = results.filter(([s]) => s === "FAIL");

@@ -186,15 +186,7 @@ document.addEventListener("keydown", (e) => {
     }
     const modals = document.querySelectorAll(".modal-back.open");
     const top = modals[modals.length - 1];
-    if (top) {
-      top.dispatchEvent(new Event("modal-escape", { bubbles: false }));
-      return;
-    }
-    // One layer at a time: only close the profile popover when no modal is
-    // above it, matching the modal/select-popover ordering rule.
-    if (document.querySelector(".pop-menu")) {
-      closeProfileMenu();
-    }
+    if (top) top.dispatchEvent(new Event("modal-escape", { bubbles: false }));
   }
 });
 
@@ -538,7 +530,7 @@ async function refreshTreeVms() {
 function renderProfileBtn() {
   const el = $("#profile-btn");
   if (!el || !user) return;
-  el.onclick = openProfileMenu;
+  el.onclick = openProfile;
   setHtml(el, `
     <div class="avatar">${avatarHtml()}</div>
     <div class="who"><b>${esc(user.nickname)}</b><span>${user.role}</span></div>`);
@@ -2278,156 +2270,99 @@ function openUpload(pool: string) {
   };
 }
 
-/// Avatar markup shared by the sidebar button, popover and full profile modal.
+// ------------------------------------------------------------------ profile
+
+/// Avatar markup shared by the sidebar button and the profile card.
 function avatarHtml(): string {
   return user?.avatar
     ? `<img src="/avatars/${encodeURIComponent(user.avatar)}" alt="">`
     : (user?.nickname[0] ?? "u").toUpperCase();
 }
 
-/// Pick a file, crop it square, and upload it as the avatar.
-async function changeAvatar() {
-  if (!user) return;
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "image/png,image/jpeg,image/webp";
-  input.onchange = async () => {
-    const file = input.files?.[0];
-    if (!file) return;
-    const blob = await openCropDialog(file);
-    if (!blob) return;
-    try {
-      user = await api.postRaw<User>("/me/avatar?ext=png", blob, "image/png");
-      toast("Avatar updated");
-      renderProfileBtn();
-    } catch (e) {
-      toast((e as Error).message, "bad");
-    }
-  };
-  input.click();
-}
-
-// ------------------------------------------------------------------ profile
-
-function closeProfileMenu() {
-  document.querySelectorAll(".pop-menu").forEach((m) => m.remove());
-  document.removeEventListener("click", onProfileMenuDocClick);
-}
-
-function onProfileMenuDocClick(e: MouseEvent) {
-  const t = e.target as HTMLElement;
-  if (t.closest?.(".pop-menu") || t.closest?.("#profile-btn")) return;
-  closeProfileMenu();
-}
-
-/// Quick popover above the sidebar profile button: avatar (click to crop),
-/// username, password, and a door into the full profile modal.
-function openProfileMenu() {
-  if (!user) return;
-  const me = user;
-  closeProfileMenu();
-  const trigger = $("#profile-btn");
-  if (!trigger) return;
-
-  const menu = document.createElement("div");
-  menu.className = "pop-menu";
-  setHtml(menu, `
-    <div class="pop-head">
-      <button class="pop-avatar" id="pm-avatar" title="Change picture">
-        <div class="avatar">${avatarHtml()}</div>
-        <span class="camera-badge">${ic.camera()}</span>
-      </button>
-      <div class="who"><b>${esc(user.nickname)}</b><span id="pm-user-label">@${esc(user.username)}</span></div>
-    </div>
-    <label class="field"><span>Username</span>
-      <input id="pm-user" value="${esc(user.username)}" autocomplete="username"></label>
-    <button class="btn primary" id="pm-user-save">Save username</button>
-    <div class="pop-sec">
-      <label class="field"><span>Current password</span>
-        <input id="pm-pass" type="password" autocomplete="current-password"></label>
-      <label class="field"><span>New password</span>
-        <input id="pm-pass2" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
-      <button class="btn primary" id="pm-pass-save">Change password</button>
-    </div>
-    <button class="btn" id="pm-full">${ic.key()} Full profile &amp; API keys</button>`);
-  document.body.append(menu);
-
-  // Anchor to the profile button; open upward (it sits at the sidebar bottom)
-  // unless the window is too short, then drop below.
-  const r = trigger.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, r.left)}px`;
-  menu.style.top = `${Math.max(8, r.top - 8)}px`;
-  if (r.top - 8 - menu.offsetHeight < 0) {
-    menu.classList.add("down");
-    menu.style.top = `${r.bottom + 8}px`;
+/// Repaint every place the identity is shown, after any profile change.
+function renderIdentity() {
+  renderProfileBtn();
+  const host = $(".topbar .host");
+  if (host && user) {
+    host.textContent = `${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${user.nickname}`}`;
   }
-  document.addEventListener("click", onProfileMenuDocClick);
-
-  $("#pm-avatar", menu).onclick = () => void changeAvatar();
-  $("#pm-user-save", menu).onclick = async () => {
-    const username = $("#pm-user", menu).value.trim();
-    if (!username) return toast("Username is required", "bad");
-    if (username === me.username) return;
-    try {
-      const updated = await api.put<User>("/me", { username });
-      user = updated;
-      toast("Username changed — use it to sign in next time");
-      renderProfileBtn();
-      const label = $("#pm-user-label", menu);
-      if (label) label.textContent = `@${updated.username}`;
-    } catch (e) {
-      toast((e as Error).message, "bad");
-    }
-  };
-  $("#pm-pass-save", menu).onclick = async () => {
-    const current = $("#pm-pass", menu).value;
-    const next = $("#pm-pass2", menu).value;
-    if (!current || !next) return toast("Enter current and new password", "bad");
-    try {
-      await api.post("/me/password", { current, new: next });
-      toast("Password changed");
-      ($("#pm-pass", menu) as HTMLInputElement).value = "";
-      ($("#pm-pass2", menu) as HTMLInputElement).value = "";
-    } catch (e) {
-      toast((e as Error).message, "bad");
-    }
-  };
-  $("#pm-full", menu).onclick = () => {
-    closeProfileMenu();
-    openFullProfile();
-  };
 }
 
-/// Full profile modal: nickname, avatar (crop), and API keys.
-function openFullProfile() {
+/// One profile card: avatar (click to crop), display name, username,
+/// password and API keys. Replaces the old popover + separate modal split.
+function openProfile() {
   if (!user) return;
   const el = openModal(
     "Profile",
-    `<div class="crop-preview">
+    `<div class="profile-id">
        <button class="pop-avatar" id="pf-avatar-btn" title="Change picture">
          <div class="avatar">${avatarHtml()}</div>
          <span class="camera-badge">${ic.camera()}</span>
        </button>
-       <span class="hint">Click the picture to crop a new avatar.</span>
+       <div class="who">
+         <b id="pf-who-name">${esc(user.nickname)}</b>
+         <span id="pf-who-user">@${esc(user.username)} · ${esc(user.role)}</span>
+         <span class="hint">Click the picture to crop a new avatar.</span>
+       </div>
      </div>
-     <label class="field" style="margin-top:14px"><span>Nickname</span><input id="pf-nick" value="${esc(user.nickname)}"></label>
-     <div class="actions"><button class="btn primary" id="pf-save">Save nickname</button></div>
+
+     <div class="grid2">
+       <label class="field"><span>Display name</span>
+         <input id="pf-nick" value="${esc(user.nickname)}"></label>
+       <label class="field"><span>Username (used to sign in)</span>
+         <input id="pf-user" value="${esc(user.username)}" autocomplete="username"></label>
+     </div>
+     <div class="actions"><button class="btn primary" id="pf-save">Save changes</button></div>
+
+     <div class="section-title">Password</div>
+     <div class="grid2">
+       <label class="field"><span>Current password</span>
+         <input id="pf-pass" type="password" autocomplete="current-password"></label>
+       <label class="field"><span>New password</span>
+         <input id="pf-pass2" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
+     </div>
+     <div class="actions"><button class="btn" id="pf-pass-save">${ic.lock()} Change password</button></div>
+
      <div class="section-title">API keys</div>
      <div id="pf-keys"></div>
      <div class="actions"><button class="btn" id="pf-newkey">${ic.key()} New API key</button></div>`,
     `<button class="btn" id="pf-close">Close</button>`,
   );
   $("#pf-close", el).onclick = () => el.remove();
-  $("#pf-avatar-btn", el).onclick = () => void changeAvatar();
+  $("#pf-avatar-btn", el).onclick = () => void changeAvatar(el);
+
+  // Display name and username save together: both live on PUT /me, so one
+  // button means one round trip and no half-applied state.
   $("#pf-save", el).onclick = async () => {
+    const nickname = $("#pf-nick", el).value.trim();
+    const username = $("#pf-user", el).value.trim();
+    if (!nickname) return toast("Display name is required", "bad");
+    if (!username) return toast("Username is required", "bad");
+    const before = user?.username;
     try {
-      user = await api.put<User>("/me", { nickname: $("#pf-nick", el).value });
-      toast("Saved");
-      renderProfileBtn();
+      user = await api.put<User>("/me", { nickname, username });
+      toast(username === before ? "Saved" : "Saved — sign in with the new username next time");
+      renderIdentity();
+      refreshProfileCard(el);
     } catch (e) {
       toast((e as Error).message, "bad");
     }
   };
+
+  $("#pf-pass-save", el).onclick = async () => {
+    const current = $("#pf-pass", el).value;
+    const next = $("#pf-pass2", el).value;
+    if (!current || !next) return toast("Enter current and new password", "bad");
+    try {
+      await api.post("/me/password", { current, new: next });
+      toast("Password changed");
+      ($("#pf-pass", el) as HTMLInputElement).value = "";
+      ($("#pf-pass2", el) as HTMLInputElement).value = "";
+    } catch (e) {
+      toast((e as Error).message, "bad");
+    }
+  };
+
   const refreshKeys = async () => {
     const keys = await api.get<import("./api").ApiKey[]>("/me/keys");
     const box = $("#pf-keys", el);
@@ -2451,6 +2386,40 @@ setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done">
       toast((e as Error).message, "bad");
     }
   };
+}
+
+/// Repaint the card's identity header from the current user.
+function refreshProfileCard(el: Element) {
+  if (!user) return;
+  const name = $("#pf-who-name", el);
+  if (name) name.textContent = user.nickname;
+  const who = $("#pf-who-user", el);
+  if (who) who.textContent = `@${user.username} · ${user.role}`;
+  const av = $("#pf-avatar-btn .avatar", el);
+  if (av) setHtml(av, avatarHtml());
+}
+
+/// Pick a file, crop it square, and upload it as the avatar.
+async function changeAvatar(card?: Element) {
+  if (!user) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/jpeg,image/webp";
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const blob = await openCropDialog(file);
+    if (!blob) return;
+    try {
+      user = await api.postRaw<User>("/me/avatar?ext=png", blob, "image/png");
+      toast("Avatar updated");
+      renderIdentity();
+      if (card) refreshProfileCard(card);
+    } catch (e) {
+      toast((e as Error).message, "bad");
+    }
+  };
+  input.click();
 }
 
 // ---------------------------------------------------------------- tasks
