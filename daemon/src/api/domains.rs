@@ -486,7 +486,12 @@ fn rename_xml(xml: &str, new_name: &str) -> Option<String> {
     let start = xml.find("<name")?;
     let open_end = start + xml[start..].find('>')?;
     let close = xml[open_end..].find("</name>")? + open_end;
-    Some(format!("{}{}{}", &xml[..open_end + 1], new_name, &xml[close..]))
+    Some(format!(
+        "{}{}{}",
+        &xml[..open_end + 1],
+        new_name,
+        &xml[close..]
+    ))
 }
 
 #[cfg(test)]
@@ -607,7 +612,11 @@ mod tests {
         // the renamed domain still the same VM to libvirt.
         assert!(out.contains("<uuid>abc</uuid>"), "uuid kept:\n{out}");
         assert!(out.contains("<domain type='kvm'>"), "attributes kept");
-        assert_eq!(out.matches("<name>").count(), 1, "no duplicated name element");
+        assert_eq!(
+            out.matches("<name>").count(),
+            1,
+            "no duplicated name element"
+        );
     }
 
     #[test]
@@ -617,7 +626,10 @@ mod tests {
         let xml = "<domain><name>old</name><devices><hostname>x</hostname></devices></domain>";
         let out = rename_xml(xml, "new").unwrap();
         assert_eq!(out.matches("<name>").count(), 1);
-        assert!(out.contains("<hostname>x</hostname>"), "hostname untouched:\n{out}");
+        assert!(
+            out.contains("<hostname>x</hostname>"),
+            "hostname untouched:\n{out}"
+        );
         assert!(!out.contains("old"), "old name gone:\n{out}");
     }
 

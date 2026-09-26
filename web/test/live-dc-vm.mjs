@@ -146,8 +146,17 @@ check("clicking a guest in the Guests tab opens its VM view", () => {
   assert.ok(document.querySelector(".tree-row.tree-vm.sel"), "sidebar marks the guest selected");
 });
 
-check("the VM toolbar offers a rename action", () => {
-  assert.ok(document.querySelector("#vm-rename"), "rename button present");
+// Rename lives in the Options tab as a field, not as a toolbar button.
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "Options")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1200);
+
+check("rename is an editable Options field, not a toolbar button", () => {
+  assert.ok(!document.querySelector("#vm-rename"), "no rename button in the toolbar");
+  const name = document.querySelector("#opt-name");
+  assert.ok(name, "Options tab has a Name field");
+  assert.ok(!name.disabled, "Name field is editable");
 });
 
 // Back to Datacenter > Guests, then straight into a console.

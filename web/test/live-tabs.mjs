@@ -106,7 +106,7 @@ check("Options tab shows editable metadata read from the guest", () => {
   const name = document.querySelector("#opt-name");
   assert.ok(name, "name field present");
   assert.ok(name.value, `name populated (${name.value})`);
-  assert.ok(name.disabled, "renaming is not offered here");
+  assert.ok(!name.disabled, "name is editable — rename lives in the Options form");
   assert.ok(document.querySelector("#opt-title"), "title field");
   assert.ok(document.querySelector("#opt-desc"), "description field");
   assert.ok(document.querySelector("#opt-boot"), "boot device selector");

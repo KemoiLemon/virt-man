@@ -917,7 +917,6 @@ setHtml(list, `<table class="grid">
               <button class="btn icon" data-stop="${esc(v.name)}" title="Shutdown" ${v.active ? "" : "disabled"}>${ic.stop()}</button>
               <button class="btn icon" data-console="${esc(v.name)}" title="Console">${ic.vm()}</button>
               <button class="btn icon" data-hwedit="${esc(v.name)}" title="Edit hardware">${ic.edit()}</button>
-              <button class="btn icon" data-rename="${esc(v.name)}" title="Rename">${ic.rename()}</button>
               <button class="btn danger icon" data-delvm="${esc(v.name)}" title="Delete">${ic.trash()}</button>
             </div>
           </td>
@@ -961,12 +960,6 @@ setHtml(list, `<table class="grid">
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
         void openHardwareEditor({ vm: (b as HTMLElement).dataset.hwedit! });
-      };
-    });
-    list.querySelectorAll("[data-rename]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = (e) => {
-        e.stopPropagation();
-        void renameVm((b as HTMLElement).dataset.rename!);
       };
     });
     list.querySelectorAll("[data-delvm]").forEach((b: Element) => {
@@ -1095,7 +1088,6 @@ setHtml(content, `
         <button class="btn icon" id="vm-reboot" title="Reboot">${ic.reboot()}</button>
         <button class="btn icon" id="vm-destroy" title="Force stop">${ic.forceStop()}</button>
         <button class="btn icon" id="vm-hwedit" title="Edit hardware">${ic.edit()}</button>
-        <button class="btn icon" id="vm-rename" title="Rename">${ic.rename()}</button>
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
@@ -1115,7 +1107,6 @@ setHtml(content, `
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(renderVm);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(renderVm);
   $("#vm-hwedit").onclick = () => void openHardwareEditor({ vm });
-  $("#vm-rename").onclick = () => void renameVm(vm);
   $("#vm-delete").onclick = () => deleteVm(vm);
   await renderVmBody(vm);
 }
@@ -1257,7 +1248,8 @@ async function renderVmBody(vm: string) {
         </div>
         <div class="grid2">
           <label class="field"><span>Name</span>
-            <input id="opt-name" value="${esc(vm)}" disabled></label>
+            <input id="opt-name" value="${esc(vm)}">
+            <small class="hint">Renaming needs the guest shut off.</small></label>
           <label class="field"><span>Title</span>
             <input id="opt-title" value="${esc(title)}" placeholder="short label"></label>
         </div>
@@ -1286,12 +1278,35 @@ async function renderVmBody(vm: string) {
         const newTitle = $("#opt-title").value.trim();
         const newDesc = $("#opt-desc").value.trim();
         const newBoot = ($("#opt-boot") as HTMLSelectElement).value;
+        const newName = $("#opt-name").value.trim();
+
+        // Rename first: the rename endpoint is the only safe way to swap the
+        // name (it keeps the UUID), and the XML write below must both target
+        // the new name and carry a matching <name> or it would undo the swap.
+        let target = vm;
+        if (newName && newName !== vm) {
+          try {
+            await api.post(
+              `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/rename`,
+              { name: newName });
+            target = newName;
+            if (selectedVm === vm) selectedVm = newName;
+            await refreshTreeVms();
+            renderTree();
+            void renderVm();
+          } catch (e) {
+            toast((e as Error).message, "bad");
+            return;
+          }
+        }
+
         // Rewrite only the elements this form owns, leaving the rest of the
         // definition untouched.
         let next = xml
           .replace(/\s*<title>[^<]*<\/title>/, "")
           .replace(/\s*<description>[^<]*<\/description>/, "")
-          .replace(/<boot dev='[^']*'\/>/, `<boot dev='${esc(newBoot)}'/>`);
+          .replace(/<boot dev='[^']*'\/>/, `<boot dev='${esc(newBoot)}'/>`)
+          .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
         const meta = [
           newTitle ? `  <title>${esc(newTitle)}</title>` : "",
           newDesc ? `  <description>${esc(newDesc)}</description>` : "",
@@ -1300,8 +1315,8 @@ async function renderVmBody(vm: string) {
           // libvirt requires title/description right after <name>.
           next = next.replace(/(<name>[^<]*<\/name>)/, `$1\n${meta}`);
         }
-        runTask(`Update options for ${vm}`, async () => {
-          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/xml`, next);
+        runTask(`Update options for ${target}`, async () => {
+          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(target)}/xml`, next);
         });
         toast("Options update started");
       });
@@ -1906,9 +1921,8 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
         return `<div class="hw-page active">
           <h3 class="hw-title">General</h3>
           <label class="field"><span>Name</span>
-            <input id="g-name" value="${esc(general.name)}" ${editing ? "disabled" : ""}
-              placeholder="arch-box"></label>
-          ${editing ? `<div class="hw-note">Renaming an existing domain is not supported here.</div>` : ""}
+            <input id="g-name" value="${esc(general.name)}" placeholder="arch-box"></label>
+          ${editing ? `<div class="hw-note">Renaming needs the guest shut off and takes effect on save.</div>` : ""}
         </div>`;
     }
   }
@@ -2055,9 +2069,22 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
     }
 
     if (editing && opts.vm) {
-      const vm = opts.vm;
+      const oldName = opts.vm;
+      const renamed = general.name.trim() && general.name.trim() !== oldName;
       el.remove();
-      runTask(`Update ${vm}`, async (set) => {
+      runTask(`Update ${general.name.trim() || oldName}`, async (set) => {
+        let target = oldName;
+        if (renamed) {
+          // Rename through the dedicated endpoint: it swaps the persistent
+          // definition while keeping the UUID. A name baked into the XML PUT
+          // below would instead define a second domain with a clashing UUID.
+          set(`renaming ${oldName} → ${general.name.trim()}`);
+          await api.post(
+            `/proxy/${conn}/domains/${encodeURIComponent(oldName)}/rename`,
+            { name: general.name.trim() });
+          target = general.name.trim();
+          if (selectedVm === oldName) selectedVm = target;
+        }
         set("rebuilding domain definition");
         // Strip the devices this editor owns, then splice the current set back
         // in, so libvirt-added devices we do not model survive the round trip.
@@ -2069,10 +2096,12 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           .replace(/<channel\b[\s\S]*?org\.qemu\.guest_agent[\s\S]*?<\/channel>\s*/g, "")
           .replace(/<vcpu([^>]*)>\d+<\/vcpu>/, `<vcpu$1>${general.cpus}</vcpu>`)
           .replace(/<memory([^>]*)>\d+<\/memory>/, `<memory$1>${general.memory_mb * 1024}</memory>`)
-          .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`);
+          .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`)
+          .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
         set("defining domain");
-        await api.put(`/proxy/${conn}/domains/${encodeURIComponent(vm)}/xml`,
+        await api.put(`/proxy/${conn}/domains/${encodeURIComponent(target)}/xml`,
           withDevices(stripped, devices));
+        await refreshTreeVms();
       });
       toast("Hardware update started");
       setTimeout(() => void renderVm(), 600);
