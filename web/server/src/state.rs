@@ -6,13 +6,17 @@ use std::sync::{Arc, RwLock};
 pub struct AppState {
     pub store: Arc<RwLock<Store>>,
     pub data_dir: PathBuf,
+    /// True when running as the desktop app's loopback sidecar: no auth,
+    /// every request is a synthetic local admin.
+    pub auth_disabled: bool,
 }
 
 impl AppState {
-    pub fn new(store: Store, data_dir: PathBuf) -> Self {
+    pub fn new(store: Store, data_dir: PathBuf, auth_disabled: bool) -> Self {
         Self {
             store: Arc::new(RwLock::new(store)),
             data_dir,
+            auth_disabled,
         }
     }
 

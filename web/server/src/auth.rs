@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::state::AppState;
-use crate::store::{sha256_hex, User};
+use crate::store::{sha256_hex, Role, User};
 
 pub const SESSION_COOKIE: &str = "virt-man-session";
 
@@ -64,6 +64,19 @@ fn api_key_user(state: &AppState, req: &Request) -> Option<User> {
     store.user_by_id(&user_id).cloned()
 }
 
+/// Synthetic user for loopback mode (no auth): full admin.
+pub fn local_user() -> User {
+    User {
+        id: "local".into(),
+        username: "local".into(),
+        password_hash: String::new(),
+        role: Role::Admin,
+        nickname: "local".into(),
+        avatar: None,
+        scopes: Default::default(),
+    }
+}
+
 /// Middleware factory: require authentication (session cookie or API key) and
 /// attach the user as an `Extension<User>`.
 pub fn require_user(
@@ -72,6 +85,10 @@ pub fn require_user(
     move |mut req: Request, next: Next| {
         let state = state.clone();
         Box::pin(async move {
+            if state.auth_disabled {
+                req.extensions_mut().insert(local_user());
+                return next.run(req).await;
+            }
             let user = session_user(&state, &req).or_else(|| api_key_user(&state, &req));
             match user {
                 Some(user) => {

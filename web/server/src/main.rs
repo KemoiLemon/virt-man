@@ -29,7 +29,7 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("create {}: {e}", cfg.data_dir.display()))?;
 
     let store = store::Store::load(&cfg.data_dir)?;
-    let state = AppState::new(store, cfg.data_dir.clone());
+    let state = AppState::new(store, cfg.data_dir.clone(), cfg.loopback_http);
 
     let index = cfg.dist_dir.join("index.html");
     let app = api::build(state.clone())

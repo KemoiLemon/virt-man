@@ -25,7 +25,10 @@ pub fn routes(state: &AppState) -> Router<AppState> {
 
 /// Public: tells the SPA whether it must show the first-run setup wizard.
 async fn status(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "needs_setup": state.read().users.is_empty() }))
+    Json(json!({
+        "needs_setup": !state.auth_disabled && state.read().users.is_empty(),
+        "auth_disabled": state.auth_disabled,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -41,6 +44,9 @@ async fn setup(
     State(state): State<AppState>,
     Json(req): Json<SetupReq>,
 ) -> Result<Response, ApiError> {
+    if state.auth_disabled {
+        return Err(ApiError::not_found("auth disabled"));
+    }
     let username = req.username.trim().to_string();
     let password = req.password;
     if username.is_empty() || password.len() < 8 {
@@ -84,6 +90,9 @@ async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginReq>,
 ) -> Result<Response, ApiError> {
+    if state.auth_disabled {
+        return Err(ApiError::not_found("auth disabled"));
+    }
     login_response(&state, req.username.trim(), &req.password)
 }
 

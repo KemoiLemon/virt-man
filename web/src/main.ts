@@ -17,6 +17,7 @@ function setHtml(el: Element, html: string) {
 // ---------------------------------------------------------------- state
 
 let user: User | null = null;
+let authDisabled = false;
 let connections: Connection[] = [];
 let selectedConn: string | null = null;
 let connTab: "vms" | "networks" | "storage" = "vms";
@@ -58,8 +59,14 @@ function toast(msg: string, kind: "ok" | "bad" = "ok") {
 
 async function boot() {
   initTheme();
-  const { needs_setup } = await api.get<{ needs_setup: boolean }>("/auth/status");
-  if (needs_setup) return renderSetup();
+  const status = await api.get<{ needs_setup: boolean; auth_disabled?: boolean }>("/auth/status");
+  if (status.auth_disabled) {
+    authDisabled = true;
+    user = { id: "local", username: "local", role: "admin", nickname: "local", avatar: null, scopes: {} };
+    renderApp();
+    return;
+  }
+  if (status.needs_setup) return renderSetup();
   try {
     const me = await api.get<User>("/auth/me");
     user = me;
@@ -138,10 +145,10 @@ function renderApp() {
 setHtml(app, `
     <div class="topbar">
       <span class="brand">virt-<span>man</span></span>
-      <span class="host">${isTauri() ? "desktop" : "web"} · ${esc(user.nickname)}</span>
+      <span class="host">${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
       <button class="btn icon" id="theme-btn" title="Toggle theme">◐</button>
       <button class="btn" id="webui-btn">Connect to webui</button>
-      <button class="btn" id="logout-btn">Sign out</button>
+      ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
       ${isTauri() ? `<span style="margin-left:auto;display:flex;gap:6px">
         <button class="btn icon" id="win-min" title="Minimise">─</button>
         <button class="btn icon" id="win-max" title="Maximise">□</button>
@@ -163,9 +170,8 @@ setHtml(app, `
     </div>`);
 
   $("#theme-btn").onclick = toggleTheme;
-  $("#logout-btn").onclick = logout;
+  if ($("#logout-btn")) $("#logout-btn").onclick = logout;
   $("#webui-btn").onclick = connectToWebui;
-  $("#profile-btn").onclick = openProfile;
   $("#tasks-close").onclick = () => $("#tasks").classList.add("hidden");
 
   onTasks(renderTasks);
@@ -252,12 +258,19 @@ setHtml(tree, `
 }
 
 function renderProfileBtn() {
-  if (!user) return;
   const el = $("#profile-btn");
+  if (!el) return;
+  if (authDisabled) {
+    setHtml(el, `<div class="who"><b>local</b><span>desktop</span></div>`);
+    el.onclick = null;
+    return;
+  }
+  if (!user) return;
   const avatar = user.avatar
     ? `<img src="/avatars/${encodeURIComponent(user.avatar)}" alt="">`
     : (user.nickname[0] ?? "u").toUpperCase();
-setHtml(el, `
+  el.onclick = openProfile;
+  setHtml(el, `
     <div class="avatar">${avatar}</div>
     <div class="who"><b>${esc(user.nickname)}</b><span>${user.role}</span></div>`);
 }
@@ -269,7 +282,7 @@ function renderDc() {
   const tabs = dcTab === "servers"
     ? `<div class="actions">
         <button class="btn primary" id="dc-add">Add Server</button>
-        <button class="btn" id="dc-users">Users &amp; API keys</button>
+        ${authDisabled ? "" : `<button class="btn" id="dc-users">Users &amp; API keys</button>`}
       </div>`
     : `<div class="actions"><button class="btn" id="dc-back">Back to servers</button></div>`;
   const body = dcTab === "servers"
