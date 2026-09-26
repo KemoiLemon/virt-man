@@ -1,0 +1,351 @@
+/* Square UI: zero border-radius anywhere, hard edges, dense grid.
+   Ported from vm-man (ui/base.css) so both apps share one visual language. */
+* { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
+
+/* ------------------------------------------------------------------ themes
+   Every colour in the app comes from these variables, so a theme swap is a
+   single attribute change on <html> and nothing else needs to know. */
+:root, html[data-theme="dark"] {
+  /* Calm charcoal surfaces + coral actions: all dark cards share the same
+     #18181a base, while accent-driven UI uses #fe6565. */
+  --bg: #18181a;
+  --panel: #18181a;
+  --panel2: #18181a;
+  --line: #303034;
+  --line2: #45454b;
+  --fg: #f2f2f3;
+  --dim: #a6a6ad;
+  --accent: #fe6565;
+  --accent-fg: #fff1f1;
+  --accent-bg: #7d3033;
+  --accent-bg-hover: #a74347;
+  --storage-system: #c95056;
+  --ok: #78cf9d;
+  --warn: #f0b45f;
+  --bad: #fe6565;
+  --bad-fg: #fff1f1;
+  --bad-bg: #5c2427;
+  --input-bg: #18181a;
+  --code-bg: #18181a;
+  --hover: #242428;
+  --hover-line: #5a5a62;
+  --scroll: #3a3a40;
+  --scroll-hover: #505057;
+  --shade: rgba(0, 0, 0, .7);
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  --bg: #eef0f4;
+  --panel: #f7f8fa;
+  --panel2: #eceef2;
+  --line: #d2d7e0;
+  --line2: #b9c0cc;
+  --fg: #1b1f27;
+  --dim: #5c6472;
+  --accent: #1d6fd0;
+  --accent-fg: #ffffff;
+  --accent-bg: #1d6fd0;
+  --accent-bg-hover: #175bab;
+  --storage-system: #4d8fda;
+  --ok: #1f8a4c;
+  --warn: #9a6b12;
+  --bad: #c2372b;
+  --bad-fg: #7d1c13;
+  --bad-bg: #f7d9d6;
+  --input-bg: #ffffff;
+  --code-bg: #f0f2f6;
+  --hover: #e2e6ee;
+  --hover-line: #9aa3b2;
+  --scroll: #c3c9d4;
+  --scroll-hover: #a9b1bf;
+  --shade: rgba(20, 24, 32, .45);
+  color-scheme: light;
+}
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, monospace;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.hidden { display: none !important; }
+
+/* ------------------------------------------------------------------ icons
+   One rule styles every Lucide icon: the pack ships path data only, so the
+   stroke weight and joins are defined here and never vary per icon. */
+.ico { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 auto; }
+.ico > svg {
+  width: 100%; height: 100%; display: block;
+  fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+/* Context sizes override the 16px default without touching the svg itself. */
+.win-btn .ico { width: 16px; height: 16px; }
+.tab .ico { width: 14px; height: 14px; }
+.tree-ic { width: 16px; height: 16px; flex: 0 0 16px; }
+.card-ic { width: 20px; height: 20px; flex: 0 0 20px; }
+.metric-ic { width: 19px; height: 19px; flex: 0 0 19px; }
+
+/* ------------------------------------------------------------------ topbar */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 14px;
+  height: 46px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.brand { font-weight: 700; letter-spacing: 2px; font-size: 15px; }
+.brand span { color: var(--accent); }
+.host { color: var(--dim); font-size: 11px; flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ------------------------------------------------------------------ layout */
+.layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  min-height: 0;
+}
+.pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.list-pane { border-right: 1px solid var(--line); background: var(--panel); }
+
+.pane-head {
+  display: flex; align-items: center; gap: 8px;
+  height: 34px; padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px; letter-spacing: 1.5px; color: var(--dim);
+  flex: 0 0 auto;
+}
+
+.empty { padding: 24px 14px; color: var(--dim); font-size: 12px; line-height: 1.8; }
+
+/* ---------------------------------------------------------------- detail */
+.detail { overflow-y: auto; flex: 1; padding: 16px; }
+.dhead { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+.dtitle { font-size: 19px; font-weight: 700; }
+.badge {
+  font-size: 10px; letter-spacing: 1px; padding: 3px 7px;
+  border: 1px solid var(--line2); color: var(--dim);
+}
+.badge.on { color: var(--ok); border-color: var(--ok); }
+.dsub { color: var(--dim); font-size: 11px; margin-bottom: 14px; word-break: break-all; }
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+
+.specs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+.spec { background: var(--panel); padding: 9px 11px; }
+.spec b { display: block; color: var(--dim); font-size: 10px; letter-spacing: 1px; font-weight: 500; margin-bottom: 3px; }
+.spec span { font-size: 13px; word-break: break-all; -webkit-user-select: text; user-select: text; }
+
+.section-title { font-size: 11px; letter-spacing: 1.5px; color: var(--dim); margin: 0 0 7px; }
+.cmd {
+  background: var(--code-bg); border: 1px solid var(--line);
+  padding: 10px; font-size: 11px; color: var(--dim);
+  white-space: pre-wrap; word-break: break-all; line-height: 1.7;
+  -webkit-user-select: text; user-select: text; margin-bottom: 14px;
+}
+
+/* --------------------------------------------------------------- controls */
+.btn {
+  background: var(--panel2);
+  border: 1px solid var(--line2);
+  color: var(--fg);
+  padding: 5px 11px;
+  font: inherit; font-size: 11px; letter-spacing: 1px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+}
+.btn:hover { background: var(--hover); border-color: var(--hover-line); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--accent-bg); border-color: var(--accent); color: var(--accent-fg); }
+.btn.primary:hover { background: var(--accent-bg-hover); }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.btn.danger:hover { background: var(--bad-bg); color: var(--bad-fg); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.icon { padding: 5px 7px; }
+.btn .ico { pointer-events: none; }
+.icon-label { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; }
+
+/* ------------------------------------------------- frameless window controls */
+.window-controls { align-self: stretch; display: flex; margin-left: auto; }
+.win-btn {
+  width: 44px; height: 100%; border: 0; border-left: 1px solid var(--line);
+  background: transparent; color: var(--dim); cursor: pointer; display: grid; place-items: center;
+}
+.win-btn .ico { width: 16px; height: 16px; }
+.win-btn:hover { color: var(--fg); background: var(--hover); }
+.win-btn.close:hover { color: var(--accent-fg); background: var(--bad); }
+
+/* ---------------------------------------------------------------- modals */
+.modal-back {
+  position: fixed; inset: 0; background: var(--shade);
+  display: none; align-items: center; justify-content: center; z-index: 50;
+}
+.modal-back.open { display: flex; }
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  width: 640px; max-width: 94vw; max-height: 92vh;
+  display: flex; flex-direction: column;
+}
+.modal.wide { width: 900px; }
+.action-modal { width: 480px; }
+.action-message { color: var(--fg); white-space: pre-line; line-height: 1.55; }
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 13px; border-bottom: 1px solid var(--line);
+  font-size: 12px; letter-spacing: 1.5px;
+}
+.x {
+  background: none; border: none; color: var(--dim); cursor: pointer; line-height: 1;
+  display: inline-grid; place-items: center; padding: 4px;
+}
+.x:hover { color: var(--fg); }
+.modal-body { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.modal-foot {
+  padding: 10px 13px; border-top: 1px solid var(--line);
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+
+/* ----------------------------------------------------------------- forms */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field > span { font-size: 10px; letter-spacing: 1.2px; color: var(--dim); }
+input, select, textarea {
+  background: var(--input-bg); border: 1px solid var(--line2); color: var(--fg);
+  padding: 6px 8px; font: inherit; font-size: 12px; width: 100%;
+  -webkit-user-select: text; user-select: text;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input:hover, select:hover, textarea:hover { border-color: var(--hover-line); }
+input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
+textarea { resize: vertical; }
+input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
+
+/* Checkboxes: custom box so the tick colour follows the accent in all themes. */
+input[type="checkbox"] {
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  width: 14px; height: 14px; min-width: 14px; padding: 0; margin: 0;
+  background: var(--input-bg); border: 1px solid var(--line2);
+  cursor: pointer; position: relative; display: inline-block; vertical-align: middle;
+}
+input[type="checkbox"]:hover { border-color: var(--hover-line); }
+input[type="checkbox"]:focus-visible { outline: none; border-color: var(--accent); }
+input[type="checkbox"]:checked { background: var(--accent-bg); border-color: var(--accent); }
+input[type="checkbox"]:checked::after {
+  content: ""; position: absolute; left: 4px; top: 1px;
+  width: 4px; height: 8px; box-sizing: border-box;
+  border: solid var(--accent-fg); border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* File pickers: the native button ignores the theme, so restyle it. */
+input[type="file"] { padding: 4px; cursor: pointer; }
+input[type="file"]::file-selector-button {
+  background: var(--panel2); border: 1px solid var(--line2); color: var(--fg);
+  padding: 4px 10px; margin-right: 10px; font: inherit; font-size: 11px;
+  letter-spacing: 1px; cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover {
+  background: var(--hover); border-color: var(--hover-line);
+}
+
+.checkfield .check { display: flex; align-items: center; gap: 7px; font-size: 12px; padding-top: 5px; }
+.check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.check input { width: auto; }
+
+.hint { font-size: 11px; color: var(--dim); word-break: break-all; }
+.hint.ok { color: var(--ok); }
+.hint.bad { color: var(--bad); }
+
+/* ----------------------------------------------------------------- tables */
+table.grid { width: 100%; border-collapse: collapse; border: 1px solid var(--line); }
+table.grid th, table.grid td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; font-size: 12px; }
+table.grid th { color: var(--dim); font-size: 10px; letter-spacing: 1px; background: var(--panel2); }
+table.grid tr:hover td { background: var(--hover); }
+
+.log {
+  background: var(--code-bg); border: 1px solid var(--line); padding: 10px;
+  font-size: 11px; color: var(--dim); white-space: pre-wrap; word-break: break-all;
+  max-height: 62vh; overflow-y: auto; -webkit-user-select: text; user-select: text;
+}
+
+/* --------------------------------------------------------------- toast */
+.toast {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  background: var(--panel2); border: 1px solid var(--line2);
+  padding: 9px 16px; font-size: 12px; z-index: 99;
+  opacity: 0; pointer-events: none; transition: opacity .15s;
+  max-width: 80vw; white-space: pre-wrap;
+}
+.toast.show { opacity: 1; }
+.toast.bad { border-color: var(--bad); color: var(--bad); }
+.toast.ok { border-color: var(--ok); color: var(--ok); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--scroll); }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); }
+
+/* ------------------------------------------------------------ auth screens */
+.center-screen { flex: 1; display: flex; align-items: center; justify-content: center; }
+.auth-box { width: 360px; max-width: 92vw; border: 1px solid var(--line2); background: var(--panel); }
+.auth-box .modal-body { gap: 12px; }
+.auth-logo { text-align: center; font-size: 20px; font-weight: 700; letter-spacing: 3px; padding: 18px 0 4px; }
+.auth-logo span { color: var(--accent); }
+
+/* ------------------------------------------------------------ VNC console */
+.console-stage {
+  flex: 1; min-width: 0; min-height: 0;
+  background: #000;
+  display: flex;
+  align-items: safe center;
+  justify-content: safe center;
+  overflow: auto;
+  position: relative;
+  outline: none;
+}
+.console-stage canvas, .console-stage #spice-screen, .console-stage .spice-screen { display: block; }
+.console-msg {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--dim); font-size: 12px; pointer-events: none;
+  background: var(--shade); padding: 10px 16px; border: 1px solid var(--line);
+}
+
+/* --------------------------------------------------------------- avatars */
+.avatar {
+  width: 32px; height: 32px; min-width: 32px; overflow: hidden;
+  background: var(--accent-bg); border: 1px solid var(--line2);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent-fg); font-weight: 700; font-size: 13px;
+}
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.side-profile {
+  border-top: 1px solid var(--line); flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  cursor: pointer; background: var(--panel2);
+}
+.side-profile:hover { background: var(--hover); }
+.side-profile .who { min-width: 0; }
+.side-profile .who b { display: block; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-profile .who span { color: var(--dim); font-size: 10px; letter-spacing: 1px; }

@@ -1,0 +1,86 @@
+/* Dashboard widgets: cards, metrics, meters and sparklines.
+   Ported from vm-man (ui/dashboard.css). */
+
+.sumgrid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px; margin-bottom: 16px;
+}
+.vm-sumgrid { align-items: stretch; grid-auto-rows: 1fr; }
+.vm-sumgrid > .metric { height: 100%; box-sizing: border-box; }
+
+/* ------------------------------------------------------------- cards */
+.cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 1px; background: var(--line); border: 1px solid var(--line); margin-bottom: 16px;
+}
+.card { background: var(--panel); padding: 12px 13px; display: flex; align-items: center; gap: 11px; }
+.card-ic { width: 20px; height: 20px; color: var(--dim); flex: 0 0 20px; }
+.card.ok .card-ic { color: var(--ok); }
+.card.warn .card-ic { color: var(--warn); }
+.card.bad .card-ic { color: var(--bad); }
+.card > div { min-width: 0; }
+.card b { display: block; font-size: 15px; font-weight: 700; }
+.card i { display: block; font-style: normal; font-size: 10px; color: var(--dim); letter-spacing: .6px; margin-top: 2px; }
+
+/* ----------------------------------------------------------- metrics */
+.metric {
+  background: var(--panel); border: 1px solid var(--line);
+  padding: 14px 15px; display: flex; flex-direction: column; gap: 11px;
+  min-width: 0;
+}
+.metric-head { display: flex; align-items: center; gap: 10px; }
+.metric-ic { width: 19px; height: 19px; color: var(--dim); flex: 0 0 19px; }
+.metric.ok .metric-ic { color: var(--ok); }
+.metric-head b { font-size: 12px; letter-spacing: .8px; color: var(--dim); font-weight: 600; flex: 1; }
+.metric-value { font-size: 19px; font-weight: 700; color: var(--fg); }
+.metric-foot {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 11px; color: var(--dim);
+}
+.meter { height: 7px; background: var(--input-bg); border: 1px solid var(--line); }
+.meter-fill { height: 100%; background: var(--accent); transition: width .3s; }
+.meter-fill.hot { background: var(--bad); }
+.meter-fill.system { background: var(--storage-system); }
+
+/* --------------------------------------------------------- sparkline */
+/* Stretches to the panel width; height stays fixed. */
+.chart { display: flex; flex-direction: column; gap: 4px; }
+.spark {
+  width: 100%; height: 74px; display: block;
+  background: var(--input-bg); border: 1px solid var(--line);
+}
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 1.7; vector-effect: non-scaling-stroke; }
+.spark-fill { fill: var(--accent); opacity: .16; stroke: none; }
+.spark-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: .7; }
+.spark-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.spark.mem .spark-line { stroke: var(--ok); }
+.spark.mem .spark-fill { fill: var(--ok); }
+.spark.mem .spark-dot { fill: var(--ok); stroke: var(--panel); }
+.spark.warn .spark-line { stroke: var(--warn); }
+.spark.warn .spark-fill { fill: var(--warn); }
+.spark.warn .spark-dot { fill: var(--warn); stroke: var(--panel); }
+.chart-axis {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--dim); letter-spacing: .4px;
+}
+
+/* ------------------------------------------------------------- facts */
+.factgrid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px 14px;
+}
+.fact { min-width: 0; }
+.fact b { display: block; font-size: 10px; letter-spacing: .9px; color: var(--dim); font-weight: 500; margin-bottom: 3px; }
+.fact span { font-size: 13px; word-break: break-word; }
+
+/* --------------------------------------------------------- pool cards */
+.storage-card {
+  background: var(--panel); border: 1px solid var(--line);
+  padding: 14px 15px; display: flex; flex-direction: column; gap: 11px;
+  margin-bottom: 14px; min-width: 0;
+}
+.storage-card-head { display: flex; align-items: center; gap: 10px; }
+.storage-card-icon { width: 19px; height: 19px; color: var(--dim); flex: 0 0 19px; }
+.storage-card.ok .storage-card-icon { color: var(--ok); }
+.storage-card-title { font-size: 13px; font-weight: 700; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.storage-card-actions { display: flex; gap: 7px; flex-wrap: wrap; }

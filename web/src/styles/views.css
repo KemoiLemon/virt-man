@@ -1,0 +1,106 @@
+/* Resource tree, tabbar, themed listbox and task dock.
+   Ported from vm-man (ui/dashboard.css, ui/base.css). */
+
+/* ------------------------------------------------------- resource tree */
+.restree { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 0; }
+.tree-row {
+  width: 100%; display: flex; align-items: center; gap: 9px;
+  padding: 7px 12px; background: none; border: 0; color: var(--fg);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+}
+.tree-row:hover { background: var(--hover); }
+.tree-row.sel { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
+.tree-root { font-weight: 600; border-bottom: 1px solid var(--line); }
+.tree-group { padding-left: 10px; }
+.tree-vm { padding-left: 26px; }
+.tree-ic { width: 16px; height: 16px; flex: 0 0 16px; color: var(--dim); }
+.tree-ic.on { color: var(--ok); }
+.tree-row.sel .tree-ic { color: var(--accent); }
+.tree-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-state { font-size: 10px; color: var(--dim); letter-spacing: .5px; }
+.tree-state.on { color: var(--ok); }
+.tree-empty { padding: 14px 16px; color: var(--dim); font-size: 11px; }
+
+/* Table cells reuse the tree's state vocabulary: the VM/network grids show the
+   same running/stopped labels and clickable names. */
+.state { font-size: 10px; letter-spacing: 1px; color: var(--dim); }
+.state.on { color: var(--ok); }
+.tname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.grid td.tname:hover { color: var(--accent); }
+.tree-add {
+  width: 100%; border: 0; border-top: 1px solid var(--line);
+  background: var(--panel); color: var(--accent); cursor: pointer;
+  font: inherit; font-size: 11px; letter-spacing: 1px; min-height: 35px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  flex: 0 0 auto;
+}
+.tree-add:hover { background: var(--accent-bg); color: var(--accent-fg); }
+
+/* ------------------------------------------------------------- tab bar */
+.tabbar {
+  flex: 0 0 auto; display: flex; gap: 0; overflow-x: auto;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.tab {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 9px 14px; background: none; border: 0; border-bottom: 2px solid transparent;
+  color: var(--dim); font: inherit; font-size: 11px; letter-spacing: .6px; cursor: pointer;
+}
+.tab .ico { width: 14px; height: 14px; }
+.tab:hover { color: var(--fg); background: var(--hover); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--panel2); }
+
+/* --------------------------------------------- themed custom listboxes */
+/* Native selects are kept only as the form data source, never displayed. */
+select { display: none !important; }
+.select-trigger {
+  background: var(--input-bg); border: 1px solid var(--line2); color: var(--fg);
+  padding: 6px 8px; min-height: 30px; width: 100%; font: inherit; font-size: 12px;
+  cursor: pointer; display: flex; align-items: center; justify-content: space-between;
+  text-align: left; -webkit-user-select: none; user-select: none; gap: 8px;
+}
+.select-trigger:hover { border-color: var(--hover-line); }
+.select-trigger:focus-visible, .select-trigger.open { outline: none; border-color: var(--accent); }
+.select-trigger:disabled { opacity: .5; cursor: not-allowed; }
+.select-value { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.select-caret { width: 14px; height: 14px; color: var(--dim); flex: 0 0 14px; transition: transform .12s; }
+.select-trigger.open .select-caret { transform: rotate(180deg); color: var(--accent); }
+.select-popover {
+  position: fixed; z-index: 200; min-width: 180px; max-width: min(440px, calc(100vw - 16px));
+  background: var(--panel); border: 1px solid var(--accent); box-shadow: 0 12px 32px var(--shade);
+  padding: 3px; max-height: min(300px, calc(100vh - 16px)); overflow-y: auto;
+}
+.select-option {
+  width: 100%; text-align: left; border: 0; background: transparent; color: var(--fg);
+  padding: 7px 9px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.select-option:hover, .select-option.active { background: var(--accent-bg); color: var(--accent-fg); }
+.select-option:disabled { color: var(--dim); cursor: default; }
+
+/* ----------------------------------------------------------- task dock */
+.tasks {
+  position: fixed; right: 0; bottom: 0; width: 380px; max-width: 94vw;
+  background: var(--panel); border: 1px solid var(--line2); border-bottom: none;
+  z-index: 40; display: flex; flex-direction: column; max-height: 60vh;
+}
+.tasks-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: 1.5px;
+}
+.tasks-head .btn { margin-left: auto; }
+.tasks-body { overflow-y: auto; padding: 6px 12px; font-size: 11px; }
+.task-row {
+  display: grid; grid-template-columns: 12px 1fr auto; gap: 8px;
+  padding: 5px 0; border-bottom: 1px solid var(--line); align-items: center;
+}
+.task-dot { width: 8px; height: 8px; background: var(--line2); }
+.task-dot.running { background: var(--warn); }
+.task-dot.done { background: var(--ok); }
+.task-dot.failed { background: var(--bad); }
+.task-msg { color: var(--dim); }
+
+/* ---------------------------------------------------------- crop stage */
+.crop-stage { position: relative; width: 100%; height: 260px; overflow: hidden; background: var(--code-bg); border: 1px solid var(--line); }
+.crop-stage img { position: absolute; cursor: move; max-width: none; }
+.crop-preview { display: flex; gap: 12px; align-items: center; }
+.crop-preview .avatar { width: 64px; height: 64px; min-width: 64px; }
