@@ -152,3 +152,12 @@ table.grid + .actions { margin-top: 12px; }
 .dim-note { color: var(--dim); font-size: 11px; }
 /* A one-time secret: selectable, wrapped, and visually distinct. */
 .secret-value { -webkit-user-select: all; user-select: all; color: var(--accent); margin-bottom: 0; }
+
+/* API key list in the profile card. The empty state gets the same border and
+   row inset as a populated list, so the section keeps its shape either way
+   instead of collapsing into a tall unbordered gap (.empty's 24px padding is
+   sized for a whole empty pane, not a row). */
+.key-list { border: 1px solid var(--line); }
+.key-list .task-row { padding: 7px 9px; }
+.key-list .task-row:last-child { border-bottom: 0; }
+.key-list .empty { padding: 7px 9px; line-height: 1.5; }

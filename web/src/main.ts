@@ -2611,7 +2611,6 @@ function openProfile() {
        <label class="field"><span>Username (used to sign in)</span>
          <input id="pf-user" value="${esc(user.username)}" autocomplete="username"></label>
      </div>
-     <div class="actions"><button class="btn primary" id="pf-save">Save changes</button></div>
 
      <div class="section-title">Password</div>
      <div class="grid2">
@@ -2623,18 +2622,36 @@ function openProfile() {
      <div class="actions"><button class="btn" id="pf-pass-save">${ic.lock()} Change password</button></div>
 
      <div class="section-title">API keys</div>
-     <div id="pf-keys"></div>
+     <div class="key-list" id="pf-keys"></div>
      <div class="actions"><button class="btn" id="pf-newkey">${ic.key()} New API key</button></div>`,
-    `<button class="btn" id="pf-close">Close</button>`,
+    // Save sits next to Cancel and only appears once something differs, so the
+    // footer never offers a no-op. Cancel/Close is the same button relabelled:
+    // with pending edits, closing discards them.
+    `<button class="btn" id="pf-close">Close</button>
+     <button class="btn primary hidden" id="pf-save">Save changes</button>`,
   );
   $("#pf-close", el).onclick = () => el.remove();
   $("#pf-avatar-btn", el).onclick = () => void changeAvatar(el);
 
+  // Show Save only when the form actually differs from the stored identity.
+  const nickInput = $("#pf-nick", el) as HTMLInputElement;
+  const userInput = $("#pf-user", el) as HTMLInputElement;
+  const saveBtn = $("#pf-save", el) as HTMLButtonElement;
+  const closeBtn = $("#pf-close", el) as HTMLButtonElement;
+  const syncDirty = () => {
+    const dirty = nickInput.value.trim() !== (user?.nickname ?? "")
+      || userInput.value.trim() !== (user?.username ?? "");
+    saveBtn.classList.toggle("hidden", !dirty);
+    closeBtn.textContent = dirty ? "Cancel" : "Close";
+  };
+  nickInput.oninput = syncDirty;
+  userInput.oninput = syncDirty;
+
   // Display name and username save together: both live on PUT /me, so one
   // button means one round trip and no half-applied state.
-  $("#pf-save", el).onclick = async () => {
-    const nickname = $("#pf-nick", el).value.trim();
-    const username = $("#pf-user", el).value.trim();
+  saveBtn.onclick = async () => {
+    const nickname = nickInput.value.trim();
+    const username = userInput.value.trim();
     if (!nickname) return toast("Display name is required", "bad");
     if (!username) return toast("Username is required", "bad");
     const before = user?.username;
@@ -2643,6 +2660,8 @@ function openProfile() {
       toast(username === before ? "Saved" : "Saved — sign in with the new username next time");
       renderIdentity();
       refreshProfileCard(el);
+      // Saved values are the new baseline, so the button retires itself.
+      syncDirty();
     } catch (e) {
       toast((e as Error).message, "bad");
     }
@@ -2665,7 +2684,7 @@ function openProfile() {
   const refreshKeys = async () => {
     const keys = await api.get<import("./api").ApiKey[]>("/me/keys");
     const box = $("#pf-keys", el);
-setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done"></span><span class="task-msg">${esc(k.name)} · ${esc(k.prefix)}…</span><button class="btn danger icon" data-kid="${k.id}">${ic.trash()}</button></div>`).join("") || `<div class="empty">No keys.</div>`);
+setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done"></span><span class="task-msg">${esc(k.name)} · ${esc(k.prefix)}…</span><button class="btn danger icon" data-kid="${k.id}">${ic.trash()}</button></div>`).join("") || `<div class="empty">No API keys.</div>`);
     box.querySelectorAll("[data-kid]").forEach((b: Element) => {
       (b as HTMLElement).onclick = async () => {
         await api.del(`/me/keys/${(b as HTMLElement).dataset.kid}`);

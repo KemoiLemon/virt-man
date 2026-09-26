@@ -123,6 +123,57 @@ check("one card holds identity, both names, password and API keys", () => {
   assert.ok(modal.querySelector("#pf-newkey"), "new API key button");
 });
 
+check("Save sits next to Cancel in the footer, hidden until something changes", () => {
+  const foot = document.querySelector(".modal-back.open .modal-foot");
+  assert.ok(foot, "footer present");
+  const ids = [...foot.querySelectorAll("button")].map((b) => b.id);
+  assert.deepEqual(ids, ["pf-close", "pf-save"], "Close then Save, both in the footer");
+  // No edits yet, so Save must not be offered at all.
+  const save = document.querySelector("#pf-save");
+  assert.ok(save.classList.contains("hidden"), "Save hidden while the form is pristine");
+  assert.equal(window.getComputedStyle(save).display, "none", "and actually not rendered");
+  assert.equal(document.querySelector("#pf-close").textContent.trim(), "Close",
+    "the other button reads Close when there is nothing to discard");
+  // The old inline Save row above the Password section is gone.
+  assert.ok(!document.querySelector(".modal-body #pf-save"), "Save is not in the body any more");
+});
+
+check("editing a name reveals Save and turns Close into Cancel", () => {
+  const nick = document.querySelector("#pf-nick");
+  const original = nick.value;
+  nick.value = `${original}-edited`;
+  nick.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const save = document.querySelector("#pf-save");
+  assert.ok(!save.classList.contains("hidden"), "Save appears once a field differs");
+  assert.equal(document.querySelector("#pf-close").textContent.trim(), "Cancel",
+    "Close becomes Cancel while edits are pending");
+  // Typing the original value back must retire the button again.
+  nick.value = original;
+  nick.dispatchEvent(new window.Event("input", { bubbles: true }));
+  assert.ok(save.classList.contains("hidden"), "reverting hides Save again");
+  assert.equal(document.querySelector("#pf-close").textContent.trim(), "Close", "and Cancel reverts to Close");
+});
+
+check("the empty API key list is bordered and compact, like a populated one", () => {
+  const box = document.querySelector("#pf-keys");
+  assert.ok(box.classList.contains("key-list"), "list carries the key-list class");
+  // jsdom drops a `border` shorthand whose colour is var(), so the computed
+  // style cannot prove the border. Assert the stylesheet rule instead, the
+  // same way the theme audit does.
+  assert.match(css.replace(/\s+/g, " "), /\.key-list\{border:1px solid var\(--line\)\}/,
+    "key-list is bordered in the shipped stylesheet");
+  const empty = box.querySelector(".empty");
+  if (empty) {
+    // .empty's default 24px is sized for a whole pane; inside a row list it
+    // must use the same inset as a key row.
+    const cs = window.getComputedStyle(empty);
+    assert.equal(cs.padding, "7px 9px", `empty state uses the row inset (got ${cs.padding})`);
+    assert.match(empty.textContent, /No API keys/, "names what is missing");
+  } else {
+    results.push(["info", "account has API keys, so the empty state was not rendered"]);
+  }
+});
+
 check("card padding follows the theme, not ad-hoc values", () => {
   const id = document.querySelector(".profile-id");
   const cs = window.getComputedStyle(id);
@@ -139,8 +190,13 @@ const before = await window.fetch("/auth/me").then((r) => r.json());
 const origUser = before.username;
 const origNick = before.nickname;
 const probeUser = `${origUser}-probe`;
-document.querySelector("#pf-user").value = probeUser;
-document.querySelector("#pf-nick").value = "Renamed";
+const userField = document.querySelector("#pf-user");
+const nickField = document.querySelector("#pf-nick");
+userField.value = probeUser;
+nickField.value = "Renamed";
+// Save only exists once the form is dirty, so announce the edits.
+userField.dispatchEvent(new window.Event("input", { bubbles: true }));
+nickField.dispatchEvent(new window.Event("input", { bubbles: true }));
 document.querySelector("#pf-save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1200);
 
@@ -160,6 +216,13 @@ check("the card and sidebar both repaint after saving", () => {
     "sidebar shows the new display name");
   assert.match(document.querySelector(".topbar .host").textContent, /Renamed/,
     "topbar shows the new display name");
+});
+
+check("Save retires itself once the edits are persisted", () => {
+  const save = document.querySelector("#pf-save");
+  assert.ok(save.classList.contains("hidden"), "saved values are the new baseline");
+  assert.equal(document.querySelector("#pf-close").textContent.trim(), "Close",
+    "nothing left to discard, so Cancel goes back to Close");
 });
 
 // Restore the account exactly as it was, so the suite is repeatable.
