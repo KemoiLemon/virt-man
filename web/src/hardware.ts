@@ -44,13 +44,13 @@ export const HW_CATALOG: HwType[] = [
       {
         key: "mode", label: "Source", type: "select", value: "existing",
         options: [
-          { value: "existing", label: "Existing volume" },
-          { value: "new", label: "New volume" },
+          { value: "existing", label: "Existing Volume" },
+          { value: "new", label: "New Volume" },
         ],
       },
-      { key: "pool", label: "Storage pool", type: "select", options: [] },
+      { key: "pool", label: "Storage Pool", type: "select", options: [] },
       { key: "volume", label: "Volume", type: "select", options: [], showWhen: { key: "mode", value: "existing" } },
-      { key: "size_gb", label: "Disk size (GB)", type: "number", min: 1, value: "10", placeholder: "10", showWhen: { key: "mode", value: "new" } },
+      { key: "size_gb", label: "Disk Size (GB)", type: "number", min: 1, value: "10", placeholder: "10", showWhen: { key: "mode", value: "new" } },
       {
         key: "format", label: "Format", type: "select", value: "qcow2",
         options: [
@@ -75,8 +75,8 @@ export const HW_CATALOG: HwType[] = [
     blurb: "Attach an ISO from a storage pool",
     icon: "disk",
     fields: [
-      { key: "pool", label: "ISO pool", type: "select", options: [] },
-      { key: "volume", label: "ISO volume", type: "select", options: [] },
+      { key: "pool", label: "ISO Pool", type: "select", options: [] },
+      { key: "volume", label: "ISO Volume", type: "select", options: [] },
     ],
   },
   {
@@ -94,7 +94,7 @@ export const HW_CATALOG: HwType[] = [
           { value: "rtl8139", label: "rtl8139" },
         ],
       },
-      { key: "mac", label: "MAC address (optional)", type: "text", placeholder: "52:54:00:aa:bb:cc" },
+      { key: "mac", label: "MAC Address (optional)", type: "text", placeholder: "52:54:00:aa:bb:cc" },
     ],
   },
   {

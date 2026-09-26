@@ -114,7 +114,7 @@ check("the datacenter dashboard summarises every server", () => {
   assert.match(body, /SERVERS/, "server count card");
   assert.match(body, /NETWORKS/, "network count card");
   assert.match(body, /Networking/, "networking summary");
-  assert.match(body, /Storage pools/, "storage pool summary");
+  assert.match(body, /Storage Pools/, "storage pool summary");
   assert.ok(document.querySelector("[data-dc-dash-conn]"), "per-server row links to its dashboard");
 });
 

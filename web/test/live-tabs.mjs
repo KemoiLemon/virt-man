@@ -70,7 +70,7 @@ check("the dashboard is the landing tab and shows host + resource summaries", ()
   assert.match(body, /NETWORKS/, "network count card rendered");
   assert.match(body, /POOLS/, "pool count card rendered");
   assert.match(body, /Networking/, "networking summary rendered");
-  assert.match(body, /Storage pools/, "storage pool summary rendered");
+  assert.match(body, /Storage Pools/, "storage pool summary rendered");
 });
 
 tabNamed("Networks")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -176,7 +176,7 @@ check("Options tab shows editable metadata read from the guest", () => {
   assert.ok(document.querySelector("#opt-save"), "save button");
   // Lifecycle facts must come from the real domain, not placeholders.
   const specs = [...document.querySelectorAll(".spec b")].map((b) => b.textContent.trim());
-  for (const want of ["On poweroff", "On reboot", "Machine", "Architecture"]) {
+  for (const want of ["On Poweroff", "On Reboot", "Machine", "Architecture"]) {
     assert.ok(specs.includes(want), `${want} shown (${specs})`);
   }
   const machine = [...document.querySelectorAll(".spec")]

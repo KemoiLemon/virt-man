@@ -14,6 +14,18 @@ import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { domainXml, esc, networkFormFromXml, networkUuid, networkXml, poolXml, volumeXml } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
+/// Title-case a status/type token for display. The API keeps lowercase values
+/// (the frontend compares against them), so capitalizing happens only here.
+function capLabel(s: string): string {
+  if (!s) return s;
+  const pretty: Record<string, string> = {
+    nostate: "No state",
+    pmsuspended: "Suspended",
+    shutdown: "Shutdown",
+  };
+  return pretty[s] ?? s[0].toUpperCase() + s.slice(1);
+}
+
 /// Single HTML injection point. Every template's dynamic parts are escaped via
 /// esc() at the call site; DOMPurify is the sanitizing backstop the XSS rule
 /// requires.
@@ -271,7 +283,7 @@ function renderSetup() {
         <label class="field"><span>Password (min 8 chars)</span><input id="sp" type="password" autocomplete="new-password"></label>
         <label class="field"><span>Nickname</span><input id="sn"></label>
       </div>
-      <div class="modal-foot"><button class="btn primary" id="setup-btn">Create admin</button></div>
+      <div class="modal-foot"><button class="btn primary" id="setup-btn">Create Admin</button></div>
     </div>`);
   $("#setup-btn").onclick = async () => {
     try {
@@ -296,7 +308,7 @@ function renderLogin() {
         <label class="field"><span>Username</span><input id="lu" autocomplete="username"></label>
         <label class="field"><span>Password</span><input id="lp" type="password" autocomplete="current-password"></label>
       </div>
-      <div class="modal-foot"><button class="btn primary" id="login-btn">Sign in</button></div>
+      <div class="modal-foot"><button class="btn primary" id="login-btn">Sign In</button></div>
     </div>`);
   $("#login-btn").onclick = async () => {
     try {
@@ -403,7 +415,7 @@ function renderTree() {
         data-vm="${esc(v.name)}" data-vm-conn="${c.id}">
         <span class="tree-ic ${v.active ? "on" : ""}">${ic.vm()}</span>
         <span class="tree-label">${esc(v.name)}</span>
-        <span class="tree-state ${v.active ? "on" : ""}">${esc(v.state)}</span>
+        <span class="tree-state ${v.active ? "on" : ""}">${esc(capLabel(v.state))}</span>
       </button>`,
               )
               .join("")
@@ -808,7 +820,7 @@ async function loadDcDashboard() {
         ${connections.map((c) => {
           const row = byId.get(c.id);
           if (!row) {
-            return `<tr><td class="tname" style="cursor:pointer" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state">unreachable</span></td><td>—</td><td>—</td><td>—</td></tr>`;
+            return `<tr><td class="tname" style="cursor:pointer" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state">Unreachable</span></td><td>—</td><td>—</td><td>—</td></tr>`;
           }
           const { h, pools: ps } = row;
           const { cpuNow: sCpu } = addHostSample(`dc:${c.id}`, h);
@@ -834,12 +846,12 @@ async function loadDcDashboard() {
         <tr><th>Name</th><th>Server</th><th>Bridge</th><th>State</th></tr>
         ${nets.map(({ c, n }) => `
           <tr><td>${esc(n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
-          <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
+          <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>
     </div>
 
     <div class="dash-section">
-      <div class="section-title">Storage pools</div>
+      <div class="section-title">Storage Pools</div>
       ${pools.map(({ c, p }) => {
         const used = p.allocation ?? 0;
         const cap = p.capacity ?? 0;
@@ -849,7 +861,7 @@ async function loadDcDashboard() {
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.name)}<span class="host" style="display:block;font-weight:400">${esc(c.name)}</span></span>
-            <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
+            <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
           </div>
           <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
           <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
@@ -885,7 +897,7 @@ function openAdmin() {
      `<div class="tabbar">
        <button class="tab" data-admintab="users">${ic.users(14)} Users</button>
        <button class="tab" data-admintab="roles">${ic.admin(14)} Roles</button>
-       <button class="tab" data-admintab="keys">${ic.key(14)} API keys</button>
+       <button class="tab" data-admintab="keys">${ic.key(14)} API Keys</button>
      </div>
      <div id="admin-area">loading…</div>`,
     `<button class="btn" id="ad-close">Close</button>`,
@@ -950,7 +962,7 @@ setHtml(area, `<table class="grid">
               <td>${esc(k.prefix)}…</td>
               <td>${listed.length
                 ? listed.map((s) => `<span class="perm-pair">${esc(s)}${permMark(k.scopes?.[s])}</span>`).join("")
-                : `<span class="dim-note">inherits owner</span>`}</td>
+                : `<span class="dim-note">Inherits Owner</span>`}</td>
               <td class="col-actions"><button class="btn danger icon" data-delkey="${k.id}" title="Revoke">${ic.trash()}</button></td>
             </tr>`;
           }).join("") || `<tr><td colspan="5" class="empty">No keys.</td></tr>`}
@@ -1002,7 +1014,7 @@ setHtml(area, `<table class="grid">
 
     const users = await api.get<User[]>("/users");
 setHtml(area, `<table class="grid">
-        <tr><th>Username</th><th>Display name</th><th>Role</th><th class="col-actions"></th></tr>
+        <tr><th>Username</th><th>Display Name</th><th>Role</th><th class="col-actions"></th></tr>
         ${users.map((u) => `
           <tr>
             <td>${esc(u.username)}${u.id === user?.id ? ` <span class="badge">you</span>` : ""}</td>
@@ -1147,15 +1159,15 @@ function openEditUser(u: User, root: Element) {
   const el = openModal(
     `Edit — ${esc(u.username)}`,
     `<div class="grid2">
-       <label class="field"><span>Display name</span><input id="eu-nick" value="${esc(u.nickname)}"></label>
+       <label class="field"><span>Display Name</span><input id="eu-nick" value="${esc(u.nickname)}"></label>
        <label class="field"><span>Role</span><select id="eu-role">
          ${adminRoles.map((r) =>
            `<option value="${esc(r.name)}" ${r.name === u.role ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
        </select></label>
      </div>
-     <label class="field"><span>Reset password (blank = leave unchanged)</span>
+     <label class="field"><span>Reset Password (blank = leave unchanged)</span>
        <input id="eu-pass" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
-     <div class="section-title">Permission overrides</div>
+     <div class="section-title">Permission Overrides</div>
      <div class="grid2 perm-grid">
        ${adminScopes.map((s) => `
          <label class="field"><span>${esc(s)}</span>
@@ -1200,7 +1212,7 @@ function openAddUser(root: Element) {
     `<div class="grid2">
       <label class="field"><span>Username</span><input id="nu-name" autocomplete="username"></label>
       <label class="field"><span>Password (min 8)</span><input id="nu-pass" type="password" autocomplete="new-password"></label>
-      <label class="field"><span>Display name</span><input id="nu-nick"></label>
+      <label class="field"><span>Display Name</span><input id="nu-nick"></label>
       <label class="field"><span>Role</span><select id="nu-role">
         ${adminRoles.map((r) =>
           `<option value="${esc(r.name)}" ${r.name === "viewer" ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
@@ -1353,12 +1365,12 @@ async function loadDashboard() {
         <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
         ${nets.map((n) => `
           <tr><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
-          <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
+          <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
       </table>
     </div>
 
     <div class="dash-section">
-      <div class="section-title">Storage pools</div>
+      <div class="section-title">Storage Pools</div>
       ${pools.map((p) => {
         const used = p.allocation ?? 0;
         const cap = p.capacity ?? 0;
@@ -1368,7 +1380,7 @@ async function loadDashboard() {
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.name)}</span>
-            <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
+            <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
           </div>
           <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
           <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
@@ -1541,14 +1553,14 @@ function openFirewallEditor(netName: string) {
 
       <div class="section-title fw-cat">Rules</div>
       <table class="grid">
-        <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
+        <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source Port</th><th>Dest Port</th><th></th></tr>
         ${rules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="fw-add-rule">${ic.plus(14)} Add rule</button></div>
 
       <div class="section-title fw-cat" style="margin-top:18px">NAT Port Forwards</div>
       <table class="grid">
-        <tr><th>WAN</th><th>Proto</th><th>WAN start</th><th>WAN end</th><th>Internal IP</th><th>Start</th><th>End</th><th></th></tr>
+        <tr><th>WAN</th><th>Proto</th><th>WAN Start</th><th>WAN End</th><th>Internal IP</th><th>Start</th><th>End</th><th></th></tr>
         ${forwards.map(fwFwdRow).join("") || `<tr><td colspan="8" class="empty">No port forwards.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>`);
@@ -2173,7 +2185,7 @@ async function renderVmBody(vm: string) {
 
       setHtml(body, `
         <div class="actions">
-          <button class="btn primary" id="opt-save">${ic.edit(14)} Save options</button>
+          <button class="btn primary" id="opt-save">${ic.edit(14)} Save Options</button>
           <span class="hw-locked">Changes apply after the guest is restarted.</span>
         </div>
         <div class="grid2">
@@ -2186,7 +2198,7 @@ async function renderVmBody(vm: string) {
         <label class="field"><span>Description</span>
           <textarea id="opt-desc" rows="3" placeholder="free-form notes">${esc(description)}</textarea></label>
         <div class="grid2">
-          <label class="field"><span>Boot device</span>
+          <label class="field"><span>Boot Device</span>
             <select id="opt-boot">
               ${["hd", "cdrom", "network"].map((d) =>
                 `<option value="${d}" ${d === bootDev ? "selected" : ""}>${d}</option>`).join("")}
@@ -2196,10 +2208,10 @@ async function renderVmBody(vm: string) {
         </div>
         <div class="section-title" style="margin-top:14px">Lifecycle</div>
         <div class="specs">
-          <div class="spec"><b>On poweroff</b><span>${esc(onPoweroff)}</span></div>
-          <div class="spec"><b>On reboot</b><span>${esc(onReboot)}</span></div>
-          <div class="spec"><b>On crash</b><span>${esc(onCrash)}</span></div>
-          <div class="spec"><b>Persistence</b><span>${esc(autostartHint)}</span></div>
+          <div class="spec"><b>On Poweroff</b><span>${esc(onPoweroff)}</span></div>
+          <div class="spec"><b>On Reboot</b><span>${esc(onReboot)}</span></div>
+          <div class="spec"><b>On Crash</b><span>${esc(onCrash)}</span></div>
+          <div class="spec"><b>Persistence</b><span>${esc(capLabel(autostartHint))}</span></div>
           <div class="spec"><b>Machine</b><span>${esc(machine)}</span></div>
           <div class="spec"><b>Architecture</b><span>${esc(arch)}</span></div>
         </div>`);
@@ -2280,7 +2292,7 @@ async function renderVmBody(vm: string) {
         ${fwPolicyRow(vmPolicy)}
         <div class="section-title fw-cat">Rules</div>
         <table class="grid">
-          <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
+          <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source Port</th><th>Dest Port</th><th></th></tr>
           ${vmRules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
         </table>
         <div class="actions">
@@ -2425,7 +2437,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     </div>
 
     <div class="specs">
-      <div class="spec"><b>State</b><span>${esc(d.state)}</span></div>
+      <div class="spec"><b>State</b><span>${esc(capLabel(d.state))}</span></div>
       <div class="spec"><b>ID</b><span>${d.id}</span></div>
       <div class="spec"><b>UUID</b><span>${esc(d.uuid ?? "—")}</span></div>
       <div class="spec"><b>Persistent</b><span>${d.persistent}</span></div>
@@ -2626,7 +2638,7 @@ function openConnectionDialog(editId?: string) {
     `
     <label class="field"><span>Name</span><input id="conn-name" value="${esc(existing?.name ?? "")}"></label>
     <label class="field"><span>URL (https://host:8443)</span><input id="conn-url" placeholder="https://host:8443" value="${esc(existing?.url ?? "")}"></label>
-    <label class="field"><span>Auth token</span>
+    <label class="field"><span>Auth Token</span>
       <input id="conn-token" placeholder="${existing ? "leave blank to keep the current token" : "paste existing token or generate"}">
       <label class="check"><input type="checkbox" id="conn-gen"> generate new token</label>
     </label>
@@ -2681,11 +2693,11 @@ function offerInstallScript(script: string): HTMLElement | null {
   const el = openModal(
     "Daemon not reachable",
     `
-    <label class="field"><span>Install script</span>
+    <label class="field"><span>Install Script</span>
       <textarea id="install-script" rows="14" readonly spellcheck="false">${esc(script)}</textarea>
     </label>
     <p class="hint" id="pending-status">Waiting for the daemon…</p>`,
-    `<button class="btn" id="dl-script">Download script</button>`,
+    `<button class="btn" id="dl-script">Download Script</button>`,
   );
   $("#dl-script", el).onclick = () => {
     const blob = new Blob([script], { type: "application/x-sh" });
@@ -2902,9 +2914,9 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
       case "disk":
         return `<div class="hw-page active">
           <h3 class="hw-title">Hard Disk</h3>
-          <label class="field"><span>Storage pool</span>
+          <label class="field"><span>Storage Pool</span>
             <select id="g-pool">${opt(pools.map((p) => p.name), newDisk.pool)}</select></label>
-          <label class="field"><span>Disk size (GB)</span>
+          <label class="field"><span>Disk Size (GB)</span>
             <input id="g-size" type="number" min="1" value="${newDisk.size_gb}"></label>
           <label class="field"><span>Format</span>
             <select id="g-format">${opt(["qcow2", "raw"], newDisk.format)}</select></label>
@@ -3251,7 +3263,7 @@ function openCreatePool() {
       <label class="field"><span>Type</span><select id="pool-type">
         <option value="dir">Directory</option><option value="logical">LVM</option><option value="fs">Filesystem</option>
       </select></label>
-      <label class="field"><span>Target path</span><input id="pool-target" placeholder="/var/lib/libvirt/images"></label>
+      <label class="field"><span>Target Path</span><input id="pool-target" placeholder="/var/lib/libvirt/images"></label>
       <label class="field"><span>Source (device/dir)</span><input id="pool-source" placeholder="/dev/vg0"></label>
     </div>`,
     `<button class="btn primary" id="pool-create">Create</button>`,
@@ -3304,7 +3316,7 @@ function openUpload(pool: string) {
   if (!selectedConn) return;
   const el = openModal(
     `Upload ISO to ${pool}`,
-    `<label class="field"><span>Volume name</span><input id="up-name" placeholder="arch.iso"></label>
+    `<label class="field"><span>Volume Name</span><input id="up-name" placeholder="arch.iso"></label>
      <label class="field"><span>File</span><input id="up-file" type="file"></label>
      <p class="hint" id="up-progress"></p>`,
     `<button class="btn primary" id="up-go">Upload</button>`,
@@ -3366,30 +3378,30 @@ function openProfile() {
        </div>
      </div>
 
-     <div class="grid2">
-       <label class="field"><span>Display name</span>
-         <input id="pf-nick" value="${esc(user.nickname)}"></label>
+      <div class="grid2">
+       <label class="field"><span>Display Name</span>
+          <input id="pf-nick" value="${esc(user.nickname)}"></label>
        <label class="field"><span>Username (used to sign in)</span>
          <input id="pf-user" value="${esc(user.username)}" autocomplete="username"></label>
      </div>
 
      <div class="section-title">Password</div>
      <div class="grid2">
-       <label class="field"><span>Current password</span>
+       <label class="field"><span>Current Password</span>
          <input id="pf-pass" type="password" autocomplete="current-password"></label>
        <label class="field"><span>New password</span>
          <input id="pf-pass2" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
      </div>
      <div class="actions"><button class="btn" id="pf-pass-save">${ic.lock()} Change password</button></div>
 
-     <div class="section-title">API keys</div>
+     <div class="section-title">API Keys</div>
      <div class="key-list" id="pf-keys"></div>
      <div class="actions"><button class="btn" id="pf-newkey">${ic.key()} New API key</button></div>`,
     // Save sits next to Cancel and only appears once something differs, so the
     // footer never offers a no-op. Cancel/Close is the same button relabelled:
     // with pending edits, closing discards them.
     `<button class="btn" id="pf-close">Close</button>
-     <button class="btn primary hidden" id="pf-save">Save changes</button>`,
+     <button class="btn primary hidden" id="pf-save">Save Changes</button>`,
   );
   $("#pf-close", el).onclick = () => el.remove();
   $("#pf-avatar-btn", el).onclick = () => void changeAvatar(el);
