@@ -70,14 +70,20 @@ check("window controls sit flush at the far right", () => {
   assert.equal(bar.lastElementChild, controls, "controls are the last element");
 });
 
-check("theme and WebUI buttons are grouped together at the trailing edge", () => {
-  const group = document.querySelector(".topbar-actions");
-  assert.ok(group, ".topbar-actions group exists");
-  assert.ok(group.querySelector("#theme-btn"), "theme button is in the group");
-  assert.ok(group.querySelector("#webui-btn"), "WebUI button is in the group");
-  assert.equal(window.getComputedStyle(group).marginLeft, "auto", "group is pushed right");
-  const gap = px(group, "gap");
+check("theme and WebUI buttons hug the window controls", () => {
+  const bar = document.querySelector(".topbar");
+  const quick = document.querySelector(".topbar-quick");
+  assert.ok(quick, ".topbar-quick group exists");
+  assert.ok(quick.querySelector("#theme-btn"), "theme button is in the quick group");
+  assert.ok(quick.querySelector("#webui-btn"), "WebUI button is in the quick group");
+  const gap = px(quick, "gap");
   assert.ok(gap > 0 && gap <= 8, `buttons sit close together (gap ${gap}px)`);
+  // The quick group is the last element before the window controls.
+  const controls = document.querySelector(".window-controls");
+  if (controls) {
+    assert.equal(controls.previousElementSibling, quick, "quick group sits directly before the window controls");
+    assert.equal(bar.lastElementChild, controls, "controls remain the last element");
+  }
 });
 
 check("tab-bar actions align with the content edge", () => {

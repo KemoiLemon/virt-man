@@ -307,9 +307,11 @@ setHtml(app, `
       <span class="brand">virt-<span>man</span></span>
       <span class="host">${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
       <span class="topbar-actions">
+        ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
+      </span>
+      <span class="topbar-quick">
         <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
         <button class="btn" id="webui-btn">${ic.webui()} Connect to WebUI</button>
-        ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
       </span>
       ${isTauri() ? `<span class="window-controls">
         <button class="win-btn" id="win-min" title="Minimise">${ic.min()}</button>

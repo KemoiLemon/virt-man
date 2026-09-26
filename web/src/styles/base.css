@@ -117,6 +117,11 @@ body {
 }
 /* Without window controls (browser build) the actions still need a gutter. */
 .topbar > .topbar-actions:last-child { padding-right: 14px; }
+/* Theme + Connect-to-WebUI hug the window controls; the 16px flex gap plus
+   this negative margin leaves a ~6px breathing room before the first
+   win-btn's divider. */
+.topbar-quick { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; margin-right: -10px; }
+.topbar > .topbar-quick:last-child { margin-right: 0; padding-right: 14px; }
 .brand { font-weight: 700; letter-spacing: 2px; font-size: 15px; }
 .brand span { color: var(--accent); }
 .host { color: var(--dim); font-size: 11px; flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
