@@ -1089,6 +1089,9 @@ async function renderVmBody(vm: string) {
         toast(`${PRESETS[consolePreset].label} preset applied`);
       };
       presetSel.disabled = !con.supports.preset;
+      if (!con.supports.preset) {
+        presetSel.title = `${con.kind.toUpperCase()} negotiates its own encoding`;
+      }
 
       $("#con-paste").onclick = async () => {
         try {
@@ -1119,10 +1122,27 @@ async function renderVmBody(vm: string) {
           toast("Host clipboard write was blocked", "bad");
         }
       };
-      for (const id of ["#con-paste", "#con-type", "#con-copy"]) {
+      // Disable only what this backend genuinely cannot do, and say why —
+      // a silently greyed-out toolbar looks broken. SPICE has no clipboard
+      // path in spice-html5, but typing (plain key events) still works.
+      for (const id of ["#con-paste", "#con-copy"]) {
         const b = $(id);
-        if (b) b.disabled = !con.supports.clipboard;
+        if (!b) continue;
+        b.disabled = !con.supports.clipboard;
+        if (!con.supports.clipboard) {
+          b.title = "SPICE clipboard needs the guest agent, which spice-html5 does not implement — use Type instead";
+        }
       }
+      const typeBtn = $("#con-type");
+      if (typeBtn) typeBtn.disabled = !con.supports.type;
+
+      const notes: string[] = [];
+      if (con.supports.preset) notes.push(PRESETS[consolePreset].hint);
+      else notes.push(`${con.kind.toUpperCase()} negotiates its own encoding, so presets do not apply.`);
+      if (!con.supports.clipboard) notes.push("Clipboard is unavailable over SPICE; Type sends key events instead.");
+      const hintEl = $("#con-hint");
+      if (hintEl) hintEl.textContent = notes.join(" ");
+
       $("#con-cad").onclick = () => con.sendCtrlAltDel();
 
       // Re-fit when the pane resizes, so the guest stays centred.

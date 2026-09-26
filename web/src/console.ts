@@ -51,8 +51,8 @@ export interface ConsoleHandle {
   refit: () => void;
   sendCtrlAltDel: () => void;
   kind: "vnc" | "spice";
-  /** Whether the backend supports clipboard/zoom controls. */
-  supports: { clipboard: boolean; zoom: boolean; preset: boolean };
+  /** Which controls this backend can actually honour. */
+  supports: { clipboard: boolean; zoom: boolean; preset: boolean; type: boolean };
 }
 
 let active: ConsoleHandle | null = null;
@@ -143,7 +143,7 @@ async function attachVnc(
 
     const handle: ConsoleHandle = {
       kind: "vnc",
-      supports: { clipboard: true, zoom: true, preset: true },
+      supports: { clipboard: true, zoom: true, preset: true, type: true },
       stop: () => {
         try {
           rfb.disconnect();
@@ -189,6 +189,58 @@ async function typeText(rfb: any, text: string): Promise<void> {
   }
 }
 
+/**
+ * Map a character to a `KeyboardEvent.code`, which is what spice-html5's
+ * key handler translates into a scancode. Only the unshifted ASCII range is
+ * covered; anything else is skipped rather than sent as the wrong key.
+ */
+function spiceCodeFor(ch: string): { code: string; shift: boolean } | null {
+  if (ch >= "a" && ch <= "z") return { code: `Key${ch.toUpperCase()}`, shift: false };
+  if (ch >= "A" && ch <= "Z") return { code: `Key${ch}`, shift: true };
+  if (ch >= "0" && ch <= "9") return { code: `Digit${ch}`, shift: false };
+  const plain: Record<string, string> = {
+    " ": "Space", "\n": "Enter", "\r": "Enter", "\t": "Tab",
+    "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight",
+    "\\": "Backslash", ";": "Semicolon", "'": "Quote", ",": "Comma",
+    ".": "Period", "/": "Slash", "`": "Backquote",
+  };
+  if (plain[ch]) return { code: plain[ch], shift: false };
+  const shifted: Record<string, string> = {
+    "!": "Digit1", "@": "Digit2", "#": "Digit3", "$": "Digit4", "%": "Digit5",
+    "^": "Digit6", "&": "Digit7", "*": "Digit8", "(": "Digit9", ")": "Digit0",
+    "_": "Minus", "+": "Equal", "{": "BracketLeft", "}": "BracketRight",
+    "|": "Backslash", ":": "Semicolon", '"': "Quote", "<": "Comma",
+    ">": "Period", "?": "Slash", "~": "Backquote",
+  };
+  if (shifted[ch]) return { code: shifted[ch], shift: true };
+  return null;
+}
+
+/**
+ * Type text into a SPICE guest.
+ *
+ * spice-html5 builds its scancode from a real `KeyboardEvent.code`, so
+ * synthetic events through its own handler are more reliable than
+ * hand-rolling the scancode table.
+ */
+async function typeSpiceText(text: string): Promise<void> {
+  const target = document.getElementById("spice-screen") ?? document.body;
+  for (const ch of text) {
+    const mapped = spiceCodeFor(ch);
+    if (!mapped) continue;
+    const init: KeyboardEventInit = {
+      code: mapped.code,
+      key: ch,
+      shiftKey: mapped.shift,
+      bubbles: true,
+      cancelable: true,
+    };
+    target.dispatchEvent(new KeyboardEvent("keydown", init));
+    target.dispatchEvent(new KeyboardEvent("keyup", init));
+    await new Promise((r) => setTimeout(r, 8));
+  }
+}
+
 async function attachSpice(
   stage: HTMLElement,
   wsUrl: string,
@@ -200,8 +252,10 @@ async function attachSpice(
     const screen = document.createElement("div");
     screen.id = "spice-screen";
     screen.className = "spice-screen";
-    screen.style.width = "100%";
-    screen.style.height = "100%";
+    // Do NOT force width/height here: spice-html5 sets this element's height
+    // to the guest's surface height when the primary surface arrives
+    // (display.js). Pinning it to 100% fights that and leaves the canvas
+    // mis-sized, which looks like a frozen display.
     stage.appendChild(screen);
 
     const sc = new (spice as any).SpiceMainConn({
@@ -213,30 +267,40 @@ async function attachSpice(
 
     let zoom = 0;
     const applyZoom = () => {
-      // spice-html5 renders into its own canvas; scale it locally.
+      // spice-html5 renders into a canvas sized to the guest surface. Scale
+      // it with a transform: object-fit does nothing for canvas content, and
+      // changing width/height would fight the library's own sizing.
       const canvas = screen.querySelector("canvas");
       if (!canvas) return;
+      canvas.style.transformOrigin = "center center";
       if (zoom === 0) {
-        canvas.style.transform = "";
-        canvas.style.maxWidth = "100%";
-        canvas.style.maxHeight = "100%";
-        canvas.style.objectFit = "contain";
+        // Fit: scale down to the stage, never up past 1:1 so a small guest
+        // stays crisp.
+        const box = stage.getBoundingClientRect();
+        const cw = canvas.width || canvas.clientWidth;
+        const ch = canvas.height || canvas.clientHeight;
+        if (!cw || !ch || !box.width || !box.height) return;
+        const factor = Math.min(1, box.width / cw, box.height / ch);
+        canvas.style.transform = factor < 1 ? `scale(${factor})` : "";
       } else {
-        canvas.style.maxWidth = "none";
-        canvas.style.maxHeight = "none";
-        canvas.style.transformOrigin = "center center";
         canvas.style.transform = `scale(${zoom})`;
       }
     };
-    // The canvas only exists once the first frame lands.
-    setTimeout(applyZoom, 400);
+    // The canvas only appears once the primary surface arrives, and it is
+    // replaced on a guest resolution change, so watch instead of guessing a
+    // delay. Re-fitting on every mutation also keeps zoom applied after the
+    // library swaps the canvas out.
+    const canvasWatcher = new MutationObserver(() => applyZoom());
+    canvasWatcher.observe(screen, { childList: true, subtree: true });
 
     const handle: ConsoleHandle = {
       kind: "spice",
-      // spice-html5's clipboard needs the vdagent; expose paste only, and
-      // no encoding knobs (SPICE negotiates its own).
-      supports: { clipboard: false, zoom: true, preset: false },
+      // spice-html5 defines the VD_AGENT_CLIPBOARD constants but implements
+      // no clipboard path, and SPICE negotiates its own encoding, so neither
+      // control applies here. Typing still works: it is just key events.
+      supports: { clipboard: false, zoom: true, preset: false, type: true },
       stop: () => {
+        canvasWatcher.disconnect();
         try {
           sc.stop();
         } catch {
@@ -245,7 +309,8 @@ async function attachSpice(
       },
       onGuestClipboard: () => {},
       pasteToGuest: () => {},
-      typeToGuest: async () => {},
+      // Typing is plain key events, which SPICE handles like any other input.
+      typeToGuest: (text) => typeSpiceText(text),
       setPreset: () => {},
       setZoom: (factor) => {
         zoom = factor;
@@ -255,7 +320,9 @@ async function attachSpice(
       refit: applyZoom,
       sendCtrlAltDel: () => {
         try {
-          (spice as any).sendCtrlAltDel(sc);
+          // Takes no argument: it acts on spice-html5's own module-global
+          // connection, so passing `sc` here was simply ignored.
+          (spice as any).sendCtrlAltDel();
         } catch {
           /* ignore */
         }

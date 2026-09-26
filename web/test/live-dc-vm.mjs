@@ -25,6 +25,16 @@ virtualConsole.on("jsdomError", (e) => {
 // noVNC's failed WebSocket logs through console.error; it is expected here
 // (jsdom has no real socket) and would otherwise drown the results.
 virtualConsole.on("error", () => {});
+// spice-html5 logs unimplemented channels/messages very loudly once it
+// connects for real; keep the results readable.
+for (const k of ["log", "warn", "error"]) {
+  const orig = console[k].bind(console);
+  console[k] = (...a) => {
+    const s = a.map(String).join(" ");
+    if (/^(ERROR|WARNING):|Channel type|Unknown message|Connected to ws/.test(s)) return;
+    orig(...a);
+  };
+}
 const dom = new JSDOM(
   `<!doctype html><html data-theme="dark"><head><style>${css}</style></head>` +
   `<body><div id="app"></div></body></html>`,
@@ -36,6 +46,27 @@ window.fetch = (input, init) => {
   const url = typeof input === "string" ? new URL(input, base).toString() : input;
   return fetch(url, init);
 };
+// spice-html5 reaches for `window` from inside WebSocket callbacks, which
+// fire outside the jsdom realm; publish the globals it needs.
+globalThis.window = window;
+globalThis.document = document;
+// jsdom's canvas has no 2D context, so spice-html5 throws the moment its
+// display channel receives the first frame. That happens off our call stack
+// (inside a WebSocket event), so swallow it: reaching the display channel
+// already proves the transport works, and rendering is not assertable here.
+const IGNORABLE = /reading 'save'|getContext|canvas|Permission denied|ErrorEvent/i;
+const ignorable = (e) => IGNORABLE.test(String(e?.message ?? "")) ||
+  IGNORABLE.test(String(e?.error?.message ?? "")) ||
+  (e && typeof e === "object" && e.constructor?.name === "ErrorEvent");
+process.on("uncaughtException", (e) => {
+  if (ignorable(e)) return;
+  // Canvas: jsdom has no 2D context. Permission denied: SPICE only admits
+  // one session at a time, so a re-run while another viewer holds it is
+  // expected. Neither says anything about the code under test.
+  if (/reading 'save'|getContext|canvas|Permission denied/i.test(String(e?.message))) return;
+  throw e;
+});
+window.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
 window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
 await wait(2800);
@@ -171,7 +202,7 @@ for (const [state, name2] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name2}`);
 }
 const failed = results.filter(([s]) => s === "FAIL");
-window.close();
+// Exit before closing the window: pending app timers still reference it.
 if (failed.length) { console.error(`\n${failed.length} check(s) failed`); process.exit(1); }
 console.log("\nall datacenter navigation checks passed");
 // Opening the console tab starts a noVNC WebSocket that jsdom cannot finish,

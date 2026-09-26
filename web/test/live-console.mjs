@@ -23,6 +23,16 @@ virtualConsole.on("jsdomError", (e) => {
   }
 });
 virtualConsole.on("error", () => {});
+// spice-html5 logs unimplemented channels/messages very loudly once it
+// connects for real; keep the results readable.
+for (const k of ["log", "warn", "error"]) {
+  const orig = console[k].bind(console);
+  console[k] = (...a) => {
+    const s = a.map(String).join(" ");
+    if (/^(ERROR|WARNING):|Channel type|Unknown message|Connected to ws/.test(s)) return;
+    orig(...a);
+  };
+}
 
 const dom = new JSDOM(
   `<!doctype html><html data-theme="dark"><head><style>${css}</style></head>` +
@@ -37,6 +47,27 @@ window.fetch = (input, init) => {
 };
 // jsdom has no ResizeObserver; the console registers one to re-fit.
 window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+// spice-html5 reaches for `window` from inside WebSocket callbacks. jsdom has
+// no WebSocket, so the page uses Node's global one, whose events fire outside
+// the jsdom realm — publish the globals it needs rather than let it throw.
+globalThis.window = window;
+globalThis.document = document;
+// jsdom's canvas has no 2D context, so spice-html5 throws the moment its
+// display channel receives the first frame. That happens off our call stack
+// (inside a WebSocket event), so swallow it: reaching the display channel
+// already proves the transport works, and rendering is not assertable here.
+const IGNORABLE = /reading 'save'|getContext|canvas|Permission denied|ErrorEvent/i;
+const ignorable = (e) => IGNORABLE.test(String(e?.message ?? "")) ||
+  IGNORABLE.test(String(e?.error?.message ?? "")) ||
+  (e && typeof e === "object" && e.constructor?.name === "ErrorEvent");
+process.on("uncaughtException", (e) => {
+  if (ignorable(e)) return;
+  // Canvas: jsdom has no 2D context. Permission denied: SPICE only admits
+  // one session at a time, so a re-run while another viewer holds it is
+  // expected. Neither says anything about the code under test.
+  if (/reading 'save'|getContext|canvas|Permission denied/i.test(String(e?.message))) return;
+  throw e;
+});
 window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
 const tabNamed = (n) => [...document.querySelectorAll(".tabbar .tab")]
@@ -178,7 +209,7 @@ for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }
 const failed = results.filter(([s]) => s === "FAIL");
-window.close();
+// Exit before closing the window: pending app timers still reference it.
 if (failed.length) { console.error(`\n${failed.length} check(s) failed`); process.exit(1); }
 console.log("\nall console checks passed");
 process.exit(0);

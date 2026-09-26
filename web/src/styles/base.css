@@ -364,6 +364,12 @@ table.grid tr:hover td { background: var(--hover); }
 /* noVNC wraps its canvas in a div; both must centre rather than stretch. */
 .console-stage > div { margin: auto; }
 .console-stage canvas { margin: auto; }
+/* spice-html5 ships its own .spice-screen rules (min-height 600px, a margin
+   and a grey background) and sets the element's height from the guest
+   surface. Neutralise the decoration but leave the height to the library. */
+.console-stage .spice-screen {
+  min-height: 0; margin: auto; padding: 0; background: transparent;
+}
 .console-msg {
   position: absolute; top: 50%; left: 50%;
   transform: translate(-50%, -50%);
