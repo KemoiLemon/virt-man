@@ -26,6 +26,7 @@ pub fn routes() -> Router {
         .route("/domains/{name}/reboot", post(reboot))
         .route("/domains/{name}/destroy", post(destroy))
         .route("/domains/{name}/reset", post(reset))
+        .route("/domains/{name}/rename", post(rename))
 }
 
 async fn list() -> Result<Json<Value>, ApiError> {
@@ -418,6 +419,76 @@ async fn reset(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     Ok(Json(v))
 }
 
+#[derive(serde::Deserialize)]
+struct RenameReq {
+    name: String,
+}
+
+/// Rename a domain. libvirt has no rename call, so this swaps the persistent
+/// definition: undefine the old name and define the same XML under a new
+/// `<name>`, keeping the UUID (and therefore disks, MACs and snapshot
+/// metadata) intact. The guest must be shut off — a running domain's
+/// definition is tied to the running process and cannot be renamed.
+async fn rename(
+    Path(name): Path<String>,
+    Json(req): Json<RenameReq>,
+) -> Result<Json<Value>, ApiError> {
+    let new_name = req.name.trim().to_string();
+    let v = with_conn(move |c| {
+        let d = Domain::lookup_by_name(c, &name)?;
+        if d.get_state()?.0 != virt::sys::VIR_DOMAIN_SHUTOFF {
+            return Err(format!("rename requires '{name}' to be shut off").into());
+        }
+        if new_name.is_empty() {
+            return Err("new name is empty".to_string().into());
+        }
+        if new_name == name {
+            // Nothing to do; report success so the caller can treat rename as
+            // idempotent rather than special-casing a same-name request.
+            return Ok(json!({"name": name, "renamed": false}));
+        }
+        // Validate before undefining: a bad name must not cost the domain.
+        if !new_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        {
+            return Err("name may only contain letters, digits, '-' '_' or '.'"
+                .to_string()
+                .into());
+        }
+        if Domain::lookup_by_name(c, &new_name).is_ok() {
+            return Err(format!("a domain named '{new_name}' already exists").into());
+        }
+
+        let xml = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?;
+        let Some(new_xml) = rename_xml(&xml, &new_name) else {
+            return Err("no <name> element in domain XML".to_string().into());
+        };
+
+        // Undefine first, then define the renamed XML: both definitions share
+        // one UUID, which libvirt will not let coexist. If the define fails,
+        // put the old definition back so a rename can never destroy the VM.
+        d.undefine_flags(0)?;
+        if let Err(e) = Domain::define_xml(c, &new_xml) {
+            let _ = Domain::define_xml(c, &xml); // rollback, best effort
+            return Err(format!("define renamed domain failed: {e}").into());
+        }
+        Ok(json!({"name": new_name, "renamed": true}))
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(v))
+}
+
+/// Swap the domain's `<name>` content, leaving every other byte — UUID,
+/// devices, disk paths — untouched.
+fn rename_xml(xml: &str, new_name: &str) -> Option<String> {
+    let start = xml.find("<name")?;
+    let open_end = start + xml[start..].find('>')?;
+    let close = xml[open_end..].find("</name>")? + open_end;
+    Some(format!("{}{}{}", &xml[..open_end + 1], new_name, &xml[close..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +596,34 @@ mod tests {
         );
         assert_eq!(out.matches("filterref").count(), 1);
         assert!(out.contains("allow-arp"));
+    }
+
+    #[test]
+    fn rename_swaps_only_the_name_content() {
+        let with_name = "<domain type='kvm'><name>old</name><uuid>abc</uuid><devices/></domain>";
+        let out = rename_xml(with_name, "new").expect("name element present");
+        assert!(out.contains("<name>new</name>"), "name swapped:\n{out}");
+        // Everything else must survive byte-for-byte: the UUID is what makes
+        // the renamed domain still the same VM to libvirt.
+        assert!(out.contains("<uuid>abc</uuid>"), "uuid kept:\n{out}");
+        assert!(out.contains("<domain type='kvm'>"), "attributes kept");
+        assert_eq!(out.matches("<name>").count(), 1, "no duplicated name element");
+    }
+
+    #[test]
+    fn rename_never_matches_neighbouring_name_prefixes() {
+        // <hostname> and <nvram> both contain "name" but are NOT the domain
+        // name element; a sloppy search would corrupt them.
+        let xml = "<domain><name>old</name><devices><hostname>x</hostname></devices></domain>";
+        let out = rename_xml(xml, "new").unwrap();
+        assert_eq!(out.matches("<name>").count(), 1);
+        assert!(out.contains("<hostname>x</hostname>"), "hostname untouched:\n{out}");
+        assert!(!out.contains("old"), "old name gone:\n{out}");
+    }
+
+    #[test]
+    fn rename_without_a_name_element_is_none() {
+        assert!(rename_xml("<domain><devices/></domain>", "x").is_none());
     }
 
     #[test]

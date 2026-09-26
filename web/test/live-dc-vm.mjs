@@ -146,6 +146,10 @@ check("clicking a guest in the Guests tab opens its VM view", () => {
   assert.ok(document.querySelector(".tree-row.tree-vm.sel"), "sidebar marks the guest selected");
 });
 
+check("the VM toolbar offers a rename action", () => {
+  assert.ok(document.querySelector("#vm-rename"), "rename button present");
+});
+
 // Back to Datacenter > Guests, then straight into a console.
 document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1000);

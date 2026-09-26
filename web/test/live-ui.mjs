@@ -354,6 +354,28 @@ await (async () => {
   body.remove();
 })();
 
+// ---- tayne command palette (Ctrl+K) --------------------------------------
+check("Ctrl+K opens the command palette", () => {
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+  assert.ok(document.querySelector(".tayne-back.open"), "palette visible");
+});
+
+check("the palette filters commands as you type", () => {
+  const input = document.querySelector(".tayne-input");
+  assert.ok(input, "palette input present");
+  assert.ok(document.querySelectorAll(".tayne-row").length > 0, "commands listed");
+  input.value = "theme";
+  input.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const rows = [...document.querySelectorAll(".tayne-row")];
+  assert.equal(rows.length, 1, "only the theme command matches");
+  assert.ok(rows[0].textContent.includes("Toggle theme"), "theme command shown");
+});
+
+check("Escape closes the palette", () => {
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.ok(!document.querySelector(".tayne-back.open"), "palette closed");
+});
+
 for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }

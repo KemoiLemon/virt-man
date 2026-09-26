@@ -1,6 +1,7 @@
 import { api } from "./api";
 import type { Connection, DomainSummary, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
 import { attachConsole, detachConsole, isTauri, tauriWindow } from "./console";
+import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
 import { ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
@@ -69,6 +70,124 @@ function toggleTheme() {
   document.documentElement.setAttribute("data-theme", next);
   localStorage.setItem("virt-man-theme", next);
 }
+
+// ------------------------------------------------------- command palette
+
+/// Build the command list for the current context. Called on every open so the
+/// palette always reflects live state (which server is selected, which guests
+/// exist) rather than a snapshot taken at boot.
+function openCommandPalette() {
+  const cmds: TayneCommand[] = [];
+  const add = (id: string, label: string, hint: string | undefined, run: () => void) =>
+    cmds.push({ id, label, hint, run });
+
+  add("nav-dc", "Go to Datacenter", "Servers, guests, users", () => {
+    leaveCurrentView();
+    selectedConn = null;
+    selectedVm = null;
+    dcTab = "servers";
+    renderTree();
+    renderDc();
+  });
+
+  for (const c of connections) {
+    add(`nav-server-${c.id}`, `Server — ${c.name}`, c.url, () => {
+      leaveCurrentView();
+      selectedConn = c.id;
+      selectedVm = null;
+      connTab = "vms";
+      renderTree();
+      void renderConn();
+    });
+    for (const v of treeVms[c.id] ?? []) {
+      add(`nav-vm-${c.id}-${v.name}`, `VM — ${v.name}`, c.name, () => {
+        leaveCurrentView();
+        selectedConn = c.id;
+        selectedVm = v.name;
+        vmTab = "summary";
+        renderTree();
+        void renderVm();
+      });
+    }
+  }
+
+  // Actions on the selected guest, when one is open.
+  if (selectedConn && selectedVm) {
+    const conn = selectedConn;
+    const vm = selectedVm;
+    const power = (id: string, label: string, path: string) =>
+      add(id, `${label} — ${vm}`, "Selected VM", async () => {
+        try {
+          await act(`/proxy/${conn}/domains/${encodeURIComponent(vm)}${path}`, "POST");
+        } catch {
+          return; // act already toasts the daemon's error
+        }
+        void renderVm();
+      });
+    power("vm-start", "Start", "/start");
+    power("vm-shutdown", "Shutdown", "/shutdown");
+    power("vm-reboot", "Reboot", "/reboot");
+    power("vm-destroy", "Force stop", "/destroy");
+    add("vm-console", `Open console — ${vm}`, "Selected VM", () => {
+      leaveCurrentView();
+      vmTab = "console";
+      renderTree();
+      void renderVm();
+    });
+    add("vm-hwedit", `Edit hardware — ${vm}`, "Selected VM", () => {
+      void openHardwareEditor({ vm });
+    });
+    add("vm-rename", `Rename — ${vm}`, "Selected VM", () => {
+      void renameVm(vm);
+    });
+    add("vm-delete", `Delete — ${vm}`, "Selected VM", () => {
+      void deleteVm(vm);
+    });
+  }
+
+  if (selectedConn && !selectedVm) {
+    add("create-vm", "Create VM", "On the selected server", () => openCreateVm());
+  }
+  add("add-server", "Add server", "Connect to a daemon", () => openConnectionDialog());
+  add(
+    "toggle-theme",
+    "Toggle theme",
+    document.documentElement.getAttribute("data-theme") === "dark" ? "dark → light" : "light → dark",
+    toggleTheme,
+  );
+  if (!authDisabled) add("logout", "Sign out", "End this session", () => void logout());
+
+  openTayne(cmds);
+}
+
+// ------------------------------------------------------------- global keys
+
+/// Ctrl+K opens the palette; Escape closes the palette, then the topmost
+/// modal (dispatched as a synthetic event so askText/askConfirm can resolve
+/// their promise). The guest owns the keyboard while the console is focused,
+/// so the palette stays out of the way there.
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+    // Only inside the real app: the login/setup screens have no commands to
+    // offer, and the guest owns the keyboard while the console is focused.
+    if (!user) return;
+    const active = document.activeElement as HTMLElement | null;
+    if (active?.closest?.(".console-stage")) return;
+    e.preventDefault();
+    if (tayneOpen()) closeTayne();
+    else openCommandPalette();
+    return;
+  }
+  if (e.key === "Escape") {
+    if (tayneOpen()) {
+      closeTayne();
+      return;
+    }
+    const modals = document.querySelectorAll(".modal-back.open");
+    const top = modals[modals.length - 1];
+    if (top) top.dispatchEvent(new Event("modal-escape", { bubbles: false }));
+  }
+});
 
 // ---------------------------------------------------------------- toast
 
@@ -798,6 +917,7 @@ setHtml(list, `<table class="grid">
               <button class="btn icon" data-stop="${esc(v.name)}" title="Shutdown" ${v.active ? "" : "disabled"}>${ic.stop()}</button>
               <button class="btn icon" data-console="${esc(v.name)}" title="Console">${ic.vm()}</button>
               <button class="btn icon" data-hwedit="${esc(v.name)}" title="Edit hardware">${ic.edit()}</button>
+              <button class="btn icon" data-rename="${esc(v.name)}" title="Rename">${ic.rename()}</button>
               <button class="btn danger icon" data-delvm="${esc(v.name)}" title="Delete">${ic.trash()}</button>
             </div>
           </td>
@@ -841,6 +961,12 @@ setHtml(list, `<table class="grid">
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
         void openHardwareEditor({ vm: (b as HTMLElement).dataset.hwedit! });
+      };
+    });
+    list.querySelectorAll("[data-rename]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        void renameVm((b as HTMLElement).dataset.rename!);
       };
     });
     list.querySelectorAll("[data-delvm]").forEach((b: Element) => {
@@ -969,6 +1095,7 @@ setHtml(content, `
         <button class="btn icon" id="vm-reboot" title="Reboot">${ic.reboot()}</button>
         <button class="btn icon" id="vm-destroy" title="Force stop">${ic.forceStop()}</button>
         <button class="btn icon" id="vm-hwedit" title="Edit hardware">${ic.edit()}</button>
+        <button class="btn icon" id="vm-rename" title="Rename">${ic.rename()}</button>
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
@@ -988,6 +1115,7 @@ setHtml(content, `
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(renderVm);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(renderVm);
   $("#vm-hwedit").onclick = () => void openHardwareEditor({ vm });
+  $("#vm-rename").onclick = () => void renameVm(vm);
   $("#vm-delete").onclick = () => deleteVm(vm);
   await renderVmBody(vm);
 }
@@ -1389,6 +1517,26 @@ async function deleteVm(name: string) {
   }
 }
 
+/// Rename a domain. libvirt can only rename shut-off persistent guests, so
+/// the daemon rejects a running one and the caller surfaces that reason.
+async function renameVm(name: string) {
+  if (!selectedConn) return;
+  const next = await askText("Rename VM", "New name", name, "alpine-worker");
+  if (!next || next === name) return;
+  try {
+    await api.post(`/proxy/${selectedConn}/domains/${encodeURIComponent(name)}/rename`, { name: next });
+    toast("Renamed");
+    // Every view keys off the old name, so reselect under the new one and
+    // refresh the tree cache.
+    if (selectedVm === name) selectedVm = next;
+    await refreshTreeVms();
+    if (selectedVm) renderVm();
+    else renderConn();
+  } catch (e) {
+    toast((e as Error).message, "bad");
+  }
+}
+
 async function deleteNetwork(name: string) {
   if (!selectedConn) return;
   if (!(await askConfirm("Delete network", `Delete network "${name}"?`, "Delete", true))) return;
@@ -1454,6 +1602,9 @@ setHtml(el, `
   document.body.appendChild(el);
   (el.querySelector(".x") as HTMLElement).onclick = () => el.remove();
   el.onclick = (e) => { if (e.target === el) el.remove(); };
+  // The global Escape handler dispatches this; askText/askConfirm add their
+  // own listener to resolve their promise, which also removes the element.
+  el.addEventListener("modal-escape", () => el.remove());
   return el;
 }
 
@@ -1480,6 +1631,7 @@ function askText(title: string, label: string, value = "", placeholder = ""): Pr
     $("#ask-cancel", el).onclick = () => finish(null);
     (el.querySelector(".x") as HTMLElement).onclick = () => finish(null);
     el.onclick = (e: Event) => { if (e.target === el) finish(null); };
+    el.addEventListener("modal-escape", () => finish(null));
     input.onkeydown = (e: KeyboardEvent) => {
       if (e.key === "Enter") finish(input.value);
       if (e.key === "Escape") finish(null);
@@ -1509,6 +1661,7 @@ function askConfirm(title: string, message: string, okLabel = "Confirm", danger 
     $("#ask-no", el).onclick = () => finish(false);
     (el.querySelector(".x") as HTMLElement).onclick = () => finish(false);
     el.onclick = (e: Event) => { if (e.target === el) finish(false); };
+    el.addEventListener("modal-escape", () => finish(false));
   });
 }
 

@@ -109,7 +109,10 @@ function openSelect(select: HTMLSelectElement, trigger: HTMLButtonElement) {
       e.preventDefault();
       opts[opts.length - 1]?.focus();
     } else if (e.key === "Escape") {
+      // One level at a time: Escape closes this popover, and must not also
+      // bubble up to dismiss an enclosing modal on the same press.
       e.preventDefault();
+      e.stopPropagation();
       closeSelect();
       trigger.focus();
     }

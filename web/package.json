@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vite build --ssr src/listbox.ts --outDir test/_build --logLevel error && vite build --ssr src/icons.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/stats.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/hardware.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/console.ts --outDir test/_build --logLevel error --emptyOutDir false && node --test test/*.test.mjs"
+    "test": "vite build --ssr src/listbox.ts --outDir test/_build --logLevel error && vite build --ssr src/icons.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/stats.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/hardware.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/console.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/tayne.ts --outDir test/_build --logLevel error --emptyOutDir false && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
