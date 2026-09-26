@@ -2,6 +2,7 @@ import { api } from "./api";
 import type { Connection, DomainSummary, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
 import { attachConsole, isTauri, tauriWindow } from "./console";
 import DOMPurify from "dompurify";
+import { ic } from "./icons";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { domainXml, esc, networkXml, poolXml, volumeXml } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
@@ -146,26 +147,26 @@ setHtml(app, `
     <div class="topbar">
       <span class="brand">virt-<span>man</span></span>
       <span class="host">${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
-      <button class="btn icon" id="theme-btn" title="Toggle theme">◐</button>
+      <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
       <button class="btn" id="webui-btn">Connect to webui</button>
       ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
       ${isTauri() ? `<span style="margin-left:auto;display:flex;gap:6px">
-        <button class="btn icon" id="win-min" title="Minimise">─</button>
-        <button class="btn icon" id="win-max" title="Maximise">□</button>
-        <button class="btn icon danger" id="win-close" title="Close">✕</button>
+        <button class="btn icon" id="win-min" title="Minimise">${ic.min()}</button>
+        <button class="btn icon" id="win-max" title="Maximise">${ic.max()}</button>
+        <button class="btn icon danger" id="win-close" title="Close">${ic.close()}</button>
       </span>` : ""}
     </div>
     <div class="layout">
       <div class="pane list-pane">
         <div class="tree" id="tree"></div>
-        <div class="side-profile" id="profile-btn"></div>
+        ${authDisabled ? "" : `<div class="side-profile" id="profile-btn"></div>`}
       </div>
       <div class="pane">
         <div class="detail" id="content"></div>
       </div>
     </div>
     <div class="tasks hidden" id="tasks">
-      <div class="tasks-head"><span>Task Log</span><button class="btn icon" id="tasks-close">✕</button></div>
+      <div class="tasks-head"><span>Task Log</span><button class="btn icon" id="tasks-close">${ic.close()}</button></div>
       <div class="tasks-body" id="tasks-body"></div>
     </div>`);
 
@@ -236,7 +237,7 @@ function renderTree() {
 setHtml(tree, `
     <div class="tree-row node ${selectedConn === null ? "sel" : ""}" id="dc-row">Datacenter</div>
     ${connRows}
-    <div class="tree-row node" id="add-conn-row" style="color:var(--accent)">＋ Add Server</div>`);
+    <div class="tree-row node" id="add-conn-row" style="color:var(--accent)">${ic.plus()} Add Server</div>`);
 
   $("#dc-row").onclick = () => {
     selectedConn = null;
@@ -259,13 +260,7 @@ setHtml(tree, `
 
 function renderProfileBtn() {
   const el = $("#profile-btn");
-  if (!el) return;
-  if (authDisabled) {
-    setHtml(el, `<div class="who"><b>local</b><span>desktop</span></div>`);
-    el.onclick = null;
-    return;
-  }
-  if (!user) return;
+  if (!el || !user) return;
   const avatar = user.avatar
     ? `<img src="/avatars/${encodeURIComponent(user.avatar)}" alt="">`
     : (user.nickname[0] ?? "u").toUpperCase();
@@ -296,7 +291,7 @@ function renderDc() {
              <td>${c.fingerprint ? c.fingerprint.slice(0, 17) + "…" : "—"}</td>
              <td>
                <button class="btn icon" data-test="${c.id}">test</button>
-               <button class="btn danger icon" data-del="${c.id}">✕</button>
+               <button class="btn danger icon" data-del="${c.id}">${ic.trash()}</button>
              </td>
            </tr>`).join("") || `<tr><td colspan="4" class="empty">No servers yet — add one.</td></tr>`}
        </table>`
@@ -330,7 +325,7 @@ setHtml(area, `<div class="section-title">Users</div>
         <tr><th>Username</th><th>Nickname</th><th>Role</th><th></th></tr>
         ${users.map((u) => `
           <tr><td>${esc(u.username)}</td><td>${esc(u.nickname)}</td><td>${esc(u.role)}</td>
-          <td><button class="btn danger icon" data-deluser="${u.id}">✕</button></td></tr>`).join("")}
+          <td><button class="btn danger icon" data-deluser="${u.id}">${ic.trash()}</button></td></tr>`).join("")}
       </table>
       <div class="actions"><button class="btn primary" id="add-user">Add user</button></div>
       <div class="section-title">API keys</div>
@@ -338,7 +333,7 @@ setHtml(area, `<div class="section-title">Users</div>
         <tr><th>Name</th><th>Prefix</th><th></th></tr>
         ${keys.map((k) => `
           <tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}…</td>
-          <td><button class="btn danger icon" data-delkey="${k.id}">✕</button></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No keys.</td></tr>`}
+          <td><button class="btn danger icon" data-delkey="${k.id}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No keys.</td></tr>`}
       </table>`);
     $("#add-user", area).onclick = () => openAddUser();
     area.querySelectorAll("[data-deluser]").forEach((b: Element) => {
@@ -447,8 +442,8 @@ setHtml(list, `<table class="grid">
           <td class="tname" style="cursor:pointer" data-vm="${esc(v.name)}">${esc(v.name)}</td>
           <td><span class="state ${v.active ? "on" : ""}">${esc(v.state)}</span></td>
           <td>
-            <button class="btn icon" data-start="${esc(v.name)}">▶</button>
-            <button class="btn icon" data-stop="${esc(v.name)}">■</button>
+            <button class="btn icon" data-start="${esc(v.name)}">${ic.start()}</button>
+            <button class="btn icon" data-stop="${esc(v.name)}">${ic.stop()}</button>
           </td>
         </tr>`).join("") || `<tr><td colspan="3" class="empty">No VMs.</td></tr>`}
     </table>`);
@@ -492,7 +487,7 @@ setHtml(list, `<table class="grid">
       ${nets.map((n) => `
         <tr><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
         <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td>
-        <td><button class="btn danger icon" data-delnet="${esc(n.name)}">✕</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
+        <td><button class="btn danger icon" data-delnet="${esc(n.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
     </table>`);
     list.querySelectorAll("[data-delnet]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => deleteNetwork((b as HTMLElement).dataset.delnet!);
@@ -511,14 +506,14 @@ async function loadPools() {
     if (!list) return;
 setHtml(list, pools.map((p) => `
       <div class="specs" style="margin-bottom:8px">
-        <div class="spec"><b>Pool</b><span>${esc(p.name)} ${p.active ? "●" : "○"}</span></div>
+        <div class="spec"><b>Pool</b><span>${esc(p.name)} <span class="state ${p.active ? "on" : ""}">${p.active ? ic.circleDot() : ic.circle()}</span></span></div>
         <div class="spec"><b>Capacity</b><span>${fmtBytes(p.capacity)}</span></div>
         <div class="spec"><b>Available</b><span>${fmtBytes(p.available)}</span></div>
       </div>
       <div class="actions" style="margin-bottom:12px">
         <button class="btn" data-vols="${esc(p.name)}">Volumes</button>
         <button class="btn" data-upload="${esc(p.name)}">Upload ISO</button>
-        <button class="btn danger icon" data-delpool="${esc(p.name)}">✕</button>
+        <button class="btn danger icon" data-delpool="${esc(p.name)}">${ic.trash()}</button>
       </div>
       <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`).join("") || `<div class="empty">No pools.</div>`);
     list.querySelectorAll("[data-vols]").forEach((b: Element) => {
@@ -546,7 +541,7 @@ setHtml(target, `<table class="grid">
       <tr><th>Volume</th><th>Size</th><th>Allocated</th><th></th></tr>
       ${vols.map((v) => `
         <tr><td>${esc(v.name)}</td><td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
-        <td><button class="btn danger icon" data-delvol="${esc(v.name)}">✕</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
+        <td><button class="btn danger icon" data-delvol="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
     </table>
     <div class="actions"><button class="btn" id="create-vol" data-pool="${esc(pool)}">New volume</button></div>`);
     target.querySelectorAll("[data-delvol]").forEach((b: Element) => {
@@ -729,7 +724,7 @@ function openModal(title: string, body: string, foot: string) {
   el.className = "modal-back open";
 setHtml(el, `
     <div class="modal">
-      <div class="modal-head"><span>${title}</span><button class="x">✕</button></div>
+      <div class="modal-head"><span>${title}</span><button class="x">${ic.close()}</button></div>
       <div class="modal-body">${body}</div>
       <div class="modal-foot">${foot}</div>
     </div>`);
@@ -1045,7 +1040,7 @@ function openProfile() {
   const refreshKeys = async () => {
     const keys = await api.get<import("./api").ApiKey[]>("/me/keys");
     const box = $("#pf-keys", el);
-setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done"></span><span class="task-msg">${esc(k.name)} · ${esc(k.prefix)}…</span><button class="btn danger icon" data-kid="${k.id}">✕</button></div>`).join("") || `<div class="empty">No keys.</div>`);
+setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done"></span><span class="task-msg">${esc(k.name)} · ${esc(k.prefix)}…</span><button class="btn danger icon" data-kid="${k.id}">${ic.trash()}</button></div>`).join("") || `<div class="empty">No keys.</div>`);
     box.querySelectorAll("[data-kid]").forEach((b: Element) => {
       (b as HTMLElement).onclick = async () => {
         await api.del(`/me/keys/${(b as HTMLElement).dataset.kid}`);
@@ -1079,7 +1074,7 @@ setHtml(box, tasks.map((t) => `
     <div class="task-row">
       <span class="task-dot ${t.status}"></span>
       <span><b>${esc(t.label)}</b><br><span class="task-msg">${esc(t.message)}</span></span>
-      <button class="btn icon" data-clear="${t.id}">✕</button>
+      <button class="btn icon" data-clear="${t.id}">${ic.close()}</button>
     </div>`).join(""));
   box.querySelectorAll("[data-clear]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => clearTask(+(b as HTMLElement).dataset.clear!);

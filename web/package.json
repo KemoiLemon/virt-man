@@ -12,7 +12,8 @@
     "@novnc/novnc": "^1.5.0",
     "@spice-project/spice-html5": "^0.2.1",
     "@tauri-apps/api": "^2",
-    "dompurify": "^3.4.16"
+    "dompurify": "^3.4.16",
+    "lucide": "^1.48.0"
   },
   "devDependencies": {
     "typescript": "~6.0.2",
