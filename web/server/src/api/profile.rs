@@ -19,34 +19,91 @@ pub fn routes(state: &AppState) -> Router<AppState> {
     // Protected profile routes, then the public avatar-serving route added
     // after the auth layer so it stays unauthenticated.
     Router::new()
-        .route("/me", axum::routing::put(update_nickname))
+        .route("/me", axum::routing::put(update_me))
+        .route("/me/password", post(change_password))
         .route("/me/avatar", post(upload_avatar))
         .layer(middleware::from_fn(auth::require_user(state.clone())))
         .route("/avatars/{file}", get(serve_avatar))
 }
 
 #[derive(Deserialize)]
-struct NicknameReq {
-    nickname: String,
+struct UpdateMe {
+    #[serde(default)]
+    nickname: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
 }
 
-async fn update_nickname(
+async fn update_me(
     State(state): State<AppState>,
     axum::extract::Extension(user): axum::extract::Extension<User>,
-    Json(req): Json<NicknameReq>,
+    Json(req): Json<UpdateMe>,
 ) -> Result<Json<Value>, ApiError> {
-    let nickname = req.nickname.trim().to_string();
-    if nickname.is_empty() {
-        return Err(ApiError::bad_request("nickname is required"));
-    }
     let mut store = state.write();
-    let Some(user) = store.users.iter_mut().find(|u| u.id == user.id) else {
+    let Some(idx) = store.users.iter().position(|u| u.id == user.id) else {
         return Err(ApiError::not_found("user"));
     };
-    user.nickname = nickname;
-    let user = user.clone();
+
+    if let Some(ref username) = req.username {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(ApiError::bad_request("username is required"));
+        }
+        if store
+            .users
+            .iter()
+            .any(|u| u.id != user.id && u.username == username)
+        {
+            return Err(ApiError::conflict("username already exists"));
+        }
+    }
+
+    let me = &mut store.users[idx];
+    if let Some(username) = req.username {
+        me.username = username.trim().to_string();
+    }
+    if let Some(nickname) = req.nickname {
+        let nickname = nickname.trim();
+        if nickname.is_empty() {
+            return Err(ApiError::bad_request("nickname is required"));
+        }
+        me.nickname = nickname.to_string();
+    }
+    let me = me.clone();
     store.save(&state.data_dir)?;
-    Ok(Json(auth::user_json(&user)))
+    Ok(Json(auth::user_json(&me)))
+}
+
+#[derive(Deserialize)]
+struct PasswordReq {
+    current: String,
+    new: String,
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
+    Json(req): Json<PasswordReq>,
+) -> Result<Json<Value>, ApiError> {
+    if req.new.len() < 8 {
+        return Err(ApiError::bad_request(
+            "password must be at least 8 characters",
+        ));
+    }
+    let mut store = state.write();
+    let Some(me) = store.users.iter_mut().find(|u| u.id == user.id) else {
+        return Err(ApiError::not_found("user"));
+    };
+    if !auth::verify_password(&req.current, &me.password_hash) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "current password is incorrect",
+        ));
+    }
+    me.password_hash = auth::hash_password(&req.new)?;
+    let me = me.clone();
+    store.save(&state.data_dir)?;
+    Ok(Json(auth::user_json(&me)))
 }
 
 /// Accept raw image bytes; `?ext=` selects the stored extension.

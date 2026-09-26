@@ -5,6 +5,7 @@
 import type { IconNode as LucideIconNode } from "lucide";
 import {
   Boxes,
+  Camera,
   ChevronDown,
   Circle,
   CircleDot,
@@ -17,7 +18,9 @@ import {
   FileCode,
   Globe,
   HardDrive,
+  KeyRound,
   LayoutDashboard,
+  Lock,
   MemoryStick,
   Minus,
   Monitor,
@@ -91,6 +94,11 @@ export function chevronSvg(size = 14): SVGSVGElement {
   return element(ChevronDown, size);
 }
 
+/** Close glyph for DOM-built modals that can't use the markup shorthand. */
+export function closeSvg(size = 14): SVGSVGElement {
+  return element(X, size);
+}
+
 // Shorthands used throughout the UI.
 export const ic = {
   theme: svg(SunMoon),
@@ -119,6 +127,9 @@ export const ic = {
   memory: svg(MemoryStick),
   users: svg(Users),
   edit: svg(Pencil),
+  key: svg(KeyRound),
+  lock: svg(Lock),
+  camera: svg(Camera),
   forceStop: svg(OctagonX),
   xml: svg(FileCode),
   options: svg(Settings),
