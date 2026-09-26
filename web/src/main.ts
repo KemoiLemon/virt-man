@@ -32,7 +32,7 @@ let selectedConn: string | null = null;
 let connTab: "vms" | "networks" | "storage" = "vms";
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "console" | "xml" = "summary";
-let dcTab: "servers" | "users" = "servers";
+let dcTab: "servers" | "guests" | "users" = "servers";
 let pollTimer: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
 /// without every render refetching.
@@ -287,12 +287,15 @@ function renderTree() {
       const running = vms.filter((v) => v.active).length;
       // Servers auto-expand: guests show as soon as they are known, without
       // requiring the server to be selected first.
+      // A guest row carries its owning connection: selecting it must switch
+      // servers too, otherwise the VM view has no connection to read from.
       const guestRows =
         vms.length
           ? vms
               .map(
                 (v) => `
-      <button class="tree-row tree-vm ${selectedVm === v.name ? "sel" : ""}" data-vm="${esc(v.name)}">
+      <button class="tree-row tree-vm ${selectedVm === v.name && selectedConn === c.id ? "sel" : ""}"
+        data-vm="${esc(v.name)}" data-vm-conn="${c.id}">
         <span class="tree-ic ${v.active ? "on" : ""}">${ic.vm()}</span>
         <span class="tree-label">${esc(v.name)}</span>
         <span class="tree-state ${v.active ? "on" : ""}">${esc(v.state)}</span>
@@ -334,11 +337,16 @@ function renderTree() {
     };
   });
   tree.querySelectorAll("[data-vm]").forEach((row: Element) => {
-    (row as HTMLElement).onclick = () => {
-      selectedVm = (row as HTMLElement).dataset.vm!;
+    const el = row as HTMLElement;
+    el.onclick = () => {
+      // Set the connection first: renderVm() bails out when selectedConn is
+      // null, which made guest clicks silently do nothing from the
+      // Datacenter view or a different server's branch.
+      selectedConn = el.dataset.vmConn!;
+      selectedVm = el.dataset.vm!;
       vmTab = "summary";
       renderTree();
-      renderVm();
+      void renderVm();
     };
   });
 }
@@ -397,6 +405,7 @@ function renderDc() {
   // Actions live on the tab bar itself, right-aligned after the tabs.
   const tabs = `<div class="tabbar">
       <button class="tab ${dcTab === "servers" ? "active" : ""}" data-dctab="servers">${ic.server(14)} Servers</button>
+      <button class="tab ${dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
       ${authDisabled ? "" : `<button class="tab ${dcTab === "users" ? "active" : ""}" data-dctab="users">${ic.users(14)} Users &amp; API keys</button>`}
       ${dcTab === "servers"
         ? `<div class="tabbar-actions"><button class="btn primary" id="dc-add">${ic.plus(14)} Add Server</button></div>`
@@ -405,7 +414,8 @@ function renderDc() {
   // Aggregate cards across every known server, from the tree's guest cache.
   const allVms = Object.values(treeVms).flat();
   const runningVms = allVms.filter((v) => v.active).length;
-  const cards = dcTab === "servers"
+  // Summary cards head both the Servers and Guests tabs.
+  const cards = dcTab !== "users"
     ? `<div class="cards">
         <div class="card">
           <span class="card-ic">${ic.server(20)}</span>
@@ -444,8 +454,9 @@ function renderDc() {
         </td>
       </tr>`).join("");
 
-  const body = dcTab === "servers"
-    ? `${cards}<div class="section-title">Servers</div>
+  let body: string;
+  if (dcTab === "servers") {
+    body = `${cards}<div class="section-title">Servers</div>
        <table class="grid">
          <tr><th>Name</th><th>URL</th><th>Cert</th><th class="col-actions"></th></tr>
          ${connections.map((c) => `
@@ -460,13 +471,16 @@ function renderDc() {
                </div>
              </td>
            </tr>`).join("") || `<tr><td colspan="4" class="empty">No servers yet — add one.</td></tr>`}
-       </table>
-       <div class="section-title" style="margin-top:18px">Guests</div>
+       </table>`;
+  } else if (dcTab === "guests") {
+    body = `${cards}<div class="section-title">Guests</div>
        <table class="grid">
          <tr><th>Name</th><th>Server</th><th>State</th><th class="col-actions"></th></tr>
          ${guestRows || `<tr><td colspan="4" class="empty">${connections.length ? "No guests on any server." : "Add a server to see its guests."}</td></tr>`}
-       </table>`
-    : `<div id="users-area">loading…</div>`;
+       </table>`;
+  } else {
+    body = `<div id="users-area">loading…</div>`;
+  }
 setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
 
   $("#dc-add")?.addEventListener("click", () => openConnectionDialog());

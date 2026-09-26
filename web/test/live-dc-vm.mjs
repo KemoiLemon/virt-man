@@ -46,10 +46,64 @@ const check = (name, fn) => {
   catch (e) { results.push(["FAIL", `${name} — ${e.message}`]); }
 };
 
-check("Datacenter lists guests, not just servers", () => {
-  const titles = [...document.querySelectorAll(".section-title")].map((s) => s.textContent.trim());
-  assert.ok(titles.includes("Servers"), `Servers section (${titles})`);
-  assert.ok(titles.includes("Guests"), `Guests section (${titles})`);
+// ---- the reported bug: selecting a guest in the SIDEBAR --------------------
+
+check("sidebar guest rows carry their owning connection", () => {
+  const guest = document.querySelector(".tree-row.tree-vm");
+  assert.ok(guest, "a guest row is rendered");
+  assert.ok(guest.dataset.vm, "row knows its VM name");
+  assert.ok(
+    guest.dataset.vmConn,
+    "row knows which server owns it — without this the VM view has no " +
+    "connection and the click silently does nothing",
+  );
+});
+
+await (async () => {
+  // Starting state is the Datacenter view, where selectedConn is null. This
+  // is exactly the case that used to fail.
+  const guest = document.querySelector(".tree-row.tree-vm");
+  const name = guest.dataset.vm;
+  guest.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1600);
+
+  check("clicking a sidebar guest from Datacenter opens that VM", () => {
+    const title = document.querySelector(".dtitle")?.textContent.trim();
+    assert.equal(title, name, `VM view opened for ${name} (title: ${title})`);
+    const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
+    assert.deepEqual(tabs, ["Summary", "Hardware", "Console", "XML"], "VM tabs render");
+  });
+
+  check("the sidebar marks that guest selected", () => {
+    const sel = document.querySelector(".tree-row.tree-vm.sel");
+    assert.ok(sel, "a guest row carries .sel");
+    assert.equal(sel.dataset.vm, name, "the clicked guest is the selected one");
+  });
+})();
+
+// Back to the Datacenter for the tab checks.
+document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1200);
+
+// ---- Guests get their own tab ---------------------------------------------
+
+check("Datacenter has a dedicated Guests tab", () => {
+  const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
+  assert.ok(tabs.includes("Servers"), `Servers tab (${tabs})`);
+  assert.ok(tabs.includes("Guests"), `Guests tab (${tabs})`);
+  // The servers tab must no longer carry the guests table.
+  assert.equal(document.querySelectorAll("[data-open-vm]").length, 0,
+    "guests are not listed on the Servers tab");
+});
+
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "Guests")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(900);
+
+check("Guests tab lists every guest", () => {
+  const active = document.querySelector(".tabbar .tab.active")?.textContent.trim();
+  assert.equal(active, "Guests", "Guests tab is active");
   const rows = [...document.querySelectorAll("[data-open-vm]")];
   assert.ok(rows.length > 0, `${rows.length} guest row(s) listed`);
   results.push(["info", `guests listed: ${rows.map((r) => r.textContent.trim()).join(", ")}`]);
@@ -69,13 +123,13 @@ check("guest rows carry quick actions", () => {
   }
 });
 
-// The actual bug: clicking a guest name must open that VM.
+// Clicking a guest name in the table must open that VM.
 const name = document.querySelector("[data-open-vm]").dataset.openVm;
 document.querySelector("[data-open-vm]")
   .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1600);
 
-check("clicking a guest opens its VM view", () => {
+check("clicking a guest in the Guests tab opens its VM view", () => {
   const title = document.querySelector(".dtitle")?.textContent.trim();
   assert.equal(title, name, `VM view for ${name} is open (title: ${title})`);
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
@@ -83,9 +137,13 @@ check("clicking a guest opens its VM view", () => {
   assert.ok(document.querySelector(".tree-row.tree-vm.sel"), "sidebar marks the guest selected");
 });
 
-// Back to Datacenter, then straight into a console.
+// Back to Datacenter > Guests, then straight into a console.
 document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(1200);
+await wait(1000);
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "Guests")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(800);
 document.querySelector("[data-dc-console]")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1600);
@@ -95,7 +153,7 @@ check("console action jumps straight to the console tab", () => {
   assert.equal(active, "Console", `console tab active (got ${active})`);
 });
 
-// Server rows should still be clickable too.
+// Server rows should still be clickable too (Servers tab).
 document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1200);
 check("server rows are selectable from the table", () => {
