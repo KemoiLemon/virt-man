@@ -15,6 +15,7 @@ pub fn routes() -> Router {
         .route("/domains/{name}", get(get_one).delete(delete))
         .route("/domains/{name}/xml", get(get_xml).put(put_xml))
         .route("/domains/{name}/state", get(get_state))
+        .route("/domains/{name}/stats", get(get_stats))
         .route("/domains/{name}/graphics", get(get_graphics))
         .route("/domains/{name}/start", post(start))
         .route("/domains/{name}/shutdown", post(shutdown))
@@ -171,6 +172,58 @@ async fn get_state(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
         let d = Domain::lookup_by_name(c, &name)?;
         let (state, reason) = d.get_state()?;
         Ok(json!({"name": d.get_name().unwrap_or_default(), "state": domain_state_name(state), "reason": reason}))
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(v))
+}
+
+/// Point-in-time CPU/memory sample for one domain, plus the host node info
+/// the caller needs to turn `cpu_time` into a percentage.
+///
+/// `cpu_time` is a monotonic nanosecond counter, so a single reading cannot
+/// express "CPU %" — the client keeps the previous sample and divides the
+/// delta by elapsed wall time and the vCPU count.
+async fn get_stats(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    let v = with_conn(move |c| {
+        let d = Domain::lookup_by_name(c, &name)?;
+        let info = d.get_info()?;
+        let node = c.get_node_info()?;
+        // Balloon stats are only available for running guests with a working
+        // agent/balloon driver; absence is normal, so never fail on it.
+        let mut rss_kib: Option<u64> = None;
+        let mut usable_kib: Option<u64> = None;
+        if let Ok(stats) = d.memory_stats(0) {
+            for s in stats {
+                match s.tag {
+                    // VIR_DOMAIN_MEMORY_STAT_RSS
+                    7 => rss_kib = Some(s.val),
+                    // VIR_DOMAIN_MEMORY_STAT_USABLE
+                    8 => usable_kib = Some(s.val),
+                    _ => {}
+                }
+            }
+        }
+        Ok(json!({
+            "name": d.get_name().unwrap_or_default(),
+            "state": domain_state_name(info.state),
+            "cpu_time_ns": info.cpu_time,
+            "vcpus": info.nr_virt_cpu,
+            "memory_kib": info.memory,
+            "max_memory_kib": info.max_mem,
+            "rss_kib": rss_kib,
+            "usable_kib": usable_kib,
+            "host": {
+                "cpus": node.cpus,
+                "memory_kib": node.memory,
+                "mhz": node.mhz,
+                "model": node.model,
+            },
+            "sampled_at_ms": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }))
     })
     .await
     .map_err(ApiError::internal)?;
