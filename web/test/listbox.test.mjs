@@ -133,6 +133,16 @@ test("Escape closes an open popover", () => {
   assert.equal(document.querySelector(".select-popover").hidden, true);
 });
 
+test("closing before anything opened creates no popover", () => {
+  // A click or Escape on a page with no selects (the login page) used to mint
+  // an empty .select-popover node via the global dismiss handlers.
+  document.body.innerHTML = "";
+  listbox.closeSelect();
+  document.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(document.querySelector(".select-popover"), null, "no popover node is created");
+});
+
 test("keyboard opens the popover from the trigger", () => {
   makeSelect([["a", "A"], ["b", "B"]], "a");
   listbox.enhanceSelects(document);

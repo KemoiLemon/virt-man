@@ -73,3 +73,12 @@ test("icons honour a requested size without restyling the svg", () => {
   assert.match(icons.ic.close(20), /width:20px;height:20px/);
   assert.match(icons.ic.close(), /width:16px;height:16px/, "defaults to 16px");
 });
+
+// The listbox popover is display:flex, which overrides the UA's [hidden]
+// display:none (author styles beat UA styles). Without this rule a parked
+// popover stays laid out and shows as a stray box — most visibly on screens
+// with no selects at all, like the login page.
+test("the hidden attribute beats layout display", () => {
+  assert.match(flat(), /\[hidden\]\s*\{\s*display:\s*none\s*!important/,
+    "[hidden] { display: none !important } exists in the shipped CSS");
+});

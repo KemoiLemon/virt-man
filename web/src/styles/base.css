@@ -77,6 +77,10 @@ body {
 }
 #app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .hidden { display: none !important; }
+/* The `hidden` attribute must beat layout display (the listbox popover is
+   display:flex), or a parked popover still lays out and shows as a stray box.
+   Same rule as vm-man's console.css. */
+[hidden] { display: none !important; }
 
 /* ------------------------------------------------------------------ icons
    One rule styles every Lucide icon: the pack ships path data only, so the

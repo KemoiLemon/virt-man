@@ -47,9 +47,11 @@ export function syncSelects(root: ParentNode = document) {
 }
 
 export function closeSelect() {
-  const p = getPopover();
-  p.hidden = true;
-  p.textContent = "";
+  // Do not lazily create the popover just to close it: every stray click (the
+  // login page included) would otherwise mint an empty .select-popover node.
+  if (!popover) return;
+  popover.hidden = true;
+  popover.textContent = "";
   openTrigger?.classList.remove("open");
   openTrigger = null;
 }
