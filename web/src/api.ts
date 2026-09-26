@@ -45,13 +45,23 @@ export const api = {
 
 // ---------------------------------------------------------------- types
 
+export type Permission = "read" | "write" | "none";
+
 export interface User {
   id: string;
+  /// Role name, resolved against the stored roles. Custom roles are allowed,
+  /// so this is a plain string rather than the old three-value union.
+  role: string;
   username: string;
-  role: "admin" | "operator" | "viewer";
   nickname: string;
   avatar: string | null;
-  scopes: Record<string, "read" | "write" | "none">;
+  scopes: Record<string, Permission>;
+}
+
+export interface RoleDef {
+  name: string;
+  builtin: boolean;
+  scopes: Record<string, Permission>;
 }
 
 export interface Connection {
@@ -67,6 +77,8 @@ export interface ApiKey {
   id: string;
   name: string;
   prefix: string;
+  user_id?: string;
+  scopes?: Record<string, Permission>;
   key?: string;
 }
 

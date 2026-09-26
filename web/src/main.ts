@@ -1,6 +1,6 @@
 import { openCropDialog } from "./crop";
 import { api } from "./api";
-import type { Connection, DomainSummary, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
+import type { Connection, DomainSummary, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
 import { attachConsole, detachConsole, isTauri, tauriWindow } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -36,7 +36,12 @@ let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
 let dcTab: "servers" | "guests" = "servers";
 /// Which section of the admin panel modal is showing.
-let adminTab: "users" | "keys" = "users";
+let adminTab: "users" | "roles" | "keys" = "users";
+/// Scope vocabulary and roles, fetched with the admin panel. The backend is
+/// the source of truth for scope names, so the editor can never offer one
+/// that nothing enforces.
+let adminScopes: string[] = [];
+let adminRoles: RoleDef[] = [];
 let pollTimer: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
 /// without every render refetching.
@@ -718,8 +723,9 @@ function openAdmin() {
   if (!canAdmin()) return;
   const el = openModal(
     "Admin panel",
-    `<div class="tabbar">
-       <button class="tab" data-admintab="users">${ic.users(14)} Users &amp; permissions</button>
+     `<div class="tabbar">
+       <button class="tab" data-admintab="users">${ic.users(14)} Users</button>
+       <button class="tab" data-admintab="roles">${ic.admin(14)} Roles</button>
        <button class="tab" data-admintab="keys">${ic.key(14)} API keys</button>
      </div>
      <div id="admin-area">loading…</div>`,
@@ -742,23 +748,97 @@ function openAdmin() {
   paint();
 }
 
+/// One <select> of permission choices. `current` of "" means inherit, which
+/// the caller only offers where inheriting is meaningful.
+function permSelect(attr: string, name: string, current: string, inheritLabel?: string): string {
+  const opt = (v: string, label: string) =>
+    `<option value="${v}" ${v === current ? "selected" : ""}>${esc(label)}</option>`;
+  return `<select ${attr}="${esc(name)}">
+    ${inheritLabel ? opt("", inheritLabel) : ""}
+    ${opt("write", "write")}${opt("read", "read")}${opt("none", "none")}
+  </select>`;
+}
+
+/// Short permission marker for the roles overview table.
+function permMark(p: Permission | undefined): string {
+  if (p === "write") return `<span class="perm w">W</span>`;
+  if (p === "read") return `<span class="perm r">R</span>`;
+  return `<span class="perm n">—</span>`;
+}
+
 async function loadAdmin(root: Element) {
   const area = $("#admin-area", root);
   if (!area) return;
   try {
+    // Roles and the scope vocabulary drive both the users and roles tabs.
+    const meta = await api.get<{ roles: RoleDef[]; scopes: string[] }>("/roles");
+    adminRoles = meta.roles;
+    adminScopes = meta.scopes;
+
     if (adminTab === "keys") {
-      const keys = await api.get<import("./api").ApiKey[]>("/keys");
-setHtml(area, `<div class="hw-note">Keys issued by any user. Revoking one takes effect immediately.</div>
+      const [keys, users] = await Promise.all([
+        api.get<import("./api").ApiKey[]>("/keys"),
+        api.get<User[]>("/users"),
+      ]);
+      const owner = (id?: string) => users.find((u) => u.id === id)?.username ?? "—";
+setHtml(area, `<div class="hw-note">A key's permissions are capped by its owner's: it can narrow
+        their access but never exceed it. Revoking takes effect immediately.</div>
         <table class="grid">
-          <tr><th>Name</th><th>Prefix</th><th class="col-actions"></th></tr>
-          ${keys.map((k) => `
-            <tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}…</td>
-            <td class="col-actions"><button class="btn danger icon" data-delkey="${k.id}" title="Revoke">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No keys.</td></tr>`}
-        </table>`);
+          <tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Permissions</th><th class="col-actions"></th></tr>
+          ${keys.map((k) => {
+            const listed = Object.keys(k.scopes ?? {});
+            return `<tr>
+              <td>${esc(k.name)}</td>
+              <td>${esc(owner(k.user_id))}</td>
+              <td>${esc(k.prefix)}…</td>
+              <td>${listed.length
+                ? listed.map((s) => `<span class="perm-pair">${esc(s)}${permMark(k.scopes?.[s])}</span>`).join("")
+                : `<span class="dim-note">inherits owner</span>`}</td>
+              <td class="col-actions"><button class="btn danger icon" data-delkey="${k.id}" title="Revoke">${ic.trash()}</button></td>
+            </tr>`;
+          }).join("") || `<tr><td colspan="5" class="empty">No keys.</td></tr>`}
+        </table>
+        <div class="actions"><button class="btn primary" id="add-key">${ic.plus(14)} New API key</button></div>`);
+      $("#add-key", area).onclick = () => openAddKey(users, root);
       area.querySelectorAll("[data-delkey]").forEach((b: Element) => {
         (b as HTMLElement).onclick = async () => {
           const id = (b as HTMLElement).dataset.delkey!;
           try { await api.del(`/keys/${id}`); toast("Key revoked"); void loadAdmin(root); }
+          catch (e) { toast((e as Error).message, "bad"); }
+        };
+      });
+      return;
+    }
+
+    if (adminTab === "roles") {
+setHtml(area, `<div class="hw-note">A role supplies the default permission for each scope. Built-in
+        roles can be retuned but not renamed or deleted.</div>
+        <table class="grid">
+          <tr><th>Role</th>${adminScopes.map((s) => `<th>${esc(s)}</th>`).join("")}<th class="col-actions"></th></tr>
+          ${adminRoles.map((r) => `
+            <tr>
+              <td class="tname">${esc(r.name)}${r.builtin ? ` <span class="badge">built-in</span>` : ""}</td>
+              ${adminScopes.map((s) => `<td>${permMark(r.scopes?.[s])}</td>`).join("")}
+              <td class="col-actions"><div class="row-actions">
+                <button class="btn icon" data-editrole="${esc(r.name)}" title="Edit permissions">${ic.edit()}</button>
+                ${r.builtin ? "" : `<button class="btn danger icon" data-delrole="${esc(r.name)}" title="Delete role">${ic.trash()}</button>`}
+              </div></td>
+            </tr>`).join("")}
+        </table>
+        <div class="actions"><button class="btn primary" id="add-role">${ic.plus(14)} New role</button></div>`);
+      $("#add-role", area).onclick = () => openEditRole(null, root);
+      area.querySelectorAll("[data-editrole]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = () => {
+          const name = (b as HTMLElement).dataset.editrole!;
+          const r = adminRoles.find((x) => x.name === name);
+          if (r) openEditRole(r, root);
+        };
+      });
+      area.querySelectorAll("[data-delrole]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = async () => {
+          const name = (b as HTMLElement).dataset.delrole!;
+          if (!await askConfirm("Delete role", `Delete the role "${name}"?`, "Delete", true)) return;
+          try { await api.del(`/roles/${encodeURIComponent(name)}`); toast("Role deleted"); void loadAdmin(root); }
           catch (e) { toast((e as Error).message, "bad"); }
         };
       });
@@ -772,7 +852,8 @@ setHtml(area, `<table class="grid">
           <tr>
             <td>${esc(u.username)}${u.id === user?.id ? ` <span class="badge">you</span>` : ""}</td>
             <td>${esc(u.nickname)}</td>
-            <td>${esc(u.role)}</td>
+            <td><span class="role-tag">${esc(u.role)}</span>${Object.keys(u.scopes ?? {}).length
+              ? ` <span class="badge">overrides</span>` : ""}</td>
             <td class="col-actions"><div class="row-actions">
               <button class="btn icon" data-edituser="${u.id}" title="Edit role and permissions">${ic.edit()}</button>
               <button class="btn danger icon" data-deluser="${u.id}" title="Delete user">${ic.trash()}</button>
@@ -802,9 +883,111 @@ setHtml(area, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
 
-/// Per-scope permission overrides. The backend reads these from user.scopes
-/// and falls back to the role, so "inherit" means "delete the override".
-const ADMIN_SCOPES = ["users", "settings", "connections", "domains"];
+/// Create or retune a role. `role` is null when adding a new one.
+function openEditRole(role: RoleDef | null, root: Element) {
+  const builtin = role?.builtin ?? false;
+  const el = openModal(
+    role ? `Role — ${esc(role.name)}` : "New role",
+    `<label class="field"><span>Name</span>
+       <input id="er-name" value="${esc(role?.name ?? "")}" placeholder="backup-operator" ${builtin ? "disabled" : ""}></label>
+     ${builtin ? `<div class="hw-note">Built-in roles cannot be renamed, but their permissions are yours to set.</div>` : ""}
+     <div class="section-title">Permissions</div>
+     <div class="grid2 perm-grid">
+       ${adminScopes.map((s) => `
+         <label class="field"><span>${esc(s)}</span>
+           ${permSelect("data-rolescope", s, role?.scopes?.[s] ?? "none")}</label>`).join("")}
+     </div>`,
+    `<button class="btn" id="er-cancel">Cancel</button>
+     <button class="btn primary" id="er-save">Save</button>`,
+  );
+  $("#er-cancel", el).onclick = () => el.remove();
+  $("#er-save", el).onclick = async () => {
+    const scopes: Record<string, string> = {};
+    el.querySelectorAll("[data-rolescope]").forEach((s: Element) => {
+      scopes[(s as HTMLElement).dataset.rolescope!] = (s as HTMLSelectElement).value;
+    });
+    const name = $("#er-name", el).value.trim();
+    if (!name) return toast("Role name is required", "bad");
+    try {
+      if (role) await api.put(`/roles/${encodeURIComponent(role.name)}`, { name, scopes });
+      else await api.post("/roles", { name, scopes });
+      toast(role ? "Role updated" : "Role created");
+      el.remove();
+      // Retuning a role can change your own effective permissions.
+      user = await api.get<User>("/auth/me");
+      if (!canAdmin()) {
+        renderApp();
+        return;
+      }
+      void loadAdmin(root);
+    } catch (e) { toast((e as Error).message, "bad"); }
+  };
+}
+
+/// Mint an API key for any user, with its own permission ceiling.
+function openAddKey(users: User[], root: Element) {
+  const el = openModal(
+    "New API key",
+    `<div class="grid2">
+       <label class="field"><span>Name</span><input id="nk-name" placeholder="ci-runner"></label>
+       <label class="field"><span>Owner</span><select id="nk-owner">
+         ${users.map((u) => `<option value="${u.id}" ${u.id === user?.id ? "selected" : ""}>${esc(u.username)}</option>`).join("")}
+       </select></label>
+     </div>
+     <div class="section-title">Permissions</div>
+     <div class="hw-note">Each scope is a ceiling: the key gets the weaker of this and the
+       owner's own permission, so it can never outrank them.</div>
+     <div class="grid2 perm-grid">
+       ${adminScopes.map((s) => `
+         <label class="field"><span>${esc(s)}</span>
+           ${permSelect("data-keyscope", s, "", "inherit owner")}</label>`).join("")}
+     </div>`,
+    `<button class="btn" id="nk-cancel">Cancel</button>
+     <button class="btn primary" id="nk-create">Create</button>`,
+  );
+  $("#nk-cancel", el).onclick = () => el.remove();
+  $("#nk-create", el).onclick = async () => {
+    const scopes: Record<string, string> = {};
+    el.querySelectorAll("[data-keyscope]").forEach((s: Element) => {
+      const v = (s as HTMLSelectElement).value;
+      if (v) scopes[(s as HTMLElement).dataset.keyscope!] = v;
+    });
+    const name = $("#nk-name", el).value.trim();
+    if (!name) return toast("Key name is required", "bad");
+    try {
+      const k = await api.post<import("./api").ApiKey>("/keys", {
+        name,
+        user_id: ($("#nk-owner", el) as HTMLSelectElement).value,
+        scopes,
+      });
+      el.remove();
+      // Shown once and never again, so give it its own dismissable dialog
+      // rather than a toast that disappears on a timer.
+      showSecret("API key created", k.key ?? "");
+      void loadAdmin(root);
+    } catch (e) { toast((e as Error).message, "bad"); }
+  };
+}
+
+/// Present a secret that the server will never show again.
+function showSecret(title: string, secret: string) {
+  const el = openModal(
+    title,
+    `<div class="hw-note">Copy this now — it is not stored and cannot be shown again.</div>
+     <code class="cmd secret-value" id="sv">${esc(secret)}</code>`,
+    `<button class="btn" id="sv-copy">${ic.copy(14)} Copy</button>
+     <button class="btn primary" id="sv-done">Done</button>`,
+  );
+  $("#sv-done", el).onclick = () => el.remove();
+  $("#sv-copy", el).onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(secret);
+      toast("Copied");
+    } catch {
+      toast("Could not copy — select the text instead", "bad");
+    }
+  };
+}
 
 function openEditUser(u: User, root: Element) {
   const el = openModal(
@@ -812,23 +995,18 @@ function openEditUser(u: User, root: Element) {
     `<div class="grid2">
        <label class="field"><span>Display name</span><input id="eu-nick" value="${esc(u.nickname)}"></label>
        <label class="field"><span>Role</span><select id="eu-role">
-         ${["viewer", "operator", "admin"].map((r) =>
-           `<option value="${r}" ${r === u.role ? "selected" : ""}>${r}</option>`).join("")}
+         ${adminRoles.map((r) =>
+           `<option value="${esc(r.name)}" ${r.name === u.role ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
        </select></label>
      </div>
      <label class="field"><span>Reset password (blank = leave unchanged)</span>
        <input id="eu-pass" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
      <div class="section-title">Permission overrides</div>
      <div class="hw-note">Each scope inherits from the role unless overridden here.</div>
-     <div class="grid2">
-       ${ADMIN_SCOPES.map((s) => `
+     <div class="grid2 perm-grid">
+       ${adminScopes.map((s) => `
          <label class="field"><span>${esc(s)}</span>
-           <select data-scope="${esc(s)}">
-             <option value="" ${u.scopes?.[s] ? "" : "selected"}>inherit from role</option>
-             <option value="write" ${u.scopes?.[s] === "write" ? "selected" : ""}>write</option>
-             <option value="read" ${u.scopes?.[s] === "read" ? "selected" : ""}>read</option>
-             <option value="none" ${u.scopes?.[s] === "none" ? "selected" : ""}>none</option>
-           </select></label>`).join("")}
+           ${permSelect("data-scope", s, u.scopes?.[s] ?? "", "inherit from role")}</label>`).join("")}
      </div>`,
     `<button class="btn" id="eu-cancel">Cancel</button>
      <button class="btn primary" id="eu-save">Save</button>`,
@@ -871,7 +1049,8 @@ function openAddUser(root: Element) {
       <label class="field"><span>Password (min 8)</span><input id="nu-pass" type="password" autocomplete="new-password"></label>
       <label class="field"><span>Display name</span><input id="nu-nick"></label>
       <label class="field"><span>Role</span><select id="nu-role">
-        <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
+        ${adminRoles.map((r) =>
+          `<option value="${esc(r.name)}" ${r.name === "viewer" ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
       </select></label>
     </div>`,
     `<button class="btn primary" id="nu-create">Create</button>`,

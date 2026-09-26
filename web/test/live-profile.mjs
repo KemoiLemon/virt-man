@@ -72,6 +72,7 @@ window.fetch = (input, init) => {
 window.eval(code);
 
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
+const px = (el, prop) => parseFloat(window.getComputedStyle(el)[prop]) || 0;
 const results = [];
 const check = (name, fn) => {
   try {
@@ -197,15 +198,107 @@ check("topbar order is theme, admin, sign out — all icon-only", () => {
 document.querySelector("#admin-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(900);
 
-check("admin panel opens with users and API key sections", () => {
+check("admin panel opens with Users, Roles and API keys", () => {
   const modal = document.querySelector(".modal-back.open");
   assert.ok(modal, "admin modal open");
-  const tabs = [...modal.querySelectorAll("[data-admintab]")].map((t) => t.dataset.admintab);
-  assert.deepEqual(tabs, ["users", "keys"], "users and keys tabs");
+  const tabs = [...modal.querySelectorAll("[data-admintab]")];
+  assert.deepEqual(tabs.map((t) => t.dataset.admintab), ["users", "roles", "keys"]);
+  // "Users & permissions" was renamed to just "Users".
+  assert.equal(tabs[0].textContent.trim(), "Users", "first tab is titled Users");
   assert.ok(modal.querySelector("#admin-area table.grid"), "user table rendered from the live API");
   assert.ok(modal.querySelector("#add-user"), "add user button");
   assert.ok(modal.querySelector("[data-edituser]"), "per-user edit (role + permissions)");
 });
+
+check("the add-user button is spaced away from the table above it", () => {
+  const actions = document.querySelector("#admin-area table.grid + .actions");
+  assert.ok(actions, "actions row follows the table");
+  const mt = px(actions, "marginTop");
+  assert.ok(mt >= 8, `table and its action row are separated (margin-top ${mt}px)`);
+});
+
+check("role choices are spaced apart in the picker", () => {
+  // The themed listbox popover renders the role options; a small gap keeps
+  // adjacent role names from reading as one block.
+  const pop = document.querySelector(".select-popover");
+  assert.ok(pop, "select popover exists in the DOM");
+  const gap = px(pop, "gap");
+  assert.ok(gap > 0 && gap <= 4, `options have a tiny gap (${gap}px)`);
+});
+
+// ---- Roles tab: create a custom role, then clean it up.
+
+document.querySelector('[data-admintab="roles"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(900);
+
+check("roles tab lists built-ins as a scope matrix", () => {
+  const rows = [...document.querySelectorAll("#admin-area table.grid tr")];
+  const names = rows.map((r) => r.querySelector(".tname")?.textContent?.trim()).filter(Boolean);
+  for (const want of ["admin", "operator", "viewer"]) {
+    assert.ok(names.some((n) => n.startsWith(want)), `${want} listed (${names})`);
+  }
+  // Header carries one column per enforced scope, from the backend.
+  const heads = [...document.querySelectorAll("#admin-area table.grid th")].map((h) => h.textContent.trim());
+  for (const scope of ["users", "vms", "networks", "storage", "settings", "connections"]) {
+    assert.ok(heads.includes(scope), `${scope} column present (${heads})`);
+  }
+  // The scope list must come from the server, so it cannot offer a scope that
+  // nothing enforces ("domains" used to be offered and silently ignored).
+  assert.ok(!heads.includes("domains"), "no unenforced 'domains' scope");
+  assert.ok(document.querySelector("#add-role"), "new role button");
+  // Built-ins are editable but not deletable.
+  const adminRow = [...document.querySelectorAll("#admin-area table.grid tr")]
+    .find((r) => r.querySelector(".tname")?.textContent?.trim().startsWith("admin"));
+  assert.ok(adminRow.querySelector("[data-editrole]"), "built-in role is editable");
+  assert.ok(!adminRow.querySelector("[data-delrole]"), "built-in role has no delete");
+});
+
+document.querySelector("#add-role").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(400);
+
+check("the role editor offers every enforced scope", () => {
+  const modal = [...document.querySelectorAll(".modal-back.open")].pop();
+  assert.ok(modal.querySelector("#er-name"), "name field");
+  const scopes = [...modal.querySelectorAll("[data-rolescope]")].map((s) => s.dataset.rolescope);
+  assert.deepEqual(scopes.sort(), ["connections", "networks", "settings", "storage", "users", "vms"].sort());
+});
+
+document.querySelector("#er-name").value = "probe-role";
+document.querySelector("#er-save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1200);
+
+const rolesAfter = await window.fetch("/roles").then((r) => r.json());
+check("creating a custom role persists it", () => {
+  assert.ok(rolesAfter.roles.some((r) => r.name === "probe-role"), "probe-role created");
+  const probe = rolesAfter.roles.find((r) => r.name === "probe-role");
+  assert.equal(probe.builtin, false, "custom role is not builtin");
+});
+
+const cleanup = await window.fetch("/roles/probe-role", { method: "DELETE" });
+check("a custom role can be deleted again", () => {
+  assert.equal(cleanup.status, 200, "probe-role removed");
+});
+
+// ---- API keys tab: create one with its own permissions.
+
+document.querySelector('[data-admintab="keys"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(900);
+
+check("keys tab can mint a key with its own permissions", () => {
+  assert.ok(document.querySelector("#add-key"), "new API key button in the admin panel");
+  document.querySelector("#add-key").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const modal = [...document.querySelectorAll(".modal-back.open")].pop();
+  assert.ok(modal.querySelector("#nk-name"), "key name field");
+  assert.ok(modal.querySelector("#nk-owner"), "owner picker");
+  const scopes = [...modal.querySelectorAll("[data-keyscope]")].map((s) => s.dataset.keyscope);
+  assert.deepEqual(scopes.sort(), ["connections", "networks", "settings", "storage", "users", "vms"].sort());
+  // Each scope must offer "inherit owner" plus the three levels.
+  const first = modal.querySelector("[data-keyscope]");
+  const vals = [...first.querySelectorAll("option")].map((o) => o.value);
+  assert.deepEqual(vals, ["", "write", "read", "none"], "inherit + write/read/none");
+});
+
+const fails = results.filter(([s]) => s === "FAIL");
 
 check("users no longer duplicated as a Datacenter tab", () => {
   assert.ok(!document.querySelector('[data-dctab="users"]'), "Datacenter has no Users tab");
@@ -250,7 +343,6 @@ if (LOW_USER && LOW_PASS) {
   results.push(["info", "set VM_LOW_USER/VM_LOW_PASS to also check the non-admin case"]);
 }
 
-const fails = results.filter(([s]) => s === "FAIL");
 for (const [s, msg] of results) {
   console.log(`${s === "pass" ? "✔" : s === "info" ? "·" : "✖"} ${msg}`);
 }

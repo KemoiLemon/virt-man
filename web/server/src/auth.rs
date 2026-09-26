@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::state::AppState;
-use crate::store::{sha256_hex, Role, User};
+use crate::store::{sha256_hex, User};
 
 pub const SESSION_COOKIE: &str = "virt-man-session";
 
@@ -55,13 +55,13 @@ fn api_key_user(state: &AppState, req: &Request) -> Option<User> {
         .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()))?;
     let hash = sha256_hex(key.as_bytes());
     let store = state.read();
-    let user_id = store
-        .api_keys
-        .iter()
-        .find(|k| k.hash == hash)?
-        .user_id
-        .clone();
-    store.user_by_id(&user_id).cloned()
+    let api_key = store.api_keys.iter().find(|k| k.hash == hash)?;
+    let mut user = store.user_by_id(&api_key.user_id).cloned()?;
+    // A key can only narrow its owner. Collapse the intersection into the
+    // user's own overrides so every downstream permission() call sees the
+    // capped values without knowing a key was involved.
+    user.scopes = store.key_effective_scopes(&user, api_key);
+    Some(user)
 }
 
 /// Synthetic user for loopback mode (no auth): full admin.
@@ -70,7 +70,7 @@ pub fn local_user() -> User {
         id: "local".into(),
         username: "local".into(),
         password_hash: String::new(),
-        role: Role::Admin,
+        role: "admin".into(),
         nickname: "local".into(),
         avatar: None,
         scopes: Default::default(),

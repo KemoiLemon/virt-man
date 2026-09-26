@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::ApiError;
 use crate::auth;
 use crate::state::AppState;
-use crate::store::{random_hex, Role, Scopes, User};
+use crate::store::{random_hex, Scopes, User};
 
 pub fn routes(state: &AppState) -> Router<AppState> {
     Router::new()
@@ -34,10 +34,14 @@ struct CreateUser {
     password: String,
     #[serde(default)]
     nickname: String,
-    #[serde(default)]
-    role: Role,
+    #[serde(default = "default_role")]
+    role: String,
     #[serde(default)]
     scopes: Scopes,
+}
+
+fn default_role() -> String {
+    "viewer".into()
 }
 
 async fn create(
@@ -54,6 +58,10 @@ async fn create(
     if store.user_by_username(&username).is_some() {
         return Err(ApiError::conflict("username already exists"));
     }
+    if store.role(&req.role).is_none() {
+        return Err(ApiError::bad_request(format!("no such role: {}", req.role)));
+    }
+    validate_scopes(&req.scopes)?;
     let user = User {
         id: random_hex(8),
         username,
@@ -81,7 +89,7 @@ struct UpdateUser {
     #[serde(default)]
     nickname: Option<String>,
     #[serde(default)]
-    role: Option<Role>,
+    role: Option<String>,
     #[serde(default)]
     scopes: Option<Scopes>,
 }
@@ -111,19 +119,23 @@ async fn update(
             return Err(ApiError::conflict("username already exists"));
         }
     }
-    if let Some(role) = req.role {
-        let last_admin = store.users[idx].id == actor.id
-            && store.users[idx].role == Role::Admin
-            && role != Role::Admin
-            && store.users.iter().filter(|u| u.role == Role::Admin).count() <= 1;
-        if last_admin {
-            return Err(ApiError::bad_request("cannot demote the last admin"));
+    if let Some(ref role) = req.role {
+        if store.role(role).is_none() {
+            return Err(ApiError::bad_request(format!("no such role: {role}")));
         }
     }
+    if let Some(ref scopes) = req.scopes {
+        validate_scopes(scopes)?;
+    }
 
-    let user = &mut store.users[idx];
+    // Build the updated user first, then refuse the change if it would leave
+    // the install with no administrator. Admin-ness is derived from the
+    // effective users:write permission, so a role change, a scope override or
+    // a retuned role can all cause it — checking the outcome catches every
+    // path instead of only self-demotion by role.
+    let mut updated = store.users[idx].clone();
     if let Some(username) = req.username {
-        user.username = username.trim().to_string();
+        updated.username = username.trim().to_string();
     }
     if let Some(password) = req.password {
         if password.len() < 8 {
@@ -131,24 +143,49 @@ async fn update(
                 "password must be at least 8 characters",
             ));
         }
-        user.password_hash = auth::hash_password(&password)?;
+        updated.password_hash = auth::hash_password(&password)?;
     }
     if let Some(nickname) = req.nickname {
-        user.nickname = if nickname.trim().is_empty() {
+        updated.nickname = if nickname.trim().is_empty() {
             "user".into()
         } else {
             nickname.trim().into()
         };
     }
     if let Some(role) = req.role {
-        user.role = role;
+        updated.role = role;
     }
     if let Some(scopes) = req.scopes {
-        user.scopes = scopes;
+        updated.scopes = scopes;
     }
-    let user = user.clone();
+
+    let was_admin = store.is_admin(&store.users[idx]);
+    let is_admin = store.is_admin(&updated);
+    if was_admin && !is_admin && store.admin_count() <= 1 {
+        return Err(ApiError::bad_request(
+            "cannot remove the last administrator",
+        ));
+    }
+    let _ = actor;
+
+    store.users[idx] = updated;
+    let user = store.users[idx].clone();
     store.save(&state.data_dir)?;
     Ok(Json(auth::user_json(&user)))
+}
+
+/// Reject scope names nothing enforces. Without this the UI could save an
+/// override that silently never applies (as "domains" did).
+pub fn validate_scopes(scopes: &Scopes) -> Result<(), ApiError> {
+    for name in scopes.keys() {
+        if !crate::store::SCOPES.contains(&name.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "unknown scope: {name} (valid: {})",
+                crate::store::SCOPES.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn remove(
@@ -163,12 +200,10 @@ async fn remove(
     let Some(pos) = store.users.iter().position(|u| u.id == id) else {
         return Err(ApiError::not_found("no such user"));
     };
-    let role = store.users[pos].role;
-    if role == Role::Admin {
-        let admins = store.users.iter().filter(|u| u.role == Role::Admin).count();
-        if admins <= 1 {
-            return Err(ApiError::bad_request("cannot delete the last admin"));
-        }
+    if store.is_admin(&store.users[pos]) && store.admin_count() <= 1 {
+        return Err(ApiError::bad_request(
+            "cannot delete the last administrator",
+        ));
     }
     store.users.remove(pos);
     store.api_keys.retain(|k| k.user_id != id);

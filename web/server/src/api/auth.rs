@@ -64,7 +64,7 @@ async fn setup(
         id: random_hex(8),
         username,
         password_hash: auth::hash_password(&password)?,
-        role: crate::store::Role::Admin,
+        role: "admin".into(),
         nickname: if req.nickname.trim().is_empty() {
             "admin".to_string()
         } else {
