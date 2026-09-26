@@ -23,6 +23,11 @@
 
 /* Table cells reuse the tree's state vocabulary: the VM/network grids show the
    same running/stopped labels and clickable names. */
+/* Action columns hug their buttons instead of stretching, so a two-button
+   cell stays the width of those two buttons. */
+table.grid th.col-actions, table.grid td.col-actions { width: 1%; white-space: nowrap; }
+.row-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
 .state { font-size: 10px; letter-spacing: 1px; color: var(--dim); }
 .state.on { color: var(--ok); }
 .tname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -49,6 +54,11 @@ table.grid td.tname:hover { color: var(--accent); }
 .tab .ico { width: 14px; height: 14px; }
 .tab:hover { color: var(--fg); background: var(--hover); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--panel2); }
+/* View actions sit on the tab bar itself, pushed to the trailing edge. */
+.tabbar-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 8px;
+  padding: 0 8px; flex: 0 0 auto;
+}
 
 /* --------------------------------------------- themed custom listboxes */
 /* Native selects are kept only as the form data source, never displayed. */

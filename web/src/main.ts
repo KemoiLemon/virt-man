@@ -3,6 +3,8 @@ import type { Connection, DomainSummary, NetworkSummary, PoolSummary, User, Volu
 import { attachConsole, isTauri, tauriWindow } from "./console";
 import DOMPurify from "dompurify";
 import { ic } from "./icons";
+import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
+import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
 import { addSample, fmtBytes, pct, sparkline } from "./stats";
 import type { DomainStats } from "./stats";
@@ -29,7 +31,7 @@ let connections: Connection[] = [];
 let selectedConn: string | null = null;
 let connTab: "vms" | "networks" | "storage" = "vms";
 let selectedVm: string | null = null;
-let vmTab: "summary" | "console" | "xml" = "summary";
+let vmTab: "summary" | "hardware" | "console" | "xml" = "summary";
 let dcTab: "servers" | "users" = "servers";
 let pollTimer: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
@@ -203,6 +205,9 @@ setHtml(app, `
   renderProfileBtn();
   wireWindowChrome();
   if (!selectedConn) renderDc();
+  // Populate the auto-expanded tree immediately rather than waiting for the
+  // first poll tick or a server click.
+  void refreshTreeVms();
   startPolling();
 }
 
@@ -278,8 +283,10 @@ function renderTree() {
       const selected = c.id === selectedConn && !selectedVm;
       const vms = treeVms[c.id] ?? [];
       const running = vms.filter((v) => v.active).length;
+      // Servers auto-expand: guests show as soon as they are known, without
+      // requiring the server to be selected first.
       const guestRows =
-        c.id === selectedConn
+        vms.length
           ? vms
               .map(
                 (v) => `
@@ -336,18 +343,31 @@ function renderTree() {
 
 /// Refresh the guest list backing the tree for the selected server.
 async function refreshTreeVms() {
-  if (!selectedConn) return;
-  const conn = selectedConn;
-  try {
-    const vms = await api.get<DomainSummary[]>(`/proxy/${conn}/domains`);
-    const changed = JSON.stringify(treeVms[conn]) !== JSON.stringify(vms);
-    treeVms[conn] = vms;
-    // Only re-render when something actually moved, so the tree does not
-    // flicker or fight the user's clicks on every poll.
-    if (changed) renderTree();
-  } catch {
-    /* the content pane surfaces connection errors */
+  // Every server's guests, not just the selected one: the tree auto-expands,
+  // so an unselected server still has to show its VMs.
+  const results = await Promise.all(
+    connections.map(async (c) => {
+      try {
+        const vms = await api.get<DomainSummary[]>(`/proxy/${c.id}/domains`);
+        return [c.id, vms] as const;
+      } catch {
+        // Unreachable daemon: keep whatever we last knew rather than
+        // collapsing its branch. The content pane surfaces the error.
+        return [c.id, treeVms[c.id] ?? []] as const;
+      }
+    }),
+  );
+
+  let changed = false;
+  for (const [id, vms] of results) {
+    if (JSON.stringify(treeVms[id]) !== JSON.stringify(vms)) {
+      treeVms[id] = vms;
+      changed = true;
+    }
   }
+  // Only re-render when something actually moved, so the tree does not
+  // flicker or fight the user's clicks on every poll.
+  if (changed) renderTree();
 }
 
 function renderProfileBtn() {
@@ -367,13 +387,14 @@ function renderProfileBtn() {
 function renderDc() {
   const content = $("#content");
   // Real tabbar; the Users tab is hidden when the local app disables auth.
+  // Actions live on the tab bar itself, right-aligned after the tabs.
   const tabs = `<div class="tabbar">
       <button class="tab ${dcTab === "servers" ? "active" : ""}" data-dctab="servers">${ic.server(14)} Servers</button>
       ${authDisabled ? "" : `<button class="tab ${dcTab === "users" ? "active" : ""}" data-dctab="users">${ic.users(14)} Users &amp; API keys</button>`}
+      ${dcTab === "servers"
+        ? `<div class="tabbar-actions"><button class="btn primary" id="dc-add">${ic.plus(14)} Add Server</button></div>`
+        : ""}
     </div>`;
-  const addBar = dcTab === "servers"
-    ? `<div class="actions" style="margin-top:14px"><button class="btn primary" id="dc-add">${ic.plus(14)} Add Server</button></div>`
-    : "";
   // Aggregate cards across every known server, from the tree's guest cache.
   const allVms = Object.values(treeVms).flat();
   const runningVms = allVms.filter((v) => v.active).length;
@@ -400,20 +421,22 @@ function renderDc() {
   const body = dcTab === "servers"
     ? `${cards}<div class="section-title">Servers</div>
        <table class="grid">
-         <tr><th>Name</th><th>URL</th><th>Cert</th><th></th></tr>
+         <tr><th>Name</th><th>URL</th><th>Cert</th><th class="col-actions"></th></tr>
          ${connections.map((c) => `
            <tr>
              <td>${esc(c.name)}</td>
              <td>${esc(c.url)}</td>
              <td>${c.fingerprint ? c.fingerprint.slice(0, 17) + "…" : "—"}</td>
-             <td>
-               <button class="btn icon" data-test="${c.id}">test</button>
-               <button class="btn danger icon" data-del="${c.id}">${ic.trash()}</button>
+             <td class="col-actions">
+               <div class="row-actions">
+                 <button class="btn icon" data-edit="${c.id}" title="Edit server">${ic.edit()}</button>
+                 <button class="btn danger icon" data-del="${c.id}" title="Remove server">${ic.trash()}</button>
+               </div>
              </td>
            </tr>`).join("") || `<tr><td colspan="4" class="empty">No servers yet — add one.</td></tr>`}
        </table>`
     : `<div id="users-area">loading…</div>`;
-setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${addBar}${body}`);
+setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
 
   $("#dc-add")?.addEventListener("click", () => openConnectionDialog());
   content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
@@ -422,8 +445,8 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
       renderDc();
     };
   });
-  content.querySelectorAll("[data-test]").forEach((b: Element) => {
-    (b as HTMLElement).onclick = () => testConnection((b as HTMLElement).dataset.test!);
+  content.querySelectorAll("[data-edit]").forEach((b: Element) => {
+    (b as HTMLElement).onclick = () => openConnectionDialog((b as HTMLElement).dataset.edit!);
   });
   content.querySelectorAll("[data-del]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => deleteConnection((b as HTMLElement).dataset.del!);
@@ -520,6 +543,11 @@ setHtml(content, `
       <button class="tab ${connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
       <button class="tab ${connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
       <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
+      <div class="tabbar-actions">
+        ${connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
+        ${connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create network</button>` : ""}
+        ${connTab === "storage" ? `<button class="btn primary" id="create-pool">${ic.plus(14)} Create pool</button>` : ""}
+      </div>
     </div>
     <div id="conn-body"></div>`);
   content.querySelectorAll("[data-tab]").forEach((b: Element) => {
@@ -535,17 +563,19 @@ setHtml(content, `
 async function renderConnBody() {
   if (!selectedConn) return;
   const body = $("#conn-body");
+  // The create buttons live on the tab bar (rendered by renderConn), so the
+  // body only carries the list itself.
   if (connTab === "vms") {
-setHtml(body, `<div class="actions"><button class="btn primary" id="create-vm">Create VM</button></div><div id="vms-list">loading…</div>`);
-    $("#create-vm").onclick = () => openCreateVm();
+    setHtml(body, `<div id="vms-list">loading…</div>`);
+    $("#create-vm")?.addEventListener("click", () => openCreateVm());
     await loadVms();
   } else if (connTab === "networks") {
-setHtml(body, `<div class="actions"><button class="btn primary" id="create-net">Create network</button></div><div id="nets-list">loading…</div>`);
-    $("#create-net").onclick = () => openCreateNetwork();
+    setHtml(body, `<div id="nets-list">loading…</div>`);
+    $("#create-net")?.addEventListener("click", () => openCreateNetwork());
     await loadNetworks();
   } else {
-setHtml(body, `<div class="actions"><button class="btn primary" id="create-pool">Create pool</button></div><div id="pools-list">loading…</div>`);
-    $("#create-pool").onclick = () => openCreatePool();
+    setHtml(body, `<div id="pools-list">loading…</div>`);
+    $("#create-pool")?.addEventListener("click", () => openCreatePool());
     await loadPools();
   }
 }
@@ -707,6 +737,7 @@ setHtml(content, `
     </div>
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
+      <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
       <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
       <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">XML</button>
     </div>
@@ -741,6 +772,56 @@ setHtml(body, `<div class="console-stage" id="console-stage"><div class="console
     } catch (e) {
       const m = $("#console-msg");
       if (m) m.textContent = (e as Error).message;
+    }
+    return;
+  }
+  if (vmTab === "hardware") {
+    try {
+      const [{ xml }, info] = await Promise.all([
+        api.get<{ xml: string }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/xml`),
+        api.get<any>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}`),
+      ]);
+      const devices = devicesFromXml(xml);
+      const cpus = xml.match(/<vcpu[^>]*>(\d+)<\/vcpu>/)?.[1] ?? "?";
+      const memMb = Math.round(+(xml.match(/<memory[^>]*>(\d+)<\/memory>/)?.[1] ?? 0) / 1024);
+      const fw = /pflash|OVMF/i.test(xml) ? "UEFI (OVMF)" : "BIOS (SeaBIOS)";
+      const gfx = /<graphics[^>]*type=['"]spice/.test(xml) ? "spice" : "vnc";
+      const running = info.active === true;
+
+      const fixed = [
+        { ico: ic.cpu(), label: "Processors", val: `${cpus} vCPU` },
+        { ico: ic.memory(), label: "Memory", val: `${memMb} MB` },
+        { ico: ic.cpu(), label: "BIOS", val: fw },
+        { ico: ic.vm(), label: "Display", val: gfx },
+      ];
+      const rows = fixed.map((r) => `
+        <div class="hwrow">
+          <span class="hwrow-ic hw-ic">${r.ico}</span>
+          <span class="hwrow-label">${esc(r.label)}</span>
+          <span class="hwctl hwctl-static">${esc(r.val)}</span>
+          <span></span>
+        </div>`).join("");
+      const devRows = devices.map((d) => {
+        const t = hwType(d.kind);
+        return `
+        <div class="hwrow">
+          <span class="hwrow-ic hw-ic">${ic[t?.icon ?? "cpu"]()}</span>
+          <span class="hwrow-label">${esc(t?.label ?? d.kind)}</span>
+          <span class="hwctl hwctl-static">${esc(deviceSummary(d))}</span>
+          <span></span>
+        </div>`;
+      }).join("");
+
+      setHtml(body, `
+        <div class="actions">
+          <button class="btn primary" id="hw-edit">${ic.edit(14)} Edit hardware</button>
+          ${running ? `<span class="hw-locked">Changes apply after the guest is restarted.</span>` : ""}
+        </div>
+        <div class="hwtable">${rows}${devRows}</div>
+        ${devices.length ? "" : `<div class="hw-note" style="margin-top:12px">No extra devices. Use Edit hardware to add one.</div>`}`);
+      $("#hw-edit")?.addEventListener("click", () => void openHardwareEditor({ vm }));
+    } catch (e) {
+      setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     }
     return;
   }
@@ -882,15 +963,6 @@ async function deleteVolume(pool: string, name: string) {
   }
 }
 
-async function testConnection(id: string) {
-  try {
-    const r = await api.get<{ ok: boolean; status: number; body: string }>(`/connections/${id}/test`);
-    toast(r.ok ? `Daemon OK (${r.status})` : `Daemon replied ${r.status}: ${r.body}`, r.ok ? "ok" : "bad");
-  } catch (e) {
-    toast((e as Error).message, "bad");
-  }
-}
-
 async function deleteConnection(id: string) {
   const c = connections.find((x) => x.id === id);
   if (!c) return;
@@ -978,17 +1050,21 @@ function askConfirm(title: string, message: string, okLabel = "Confirm", danger 
   });
 }
 
-function openConnectionDialog() {
+/// Add a server, or edit an existing one when `editId` is given. Daemons
+/// autoconnect, so editing (not a manual connection test) is the useful
+/// per-row action.
+function openConnectionDialog(editId?: string) {
+  const existing = editId ? connections.find((c) => c.id === editId) : undefined;
   const el = openModal(
-    "Add Server",
+    existing ? `Edit Server — ${esc(existing.name)}` : "Add Server",
     `
-    <label class="field"><span>Name</span><input id="conn-name"></label>
-    <label class="field"><span>URL (https://host:8443)</span><input id="conn-url" placeholder="https://host:8443"></label>
+    <label class="field"><span>Name</span><input id="conn-name" value="${esc(existing?.name ?? "")}"></label>
+    <label class="field"><span>URL (https://host:8443)</span><input id="conn-url" placeholder="https://host:8443" value="${esc(existing?.url ?? "")}"></label>
     <label class="field"><span>Auth token</span>
-      <input id="conn-token" placeholder="paste existing token or generate">
+      <input id="conn-token" placeholder="${existing ? "leave blank to keep the current token" : "paste existing token or generate"}">
       <label class="check"><input type="checkbox" id="conn-gen"> generate new token</label>
     </label>
-    <p class="hint" id="conn-fp"></p>`,
+    <p class="hint" id="conn-fp">${existing?.fingerprint ? `Pinned certificate: ${esc(existing.fingerprint)}` : ""}</p>`,
     `<button class="btn" id="conn-save">Save</button>`,
   );
   const fpEl = $("#conn-fp", el);
@@ -1012,14 +1088,21 @@ function openConnectionDialog() {
         url: $("#conn-url", el).value.trim(),
         generate_token: $("#conn-gen", el).checked,
       };
-      if (!body.generate_token) body.token = $("#conn-token", el).value;
+      const typedToken = $("#conn-token", el).value;
+      // On edit an empty token means "keep the current one"; the backend
+      // leaves it untouched when the field is absent.
+      if (!body.generate_token && (typedToken || !existing)) body.token = typedToken;
       if ((el as any)._cert) body.cert = (el as any)._cert;
-      await api.post("/connections", body);
-      toast("Server added");
+
+      if (existing) await api.put(`/connections/${existing.id}`, body);
+      else await api.post("/connections", body);
+
+      toast(existing ? "Server updated" : "Server added");
       el.remove();
       connections = await api.get<Connection[]>("/connections");
       renderTree();
       renderDc();
+      void refreshTreeVms();
     } catch (e) {
       toast((e as Error).message, "bad");
     }
@@ -1032,90 +1115,391 @@ async function loadFormData(conn: string) {
   return { pools, nets };
 }
 
-function poolOptions(pools: PoolSummary[]) {
-  return pools.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join("");
+/// Proxmox-style hardware editor: device list on the LEFT, the selected
+/// device's form on the right. Used for both "Create VM" and editing an
+/// existing guest's hardware, so the two can never drift apart.
+async function openHardwareEditor(opts: { vm?: string } = {}) {
+  if (!selectedConn) return;
+  const conn = selectedConn;
+  const editing = !!opts.vm;
+
+  // Existing guest: read its current definition so the form starts populated.
+  let baseXml = "";
+  let devices: HwDevice[] = [];
+  let general = {
+    name: "",
+    cpus: 2,
+    memory_mb: 2048,
+    firmware: "uefi" as "uefi" | "bios",
+    graphics: "vnc" as "vnc" | "spice",
+  };
+
+  if (editing && opts.vm) {
+    try {
+      const { xml } = await api.get<{ xml: string }>(
+        `/proxy/${conn}/domains/${encodeURIComponent(opts.vm)}/xml`);
+      baseXml = xml;
+      devices = devicesFromXml(xml);
+      general = {
+        name: opts.vm,
+        cpus: +(xml.match(/<vcpu[^>]*>(\d+)<\/vcpu>/)?.[1] ?? 2),
+        memory_mb: Math.round(+(xml.match(/<memory[^>]*>(\d+)<\/memory>/)?.[1] ?? 2097152) / 1024),
+        firmware: /pflash|OVMF/i.test(xml) ? "uefi" : "bios",
+        graphics: /<graphics[^>]*type=['"]spice/.test(xml) ? "spice" : "vnc",
+      };
+    } catch (e) {
+      toast((e as Error).message, "bad");
+      return;
+    }
+  }
+
+  // New VM: one disk is created up front, described by these fields.
+  const newDisk = { pool: "", size_gb: 10, format: "qcow2" as "raw" | "qcow2" };
+
+  const el = openModal(
+    editing ? `Hardware — ${esc(opts.vm ?? "")}` : "Create VM",
+    "",
+    `<button class="btn" id="hw-cancel">Cancel</button>
+     <button class="btn primary" id="hw-save">${editing ? "Save" : "Create"}</button>`,
+  );
+  el.querySelector(".modal")?.classList.add("hw-modal");
+
+  const { pools, nets } = await loadFormData(conn);
+  // Volumes per pool, fetched lazily and cached for the device forms.
+  const volCache: Record<string, string[]> = {};
+  const volumes = async (pool: string): Promise<string[]> => {
+    if (!pool) return [];
+    if (!volCache[pool]) {
+      try {
+        const v = await api.get<VolumeSummary[]>(
+          `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`);
+        volCache[pool] = v.map((x) => x.name);
+      } catch {
+        volCache[pool] = [];
+      }
+    }
+    return volCache[pool];
+  };
+  newDisk.pool = pools[0]?.name ?? "";
+
+  let page = "general";
+
+  const opt = (list: string[], sel: string) =>
+    list.map((v) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
+
+  /** Sidebar rows mirror Proxmox: label plus the current value. */
+  function sidebar(): string {
+    const fixed = [
+      { key: "general", icon: ic.datacenter(), label: "General", sum: general.name || "unnamed" },
+      { key: "processors", icon: ic.cpu(), label: "Processors", sum: `${general.cpus} vCPU` },
+      { key: "memory", icon: ic.memory(), label: "Memory", sum: `${general.memory_mb} MB` },
+      ...(editing ? [] : [{ key: "disk", icon: ic.disk(), label: "Hard Disk", sum: `${newDisk.size_gb} GB ${newDisk.format}` }]),
+      { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics },
+      { key: "firmware", icon: ic.cpu(), label: "BIOS", sum: general.firmware === "uefi" ? "UEFI (OVMF)" : "BIOS (SeaBIOS)" },
+    ];
+    const rows = fixed.map((f) => `
+      <button class="hw-item ${page === f.key ? "active" : ""}" data-hw="${f.key}">
+        <span class="hw-ic">${f.icon}</span>
+        <span class="hw-tx"><b>${esc(f.label)}</b><i>${esc(f.sum)}</i></span>
+      </button>`).join("");
+    const custom = devices.map((d, i) => {
+      const t = hwType(d.kind);
+      return `
+      <button class="hw-item hw-custom ${page === `dev-${i}` ? "active" : ""}" data-hw="dev-${i}">
+        <span class="hw-ic">${ic[t?.icon ?? "cpu"]()}</span>
+        <span class="hw-tx"><b>${esc(t?.label ?? d.kind)}</b><i>${esc(deviceSummary(d))}</i></span>
+      </button>`;
+    }).join("");
+    return `
+      <div class="hw-side-head">HARDWARE</div>
+      <div class="hw-side-scroll">${rows}<div class="hw-custom-list">${custom}</div></div>
+      <button class="hw-add" id="hw-add">${ic.plus(15)} ADD HARDWARE</button>`;
+  }
+
+  async function pageHtml(): Promise<string> {
+    if (page.startsWith("dev-")) {
+      const i = +page.slice(4);
+      const d = devices[i];
+      const t = hwType(d.kind);
+      if (!t) return `<div class="hw-page active"><div class="hw-note">Unknown device.</div></div>`;
+      const fields = await Promise.all(t.fields.map(async (f) => {
+        const val = d.fields[f.key] ?? f.value ?? "";
+        if (f.type === "select") {
+          let list: string[] = (f.options ?? []).map((o) => o.value);
+          if (f.key === "pool") list = pools.map((p) => p.name);
+          if (f.key === "network") list = nets.map((n) => n.name);
+          if (f.key === "volume") list = await volumes(d.fields.pool ?? pools[0]?.name ?? "");
+          const labels = f.options?.length
+            ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
+            : opt(list, val);
+          return `<label class="field"><span>${esc(f.label)}</span>
+            <select data-field="${esc(f.key)}">${labels}</select></label>`;
+        }
+        return `<label class="field"><span>${esc(f.label)}</span>
+          <input data-field="${esc(f.key)}" type="${f.type}" value="${esc(val)}"
+            placeholder="${esc(f.placeholder ?? "")}"></label>`;
+      }));
+      return `<div class="hw-page active">
+        <h3 class="hw-title">${esc(t.label)}</h3>
+        <div class="hw-note">${esc(t.blurb)}</div>
+        ${fields.join("")}
+        <div class="actions"><button class="btn danger" id="hw-remove">${ic.trash(14)} Remove device</button></div>
+      </div>`;
+    }
+
+    switch (page) {
+      case "processors":
+        return `<div class="hw-page active">
+          <h3 class="hw-title">Processors</h3>
+          <label class="field"><span>vCPUs</span>
+            <input id="g-cpus" type="number" min="1" max="128" value="${general.cpus}"></label>
+          <div class="hw-note">Written to the domain as <code>&lt;vcpu&gt;</code>.</div>
+        </div>`;
+      case "memory":
+        return `<div class="hw-page active">
+          <h3 class="hw-title">Memory</h3>
+          <label class="field"><span>Memory (MB)</span>
+            <input id="g-mem" type="number" min="128" step="256" value="${general.memory_mb}"></label>
+          <div class="hw-note">Written as <code>&lt;memory unit="KiB"&gt;</code>.</div>
+        </div>`;
+      case "disk":
+        return `<div class="hw-page active">
+          <h3 class="hw-title">Hard Disk</h3>
+          <label class="field"><span>Storage pool</span>
+            <select id="g-pool">${opt(pools.map((p) => p.name), newDisk.pool)}</select></label>
+          <label class="field"><span>Disk size (GB)</span>
+            <input id="g-size" type="number" min="1" value="${newDisk.size_gb}"></label>
+          <label class="field"><span>Format</span>
+            <select id="g-format">${opt(["qcow2", "raw"], newDisk.format)}</select></label>
+          <div class="hw-note">A volume is created in the pool, then attached as the boot disk.</div>
+        </div>`;
+      case "display":
+        return `<div class="hw-page active">
+          <h3 class="hw-title">Display</h3>
+          <label class="field"><span>Graphics</span>
+            <select id="g-gfx">${opt(["vnc", "spice"], general.graphics)}</select></label>
+          <div class="hw-note">Served through the daemon's console proxy.</div>
+        </div>`;
+      case "firmware":
+        return `<div class="hw-page active">
+          <h3 class="hw-title">BIOS</h3>
+          <label class="field"><span>Firmware</span>
+            <select id="g-fw">${opt(["uefi", "bios"], general.firmware)}</select></label>
+          <div class="hw-note">UEFI loads OVMF via <code>&lt;loader&gt;</code>.</div>
+        </div>`;
+      default:
+        return `<div class="hw-page active">
+          <h3 class="hw-title">General</h3>
+          <label class="field"><span>Name</span>
+            <input id="g-name" value="${esc(general.name)}" ${editing ? "disabled" : ""}
+              placeholder="arch-box"></label>
+          ${editing ? `<div class="hw-note">Renaming an existing domain is not supported here.</div>` : ""}
+        </div>`;
+    }
+  }
+
+  async function render() {
+    setHtml(el.querySelector(".modal-body")!, `<div class="hw-body">
+      <nav class="hw-side" id="hw-side">${sidebar()}</nav>
+      <div class="hw-pane" id="hw-pane">${await pageHtml()}</div>
+    </div>`);
+    // The body is a grid host for the editor, so drop the default padding.
+    (el.querySelector(".modal-body") as HTMLElement).style.padding = "0";
+    (el.querySelector(".modal-body") as HTMLElement).style.overflow = "hidden";
+
+    el.querySelectorAll("[data-hw]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => {
+        page = (b as HTMLElement).dataset.hw!;
+        void render();
+      };
+    });
+    $("#hw-add", el).onclick = () => openAddHardware();
+
+    // General/spec fields write straight back into the model.
+    const bind = (sel: string, fn: (v: string) => void) => {
+      const n = $(sel, el);
+      if (!n) return;
+      n.onchange = () => { fn(n.value); void render(); };
+    };
+    bind("#g-name", (v) => { general.name = v; });
+    bind("#g-cpus", (v) => { general.cpus = Math.max(1, +v || 1); });
+    bind("#g-mem", (v) => { general.memory_mb = Math.max(128, +v || 128); });
+    bind("#g-gfx", (v) => { general.graphics = v as "vnc" | "spice"; });
+    bind("#g-fw", (v) => { general.firmware = v as "uefi" | "bios"; });
+    bind("#g-pool", (v) => { newDisk.pool = v; });
+    bind("#g-size", (v) => { newDisk.size_gb = Math.max(1, +v || 1); });
+    bind("#g-format", (v) => { newDisk.format = v as "raw" | "qcow2"; });
+
+    // Device field edits, plus removal.
+    if (page.startsWith("dev-")) {
+      const i = +page.slice(4);
+      el.querySelectorAll("[data-field]").forEach((n: Element) => {
+        (n as HTMLElement).onchange = () => {
+          const key = (n as HTMLElement).dataset.field!;
+          devices[i].fields[key] = (n as HTMLInputElement).value;
+          // Changing the pool invalidates the volume list.
+          void render();
+        };
+      });
+      const rm = $("#hw-remove", el);
+      if (rm) rm.onclick = () => {
+        devices.splice(i, 1);
+        page = "general";
+        void render();
+      };
+    }
+  }
+
+  /** Chooser for a new device; fields come from the catalogue. */
+  function openAddHardware() {
+    let kind = HW_CATALOG[0].id;
+    const draft: Record<string, string> = {};
+
+    const add = openModal("Add Hardware", "",
+      `<button class="btn" id="ah-cancel">Cancel</button>
+       <button class="btn primary" id="ah-save">Add</button>`);
+    add.querySelector(".modal")?.classList.add("add-hw-modal");
+
+    const renderAdd = async () => {
+      const t = hwType(kind)!;
+      const fields = await Promise.all(t.fields.map(async (f) => {
+        const val = draft[f.key] ?? f.value ?? "";
+        if (f.type === "select") {
+          let list: string[] = (f.options ?? []).map((o) => o.value);
+          if (f.key === "pool") list = pools.map((p) => p.name);
+          if (f.key === "network") list = nets.map((n) => n.name);
+          if (f.key === "volume") list = await volumes(draft.pool ?? pools[0]?.name ?? "");
+          const labels = f.options?.length
+            ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
+            : opt(list, val);
+          return `<label class="field"><span>${esc(f.label)}</span>
+            <select data-af="${esc(f.key)}">${labels}</select></label>`;
+        }
+        return `<label class="field"><span>${esc(f.label)}</span>
+          <input data-af="${esc(f.key)}" type="${f.type}" value="${esc(val)}"
+            placeholder="${esc(f.placeholder ?? "")}"></label>`;
+      }));
+
+      const preview = deviceXml({ kind, fields: draft }, devices.length + 1) || "—";
+      setHtml(add.querySelector(".modal-body")!, `<div class="add-hw-body">
+        <aside class="add-hw-types">
+          ${HW_CATALOG.map((t2) => `
+            <button class="add-hw-type ${t2.id === kind ? "active" : ""}" data-at="${t2.id}">
+              <b>${esc(t2.label)}</b><small>${esc(t2.blurb)}</small>
+            </button>`).join("")}
+        </aside>
+        <div class="add-hw-form">
+          <div class="hw-title">${esc(t.label)}</div>
+          <div class="hw-note">${esc(t.blurb)}</div>
+          <div class="add-hw-fields">${fields.join("")}</div>
+          <div class="field add-hw-preview"><span>LIBVIRT XML PREVIEW</span>
+            <code>${esc(preview)}</code></div>
+        </div>
+      </div>`);
+      (add.querySelector(".modal-body") as HTMLElement).style.padding = "0";
+      (add.querySelector(".modal-body") as HTMLElement).style.overflow = "hidden";
+
+      add.querySelectorAll("[data-at]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = () => {
+          kind = (b as HTMLElement).dataset.at!;
+          for (const k of Object.keys(draft)) delete draft[k];
+          void renderAdd();
+        };
+      });
+      add.querySelectorAll("[data-af]").forEach((n: Element) => {
+        (n as HTMLElement).onchange = () => {
+          draft[(n as HTMLElement).dataset.af!] = (n as HTMLInputElement).value;
+          void renderAdd();
+        };
+      });
+      $("#ah-cancel", add).onclick = () => add.remove();
+      $("#ah-save", add).onclick = () => {
+        // Seed any untouched select with its first rendered option, so a
+        // device added without interaction is still valid.
+        add.querySelectorAll("[data-af]").forEach((n: Element) => {
+          const key = (n as HTMLElement).dataset.af!;
+          if (draft[key] === undefined) draft[key] = (n as HTMLInputElement).value;
+        });
+        const device: HwDevice = { kind, fields: { ...draft } };
+        const bad = validateDevice(device);
+        if (bad) return toast(bad, "bad");
+        devices.push(device);
+        add.remove();
+        page = `dev-${devices.length - 1}`;
+        void render();
+      };
+    };
+    void renderAdd();
+  }
+
+  $("#hw-cancel", el).onclick = () => el.remove();
+  $("#hw-save", el).onclick = async () => {
+    for (const d of devices) {
+      const bad = validateDevice(d);
+      if (bad) return toast(bad, "bad");
+    }
+
+    if (editing && opts.vm) {
+      const vm = opts.vm;
+      el.remove();
+      runTask(`Update ${vm}`, async (set) => {
+        set("rebuilding domain definition");
+        // Strip the devices this editor owns, then splice the current set back
+        // in, so libvirt-added devices we do not model survive the round trip.
+        const stripped = baseXml
+          .replace(/<disk\b[^>]*device=['"](disk|cdrom)['"][\s\S]*?<\/disk>\s*/g, "")
+          .replace(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>\s*/g, "")
+          .replace(/<rng\b[\s\S]*?<\/rng>\s*/g, "")
+          .replace(/<memballoon\b[^>]*\/>\s*/g, "")
+          .replace(/<channel\b[\s\S]*?org\.qemu\.guest_agent[\s\S]*?<\/channel>\s*/g, "")
+          .replace(/<vcpu([^>]*)>\d+<\/vcpu>/, `<vcpu$1>${general.cpus}</vcpu>`)
+          .replace(/<memory([^>]*)>\d+<\/memory>/, `<memory$1>${general.memory_mb * 1024}</memory>`)
+          .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`);
+        set("defining domain");
+        await api.put(`/proxy/${conn}/domains/${encodeURIComponent(vm)}/xml`,
+          withDevices(stripped, devices));
+      });
+      toast("Hardware update started");
+      setTimeout(() => void renderVm(), 600);
+      return;
+    }
+
+    if (!general.name.trim()) return toast("Name is required", "bad");
+    const form: DomainForm = {
+      name: general.name.trim(),
+      cpus: general.cpus,
+      memory_mb: general.memory_mb,
+      firmware: general.firmware,
+      graphics: general.graphics,
+      network: "",
+      bridge: "",
+      pool: newDisk.pool,
+      new_disk: false,
+      existing_volume: `${general.name.trim()}.qcow2`,
+      disk_size_gb: newDisk.size_gb,
+      disk_format: newDisk.format,
+      iso: "",
+      iso_pool: newDisk.pool,
+    };
+    el.remove();
+    runTask(`Create VM ${form.name}`, async (set) => {
+      set(`creating ${newDisk.size_gb} GB volume`);
+      await api.post(`/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`, {
+        xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }),
+      });
+      set("defining domain");
+      await api.post(`/proxy/${conn}/domains?start=true`, withDevices(domainXml(form), devices));
+    });
+    toast("VM creation started");
+    renderConn();
+  };
+
+  void render();
 }
 
+/// Back-compat entry point used by the VMs tab button.
 function openCreateVm() {
-  if (!selectedConn) return;
-  const el = openModal(
-    "Create VM",
-    `<div class="grid2">
-      <label class="field"><span>Name</span><input id="vm-name"></label>
-      <label class="field"><span>vCPUs</span><input id="vm-cpus" type="number" value="2" min="1"></label>
-      <label class="field"><span>Memory (MB)</span><input id="vm-mem" type="number" value="2048" min="128"></label>
-      <label class="field"><span>Firmware</span><select id="vm-fw"><option>uefi</option><option>bios</option></select></label>
-      <label class="field"><span>Graphics</span><select id="vm-gfx"><option>vnc</option><option>spice</option></select></label>
-      <label class="field"><span>Network</span><select id="vm-net"><option value="">none</option></select></label>
-      <label class="field"><span>Storage pool</span><select id="vm-pool"></select></label>
-      <label class="field"><span>Disk</span>
-        <select id="vm-disk-mode">
-          <option value="new">New disk</option>
-          <option value="existing">Existing volume</option>
-        </select>
-      </label>
-      <label class="field" id="vm-new-size-wrap"><span>Disk size (GB)</span><input id="vm-disk-size" type="number" value="10" min="1"></label>
-      <label class="field hidden" id="vm-existing-wrap"><span>Volume</span><select id="vm-existing"></select></label>
-      <label class="field"><span>Disk format</span><select id="vm-format"><option>qcow2</option><option>raw</option></select></label>
-      <label class="field"><span>ISO (optional)</span><select id="vm-iso"><option value="">none</option></select></label>
-    </div>
-    <p class="hint" id="vm-xml-preview"></p>`,
-    `<button class="btn primary" id="vm-create">Create</button>`,
-  );
-  loadFormData(selectedConn).then(async ({ pools, nets }) => {
-setHtml($("#vm-pool", el), poolOptions(pools));
-setHtml($("#vm-net", el), `<option value="">none</option>` + nets.map((n) => `<option>${esc(n.name)}</option>`).join(""));
-    const vols = async (pool: string) => {
-      const v = await api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
-      const opts = v.map((x) => `<option>${esc(x.name)}</option>`).join("");
-setHtml($("#vm-existing", el), opts);
-setHtml($("#vm-iso", el), `<option value="">none</option>` + opts);
-    };
-    const firstPool = pools[0]?.name;
-    if (firstPool) await vols(firstPool);
-    $("#vm-pool", el).onchange = () => vols(($("#vm-pool", el) as HTMLSelectElement).value);
-    $("#vm-disk-mode", el).onchange = () => {
-      const mode = ($("#vm-disk-mode", el) as HTMLSelectElement).value;
-      $("#vm-new-size-wrap", el).classList.toggle("hidden", mode !== "new");
-      $("#vm-existing-wrap", el).classList.toggle("hidden", mode !== "existing");
-    };
-    $("#vm-create", el).onclick = async () => {
-      const pool = ($("#vm-pool", el) as HTMLSelectElement).value;
-      const form: DomainForm = {
-        name: $("#vm-name", el).value,
-        cpus: +$("#vm-cpus", el).value,
-        memory_mb: +$("#vm-mem", el).value,
-        firmware: ($("#vm-fw", el) as HTMLSelectElement).value as "uefi" | "bios",
-        graphics: ($("#vm-gfx", el) as HTMLSelectElement).value as "vnc" | "spice",
-        network: ($("#vm-net", el) as HTMLSelectElement).value,
-        bridge: "",
-        pool,
-        new_disk: ($("#vm-disk-mode", el) as HTMLSelectElement).value === "new",
-        existing_volume: ($("#vm-existing", el) as HTMLSelectElement).value,
-        disk_size_gb: +$("#vm-disk-size", el).value,
-        disk_format: ($("#vm-format", el) as HTMLSelectElement).value as "raw" | "qcow2",
-        iso: ($("#vm-iso", el) as HTMLSelectElement).value,
-        iso_pool: pool,
-      };
-      if (!form.name) return toast("Name is required", "bad");
-      el.remove();
-      runTask(`Create VM ${form.name}`, async (set) => {
-        set("defining domain");
-        const xml = domainXml(form);
-        if (form.new_disk) {
-          set(`creating ${form.disk_size_gb} GB volume`);
-          await api.post(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`, {
-            xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: form.disk_size_gb, format: form.disk_format }),
-          });
-          form.new_disk = false;
-          form.existing_volume = `${form.name}.qcow2`;
-        }
-        await api.post(`/proxy/${selectedConn}/domains?start=true`, xml);
-      });
-      toast("VM creation started");
-      renderConn();
-    };
-  });
+  void openHardwareEditor();
 }
 
 function openCreateNetwork() {

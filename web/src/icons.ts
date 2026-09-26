@@ -17,6 +17,7 @@ import {
   Minus,
   Monitor,
   Network,
+  Pencil,
   Play,
   Plus,
   Power,
@@ -105,4 +106,5 @@ export const ic = {
   cpu: svg(Cpu),
   memory: svg(MemoryStick),
   users: svg(Users),
+  edit: svg(Pencil),
 };
