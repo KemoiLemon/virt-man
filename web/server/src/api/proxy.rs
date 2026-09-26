@@ -149,11 +149,17 @@ async fn console(
         .map_err(|e| (StatusCode::BAD_REQUEST, axum::Json(json!({"error": e}))).into_response())?;
 
     let _ = q;
-    Ok(ws.on_upgrade(move |browser| async move {
-        if let Err(e) = console_pipe(browser, target, connector).await {
-            tracing::warn!("console proxy for {conn_id}/{name} ended: {e}");
-        }
-    }))
+    // spice-html5 opens its socket as `new WebSocket(uri, 'binary')`. A server
+    // that does not echo the negotiated subprotocol makes the client fail the
+    // connection per the WebSocket spec, which showed up as a SPICE console
+    // that connected at the TCP level and then silently never rendered.
+    Ok(ws
+        .protocols(["binary"])
+        .on_upgrade(move |browser| async move {
+            if let Err(e) = console_pipe(browser, target, connector).await {
+                tracing::warn!("console proxy for {conn_id}/{name} ended: {e}");
+            }
+        }))
 }
 
 async fn console_pipe(
@@ -161,8 +167,21 @@ async fn console_pipe(
     target: String,
     connector: tokio_tungstenite::Connector,
 ) -> Result<(), String> {
+    // Ask the daemon for the same `binary` subprotocol the browser negotiated,
+    // so the whole chain agrees and spice-html5's client does not fail the
+    // connection.
+    let request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+        target.as_str(),
+    )
+    .map_err(|e| format!("build upstream ws request: {e}"))?;
+    let mut request = request;
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        axum::http::HeaderValue::from_static("binary"),
+    );
+
     let (daemon_ws, _resp) =
-        tokio_tungstenite::connect_async_tls_with_config(target, None, false, Some(connector))
+        tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
             .await
             .map_err(|e| format!("daemon websocket: {e}"))?;
 

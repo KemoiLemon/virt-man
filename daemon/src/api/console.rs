@@ -44,11 +44,16 @@ async fn ws_handler(
             .into_response()
     })?;
 
-    Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(e) = proxy(socket, graphics).await {
-            tracing::warn!("console proxy for {name_for_upgrade} ended: {e}");
-        }
-    }))
+    // spice-html5 connects with the `binary` subprotocol. A server that does
+    // not echo it makes the client fail the connection per the WebSocket
+    // spec, which looks like a console that opens and then never renders.
+    Ok(ws
+        .protocols(["binary"])
+        .on_upgrade(move |socket| async move {
+            if let Err(e) = proxy(socket, graphics).await {
+                tracing::warn!("console proxy for {name_for_upgrade} ended: {e}");
+            }
+        }))
 }
 
 /// Raw TCP <-> WebSocket byte pipe. Works for VNC (noVNC).
