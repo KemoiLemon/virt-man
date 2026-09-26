@@ -572,7 +572,7 @@ function renderDc() {
         </div>
         <div class="specs">
           <div class="spec"><b>vCPUs</b><span>${vm.vcpus || "—"}</span></div>
-          <div class="spec"><b>Memory</b><span>${vm.memory_mb ? fmtBytes(vm.memory_mb * 1024) : "—"}</span></div>
+          <div class="spec"><b>Memory</b><span>${vm.memory_mb ? fmtBytes(vm.memory_mb * 1024 * 1024) : "—"}</span></div>
         </div>
         <div class="storage-card-actions net-actions">
           <button class="btn icon ${vm.active ? "on" : ""}" data-dc-toggle="${esc(vm.name)}" data-dc-toggle-conn="${conn.id}" data-dc-action="${vm.active ? "stop" : "start"}" title="${vm.active ? "Shutdown" : "Start"}">${vm.active ? ic.stop() : ic.start()}</button>
@@ -1650,7 +1650,7 @@ async function loadVms() {
         </div>
         <div class="specs">
           <div class="spec"><b>vCPUs</b><span>${v.vcpus || "—"}</span></div>
-          <div class="spec"><b>Memory</b><span>${v.memory_mb ? fmtBytes(v.memory_mb * 1024) : "—"}</span></div>
+          <div class="spec"><b>Memory</b><span>${v.memory_mb ? fmtBytes(v.memory_mb * 1024 * 1024) : "—"}</span></div>
         </div>
         <div class="storage-card-actions net-actions">
           <button class="btn icon ${v.active ? "on" : ""}" data-vm-toggle="${esc(v.name)}" data-vm-action="${v.active ? "stop" : "start"}" title="${v.active ? "Shutdown" : "Start"}">${v.active ? ic.stop() : ic.start()}</button>
