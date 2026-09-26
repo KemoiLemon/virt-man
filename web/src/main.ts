@@ -1,6 +1,7 @@
 import { api } from "./api";
 import type { Connection, DomainSummary, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
-import { attachConsole, isTauri, tauriWindow } from "./console";
+import { PRESETS, attachConsole, detachConsole, isTauri, tauriWindow } from "./console";
+import type { Preset } from "./console";
 import DOMPurify from "dompurify";
 import { ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
@@ -37,6 +38,24 @@ let pollTimer: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
 /// without every render refetching.
 const treeVms: Record<string, DomainSummary[]> = {};
+/// Console view settings, kept across tab switches and reconnects.
+let consoleZoom = 0; // 0 = fit to the stage
+let consolePreset: Preset = "balanced";
+let consoleResizeObserver: ResizeObserver | null = null;
+
+/// Tear down a live console: its WebSocket and the stage resize observer.
+function closeConsole() {
+  consoleResizeObserver?.disconnect();
+  consoleResizeObserver = null;
+  detachConsole();
+}
+
+/// Navigate away from whatever is on screen. Every path that changes the
+/// selected VM or view goes through here, so a console session can never be
+/// left streaming in the background.
+function leaveCurrentView() {
+  if (vmTab === "console") closeConsole();
+}
 
 const $ = (sel: string, root: ParentNode = document): any =>
   root.querySelector(sel);
@@ -320,6 +339,7 @@ function renderTree() {
     ${serverRows || `<div class="tree-empty">No servers yet — add one below.</div>`}`);
 
   $("#dc-row").onclick = () => {
+    leaveCurrentView();
     selectedConn = null;
     selectedVm = null;
     dcTab = "servers";
@@ -328,6 +348,7 @@ function renderTree() {
   };
   tree.querySelectorAll("[data-conn]").forEach((row: Element) => {
     (row as HTMLElement).onclick = () => {
+      leaveCurrentView();
       selectedConn = (row as HTMLElement).dataset.conn!;
       selectedVm = null;
       connTab = "vms";
@@ -342,6 +363,7 @@ function renderTree() {
       // Set the connection first: renderVm() bails out when selectedConn is
       // null, which made guest clicks silently do nothing from the
       // Datacenter view or a different server's branch.
+      leaveCurrentView();
       selectedConn = el.dataset.vmConn!;
       selectedVm = el.dataset.vm!;
       vmTab = "summary";
@@ -510,6 +532,7 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
 
   /// Open a guest from the Datacenter table, switching server if needed.
   const openVm = (connId: string, vm: string, tab: typeof vmTab) => {
+    leaveCurrentView();
     selectedConn = connId;
     selectedVm = vm;
     vmTab = tab;
@@ -809,6 +832,7 @@ setHtml(list, `<table class="grid">
     list.querySelectorAll("[data-console]").forEach((b: Element) => {
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
+        leaveCurrentView();
         selectedVm = (b as HTMLElement).dataset.console!;
         vmTab = "console";
         renderTree();
@@ -953,8 +977,12 @@ setHtml(content, `
     <div id="vm-body"></div>`);
   content.querySelectorAll("[data-vmtab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
-      vmTab = (b as HTMLElement).dataset.vmtab as typeof vmTab;
-      renderVm();
+      const next = (b as HTMLElement).dataset.vmtab as typeof vmTab;
+      // Leaving the console must tear down its WebSocket and observer,
+      // otherwise the session keeps streaming in the background.
+      if (vmTab === "console" && next !== "console") closeConsole();
+      vmTab = next;
+      void renderVm();
     };
   });
   $("#vm-start").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/start`, "POST").then(renderVm);
@@ -970,15 +998,141 @@ async function renderVmBody(vm: string) {
   if (!selectedConn) return;
   const body = $("#vm-body");
   if (vmTab === "console") {
-setHtml(body, `<div class="console-stage" id="console-stage"><div class="console-msg" id="console-msg">connecting…</div></div>`);
+    const zoomLabel = (z: number) => (z === 0 ? "Fit" : `${Math.round(z * 100)}%`);
+    setHtml(body, `
+      <div class="console-bar">
+        <span class="console-group">
+          <button class="btn icon" id="con-zoom-out" title="Zoom out">${ic.zoomOut()}</button>
+          <button class="btn" id="con-zoom-reset" title="Fit to window">${zoomLabel(consoleZoom)}</button>
+          <button class="btn icon" id="con-zoom-in" title="Zoom in">${ic.zoomIn()}</button>
+          <button class="btn icon" id="con-fit" title="Fit to window">${ic.fit()}</button>
+        </span>
+        <span class="console-group">
+          <label class="field console-preset"><span>Performance</span>
+            <select id="con-preset">
+              ${(Object.keys(PRESETS) as Preset[]).map((p) =>
+                `<option value="${p}" ${p === consolePreset ? "selected" : ""}>${esc(PRESETS[p].label)}</option>`).join("")}
+            </select></label>
+        </span>
+        <span class="console-group">
+          <button class="btn" id="con-paste" title="Send host clipboard to the guest">${ic.clipboard(14)} Paste</button>
+          <button class="btn" id="con-type" title="Type text as key events">${ic.type(14)} Type…</button>
+          <button class="btn" id="con-copy" title="Copy the guest's clipboard">${ic.copy(14)} Copy</button>
+        </span>
+        <span class="console-group" style="margin-left:auto">
+          <button class="btn" id="con-cad" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
+        </span>
+      </div>
+      <div class="console-hint" id="con-hint">${esc(PRESETS[consolePreset].hint)}</div>
+      <div class="console-stage" id="console-stage">
+        <div class="console-msg" id="console-msg">connecting…</div>
+      </div>`);
+
     try {
       const g = await api.get<{ graphics: { kind: string } | null }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/graphics`);
       const kind = g.graphics?.kind ?? "vnc";
       const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/proxy/${selectedConn}/console/domains/${encodeURIComponent(vm)}`;
-      attachConsole($("#console-stage"), kind, url, (msg) => {
+      const con = await attachConsole($("#console-stage"), kind, url, (msg) => {
         const m = $("#console-msg");
         if (m) m.textContent = msg ?? "";
-      });
+      }, consolePreset);
+
+      if (!con) {
+        // The viewer failed to construct (bad URL, blocked import). Leave the
+        // toolbar visible but inert rather than silently dead, and say why.
+        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset",
+          "#con-preset", "#con-paste", "#con-type", "#con-copy", "#con-cad"]) {
+          const el = $(id);
+          if (el) el.disabled = true;
+        }
+        const hint = $("#con-hint");
+        if (hint) hint.textContent = "Console unavailable — controls disabled until it connects.";
+        return;
+      }
+
+      // Guest -> host: remember what the guest copied so Copy can hand it over
+      // (the browser forbids writing the clipboard outside a user gesture).
+      let guestClipboard = "";
+      con.onGuestClipboard((t) => { guestClipboard = t; });
+
+      const setZoomLabel = () => {
+        const b = $("#con-zoom-reset");
+        if (b) b.textContent = zoomLabel(con.getZoom());
+      };
+      const nudge = (dir: 1 | -1) => {
+        // Stepping from Fit starts at 1:1 so the first click is predictable.
+        const base = con.getZoom() || 1;
+        const next = Math.min(4, Math.max(0.25, +(base + dir * 0.25).toFixed(2)));
+        con.setZoom(next);
+        consoleZoom = next;
+        setZoomLabel();
+      };
+      $("#con-zoom-in").onclick = () => nudge(1);
+      $("#con-zoom-out").onclick = () => nudge(-1);
+      const fit = () => { con.setZoom(0); consoleZoom = 0; setZoomLabel(); };
+      $("#con-fit").onclick = fit;
+      $("#con-zoom-reset").onclick = fit;
+
+      // Ctrl+wheel zooms, like every other viewer.
+      $("#console-stage").addEventListener("wheel", (e: WheelEvent) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        nudge(e.deltaY < 0 ? 1 : -1);
+      }, { passive: false });
+
+      const presetSel = $("#con-preset");
+      presetSel.onchange = () => {
+        consolePreset = presetSel.value as Preset;
+        con.setPreset(consolePreset);
+        const hint = $("#con-hint");
+        if (hint) hint.textContent = PRESETS[consolePreset].hint;
+        toast(`${PRESETS[consolePreset].label} preset applied`);
+      };
+      presetSel.disabled = !con.supports.preset;
+
+      $("#con-paste").onclick = async () => {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (!text) return toast("Host clipboard is empty", "bad");
+          con.pasteToGuest(text);
+          toast(`Sent ${text.length} chars to the guest clipboard`);
+        } catch {
+          // Clipboard read can be denied; typing always works.
+          toast("Clipboard blocked — use Type instead", "bad");
+        }
+      };
+      $("#con-type").onclick = async () => {
+        const text = await askText("Type into the guest", "Text", "",
+          "sent as key events, for guests without a clipboard agent");
+        if (!text) return;
+        toast(`Typing ${text.length} characters…`);
+        await con.typeToGuest(text);
+      };
+      $("#con-copy").onclick = async () => {
+        if (!guestClipboard) {
+          return toast("Nothing copied in the guest yet", "bad");
+        }
+        try {
+          await navigator.clipboard.writeText(guestClipboard);
+          toast(`Copied ${guestClipboard.length} chars from the guest`);
+        } catch {
+          toast("Host clipboard write was blocked", "bad");
+        }
+      };
+      for (const id of ["#con-paste", "#con-type", "#con-copy"]) {
+        const b = $(id);
+        if (b) b.disabled = !con.supports.clipboard;
+      }
+      $("#con-cad").onclick = () => con.sendCtrlAltDel();
+
+      // Re-fit when the pane resizes, so the guest stays centred.
+      const stage = $("#console-stage");
+      const ro = new ResizeObserver(() => con.refit());
+      ro.observe(stage);
+      consoleResizeObserver?.disconnect();
+      consoleResizeObserver = ro;
+
+      setZoomLabel();
     } catch (e) {
       const m = $("#console-msg");
       if (m) m.textContent = (e as Error).message;

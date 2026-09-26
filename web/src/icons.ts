@@ -8,6 +8,9 @@ import {
   ChevronDown,
   Circle,
   CircleDot,
+  Clipboard,
+  ClipboardPaste,
+  Copy,
   Cpu,
   Database,
   FileCode,
@@ -17,6 +20,8 @@ import {
   MemoryStick,
   Minus,
   Monitor,
+  Keyboard,
+  Maximize,
   Network,
   OctagonX,
   Pencil,
@@ -33,6 +38,8 @@ import {
   Upload,
   Users,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide";
 
 // The Lucide pack ships path data only. Stroke weight, caps and joins are
@@ -115,4 +122,12 @@ export const ic = {
   xml: svg(FileCode),
   options: svg(Settings),
   firewall: svg(Shield),
+  // Console toolbar
+  zoomIn: svg(ZoomIn),
+  zoomOut: svg(ZoomOut),
+  fit: svg(Maximize),
+  clipboard: svg(ClipboardPaste),
+  copy: svg(Copy),
+  type: svg(Keyboard),
+  clip: svg(Clipboard),
 };

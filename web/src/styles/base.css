@@ -331,17 +331,39 @@ table.grid tr:hover td { background: var(--hover); }
 .auth-logo span { color: var(--accent); }
 
 /* ------------------------------------------------------------ VNC console */
+/* Toolbar above the screen: zoom, performance preset and clipboard. */
+.console-bar {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding-bottom: 10px;
+}
+.console-group { display: flex; align-items: center; gap: 6px; }
+/* The preset picker is a labelled control, but must not stretch. */
+.console-preset { flex-direction: row; align-items: center; gap: 8px; }
+.console-preset > span { white-space: nowrap; }
+.console-preset select, .console-preset .select-trigger { width: auto; min-width: 118px; }
+.console-hint { font-size: 11px; color: var(--dim); padding-bottom: 10px; }
+
+/* The screen is centred in the stage and scaled to the LOCAL viewport; the
+   guest resolution only supplies an aspect ratio. A fixed height is used
+   because the detail pane scrolls, so `flex: 1` would collapse to nothing. */
 .console-stage {
-  flex: 1; min-width: 0; min-height: 0;
+  min-width: 0;
+  height: clamp(320px, calc(100vh - 320px), 1200px);
   background: #000;
   display: flex;
+  /* safe centering keeps zoomed-in overflow reachable instead of clipping it
+     off the left/top edge, which plain `center` would do. */
   align-items: safe center;
   justify-content: safe center;
   overflow: auto;
   position: relative;
   outline: none;
+  border: 1px solid var(--line);
 }
 .console-stage canvas, .console-stage #spice-screen, .console-stage .spice-screen { display: block; }
+/* noVNC wraps its canvas in a div; both must centre rather than stretch. */
+.console-stage > div { margin: auto; }
+.console-stage canvas { margin: auto; }
 .console-msg {
   position: absolute; top: 50%; left: 50%;
   transform: translate(-50%, -50%);
