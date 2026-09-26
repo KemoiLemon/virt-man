@@ -70,12 +70,13 @@ check("window controls sit flush at the far right", () => {
   assert.equal(bar.lastElementChild, controls, "controls are the last element");
 });
 
-check("theme and WebUI buttons hug the window controls", () => {
+check("the topbar action group hugs the window controls", () => {
   const bar = document.querySelector(".topbar");
   const quick = document.querySelector(".topbar-quick");
   assert.ok(quick, ".topbar-quick group exists");
   assert.ok(quick.querySelector("#theme-btn"), "theme button is in the quick group");
-  assert.ok(quick.querySelector("#webui-btn"), "WebUI button is in the quick group");
+  // Connect-to-WebUI is desktop-only now; the browser build must not show it.
+  assert.ok(!quick.querySelector("#webui-btn"), "no WebUI button in the browser build");
   const gap = px(quick, "gap");
   assert.ok(gap > 0 && gap <= 8, `buttons sit close together (gap ${gap}px)`);
   // The quick group is the last element before the window controls.

@@ -60,7 +60,7 @@ test("stroke weight is defined once in CSS, not per icon", () => {
 });
 
 test("rendered icons carry no inline stroke attributes", () => {
-  for (const name of ["min", "max", "close", "theme", "webui", "trash"]) {
+  for (const name of ["min", "max", "close", "theme", "webui", "trash", "admin", "logout"]) {
     const html = icons.ic[name]();
     assert.match(html, /class="ico"/, `${name} is wrapped in .ico`);
     assert.match(html, /<svg viewBox="0 0 24 24">/, `${name} svg is attribute-free`);

@@ -3,7 +3,12 @@
 //
 // The system service serves HTTPS with a self-signed cert, so this one runs
 // with NODE_TLS_REJECT_UNAUTHORIZED=0 (Node's undici accepts the cert):
-//   NODE_TLS_REJECT_UNAUTHORIZED=0 node test/live-profile.mjs [baseUrl]
+//   NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=admin VM_PASS=... \
+//     node test/live-profile.mjs [baseUrl]
+//
+// Credentials come from VM_USER/VM_PASS because the account can be renamed
+// through the very feature under test — hardcoding them made this suite fail
+// the moment someone changed their own username.
 //
 // jsdom cannot do file input or canvas, so the crop dialog itself is not
 // exercised here — crop math is covered by crop.test.mjs.
@@ -14,6 +19,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
 
 const base = process.argv[2] ?? "https://127.0.0.1:8006";
+const USER = process.env.VM_USER ?? "admin";
+const PASS = process.env.VM_PASS ?? "password123";
+// Optional non-admin account. When supplied, the suite also proves the admin
+// panel is hidden from it and that the API refuses it regardless of the UI.
+const LOW_USER = process.env.VM_LOW_USER;
+const LOW_PASS = process.env.VM_LOW_PASS;
 
 execFileSync(
   "npx",
@@ -78,11 +89,15 @@ check("login screen appears", () => {
   assert.ok(document.querySelector("#lp"), "password field");
 });
 
-// Sign in as the seeded admin (admin / password123).
-document.querySelector("#lu").value = "admin";
-document.querySelector("#lp").value = "password123";
+document.querySelector("#lu").value = USER;
+document.querySelector("#lp").value = PASS;
 document.querySelector("#login-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1600);
+
+if (!document.querySelector("#profile-btn")) {
+  console.error(`✖ could not sign in as ${USER} — set VM_USER/VM_PASS for this instance`);
+  process.exit(1);
+}
 
 check("profile button renders in the sidebar after login", () => {
   assert.ok(document.querySelector("#profile-btn"), "profile button present");
@@ -119,8 +134,11 @@ check("card padding follows the theme, not ad-hoc values", () => {
 });
 
 // The real bug: saving a username must change it server-side AND repaint.
-const origUser = (await window.fetch("/auth/me").then((r) => r.json())).username;
-document.querySelector("#pf-user").value = "renamed-admin";
+const before = await window.fetch("/auth/me").then((r) => r.json());
+const origUser = before.username;
+const origNick = before.nickname;
+const probeUser = `${origUser}-probe`;
+document.querySelector("#pf-user").value = probeUser;
 document.querySelector("#pf-nick").value = "Renamed";
 document.querySelector("#pf-save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1200);
@@ -128,12 +146,12 @@ await wait(1200);
 const afterSave = await window.fetch("/auth/me").then((r) => r.json());
 
 check("saving changes the username on the server", () => {
-  assert.equal(afterSave.username, "renamed-admin", "server reports the new username");
+  assert.equal(afterSave.username, probeUser, "server reports the new username");
   assert.equal(afterSave.nickname, "Renamed", "server reports the new display name");
 });
 
 check("the card and sidebar both repaint after saving", () => {
-  assert.equal(document.querySelector("#pf-who-user").textContent.split(" · ")[0], "@renamed-admin",
+  assert.equal(document.querySelector("#pf-who-user").textContent.split(" · ")[0], `@${probeUser}`,
     "card header shows the new username");
   assert.equal(document.querySelector("#pf-who-name").textContent, "Renamed",
     "card header shows the new display name");
@@ -147,16 +165,95 @@ check("the card and sidebar both repaint after saving", () => {
 await window.fetch("/me", {
   method: "PUT",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ username: origUser, nickname: "Admin" }),
+  body: JSON.stringify({ username: origUser, nickname: origNick }),
 });
 const restored = await window.fetch("/auth/me").then((r) => r.json());
 check("account restored for repeatability", () => {
   assert.equal(restored.username, origUser, `username back to ${origUser}`);
-  assert.equal(restored.nickname, "Admin", "nickname back to Admin");
+  assert.equal(restored.nickname, origNick, `nickname back to ${origNick}`);
 });
 
+// ------------------------------------------------------- topbar + admin panel
+
+document.querySelector(".modal-back.open .x")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(300);
+
+check("topbar order is theme, admin, sign out — all icon-only", () => {
+  const quick = document.querySelector(".topbar-quick");
+  assert.ok(quick, ".topbar-quick group exists");
+  // Browser build must not offer Connect to WebUI at all.
+  assert.ok(!document.querySelector("#webui-btn"), "no WebUI button in the browser build");
+  const ids = [...quick.querySelectorAll("button")].map((b) => b.id);
+  assert.deepEqual(ids, ["theme-btn", "admin-btn", "logout-btn"], `order is theme, admin, sign out (got ${ids})`);
+  for (const id of ids) {
+    const b = document.querySelector(`#${id}`);
+    assert.ok(b.classList.contains("icon"), `${id} is an icon button`);
+    assert.ok(b.querySelector("svg"), `${id} renders an icon`);
+    assert.equal(b.textContent.trim(), "", `${id} has no text label`);
+    assert.ok(b.title, `${id} has a tooltip`);
+  }
+});
+
+document.querySelector("#admin-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(900);
+
+check("admin panel opens with users and API key sections", () => {
+  const modal = document.querySelector(".modal-back.open");
+  assert.ok(modal, "admin modal open");
+  const tabs = [...modal.querySelectorAll("[data-admintab]")].map((t) => t.dataset.admintab);
+  assert.deepEqual(tabs, ["users", "keys"], "users and keys tabs");
+  assert.ok(modal.querySelector("#admin-area table.grid"), "user table rendered from the live API");
+  assert.ok(modal.querySelector("#add-user"), "add user button");
+  assert.ok(modal.querySelector("[data-edituser]"), "per-user edit (role + permissions)");
+});
+
+check("users no longer duplicated as a Datacenter tab", () => {
+  assert.ok(!document.querySelector('[data-dctab="users"]'), "Datacenter has no Users tab");
+});
+
+// --------------------------------------------- non-admin sees no admin panel
+
+if (LOW_USER && LOW_PASS) {
+  // Sign out and back in as the low-privilege account in the same document.
+  document.querySelector(".modal-back.open .x")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(200);
+  sessionCookie = "";
+  document.querySelector("#logout-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1000);
+  document.querySelector("#lu").value = LOW_USER;
+  document.querySelector("#lp").value = LOW_PASS;
+  document.querySelector("#login-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1600);
+
+  const who = await window.fetch("/auth/me").then((r) => r.json());
+  const usersStatus = (await window.fetch("/users")).status;
+  const keysStatus = (await window.fetch("/keys")).status;
+
+  check("a non-admin gets no admin button, and the API refuses them anyway", () => {
+    assert.notEqual(who.role, "admin", `signed in as a non-admin (${who.username}/${who.role})`);
+    assert.ok(!document.querySelector("#admin-btn"), "admin button hidden");
+    assert.ok(document.querySelector("#theme-btn"), "theme button still shown");
+    assert.ok(document.querySelector("#logout-btn"), "sign out still shown");
+    // Hiding the button is cosmetic; the server is the actual gate.
+    assert.equal(usersStatus, 403, "GET /users forbidden");
+    assert.equal(keysStatus, 403, "GET /keys forbidden");
+  });
+
+  check("the command palette hides the admin command from a non-admin", () => {
+    document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+    const labels = [...document.querySelectorAll(".tayne-row .tayne-label")].map((e) => e.textContent);
+    assert.ok(labels.length, "palette rendered commands");
+    assert.ok(!labels.some((l) => /Admin panel/.test(l)), "no Admin panel command");
+    document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+} else {
+  results.push(["info", "set VM_LOW_USER/VM_LOW_PASS to also check the non-admin case"]);
+}
+
 const fails = results.filter(([s]) => s === "FAIL");
-for (const [s, msg] of results) console.log(`${s === "pass" ? "✔" : "✖"} ${msg}`);
+for (const [s, msg] of results) {
+  console.log(`${s === "pass" ? "✔" : s === "info" ? "·" : "✖"} ${msg}`);
+}
 window.close();
 if (fails.length) {
   console.log(`\n${fails.length} check(s) failed`);

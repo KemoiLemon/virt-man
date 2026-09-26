@@ -34,7 +34,9 @@ let selectedConn: string | null = null;
 let connTab: "vms" | "networks" | "storage" | "firewall" = "vms";
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
-let dcTab: "servers" | "guests" | "users" = "servers";
+let dcTab: "servers" | "guests" = "servers";
+/// Which section of the admin panel modal is showing.
+let adminTab: "users" | "keys" = "users";
 let pollTimer: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
 /// without every render refetching.
@@ -82,7 +84,7 @@ function openCommandPalette() {
   const add = (id: string, label: string, hint: string | undefined, run: () => void) =>
     cmds.push({ id, label, hint, run });
 
-  add("nav-dc", "Go to Datacenter", "Servers, guests, users", () => {
+  add("nav-dc", "Go to Datacenter", "Servers and guests", () => {
     leaveCurrentView();
     selectedConn = null;
     selectedVm = null;
@@ -156,6 +158,9 @@ function openCommandPalette() {
     document.documentElement.getAttribute("data-theme") === "dark" ? "dark → light" : "light → dark",
     toggleTheme,
   );
+  if (canAdmin()) {
+    add("admin-panel", "Admin panel", "Users, permissions, API keys", () => openAdmin());
+  }
   if (!authDisabled) add("logout", "Sign out", "End this session", () => void logout());
 
   openTayne(cmds);
@@ -307,12 +312,11 @@ setHtml(app, `
     <div class="topbar">
       <span class="brand">virt-<span>man</span></span>
       <span class="host">${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
-      <span class="topbar-actions">
-        ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
-      </span>
       <span class="topbar-quick">
+        ${isTauri() ? `<button class="btn icon" id="webui-btn" title="Connect to a remote WebUI">${ic.webui()}</button>` : ""}
         <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
-        <button class="btn" id="webui-btn">${ic.webui()} Connect to WebUI</button>
+        ${canAdmin() ? `<button class="btn icon" id="admin-btn" title="Admin panel">${ic.admin()}</button>` : ""}
+        ${authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign out">${ic.logout()}</button>`}
       </span>
       ${isTauri() ? `<span class="window-controls">
         <button class="win-btn" id="win-min" title="Minimise">${ic.min()}</button>
@@ -337,7 +341,8 @@ setHtml(app, `
 
   $("#theme-btn").onclick = toggleTheme;
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
-  $("#webui-btn").onclick = connectToWebui;
+  if ($("#admin-btn")) $("#admin-btn").onclick = openAdmin;
+  if ($("#webui-btn")) $("#webui-btn").onclick = connectToWebui;
   $("#add-conn-row").onclick = () => openConnectionDialog();
   $("#tasks-close").onclick = () => $("#tasks").classList.add("hidden");
 
@@ -386,6 +391,17 @@ function wireWindowChrome() {
       else await w.maximize();
     })();
   });
+}
+
+/// Whether to offer the admin panel. Mirrors the backend's `permission()`
+/// for the "users" scope: an explicit per-user override wins, otherwise the
+/// role decides. Hiding the button is cosmetic — the API enforces the same
+/// rule, so a non-admin poking at /users still gets 403.
+function canAdmin(): boolean {
+  if (!user) return false;
+  const override = user.scopes?.users;
+  if (override) return override === "write";
+  return user.role === "admin";
 }
 
 /// Navigate the app window to a remote web UI. Standalone desktop builds use
@@ -545,7 +561,6 @@ function renderDc() {
   const tabs = `<div class="tabbar">
       <button class="tab ${dcTab === "servers" ? "active" : ""}" data-dctab="servers">${ic.server(14)} Servers</button>
       <button class="tab ${dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
-      ${authDisabled ? "" : `<button class="tab ${dcTab === "users" ? "active" : ""}" data-dctab="users">${ic.users(14)} Users &amp; API keys</button>`}
       ${dcTab === "servers"
         ? `<div class="tabbar-actions"><button class="btn primary" id="dc-add">${ic.plus(14)} Add Server</button></div>`
         : ""}
@@ -554,8 +569,7 @@ function renderDc() {
   const allVms = Object.values(treeVms).flat();
   const runningVms = allVms.filter((v) => v.active).length;
   // Summary cards head both the Servers and Guests tabs.
-  const cards = dcTab !== "users"
-    ? `<div class="cards">
+  const cards = `<div class="cards">
         <div class="card">
           <span class="card-ic">${ic.server(20)}</span>
           <div><b>${connections.length}</b><i>SERVERS</i></div>
@@ -572,8 +586,7 @@ function renderDc() {
           <span class="card-ic">${ic.stop(20)}</span>
           <div><b>${allVms.length - runningVms}</b><i>STOPPED</i></div>
         </div>
-      </div>`
-    : "";
+      </div>`;
   // Every guest across every server, so a VM is reachable directly from here
   // instead of only through the sidebar.
   const guestRows = connections
@@ -694,47 +707,93 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
       renderDc();
     };
   });
-
-  if (dcTab === "users") loadUsers();
 }
 
-// ---------------------------------------------------------------- users
+// ----------------------------------------------------------- admin panel
 
-async function loadUsers() {
-  const area = $("#users-area");
+/// Admin panel: users, permissions and API keys, plus room for the misc
+/// server-wide settings that do not belong to any one daemon. Lives in a
+/// modal rather than a Datacenter tab so it is reachable from any view.
+function openAdmin() {
+  if (!canAdmin()) return;
+  const el = openModal(
+    "Admin panel",
+    `<div class="tabbar">
+       <button class="tab" data-admintab="users">${ic.users(14)} Users &amp; permissions</button>
+       <button class="tab" data-admintab="keys">${ic.key(14)} API keys</button>
+     </div>
+     <div id="admin-area">loading…</div>`,
+    `<button class="btn" id="ad-close">Close</button>`,
+  );
+  (el.querySelector(".modal") as HTMLElement).classList.add("wide");
+  $("#ad-close", el).onclick = () => el.remove();
+
+  const paint = () => {
+    el.querySelectorAll("[data-admintab]").forEach((b: Element) => {
+      const tab = (b as HTMLElement).dataset.admintab as typeof adminTab;
+      (b as HTMLElement).classList.toggle("active", tab === adminTab);
+      (b as HTMLElement).onclick = () => {
+        adminTab = tab;
+        paint();
+      };
+    });
+    void loadAdmin(el);
+  };
+  paint();
+}
+
+async function loadAdmin(root: Element) {
+  const area = $("#admin-area", root);
   if (!area) return;
   try {
-    const [users, keys] = await Promise.all([
-      api.get<User[]>("/users"),
-      api.get<import("./api").ApiKey[]>("/keys"),
-    ]);
-setHtml(area, `<div class="section-title">Users</div>
-      <table class="grid">
-        <tr><th>Username</th><th>Nickname</th><th>Role</th><th></th></tr>
+    if (adminTab === "keys") {
+      const keys = await api.get<import("./api").ApiKey[]>("/keys");
+setHtml(area, `<div class="hw-note">Keys issued by any user. Revoking one takes effect immediately.</div>
+        <table class="grid">
+          <tr><th>Name</th><th>Prefix</th><th class="col-actions"></th></tr>
+          ${keys.map((k) => `
+            <tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}…</td>
+            <td class="col-actions"><button class="btn danger icon" data-delkey="${k.id}" title="Revoke">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No keys.</td></tr>`}
+        </table>`);
+      area.querySelectorAll("[data-delkey]").forEach((b: Element) => {
+        (b as HTMLElement).onclick = async () => {
+          const id = (b as HTMLElement).dataset.delkey!;
+          try { await api.del(`/keys/${id}`); toast("Key revoked"); void loadAdmin(root); }
+          catch (e) { toast((e as Error).message, "bad"); }
+        };
+      });
+      return;
+    }
+
+    const users = await api.get<User[]>("/users");
+setHtml(area, `<table class="grid">
+        <tr><th>Username</th><th>Display name</th><th>Role</th><th class="col-actions"></th></tr>
         ${users.map((u) => `
-          <tr><td>${esc(u.username)}</td><td>${esc(u.nickname)}</td><td>${esc(u.role)}</td>
-          <td><button class="btn danger icon" data-deluser="${u.id}">${ic.trash()}</button></td></tr>`).join("")}
+          <tr>
+            <td>${esc(u.username)}${u.id === user?.id ? ` <span class="badge">you</span>` : ""}</td>
+            <td>${esc(u.nickname)}</td>
+            <td>${esc(u.role)}</td>
+            <td class="col-actions"><div class="row-actions">
+              <button class="btn icon" data-edituser="${u.id}" title="Edit role and permissions">${ic.edit()}</button>
+              <button class="btn danger icon" data-deluser="${u.id}" title="Delete user">${ic.trash()}</button>
+            </div></td>
+          </tr>`).join("")}
       </table>
-      <div class="actions"><button class="btn primary" id="add-user">Add user</button></div>
-      <div class="section-title">API keys</div>
-      <table class="grid">
-        <tr><th>Name</th><th>Prefix</th><th></th></tr>
-        ${keys.map((k) => `
-          <tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}…</td>
-          <td><button class="btn danger icon" data-delkey="${k.id}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No keys.</td></tr>`}
-      </table>`);
-    $("#add-user", area).onclick = () => openAddUser();
+      <div class="actions"><button class="btn primary" id="add-user">${ic.plus(14)} Add user</button></div>`);
+    $("#add-user", area).onclick = () => openAddUser(root);
+    area.querySelectorAll("[data-edituser]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => {
+        const id = (b as HTMLElement).dataset.edituser!;
+        const u = users.find((x) => x.id === id);
+        if (u) openEditUser(u, root);
+      };
+    });
     area.querySelectorAll("[data-deluser]").forEach((b: Element) => {
       (b as HTMLElement).onclick = async () => {
         const id = (b as HTMLElement).dataset.deluser!;
-        try { await api.del(`/users/${id}`); toast("User removed"); loadUsers(); }
-        catch (e) { toast((e as Error).message, "bad"); }
-      };
-    });
-    area.querySelectorAll("[data-delkey]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = async () => {
-        const id = (b as HTMLElement).dataset.delkey!;
-        try { await api.del(`/keys/${id}`); toast("Key revoked"); loadUsers(); }
+        const u = users.find((x) => x.id === id);
+        if (!await askConfirm("Delete user", `Delete ${u?.username ?? "this user"}? Their API keys and sessions go too.`, "Delete", true)) return;
+        try { await api.del(`/users/${id}`); toast("User removed"); void loadAdmin(root); }
         catch (e) { toast((e as Error).message, "bad"); }
       };
     });
@@ -743,13 +802,74 @@ setHtml(area, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
 
-function openAddUser() {
+/// Per-scope permission overrides. The backend reads these from user.scopes
+/// and falls back to the role, so "inherit" means "delete the override".
+const ADMIN_SCOPES = ["users", "settings", "connections", "domains"];
+
+function openEditUser(u: User, root: Element) {
+  const el = openModal(
+    `Edit — ${esc(u.username)}`,
+    `<div class="grid2">
+       <label class="field"><span>Display name</span><input id="eu-nick" value="${esc(u.nickname)}"></label>
+       <label class="field"><span>Role</span><select id="eu-role">
+         ${["viewer", "operator", "admin"].map((r) =>
+           `<option value="${r}" ${r === u.role ? "selected" : ""}>${r}</option>`).join("")}
+       </select></label>
+     </div>
+     <label class="field"><span>Reset password (blank = leave unchanged)</span>
+       <input id="eu-pass" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
+     <div class="section-title">Permission overrides</div>
+     <div class="hw-note">Each scope inherits from the role unless overridden here.</div>
+     <div class="grid2">
+       ${ADMIN_SCOPES.map((s) => `
+         <label class="field"><span>${esc(s)}</span>
+           <select data-scope="${esc(s)}">
+             <option value="" ${u.scopes?.[s] ? "" : "selected"}>inherit from role</option>
+             <option value="write" ${u.scopes?.[s] === "write" ? "selected" : ""}>write</option>
+             <option value="read" ${u.scopes?.[s] === "read" ? "selected" : ""}>read</option>
+             <option value="none" ${u.scopes?.[s] === "none" ? "selected" : ""}>none</option>
+           </select></label>`).join("")}
+     </div>`,
+    `<button class="btn" id="eu-cancel">Cancel</button>
+     <button class="btn primary" id="eu-save">Save</button>`,
+  );
+  $("#eu-cancel", el).onclick = () => el.remove();
+  $("#eu-save", el).onclick = async () => {
+    const scopes: Record<string, string> = {};
+    el.querySelectorAll("[data-scope]").forEach((s: Element) => {
+      const v = (s as HTMLSelectElement).value;
+      if (v) scopes[(s as HTMLElement).dataset.scope!] = v;
+    });
+    const body: Record<string, unknown> = {
+      nickname: $("#eu-nick", el).value,
+      role: $("#eu-role", el).value,
+      scopes,
+    };
+    const pass = $("#eu-pass", el).value;
+    if (pass) body.password = pass;
+    try {
+      await api.put(`/users/${u.id}`, body);
+      toast("User updated");
+      el.remove();
+      // Editing yourself can change your own role, so refresh the identity
+      // the topbar and admin-button visibility are derived from.
+      if (u.id === user?.id) {
+        user = await api.get<User>("/auth/me");
+        renderApp();
+      } else {
+        void loadAdmin(root);
+      }
+    } catch (e) { toast((e as Error).message, "bad"); }
+  };
+}
+
+function openAddUser(root: Element) {
   const el = openModal(
     "Add user",
     `<div class="grid2">
-      <label class="field"><span>Username</span><input id="nu-name"></label>
-      <label class="field"><span>Password (min 8)</span><input id="nu-pass" type="password"></label>
-      <label class="field"><span>Nickname</span><input id="nu-nick"></label>
+      <label class="field"><span>Username</span><input id="nu-name" autocomplete="username"></label>
+      <label class="field"><span>Password (min 8)</span><input id="nu-pass" type="password" autocomplete="new-password"></label>
+      <label class="field"><span>Display name</span><input id="nu-nick"></label>
       <label class="field"><span>Role</span><select id="nu-role">
         <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
       </select></label>
@@ -766,7 +886,7 @@ function openAddUser() {
       });
       toast("User created");
       el.remove();
-      loadUsers();
+      void loadAdmin(root);
     } catch (e) { toast((e as Error).message, "bad"); }
   };
 }

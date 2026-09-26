@@ -109,18 +109,16 @@ body {
   -webkit-user-select: none;
   user-select: none;
 }
-/* App actions sit together at the trailing edge, next to the window
-   controls, rather than spread across the bar. */
-.topbar-actions {
+/* App actions sit together at the trailing edge, hugging the window controls.
+   The 16px topbar flex gap plus this negative margin leaves ~6px of breathing
+   room before the first win-btn's divider. `.host` flexes, but it can shrink
+   to nothing, so this group still needs margin-left:auto to stay pinned right
+   when the host label is short. */
+.topbar-quick {
   margin-left: auto; display: flex; align-items: center; gap: 7px;
-  padding-right: 8px; flex: 0 0 auto;
+  flex: 0 0 auto; margin-right: -10px;
 }
 /* Without window controls (browser build) the actions still need a gutter. */
-.topbar > .topbar-actions:last-child { padding-right: 14px; }
-/* Theme + Connect-to-WebUI hug the window controls; the 16px flex gap plus
-   this negative margin leaves a ~6px breathing room before the first
-   win-btn's divider. */
-.topbar-quick { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; margin-right: -10px; }
 .topbar > .topbar-quick:last-child { margin-right: 0; padding-right: 14px; }
 .brand { font-weight: 700; letter-spacing: 2px; font-size: 15px; }
 .brand span { color: var(--accent); }
