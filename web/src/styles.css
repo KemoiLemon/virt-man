@@ -4,4 +4,5 @@
 @import "./styles/base.css";
 @import "./styles/views.css";
 @import "./styles/dashboard.css";
+@import "./styles/hardware.css";
 @import "./styles/density.css";

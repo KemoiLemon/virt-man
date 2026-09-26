@@ -1,0 +1,108 @@
+/* Proxmox-style hardware editor, ported from vm-man (ui/base.css).
+   Device list on the LEFT (sidebar, not a top bar); the selected device's
+   form fills the pane on the right. */
+
+.hw-modal { width: 860px; max-width: 96vw; height: 620px; max-height: 92vh; }
+.hw-body { flex: 1; display: grid; grid-template-columns: 210px 1fr; min-height: 0; }
+
+.hw-side {
+  border-right: 1px solid var(--line);
+  background: var(--panel2);
+  /* The device list scrolls; the Add Hardware button below stays pinned to
+     the sidebar's visible bottom instead of scrolling away. */
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  position: relative;
+}
+.hw-side-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.hw-side-head {
+  padding: 8px 11px; font-size: 10px; letter-spacing: 1.5px; color: var(--dim);
+  border-bottom: 1px solid var(--line); flex: 0 0 auto;
+}
+.hw-item {
+  display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 9px 12px; background: none; border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg); font: inherit; cursor: pointer; width: 100%;
+}
+.hw-item:hover { background: var(--hover); }
+.hw-item.active { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
+.hw-ic {
+  width: 17px; height: 17px; flex: 0 0 17px;
+  display: inline-grid; place-items: center; color: var(--dim);
+}
+.hw-item.active .hw-ic { color: var(--accent); }
+.hw-tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.hw-tx b { font-size: 12px; font-weight: 600; line-height: 1.35; }
+.hw-tx i {
+  font-style: normal; font-size: 10px; color: var(--dim); line-height: 1.35;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.hw-pane { overflow-y: auto; padding: 16px; min-width: 0; }
+.hw-page { display: none; flex-direction: column; gap: 13px; }
+.hw-page.active { display: flex; }
+.hw-title {
+  font-size: 13px; font-weight: 700; letter-spacing: 1px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 2px;
+}
+.hw-note {
+  font-size: 11px; color: var(--dim); line-height: 1.7;
+  border-left: 2px solid var(--line2); padding: 2px 0 2px 9px;
+}
+.hw-note code { color: var(--fg); }
+.hw-check { font-size: 12px; }
+
+/* Add-hardware button pinned to the sidebar bottom. */
+.hw-add {
+  margin-top: auto; flex: 0 0 auto; min-height: 35px; width: 100%;
+  border: 0; border-top: 1px solid var(--line);
+  background: var(--panel); color: var(--accent); cursor: pointer;
+  font: inherit; font-size: 11px; letter-spacing: 1px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+}
+.hw-add:hover { background: var(--accent-bg); color: var(--accent-fg); }
+.hw-add .ico { width: 15px; height: 15px; }
+
+/* Custom devices appended below the fixed device pages. */
+.hw-custom-list { border-top: 1px solid var(--line); }
+.hw-custom-list:empty { display: none; }
+.hw-custom .hw-ic { color: var(--warn); }
+.hw-custom.active .hw-ic { color: var(--accent); }
+
+/* Device table on the VM Hardware tab. */
+.hwtable { border: 1px solid var(--line); }
+.hwrow {
+  display: grid; grid-template-columns: 20px 150px 1fr auto;
+  align-items: center; gap: 10px;
+  padding: 8px 11px; border-bottom: 1px solid var(--line);
+}
+.hwrow:last-child { border-bottom: none; }
+.hwrow:hover { background: var(--hover); }
+.hwrow-ic { color: var(--dim); width: 17px; height: 17px; }
+.hwrow-label { font-size: 11px; letter-spacing: .8px; color: var(--dim); }
+.hwctl { min-width: 0; }
+.hwctl-static { font-size: 12px; word-break: break-word; }
+.hw-locked { font-size: 11px; color: var(--warn); }
+
+/* Add-hardware chooser: type list on the left, generated form on the right. */
+.add-hw-modal { width: 760px; max-width: 96vw; height: 560px; max-height: 92vh; }
+.add-hw-body { flex: 1; display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
+.add-hw-types { border-right: 1px solid var(--line); background: var(--panel2); overflow-y: auto; }
+.add-hw-type {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  padding: 9px 12px; background: none; border: none;
+  border-bottom: 1px solid var(--line); color: var(--fg); font: inherit;
+}
+.add-hw-type:hover { background: var(--hover); }
+.add-hw-type.active { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
+.add-hw-type b { display: block; font-size: 12px; font-weight: 600; }
+.add-hw-type small { display: block; font-size: 10px; color: var(--dim); margin-top: 2px; }
+.add-hw-form { overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 13px; min-width: 0; }
+.add-hw-fields { display: flex; flex-direction: column; gap: 12px; }
+.add-hw-preview code {
+  display: block; background: var(--code-bg); border: 1px solid var(--line);
+  padding: 9px 10px; font-size: 11px; color: var(--dim);
+  white-space: pre-wrap; word-break: break-all;
+  -webkit-user-select: text; user-select: text;
+}
