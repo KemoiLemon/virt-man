@@ -266,7 +266,12 @@ pub const OUR_FORMAT: PixOrder = PixOrder { r: 2, g: 1, b: 0 };
 /// Convert one Raw rectangle (32bpp, little-endian, `ord` layout) into RGBA.
 pub fn raw_to_rgba(src: &[u8], ord: PixOrder, out: &mut [u8]) {
     debug_assert_eq!(src.len(), out.len());
-    for (s, d) in src.as_chunks::<4>().0.iter().zip(out.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<4>().0.iter_mut())
+    {
         d[0] = s[ord.r];
         d[1] = s[ord.g];
         d[2] = s[ord.b];
@@ -345,17 +350,17 @@ pub fn blit_changed(
 
 /// CopyRect: move a block already present in the framebuffer.
 /// Copies through a temporary so overlapping regions stay correct.
-pub fn copy_rect(fb: &mut [u8], fb_w: u16, sx: u16, sy: u16, dx: u16, dy: u16, w: u16, h: u16) {
+pub fn copy_rect(fb: &mut [u8], fb_w: u16, src: Rect, dst: Rect) {
     let stride = fb_w as usize * 4;
-    let mut tmp = vec![0u8; w as usize * h as usize * 4];
-    for row in 0..h as usize {
-        let s = (sy as usize + row) * stride + sx as usize * 4;
-        let n = w as usize * 4;
+    let mut tmp = vec![0u8; src.w as usize * src.h as usize * 4];
+    for row in 0..src.h as usize {
+        let s = (src.y as usize + row) * stride + src.x as usize * 4;
+        let n = src.w as usize * 4;
         if s + n <= fb.len() {
             tmp[row * n..(row + 1) * n].copy_from_slice(&fb[s..s + n]);
         }
     }
-    blit(fb, fb_w, dx, dy, w, h, &tmp);
+    blit(fb, fb_w, dst.x, dst.y, dst.w, dst.h, &tmp);
 }
 
 /// Keep a rectangle inside the framebuffer, so a malformed or stale rect can
@@ -560,7 +565,14 @@ fn reader_loop(sess: &Arc<Session>, mut s: TcpStream) -> R<()> {
                             let (sx, sy) = (be16(&src[0..2]), be16(&src[2..4]));
                             let mut f = sess.frame.lock().unwrap();
                             let fw = f.w;
-                            copy_rect(&mut f.rgba, fw, sx, sy, x, y, w, h);
+                            // CopyRect carries the same w/h for source and
+                            // destination; only the source x/y differs.
+                            copy_rect(
+                                &mut f.rgba,
+                                fw,
+                                Rect { x: sx, y: sy, w, h },
+                                Rect { x, y, w, h },
+                            );
                             f.touch(Rect { x, y, w, h });
                         }
                         -223 => {
@@ -668,11 +680,24 @@ mod tests {
         // 2x2, top-left white, rest black; copy (0,0)1x1 to (1,1)
         let mut fb = vec![0u8; 2 * 2 * 4];
         fb[0..4].copy_from_slice(&[255, 255, 255, 255]);
-        copy_rect(&mut fb, 2, 0, 0, 1, 1, 1, 1);
-        assert_eq!(
-            &fb[(1 * 2 + 1) * 4..(1 * 2 + 1) * 4 + 4],
-            [255, 255, 255, 255]
+        copy_rect(
+            &mut fb,
+            2,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            Rect {
+                x: 1,
+                y: 1,
+                w: 1,
+                h: 1,
+            },
         );
+        // Target pixel (1,1) in a 2-wide RGBA framebuffer is at byte 12.
+        assert_eq!(&fb[12..16], [255, 255, 255, 255]);
         assert_eq!(&fb[0..4], [255, 255, 255, 255], "source stays put");
     }
 

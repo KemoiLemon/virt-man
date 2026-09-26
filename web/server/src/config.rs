@@ -71,11 +71,11 @@ impl Config {
         })
     }
 
-    pub fn addr(&self) -> std::net::SocketAddr {
+    pub fn addr(&self) -> Result<std::net::SocketAddr, String> {
         let host = dual_stack_host(&self.bind);
         format!("{host}:{}", self.port)
             .parse()
-            .expect("invalid bind address")
+            .map_err(|e| format!("invalid bind address {host}:{}: {e}", self.port))
     }
 
     pub fn cert_path(&self) -> PathBuf {

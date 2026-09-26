@@ -23,9 +23,7 @@ pub fn session_cookie(token: &str) -> String {
     // Secure so the token never rides a plaintext HTTP request — which now
     // matters: the same port answers plain HTTP with a redirect, and without
     // Secure a LAN client would send its session cookie in cleartext.
-    format!(
-        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000"
-    )
+    format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000")
 }
 
 pub fn cleared_cookie() -> String {
@@ -152,13 +150,19 @@ mod tests {
         // ride a plaintext request (the same port answers HTTP with a redirect).
         assert!(c.contains("Max-Age=2592000"), "persistent: {c}");
         assert!(c.contains("Secure"), "https only: {c}");
-        assert!(c.contains("HttpOnly") && c.contains("SameSite=Lax"), "defense in depth: {c}");
+        assert!(
+            c.contains("HttpOnly") && c.contains("SameSite=Lax"),
+            "defense in depth: {c}"
+        );
     }
 
     #[test]
     fn clearing_the_cookie_expires_it() {
         let c = cleared_cookie();
         assert!(c.contains("Max-Age=0"), "{c}");
-        assert!(c.contains("Secure"), "clear must match the set attributes: {c}");
+        assert!(
+            c.contains("Secure"),
+            "clear must match the set attributes: {c}"
+        );
     }
 }

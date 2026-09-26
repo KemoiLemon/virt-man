@@ -37,7 +37,7 @@ async fn run() -> Result<(), String> {
         .fallback_service(ServeDir::new(&cfg.dist_dir).fallback(ServeFile::new(index)))
         .with_state(state);
 
-    let addr = cfg.addr();
+    let addr = cfg.addr()?;
     tracing::info!("virt-man-web listening on {addr}");
 
     if cfg.loopback_http {

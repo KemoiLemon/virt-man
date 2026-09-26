@@ -57,8 +57,9 @@ fn dropping_without_close_leaks() {
     for _ in 0..100 {
         let c = Connect::open(Some("qemu:///system")).expect("connect");
         let _ = c.list_all_domains(0);
-        // Deliberately no close(): this is what the daemon used to do.
-        drop(c);
+        // Deliberately no close(): this is what the daemon used to do. `c`
+        // drops here at iteration end — the leak is exactly that this Drop is
+        // a no-op (libvirt's Connect has no Drop impl).
     }
     let after = open_fds();
     assert!(

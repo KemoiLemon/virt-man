@@ -22,11 +22,11 @@ impl AppState {
 
     /// Read lock over the store.
     pub fn read(&self) -> std::sync::RwLockReadGuard<'_, Store> {
-        self.store.read().unwrap()
+        self.store.read().expect("store lock poisoned")
     }
 
     /// Write lock over the store.
     pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
-        self.store.write().unwrap()
+        self.store.write().expect("store lock poisoned")
     }
 }

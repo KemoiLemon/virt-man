@@ -83,7 +83,8 @@ pub async fn fetch_cert(url: &str) -> Result<(String, String), String> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(der);
     let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
     for chunk in b64.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).unwrap());
+        // base64 output is pure ASCII, so from_utf8 cannot fail here.
+        pem.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
         pem.push('\n');
     }
     pem.push_str("-----END CERTIFICATE-----\n");
@@ -96,7 +97,12 @@ pub fn fingerprint_of_der(der: &[u8]) -> String {
     let hex = sha256_hex(der);
     hex.as_bytes()
         .chunks(2)
-        .map(|c| std::str::from_utf8(c).unwrap().to_ascii_uppercase())
+        .map(|c| {
+            // sha256_hex output is pure ASCII, so from_utf8 cannot fail here.
+            std::str::from_utf8(c)
+                .expect("hex is ascii")
+                .to_ascii_uppercase()
+        })
         .collect::<Vec<_>>()
         .join(":")
 }
