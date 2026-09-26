@@ -32,6 +32,9 @@ let authDisabled = false;
 let connections: Connection[] = [];
 let selectedConn: string | null = null;
 let connTab: "dashboard" | "vms" | "networks" | "storage" | "firewall" = "dashboard";
+/// Pool whose volume table is expanded; survives the 1s pool poll so the
+/// table is re-rendered in place instead of vanishing every second.
+let volumesOpen: string | null = null;
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
 let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
@@ -1743,7 +1746,12 @@ setHtml(list, pools.map((p) => {
       <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`;
     }).join("") || `<div class="empty">No pools.</div>`);
     list.querySelectorAll("[data-vols]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => loadVolumes((b as HTMLElement).dataset.vols!);
+      (b as HTMLElement).onclick = () => {
+        const pool = (b as HTMLElement).dataset.vols!;
+        // Toggle: clicking the open pool collapses it, otherwise expand it.
+        volumesOpen = volumesOpen === pool ? null : pool;
+        loadVolumes(pool);
+      };
     });
     list.querySelectorAll("[data-upload]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => openUpload((b as HTMLElement).dataset.upload!);
@@ -1751,6 +1759,9 @@ setHtml(list, pools.map((p) => {
     list.querySelectorAll("[data-delpool]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => deletePool((b as HTMLElement).dataset.delpool!);
     });
+    // The 1s poll re-renders this whole list, wiping the volume table; restore
+    // the expanded pool's table in place so it does not blink out.
+    if (volumesOpen) void loadVolumes(volumesOpen);
   } catch (e) {
     const list = $("#pools-list");
     if (list) setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -1761,6 +1772,11 @@ async function loadVolumes(pool: string) {
   if (!selectedConn) return;
   const target = $(`#vols-${cssId(pool)}`);
   if (!target) return;
+  // Collapsed: clear the table and stop.
+  if (volumesOpen !== pool) {
+    setHtml(target, "");
+    return;
+  }
   try {
     const vols = await api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
 setHtml(target, `<table class="grid">
