@@ -2582,7 +2582,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           ${[
             ["In", fw.policy.in, ic.down()],
             ["Out", fw.policy.out, ic.up()],
-            ["Forward", fw.policy.forward, ic.circle()],
+            ["Forward", fw.policy.forward, ic.bidir()],
           ].map(([k, v, ico]) => {
             const action = v as FirewallPolicy["in"];
             const cls = action === "accept" ? "ok" : action === "reject" ? "warn" : "bad";

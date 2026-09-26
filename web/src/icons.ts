@@ -5,6 +5,7 @@
 import type { IconNode as LucideIconNode } from "lucide";
 import {
   ArrowDown,
+  ArrowLeftRight,
   ArrowUp,
   Boxes,
   Camera,
@@ -138,6 +139,7 @@ export const ic = {
   firewall: svg(Shield),
   down: svg(ArrowDown),
   up: svg(ArrowUp),
+  bidir: svg(ArrowLeftRight),
   // Console toolbar
   zoomIn: svg(ZoomIn),
   zoomOut: svg(ZoomOut),
