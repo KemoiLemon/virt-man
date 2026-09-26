@@ -1531,7 +1531,7 @@ async function loadNetworks() {
           <span class="storage-card-icon">${ic.network()}</span>
           <span class="storage-card-title">${esc(n.name)}</span>
           <span class="badge">${esc(typeLabel(n))}</span>
-          <span class="badge ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span>
+          <span class="badge ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span>
         </div>
         <div class="specs">
           <div class="spec"><b>Bridge</b><span>${esc(n.bridge || "—")}</span></div>

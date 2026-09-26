@@ -96,9 +96,11 @@
 #nets-list .storage-card { margin-bottom: 0; padding: 16px 17px; }
 #nets-list .storage-card-head { flex-wrap: wrap; gap: 8px 10px; }
 /* The card header reads a touch larger so the name, type and state do not
-   look cramped at the wider card width. */
+   look cramped at the wider card width. The icon and name sit a little right
+   of the card edge, leaving the badges flush. */
 #nets-list .storage-card-title { font-size: 15px; }
 #nets-list .storage-card-head .badge { font-size: 11px; }
+#nets-list .storage-card-icon { margin-left: 5px; }
 /* Bridge and subnet stack vertically, one spec per row, with less space
    before the controls. */
 #nets-list .specs { grid-template-columns: 1fr; margin-bottom: 2px; }

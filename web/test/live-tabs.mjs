@@ -104,7 +104,7 @@ check("Networks tab renders cards with type, subnet and merged controls", () => 
 check("start/stop and autostart highlights follow their state", () => {
   for (const c of document.querySelectorAll("#nets-list .net-card")) {
     const toggle = c.querySelector("[data-net-toggle]");
-    const cardActive = c.querySelector(".storage-card-head .badge.on")?.textContent.trim() === "active";
+    const cardActive = c.querySelector(".storage-card-head .badge.on")?.textContent.trim() === "Active";
     assert.equal(toggle.classList.contains("on"), cardActive,
       `toggle highlight matches the active badge`);
     const auto = c.querySelector("[data-net-autostart]");
