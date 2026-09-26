@@ -31,11 +31,13 @@ cd web/server && cargo clippy && cargo test
 #   arg is the base URL; defaults to http://127.0.0.1:8799
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console
-
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
   [VM_LOW_USER=... VM_LOW_PASS=...] node test/live-profile.mjs https://127.0.0.1:8006
+# login path must show saved servers without a refresh (creates a connection):
+cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
+  node test/live-login.mjs https://127.0.0.1:8006
 
 # transport-level: HTTP->HTTPS redirect on the single TLS port (raw sockets)
 cd web && node test/live-redirect.mjs https://127.0.0.1:8006

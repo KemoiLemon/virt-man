@@ -294,6 +294,9 @@ function renderLogin() {
   $("#login-btn").onclick = async () => {
     try {
       user = await api.post<User>("/auth/login", { username: $("#lu").value, password: $("#lp").value });
+      // boot() loads connections before rendering; the login path must too, or
+      // the sidebar tree and Datacenter table render empty until a refresh.
+      await loadConnections();
       renderApp();
     } catch (e) {
       toast((e as Error).message, "bad");
