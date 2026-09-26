@@ -1,38 +1,38 @@
 /* ------------------------------------------------ slightly larger UI + fill
-   Base type goes 13 -> 15px; panes use the full window width.
+   Base type goes 13 -> 14px; panes use the full window width.
    Ported from vm-man (ui/density.css). Loaded last so it overrides sizing
    without duplicating any colour decisions. */
-body { font-size: 15px; }
-.layout { grid-template-columns: minmax(320px, 22vw) 1fr; }
+body { font-size: 14px; }
+.layout { grid-template-columns: minmax(300px, 21vw) 1fr; }
 /* Give the selected tab's information a clear gutter below the tab bar. */
-.detail { padding: 28px 22px 22px; }
+.detail { padding: 26px 20px 20px; }
 /* Padding is set per-axis: the shorthand would reset the padding-left that
    indents nested tree rows, since this layer loads after views.css. */
-.tree-row { padding-top: 10px; padding-bottom: 10px; padding-right: 15px; padding-left: 15px; font-size: 14px; }
-.tree-group { padding-left: 24px; }
-.tree-vm { padding-left: 42px; }
-.tree-state { font-size: 12px; }
-.tree-empty { font-size: 13px; padding: 18px 20px; }
-.tree-add { font-size: 13px; }
-.pane-head { height: 44px; padding: 0 14px; font-size: 13px; }
-.tab { font-size: 13px; padding: 11px 17px; }
-.btn { font-size: 13px; padding: 7px 14px; }
-.btn.icon { padding: 7px 9px; }
-.icon-label { padding: 8px 15px; }
-.spec span, .card b { font-size: 15px; }
-.spec b, .card i { font-size: 12px; }
-.card { padding: 15px 16px; }
-.section-title { font-size: 13px; margin-bottom: 10px; }
-input, select, textarea { font-size: 14px; padding: 8px 10px; }
-.select-trigger { font-size: 14px; padding: 8px 10px; }
-.select-option { font-size: 14px; }
-.field > span { font-size: 12px; }
-.modal-head { font-size: 15px; }
-.hint { font-size: 13px; }
-.cmd, .log { font-size: 13px; }
-.empty { font-size: 14px; }
-.toast { font-size: 14px; }
-.metric-value { font-size: 22px; }
-.fact span { font-size: 15px; }
-table.grid th, table.grid td { font-size: 14px; padding: 9px 11px; }
-.tasks-body, .task-row { font-size: 13px; }
+.tree-row { padding-top: 9px; padding-bottom: 9px; padding-right: 14px; padding-left: 14px; font-size: 13px; }
+.tree-group { padding-left: 22px; }
+.tree-vm { padding-left: 40px; }
+.tree-state { font-size: 11px; }
+.tree-empty { font-size: 12px; padding: 16px 18px; }
+.tree-add { font-size: 12px; }
+.pane-head { height: 40px; padding: 0 12px; font-size: 12px; }
+.tab { font-size: 12px; padding: 10px 16px; }
+.btn { font-size: 12px; padding: 6px 13px; }
+.btn.icon { padding: 6px 8px; }
+.icon-label { padding: 7px 14px; }
+.spec span, .card b { font-size: 14px; }
+.spec b, .card i { font-size: 11px; }
+.card { padding: 14px 15px; }
+.section-title { font-size: 12px; margin-bottom: 9px; }
+input, select, textarea { font-size: 13px; padding: 7px 9px; }
+.select-trigger { font-size: 13px; padding: 7px 9px; }
+.select-option { font-size: 13px; }
+.field > span { font-size: 11px; }
+.modal-head { font-size: 13px; }
+.hint { font-size: 12px; }
+.cmd, .log { font-size: 12px; }
+.empty { font-size: 13px; }
+.toast { font-size: 13px; }
+.metric-value { font-size: 20px; }
+.fact span { font-size: 14px; }
+table.grid th, table.grid td { font-size: 13px; padding: 8px 10px; }
+.tasks-body, .task-row { font-size: 12px; }

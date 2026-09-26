@@ -68,9 +68,7 @@ html, body { height: 100%; }
 body {
   background: var(--bg);
   color: var(--fg);
-  /* Proportional UI font: the mono stack pixelated at small sizes because
-     JetBrains Mono / DejaVu Sans Mono are not installed on the host. */
-  font: 13px/1.5 "Noto Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 13px/1.45 "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, monospace;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -171,8 +169,7 @@ body {
 .section-title.fw-cat { font-size: 13px; letter-spacing: 1.5px; color: var(--fg); }
 .cmd {
   background: var(--code-bg); border: 1px solid var(--line);
-  padding: 10px; color: var(--dim);
-  font-family: "Noto Sans Mono", ui-monospace, monospace;
+  padding: 10px; font-size: 11px; color: var(--dim);
   white-space: pre-wrap; word-break: break-all; line-height: 1.7;
   -webkit-user-select: text; user-select: text; margin-bottom: 14px;
 }
@@ -354,8 +351,7 @@ table.grid tr:hover td { background: var(--hover); }
 
 .log {
   background: var(--code-bg); border: 1px solid var(--line); padding: 10px;
-  font-family: "Noto Sans Mono", ui-monospace, monospace;
-  font-size: 12px; color: var(--dim); white-space: pre-wrap; word-break: break-all;
+  font-size: 11px; color: var(--dim); white-space: pre-wrap; word-break: break-all;
   max-height: 62vh; overflow-y: auto; -webkit-user-select: text; user-select: text;
 }
 
