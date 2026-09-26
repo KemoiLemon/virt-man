@@ -74,7 +74,9 @@ if [[ -n "$HOSTNAME_OVERRIDE" ]]; then
 fi
 ips="${IPS_OVERRIDE:-$(hostname -I 2>/dev/null || ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')}"
 
-san="DNS:localhost,IP:127.0.0.1,DNS:$hostname_"
+# ::1 alongside 127.0.0.1: the listener is dual-stack, so a client may dial the
+# IPv6 loopback literal, and a missing SAN makes that a cert-name failure.
+san="DNS:localhost,IP:127.0.0.1,IP:::1,DNS:$hostname_"
 for ip in $ips; do
   [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && san="$san,IP:$ip"
 done

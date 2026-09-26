@@ -119,6 +119,42 @@ check("the listener keeps serving both after mixed traffic", () => {
   assert.match(after, /^HTTP\/1\.1 308 /, "still redirects plaintext");
 });
 
+// ---- the listener must answer on both IP families
+//
+// `localhost` resolves to ::1 alone on many systems, so a 0.0.0.0 bind refused
+// https://localhost:8006 outright while 127.0.0.1 worked. Only meaningful when
+// pointed at a loopback name/address.
+const loopbackNames = ["localhost", "127.0.0.1", "::1"];
+if (loopbackNames.includes(host)) {
+  const reach = async (family) => {
+    try {
+      await new Promise((resolve, reject) => {
+        const sock = net.connect({ host, port, family });
+        sock.setTimeout(4000, () => {
+          sock.destroy();
+          reject(new Error("timeout"));
+        });
+        sock.on("connect", () => {
+          sock.destroy();
+          resolve();
+        });
+        sock.on("error", reject);
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const v4 = await reach(4);
+  const v6 = await reach(6);
+  check("the port answers over both IPv4 and IPv6", () => {
+    assert.ok(v4, "IPv4 reachable");
+    assert.ok(v6, "IPv6 reachable — a 0.0.0.0 bind would refuse ::1, breaking `localhost`");
+  });
+} else {
+  results.push(["info", `host ${host} is not loopback, skipping the dual-stack check`]);
+}
+
 for (const [s, msg] of results) {
   console.log(`${s === "pass" ? "✔" : s === "info" ? "·" : "✖"} ${msg}`);
 }

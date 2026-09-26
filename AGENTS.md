@@ -10,8 +10,8 @@ Three parts, one product:
 
 | Path | Build | Role |
 | --- | --- | --- |
-| `daemon/` | `cargo` | Rust + axum over libvirt (`qemu:///system`). Runs on the hypervisor host. Token auth, HTTPS `0.0.0.0:8443`. |
-| `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, RBAC, API keys, TLS-pinned daemon proxy). HTTPS `0.0.0.0:8006`. |
+| `daemon/` | `cargo` | Rust + axum over libvirt (`qemu:///system`). Runs on the hypervisor host. Token auth, HTTPS `[::]:8443`. |
+| `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, RBAC, API keys, TLS-pinned daemon proxy). HTTPS `[::]:8006`. |
 | `client/` | `pnpm tauri` | Tauri v2 desktop shell. Embeds the same SPA, runs `virt-man-web` as a loopback sidecar with auth disabled. |
 
 **One frontend build serves both browser and desktop.** There is no
@@ -148,9 +148,9 @@ introduce a poll interval.
 
 ## Live environment
 
-- `virt-man-daemon` — HTTPS `0.0.0.0:8443`, token at `/etc/virt-man/token`
+- `virt-man-daemon` — HTTPS `[::]:8443`, token at `/etc/virt-man/token`
   (root-owned, mode 0600; `sudo cat` to read it).
-- `virt-man-web` — HTTPS `0.0.0.0:8006`, admin / `password123`. A leftover
+- `virt-man-web` — HTTPS `[::]:8006`, admin / `password123`. A leftover
   `viewer` / `password123` RBAC test account exists and may want removing.
 - Test VM `alpinelinux3.23` — running, 1 vCPU, 768 MB, **both** VNC (5900) and
   SPICE (5901), network `internet`.
@@ -167,3 +167,12 @@ to return a raw TLS alert record; the listener now peeks the first byte of each
 connection (TLS always starts `0x16`) and answers plaintext with a 308 to the
 `https://` URL. Only the TLS branch is wrapped, so the desktop app's
 `VIRT_MAN_WEB_LOOPBACK_HTTP=1` mode still serves plain HTTP directly.
+
+**The wildcard bind is `[::]`, not `0.0.0.0`.** `localhost` resolves to `::1`
+alone on many systems (including this one — see `/etc/hosts`), so an IPv4-only
+wildcard refuses `https://localhost:8006` while `127.0.0.1` works. Both
+services map the `0.0.0.0` wildcard to `[::]`, which serves both families on
+one socket given `net.ipv6.bindv6only=0` (the Linux default). An **explicit**
+address is never rewritten, so the desktop sidecar's `127.0.0.1` bind stays
+loopback-only. `curl` masks this by falling back to IPv4; a browser does not,
+so test with `curl -6` or `ss -tlnp` (a dual-stack listener shows as `*:8006`).

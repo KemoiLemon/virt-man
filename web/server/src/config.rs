@@ -72,7 +72,8 @@ impl Config {
     }
 
     pub fn addr(&self) -> std::net::SocketAddr {
-        format!("{}:{}", self.bind, self.port)
+        let host = dual_stack_host(&self.bind);
+        format!("{host}:{}", self.port)
             .parse()
             .expect("invalid bind address")
     }
@@ -83,5 +84,44 @@ impl Config {
 
     pub fn key_path(&self) -> PathBuf {
         self.data_dir.join("tls/key.pem")
+    }
+}
+
+/// Map the IPv4 wildcard to the IPv6 one so a single socket serves both
+/// families. `localhost` resolves to `::1` on many systems, so a `0.0.0.0`
+/// listener refuses `https://localhost:8006` outright while `127.0.0.1` works
+/// — which reads as "localhost is broken".
+///
+/// Only the wildcard is rewritten: an explicit `127.0.0.1` stays loopback-only,
+/// because widening a deliberately narrow bind would be a security change.
+/// Needs `net.ipv6.bindv6only=0` (the Linux default) for the IPv4 half.
+fn dual_stack_host(bind: &str) -> &str {
+    match bind {
+        "0.0.0.0" => "[::]",
+        // Already bracketed or a literal host: pass through untouched.
+        b => b,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dual_stack_host;
+
+    #[test]
+    fn the_ipv4_wildcard_becomes_dual_stack() {
+        assert_eq!(dual_stack_host("0.0.0.0"), "[::]");
+    }
+
+    #[test]
+    fn an_explicit_loopback_bind_is_left_alone() {
+        // Narrowing is intentional (the desktop sidecar); do not widen it.
+        assert_eq!(dual_stack_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(dual_stack_host("::1"), "::1");
+    }
+
+    #[test]
+    fn a_specific_address_is_left_alone() {
+        assert_eq!(dual_stack_host("192.168.0.119"), "192.168.0.119");
+        assert_eq!(dual_stack_host("[::]"), "[::]");
     }
 }

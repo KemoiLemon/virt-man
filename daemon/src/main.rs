@@ -58,10 +58,7 @@ async fn run() -> Result<(), String> {
     tracing::info!("unix socket listening on {}", sock_path.display());
 
     // TLS HTTP listener.
-    let http_addr: std::net::SocketAddr = cfg
-        .http_addr
-        .parse()
-        .map_err(|e| format!("invalid http_addr {}: {e}", cfg.http_addr))?;
+    let http_addr = cfg.http_socket_addr()?;
     tracing::info!("https listening on {http_addr}");
 
     let tcp_handle = axum_server::Handle::new();

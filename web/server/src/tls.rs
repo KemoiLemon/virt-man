@@ -9,9 +9,15 @@ pub fn ensure_cert(cert_path: &Path, key_path: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let key =
-        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-            .map_err(|e| format!("failed to generate TLS certificate: {e}"))?;
+    // ::1 belongs here alongside 127.0.0.1: the listener is dual-stack, so a
+    // client may legitimately dial the IPv6 loopback literal, and a missing SAN
+    // makes that a certificate-name failure rather than a trust prompt.
+    let key = rcgen::generate_simple_self_signed(vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ])
+    .map_err(|e| format!("failed to generate TLS certificate: {e}"))?;
 
     if let Some(parent) = cert_path.parent() {
         fs::create_dir_all(parent)
