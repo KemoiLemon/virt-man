@@ -105,6 +105,8 @@
 }
 .add-hw-type:hover { background: var(--hover); }
 .add-hw-type.active { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
+.add-hw-type:disabled, .add-hw-type.dup { color: var(--dim); cursor: not-allowed; }
+.add-hw-type:disabled:hover { background: none; }
 .add-hw-type b { display: block; font-size: 12px; font-weight: 600; }
 .add-hw-type small { display: block; font-size: 10px; color: var(--dim); margin-top: 2px; }
 .add-hw-form { overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 13px; min-width: 0; }

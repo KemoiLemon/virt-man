@@ -3012,6 +3012,10 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
   function openAddHardware() {
     let kind = HW_CATALOG[0].id;
     const draft: Record<string, string> = {};
+    // Single-instance devices (memballoon, watchdog, tpm, …) already present
+    // cannot be added again: libvirt rejects the duplicate at define time.
+    const alreadyAdded = (id: string) =>
+      !!hwType(id)?.single && devices.some((d) => d.kind === id);
 
     const add = openModal("Add Hardware", "",
       `<button class="btn" id="ah-cancel">Cancel</button>
@@ -3058,10 +3062,13 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
       const preview = deviceXml({ kind, fields: draft }, devices.length + 1) || "—";
       setHtml(add.querySelector(".modal-body")!, `<div class="add-hw-body">
         <aside class="add-hw-types">
-          ${HW_CATALOG.map((t2) => `
-            <button class="add-hw-type ${t2.id === kind ? "active" : ""}" data-at="${t2.id}">
-              <b>${esc(t2.label)}</b><small>${esc(t2.blurb)}</small>
-            </button>`).join("")}
+          ${HW_CATALOG.map((t2) => {
+            const dup = alreadyAdded(t2.id);
+            return `
+            <button class="add-hw-type ${t2.id === kind ? "active" : ""} ${dup ? "dup" : ""}" data-at="${t2.id}" ${dup ? "disabled" : ""}>
+              <b>${esc(t2.label)}</b><small>${dup ? "Already added" : esc(t2.blurb)}</small>
+            </button>`;
+          }).join("")}
         </aside>
         <div class="add-hw-form">
           <div class="hw-title">${esc(t.label)}</div>
@@ -3088,6 +3095,11 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
       });
       $("#ah-cancel", add).onclick = () => add.remove();
       $("#ah-save", add).onclick = () => {
+        // A duplicate single-instance device would fail at define time with
+        // e.g. "only a single memory balloon device is supported".
+        if (alreadyAdded(kind)) {
+          return toast(`${hwType(kind)!.label} is already added`, "bad");
+        }
         // Seed any untouched select with its first rendered option, so a
         // device added without interaction is still valid.
         add.querySelectorAll("[data-af]").forEach((n: Element) => {

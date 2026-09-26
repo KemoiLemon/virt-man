@@ -19,6 +19,16 @@ test("catalogue entries all declare an id, label and icon", () => {
   }
 });
 
+test("single-instance devices are marked so duplicates can be blocked", () => {
+  const single = new Set(hw.HW_CATALOG.filter((t) => t.single).map((t) => t.id));
+  for (const id of ["memballoon", "watchdog", "tpm", "rng", "channel"]) {
+    assert.ok(single.has(id), `${id} is single-instance`);
+  }
+  for (const id of ["disk", "interface", "cdrom", "hostdev", "usb"]) {
+    assert.ok(!single.has(id), `${id} may repeat`);
+  }
+});
+
 test("a volume-backed disk serialises to a libvirt volume disk", () => {
   const xml = hw.deviceXml({ kind: "disk", fields: { pool: "default", volume: "data.qcow2", bus: "virtio" } }, 1);
   assert.match(xml, /<disk type="volume" device="disk">/);

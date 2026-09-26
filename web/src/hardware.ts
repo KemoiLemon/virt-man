@@ -31,6 +31,8 @@ export interface HwType {
   blurb: string;
   icon: keyof typeof ic;
   fields: HwField[];
+  /** At most one instance per VM (libvirt rejects duplicates). */
+  single?: boolean;
 }
 
 /** Devices the "Add Hardware" chooser offers, with their libvirt mapping. */
@@ -124,6 +126,7 @@ export const HW_CATALOG: HwType[] = [
     label: "RNG",
     blurb: "virtio entropy source backed by /dev/urandom",
     icon: "cpu",
+    single: true,
     fields: [
       { key: "backend", label: "Backend", type: "text", value: "/dev/urandom" },
     ],
@@ -133,6 +136,7 @@ export const HW_CATALOG: HwType[] = [
     label: "Memory Balloon",
     blurb: "virtio balloon so the host can reclaim guest memory",
     icon: "memory",
+    single: true,
     fields: [],
   },
   {
@@ -140,6 +144,7 @@ export const HW_CATALOG: HwType[] = [
     label: "Guest Agent Channel",
     blurb: "virtio-serial channel for the QEMU guest agent",
     icon: "cpu",
+    single: true,
     fields: [],
   },
   {
@@ -147,6 +152,7 @@ export const HW_CATALOG: HwType[] = [
     label: "TPM",
     blurb: "Emulated Trusted Platform Module (tpm-crb)",
     icon: "lock",
+    single: true,
     fields: [
       {
         key: "version", label: "Version", type: "select", value: "2.0",
@@ -162,6 +168,7 @@ export const HW_CATALOG: HwType[] = [
     label: "Watchdog",
     blurb: "i6300esb watchdog — fires when the guest hangs",
     icon: "firewall",
+    single: true,
     fields: [
       {
         key: "action", label: "Action", type: "select", value: "reset",
