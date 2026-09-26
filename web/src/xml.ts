@@ -103,6 +103,7 @@ export interface NetworkForm {
   ip: string; // e.g. 192.168.100.1/24, or empty
   dhcp_start: string;
   dhcp_end: string;
+  dns: string; // comma/space separated forwarders, NAT only
 }
 
 /** Optional uuid from an existing definition, preserved so editing/renaming
@@ -118,6 +119,14 @@ export function networkXml(f: NetworkForm, uuid = ""): string {
   }
   // Only a bridge-mode network attaches to a host bridge device.
   const bridge = f.forward === "bridge" && f.bridge ? `<bridge name="${esc(f.bridge)}"/>` : "";
+  // Custom DNS forwarders (NAT only). libvirt wants <dns> before <ip>.
+  let dns = "";
+  if (f.forward === "nat" && f.dns.trim()) {
+    const servers = f.dns.split(/[,\s]+/).filter(Boolean);
+    if (servers.length) {
+      dns = `<dns>\n    ${servers.map((s) => `<forwarder addr="${esc(s)}"/>`).join("\n    ")}\n  </dns>`;
+    }
+  }
   // NAT and isolated networks may carry their own subnet; a bridge network
   // takes its addressing from the bridge and must not define <ip>.
   let ip = "";
@@ -133,6 +142,7 @@ export function networkXml(f: NetworkForm, uuid = ""): string {
   ${id}
   ${forward}
   ${bridge}
+  ${dns}
   ${ip}
 </network>`;
 }
@@ -151,25 +161,77 @@ function tag(xml: string, name: string): string {
   return xml.slice(i + open.length, j);
 }
 
-export function networkFormFromXml(xml: string): NetworkForm {
-  const forwardMatch = /<forward mode="([^"]+)"/.exec(xml);
-  const forward = (forwardMatch?.[1] ?? "none") as NetworkForm["forward"];
-  const ipMatch = /<ip[^>]*address="([^"]+)"/.exec(xml);
-  const netmaskMatch = /<ip[^>]*netmask="([^"]+)"/.exec(xml);
-  const range = /<range start="([^"]+)" end="([^"]+)"/.exec(xml);
-  let cidr = ipMatch?.[1] ?? "";
-  // The <ip> tag carries only the address; rebuild the CIDR from its netmask
-  // so the field round-trips through the same netmask() path.
-  if (cidr && netmaskMatch) {
-    cidr = `${cidr}/${netmaskBits(netmaskMatch[1])}`;
+/// Read an XML attribute's value from a tag fragment, single- or double-quoted.
+function attr(tag: string, name: string): string {
+  let from = 0;
+  while (true) {
+    const i = tag.indexOf(name, from);
+    if (i < 0) return "";
+    const after = tag.slice(i + name.length).trimStart();
+    if (!after.startsWith("=")) {
+      from = i + name.length;
+      continue;
+    }
+    const rest = after.slice(1).trimStart();
+    const q = rest[0];
+    if (q !== '"' && q !== "'") {
+      from = i + name.length;
+      continue;
+    }
+    const inner = rest.slice(1);
+    const j = inner.indexOf(q);
+    return j < 0 ? "" : inner.slice(0, j);
   }
+}
+
+/// The element from `<name` up to its closing `>` (or the whole remainder).
+function elem(xml: string, name: string): string {
+  const i = xml.indexOf(`<${name}`);
+  if (i < 0) return "";
+  const j = xml.indexOf(">", i);
+  return j < 0 ? xml.slice(i) : xml.slice(i, j + 1);
+}
+
+function allElems(xml: string, name: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  while (true) {
+    const i = xml.indexOf(`<${name}`, from);
+    if (i < 0) break;
+    const j = xml.indexOf(">", i);
+    out.push(j < 0 ? xml.slice(i) : xml.slice(i, j + 1));
+    from = i + name.length + 1;
+  }
+  return out;
+}
+
+export function networkFormFromXml(xml: string): NetworkForm {
+  const forwardElem = elem(xml, "forward");
+  const forward = (attr(forwardElem, "mode") || "none") as NetworkForm["forward"];
+  const ipElem = elem(xml, "ip");
+  const address = attr(ipElem, "address");
+  const netmask = attr(ipElem, "netmask");
+  const prefix = attr(ipElem, "prefix");
+  // The <ip> tag carries only the address; rebuild the CIDR from its netmask
+  // or prefix so the field round-trips through the same netmask() path.
+  let cidr = address;
+  if (address) {
+    if (prefix) cidr = `${address}/${prefix}`;
+    else if (netmask) cidr = `${address}/${netmaskBits(netmask)}`;
+  }
+  const range = elem(xml, "range");
+  const dns = allElems(xml, "forwarder")
+    .map((f) => attr(f, "addr"))
+    .filter(Boolean)
+    .join(", ");
   return {
     name: tag(xml, "name"),
     forward,
-    bridge: tag(xml, "bridge"),
+    bridge: attr(elem(xml, "bridge"), "name"),
     ip: cidr,
-    dhcp_start: range?.[1] ?? "",
-    dhcp_end: range?.[2] ?? "",
+    dhcp_start: attr(range, "start"),
+    dhcp_end: attr(range, "end"),
+    dns,
   };
 }
 

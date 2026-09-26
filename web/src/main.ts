@@ -1602,14 +1602,15 @@ async function openEditNetwork(name: string) {
 
 function openCreateNetwork() {
   openNetworkForm(
-    { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "" },
+    { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "", dns: "" },
     "",
   );
 }
 
 /// One network form for create and edit. Fields appear and disappear with the
-/// forward mode: bridge mode offers a bridge picker and no IP/DHCP (the bridge
-/// owns addressing); NAT and isolated offer IP/DHCP and no bridge.
+/// forward mode: bridge mode offers a bridge picker and no IP/DHCP/DNS (the
+/// bridge owns addressing); NAT offers IP, DHCP and DNS forwarders; isolated
+/// offers IP/DHCP but no bridge.
 function openNetworkForm(initial: NetworkForm, uuid: string) {
   if (!selectedConn) return;
   const el = openModal(
@@ -1628,6 +1629,7 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
       <label class="field" data-net-field="ip"><span>Network (CIDR, optional)</span><input id="net-ip" placeholder="192.168.100.1/24" value="${esc(initial.ip)}"></label>
       <label class="field" data-net-field="dhcp-start"><span>DHCP start</span><input id="net-dhcp-start" placeholder="192.168.100.10" value="${esc(initial.dhcp_start)}"></label>
       <label class="field" data-net-field="dhcp-end"><span>DHCP end</span><input id="net-dhcp-end" placeholder="192.168.100.200" value="${esc(initial.dhcp_end)}"></label>
+      <label class="field" data-net-field="dns"><span>DNS servers (NAT, comma separated)</span><input id="net-dns" placeholder="1.1.1.1, 8.8.8.8" value="${esc(initial.dns)}"></label>
     </div>`,
     `<button class="btn primary" id="net-save">${uuid ? "Save" : "Create"}</button>`,
   );
@@ -1637,7 +1639,14 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
     const m = mode();
     el.querySelectorAll("[data-net-field]").forEach((f: Element) => {
       const field = (f as HTMLElement).dataset.netField!;
-      const show = m === "bridge" ? field === "bridge" : field !== "bridge";
+      let show: boolean;
+      if (m === "bridge") {
+        show = field === "bridge";
+      } else if (m === "nat") {
+        show = field !== "bridge";
+      } else {
+        show = field !== "bridge" && field !== "dns";
+      }
       (f as HTMLElement).hidden = !show;
     });
   };
@@ -1672,6 +1681,7 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
       ip: $("#net-ip", el).value,
       dhcp_start: $("#net-dhcp-start", el).value,
       dhcp_end: $("#net-dhcp-end", el).value,
+      dns: $("#net-dns", el).value,
     };
     if (!form.name) return toast("Name is required", "bad");
     if (form.forward === "bridge" && !form.bridge) {
