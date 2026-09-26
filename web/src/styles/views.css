@@ -54,11 +54,24 @@ table.grid td.tname:hover { color: var(--accent); }
 .tab .ico { width: 14px; height: 14px; }
 .tab:hover { color: var(--fg); background: var(--hover); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--panel2); }
-/* View actions sit on the tab bar itself, pushed to the trailing edge. */
+/* View actions sit on the tab bar itself, flush with the trailing edge so
+   they line up with the cards and tables below (the detail pane supplies the
+   outer gutter). */
 .tabbar-actions {
   margin-left: auto; display: flex; align-items: center; gap: 8px;
-  padding: 0 8px; flex: 0 0 auto;
+  padding: 0; flex: 0 0 auto;
 }
+/* Breathing room between the tabs and the content they switch. */
+.tabbar { margin-bottom: 18px; }
+.tabbar + * { margin-top: 0; }
+/* Tables and card grids get extra clearance so rows do not crowd the tabs. */
+.tabbar + table.grid,
+.tabbar + .cards,
+.tabbar + div > table.grid:first-child,
+.tabbar + div > .cards:first-child { margin-top: 8px; }
+/* The section label above a table keeps its own rhythm under the tabs. */
+.tabbar + div > .section-title:first-child,
+.tabbar + .section-title { margin-top: 4px; }
 
 /* --------------------------------------------- themed custom listboxes */
 /* Native selects are kept only as the form data source, never displayed. */

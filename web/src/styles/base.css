@@ -99,7 +99,9 @@ body {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 0 14px;
+  /* No right padding: the window controls run flush to the window edge like
+     a real titlebar. */
+  padding: 0 0 0 14px;
   height: 46px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
@@ -107,6 +109,14 @@ body {
   -webkit-user-select: none;
   user-select: none;
 }
+/* App actions sit together at the trailing edge, next to the window
+   controls, rather than spread across the bar. */
+.topbar-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 7px;
+  padding-right: 8px; flex: 0 0 auto;
+}
+/* Without window controls (browser build) the actions still need a gutter. */
+.topbar > .topbar-actions:last-child { padding-right: 14px; }
 .brand { font-weight: 700; letter-spacing: 2px; font-size: 15px; }
 .brand span { color: var(--accent); }
 .host { color: var(--dim); font-size: 11px; flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -193,7 +203,7 @@ body {
 .icon-label { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; }
 
 /* ------------------------------------------------- frameless window controls */
-.window-controls { align-self: stretch; display: flex; margin-left: auto; }
+.window-controls { align-self: stretch; display: flex; flex: 0 0 auto; }
 .win-btn {
   width: 44px; height: 100%; border: 0; border-left: 1px solid var(--line);
   background: transparent; color: var(--dim); cursor: pointer; display: grid; place-items: center;

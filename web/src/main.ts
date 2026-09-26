@@ -170,9 +170,11 @@ setHtml(app, `
     <div class="topbar">
       <span class="brand">virt-<span>man</span></span>
       <span class="host">${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
-      <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
-      <button class="btn" id="webui-btn">${ic.webui()} Connect to WebUI</button>
-      ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
+      <span class="topbar-actions">
+        <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
+        <button class="btn" id="webui-btn">${ic.webui()} Connect to WebUI</button>
+        ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
+      </span>
       ${isTauri() ? `<span class="window-controls">
         <button class="win-btn" id="win-min" title="Minimise">${ic.min()}</button>
         <button class="win-btn" id="win-max" title="Maximise">${ic.max()}</button>
@@ -587,14 +589,19 @@ async function loadVms() {
     const list = $("#vms-list");
     if (!list) return;
 setHtml(list, `<table class="grid">
-      <tr><th>Name</th><th>State</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>State</th><th class="col-actions"></th></tr>
       ${vms.map((v) => `
         <tr>
           <td class="tname" style="cursor:pointer" data-vm="${esc(v.name)}">${esc(v.name)}</td>
           <td><span class="state ${v.active ? "on" : ""}">${esc(v.state)}</span></td>
-          <td>
-            <button class="btn icon" data-start="${esc(v.name)}">${ic.start()}</button>
-            <button class="btn icon" data-stop="${esc(v.name)}">${ic.stop()}</button>
+          <td class="col-actions">
+            <div class="row-actions">
+              <button class="btn icon" data-start="${esc(v.name)}" title="Start" ${v.active ? "disabled" : ""}>${ic.start()}</button>
+              <button class="btn icon" data-stop="${esc(v.name)}" title="Shutdown" ${v.active ? "" : "disabled"}>${ic.stop()}</button>
+              <button class="btn icon" data-console="${esc(v.name)}" title="Console">${ic.vm()}</button>
+              <button class="btn icon" data-hwedit="${esc(v.name)}" title="Edit hardware">${ic.edit()}</button>
+              <button class="btn danger icon" data-delvm="${esc(v.name)}" title="Delete">${ic.trash()}</button>
+            </div>
           </td>
         </tr>`).join("") || `<tr><td colspan="3" class="empty">No VMs.</td></tr>`}
     </table>`);
@@ -619,6 +626,28 @@ setHtml(list, `<table class="grid">
         const n = (b as HTMLElement).dataset.stop!;
         await act(`/proxy/${selectedConn}/domains/${encodeURIComponent(n)}/shutdown`, "POST");
         loadVms();
+      };
+    });
+    // Jump straight to the console tab for that guest.
+    list.querySelectorAll("[data-console]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        selectedVm = (b as HTMLElement).dataset.console!;
+        vmTab = "console";
+        renderTree();
+        void renderVm();
+      };
+    });
+    list.querySelectorAll("[data-hwedit]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        void openHardwareEditor({ vm: (b as HTMLElement).dataset.hwedit! });
+      };
+    });
+    list.querySelectorAll("[data-delvm]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        void deleteVm((b as HTMLElement).dataset.delvm!);
       };
     });
   } catch (e) {
@@ -728,18 +757,19 @@ async function renderVm() {
   const vm = selectedVm;
 setHtml(content, `
     <div class="dhead"><span class="dtitle">${esc(vm)}</span></div>
-    <div class="actions">
-      <button class="btn" id="vm-start">${ic.start(14)} Start</button>
-      <button class="btn" id="vm-shutdown">${ic.stop(14)} Shutdown</button>
-      <button class="btn" id="vm-destroy">Force stop</button>
-      <button class="btn" id="vm-reboot">${ic.reboot(14)} Reboot</button>
-      <button class="btn danger" id="vm-delete">${ic.trash(14)} Delete</button>
-    </div>
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
       <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
       <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
       <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">XML</button>
+      <div class="tabbar-actions row-actions">
+        <button class="btn icon" id="vm-start" title="Start">${ic.start()}</button>
+        <button class="btn icon" id="vm-shutdown" title="Shutdown">${ic.stop()}</button>
+        <button class="btn icon" id="vm-reboot" title="Reboot">${ic.reboot()}</button>
+        <button class="btn icon" id="vm-destroy" title="Force stop">${ic.forceStop()}</button>
+        <button class="btn icon" id="vm-hwedit" title="Edit hardware">${ic.edit()}</button>
+        <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
+      </div>
     </div>
     <div id="vm-body"></div>`);
   content.querySelectorAll("[data-vmtab]").forEach((b: Element) => {
@@ -752,6 +782,7 @@ setHtml(content, `
   $("#vm-shutdown").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/shutdown`, "POST").then(renderVm);
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(renderVm);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(renderVm);
+  $("#vm-hwedit").onclick = () => void openHardwareEditor({ vm });
   $("#vm-delete").onclick = () => deleteVm(vm);
   await renderVmBody(vm);
 }

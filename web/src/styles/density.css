@@ -6,7 +6,11 @@ body { font-size: 14px; }
 .layout { grid-template-columns: minmax(300px, 21vw) 1fr; }
 /* Give the selected tab's information a clear gutter below the tab bar. */
 .detail { padding: 26px 20px 20px; }
-.tree-row { padding: 9px 14px; font-size: 13px; }
+/* Padding is set per-axis: the shorthand would reset the padding-left that
+   indents nested tree rows, since this layer loads after views.css. */
+.tree-row { padding-top: 9px; padding-bottom: 9px; padding-right: 14px; padding-left: 14px; font-size: 13px; }
+.tree-group { padding-left: 22px; }
+.tree-vm { padding-left: 40px; }
 .tree-state { font-size: 11px; }
 .tree-empty { font-size: 12px; padding: 16px 18px; }
 .tree-add { font-size: 12px; }

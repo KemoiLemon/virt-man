@@ -17,6 +17,7 @@ import {
   Minus,
   Monitor,
   Network,
+  OctagonX,
   Pencil,
   Play,
   Plus,
@@ -107,4 +108,5 @@ export const ic = {
   memory: svg(MemoryStick),
   users: svg(Users),
   edit: svg(Pencil),
+  forceStop: svg(OctagonX),
 };
