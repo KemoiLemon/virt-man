@@ -29,11 +29,15 @@ export function withFirmware(
   firmware: "uefi" | "bios",
   name: string,
 ): string {
+  // Match the paired form FIRST, then self-closing. The old order had the
+  // self-closing pattern with an OPTIONAL slash, so it consumed the opening
+  // tag of a paired loader/nvram and left the closing tag dangling — which
+  // libvirt rejects as an opening/ending tag mismatch.
   let out = domainXml
-    .replace(/\s*<loader\b[^>]*\/?>\s*/g, "")
     .replace(/\s*<loader\b[\s\S]*?<\/loader>\s*/g, "")
-    .replace(/\s*<nvram\b[^>]*\/?>\s*/g, "")
+    .replace(/\s*<loader\b[^>]*\/>\s*/g, "")
     .replace(/\s*<nvram\b[\s\S]*?<\/nvram>\s*/g, "")
+    .replace(/\s*<nvram\b[^>]*\/>\s*/g, "")
     .replace(/(<os\b[^>]*)\s+firmware=['"][^'"]*['"]/g, "$1");
   const frag = firmwareXml(firmware, name);
   if (frag) {

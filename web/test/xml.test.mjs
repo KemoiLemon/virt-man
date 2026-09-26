@@ -167,3 +167,23 @@ test("withFirmware swaps loader/nvram in place and strips on BIOS", () => {
   assert.equal((back.match(/<loader/g) || []).length, 1, "exactly one loader after switching back");
   assert.equal((back.match(/<nvram/g) || []).length, 1, "exactly one nvram after switching back");
 });
+
+test("withFirmware leaves no dangling close tags on libvirt single-quoted XML", () => {
+  // libvirt stores paired loader/nvram with single-quoted attributes and the
+  // closing tags on their own lines; an over-eager opening-tag strip left
+  // orphaned </loader> / </nvram> and failed define with a tag mismatch.
+  const live = `<domain type='kvm'>
+  <os>
+    <type arch='x86_64' machine='pc-q35-11.1'>hvm</type>
+    <loader readonly='yes' type='pflash' format='raw'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>
+    <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd' format='raw'>/var/lib/libvirt/qemu/nvram/Alpine_VARS.fd</nvram>
+    <boot dev='hd'/>
+  </os>
+</domain>`;
+  const bios = xml.withFirmware(live, "bios", "Alpine");
+  assert.doesNotMatch(bios, /<loader/);
+  assert.doesNotMatch(bios, /<nvram/);
+  assert.doesNotMatch(bios, /<\/loader>|<\/nvram>/, "no orphaned closing tags");
+  assert.match(bios, /<os>\s*<type/, "os block intact");
+  assert.match(bios, /<boot dev='hd'\/>/, "boot device survives");
+});
