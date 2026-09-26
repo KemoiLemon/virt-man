@@ -95,8 +95,10 @@
 #nets-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
 #nets-list .storage-card { margin-bottom: 0; padding: 16px 17px; }
 #nets-list .storage-card-head { flex-wrap: wrap; gap: 8px 10px; }
-/* Bridge and subnet stack vertically, one spec per row. */
-#nets-list .specs { grid-template-columns: 1fr; }
-/* Controls share one row, spaced evenly across the card, with flatter buttons. */
-#nets-list .net-actions { flex-wrap: nowrap; justify-content: space-between; gap: 4px; }
-#nets-list .net-actions .btn { padding-top: 3px; padding-bottom: 3px; }
+/* Bridge and subnet stack vertically, one spec per row, with less space
+   before the controls. */
+#nets-list .specs { grid-template-columns: 1fr; margin-bottom: 8px; }
+/* Controls share one row and are sized evenly (each flexes to fill an equal
+   share of the card), with flatter buttons. */
+#nets-list .net-actions { flex-wrap: nowrap; gap: 4px; }
+#nets-list .net-actions .btn { flex: 1 1 0; padding-top: 3px; padding-bottom: 3px; }
