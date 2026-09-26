@@ -2419,15 +2419,16 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       const src = block.match(/<source\b[^>]*>/)?.[0] ?? "";
       const dev = xattr(block.match(/<target\b[^>]*>/)?.[0] ?? "", "dev");
       const kind = m[1] === "cdrom" ? "cdrom" : "disk";
+      const volume = xattr(src, "volume");
       return {
         dev: dev || (kind === "cdrom" ? "cdrom" : "disk"),
         kind,
         pool: xattr(src, "pool"),
-        volume: xattr(src, "volume"),
+        volume,
         file: xattr(src, "file"),
-        label: xattr(src, "volume") || xattr(src, "file") || (kind === "cdrom" ? "empty" : "—"),
+        label: volume || xattr(src, "file") || (kind === "cdrom" ? "empty" : "—"),
       };
-    });
+    }).filter((x) => x.kind !== "cdrom" || !x.volume?.toLowerCase().endsWith(".iso"));
     const nics = [...xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)].map((m) => {
       const block = m[0];
       return {
