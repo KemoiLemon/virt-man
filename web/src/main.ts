@@ -2431,7 +2431,6 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       };
     });
     const devices = devicesFromXml(xml);
-    const other = devices.filter((x) => x.kind !== "disk" && x.kind !== "cdrom" && x.kind !== "interface");
     const bios = /pflash|OVMF/i.test(xml) ? "UEFI (OVMF)" : "BIOS (SeaBIOS)";
     const display = /<graphics[^>]*type=['"]spice/.test(xml) ? "spice" : "vnc";
 
@@ -2483,14 +2482,19 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       ["Out", capLabel(fw.policy.out)],
       ["Forward", capLabel(fw.policy.forward)],
     ];
-    const hwFacts: [string, string][] = [
-      ["BIOS", bios],
-      ["Display", display],
-      ...other.map((x) => [hwType(x.kind)?.label ?? x.kind, deviceSummary(x)] as [string, string]),
+    // Every hardware device in one full-width strip, in domain order.
+    const hwStrip = [
+      { icon: ic.cpu(), label: "BIOS", sum: bios },
+      { icon: ic.vm(), label: "Display", sum: display },
+      ...devices.map((x) => ({
+        icon: ic[hwType(x.kind)?.icon ?? "cpu"](),
+        label: hwType(x.kind)?.label ?? x.kind,
+        sum: deviceSummary(x),
+      })),
     ];
 
     setHtml(body, `
-    <div class="sumgrid vm-sumgrid">
+    <div class="sumgrid vm-sumgrid vm-top">
       <div class="metric ${running ? "ok" : ""}">
         <div class="metric-head">
           <span class="metric-ic">${ic.cpu()}</span>
@@ -2542,13 +2546,22 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           <span>${selCap > 0 ? fmtBytes(selCap) : esc(selDisk?.label ?? "—")}</span>
         </div>
       </div>
+    </div>
 
+    <div class="sumgrid vm-sumgrid vm-mid">
       ${factCard(ic.network(), "Network", `${nics.length}`, nics.map((x) => [x.net || "network", x.model || "virtio"]),
         `<span>${nics.length} NIC</span><span>${[...new Set(nics.map((x) => x.model).filter(Boolean))].join(", ") || "virtio"}</span>`)}
       ${factCard(ic.firewall(), "Firewall", `${fw.rules.length}`, fwFacts,
         `<span>in ${capLabel(fw.policy.in)}</span><span>out ${capLabel(fw.policy.out)} · fwd ${capLabel(fw.policy.forward)}</span>`)}
-      ${factCard(ic.cpu(), "Hardware", `${devices.length}`, hwFacts,
-        `<span>${esc(bios)}</span><span>${esc(display)}</span>`)}
+    </div>
+
+    <div class="section-title fw-cat">Hardware</div>
+    <div class="hw-strip">
+      ${hwStrip.map((h) => `
+        <div class="hw-chip">
+          <span class="hw-chip-ic">${h.icon}</span>
+          <span class="hw-chip-tx"><b>${esc(h.label)}</b><i>${esc(h.sum)}</i></span>
+        </div>`).join("")}
     </div>`);
 
     $("#disk-sel", body)?.addEventListener("change", (e: Event) => {

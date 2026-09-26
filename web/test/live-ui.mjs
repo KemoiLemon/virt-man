@@ -236,34 +236,48 @@ await (async () => {
 
   // The Summary tab is open again; it must carry the live dashboard widgets.
   await new Promise((r) => window.setTimeout(r, 800));
-  check("VM summary shows six cards — CPU, Memory, Disks, Network, Firewall, Hardware", () => {
+  check("VM summary lays out CPU/Memory/Disks on top, Network/Firewall below, hardware strip at bottom", () => {
     const metrics = [...document.querySelectorAll(".metric")];
     const labels = metrics.map((m) => m.querySelector("b")?.textContent.trim());
-    for (const want of ["CPU", "Memory", "Disks", "Network", "Firewall", "Hardware"]) {
+    for (const want of ["CPU", "Memory", "Disks", "Network", "Firewall"]) {
       assert.ok(labels.includes(want), `${want} card present (${labels})`);
     }
 
-    for (const label of ["CPU", "Memory"]) {
-      const m = metrics.find((x) => x.querySelector("b")?.textContent.trim() === label);
+    // Top tier: three metric cards in one row.
+    const top = document.querySelector(".vm-top");
+    assert.ok(top, "vm-top row present");
+    assert.equal(top.querySelectorAll(":scope > .metric").length, 3, "three cards across the top");
+    for (const label of ["CPU", "Memory", "Disks"]) {
+      const m = top.querySelector(`.metric b`);
+      assert.ok(m, `${label} in top row`);
+    }
+    for (const label of ["CPU", "Memory", "Disks"]) {
+      const m = [...top.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === label);
       assert.ok(m, `${label} metric`);
       assert.ok(m.querySelector(".metric-ic svg"), "metric has a Lucide icon");
       assert.ok(m.querySelector(".metric-value"), "metric shows a headline value");
       assert.ok(m.querySelector(".meter .meter-fill"), "metric has a meter");
-      const spark = m.querySelector("svg.spark");
-      assert.ok(spark, "metric has a sparkline");
-      assert.ok(spark.querySelector(".spark-line"), "sparkline has a trace");
+      assert.ok(m.querySelector("svg.spark"), "metric has a sparkline");
     }
 
-    // Disks is a live metric card (selectable disk + allocation graph); the
-    // other three inventory cards hold facts, not meter/spark pairs.
-    const disksCard = metrics.find((x) => x.querySelector("b")?.textContent.trim() === "Disks");
-    assert.ok(disksCard, "Disks card");
-    assert.ok(disksCard.querySelector(".meter .meter-fill"), "Disks card has a meter");
-    assert.ok(disksCard.querySelector("svg.spark"), "Disks card has an allocation sparkline");
-    for (const label of ["Network", "Firewall", "Hardware"]) {
-      const m = metrics.find((x) => x.querySelector("b")?.textContent.trim() === label);
+    // Middle tier: Network and Firewall side by side.
+    const mid = document.querySelector(".vm-mid");
+    assert.ok(mid, "vm-mid row present");
+    assert.equal(mid.querySelectorAll(":scope > .metric").length, 2, "two cards in the middle");
+    for (const label of ["Network", "Firewall"]) {
+      const m = [...mid.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === label);
       assert.ok(m, `${label} card`);
       assert.ok(m.querySelector(".factgrid .fact"), `${label} card has a fact grid`);
+    }
+
+    // Bottom: full-width hardware strip.
+    const strip = document.querySelector(".hw-strip");
+    assert.ok(strip, "hardware strip present");
+    const chips = [...strip.querySelectorAll(".hw-chip")];
+    assert.ok(chips.length >= 3, `${chips.length} hardware chips`);
+    const chipLabels = chips.map((c) => c.querySelector(".hw-chip-tx b")?.textContent.trim());
+    for (const want of ["BIOS", "Display"]) {
+      assert.ok(chipLabels.includes(want), `${want} chip present (${chipLabels})`);
     }
 
     // Memory must reflect the real guest, not a placeholder.

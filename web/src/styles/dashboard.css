@@ -50,6 +50,29 @@
 .fact b { display: block; font-size: 10px; letter-spacing: .9px; color: var(--dim); font-weight: 500; margin-bottom: 3px; }
 .fact span { font-size: 13px; word-break: break-word; }
 
+/* VM summary: top metrics stretch to fill, middle facts are two-up, and the
+   hardware inventory runs full-width across the bottom. */
+.vm-top { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
+.vm-mid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 18px; }
+
+/* Full-width hardware inventory strip at the bottom of the VM summary. */
+.hw-strip {
+  display: flex; flex-wrap: wrap; gap: 1px;
+  background: var(--line); border: 1px solid var(--line);
+}
+.hw-chip {
+  flex: 1 1 160px; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel); padding: 10px 12px;
+}
+.hw-chip-ic { width: 17px; height: 17px; color: var(--dim); flex: 0 0 17px; }
+.hw-chip-tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hw-chip-tx b { font-size: 12px; font-weight: 600; }
+.hw-chip-tx i {
+  font-style: normal; font-size: 10px; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* --------------------------------------------------------- sparkline */
 /* Stretches to the panel width; height stays fixed. */
 .chart { display: flex; flex-direction: column; gap: 4px; }
