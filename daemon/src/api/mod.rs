@@ -1,5 +1,6 @@
 pub mod console;
 pub mod domains;
+pub mod filters;
 pub mod health;
 pub mod networks;
 pub mod pools;
@@ -46,6 +47,7 @@ pub fn build(auth: Auth) -> Router {
         .merge(health::routes())
         .merge(domains::routes())
         .merge(networks::routes())
+        .merge(filters::routes())
         .merge(pools::routes())
         .merge(volumes::routes())
         .layer(middleware::from_fn(crate::auth::require_token));
