@@ -110,6 +110,7 @@
 .card-grid .net-actions .btn, .card-grid .card-actions .btn { flex: 1 1 0; padding-top: 7px; padding-bottom: 7px; }
 /* A card whose whole surface opens the detail view should look clickable. */
 .card-grid .storage-card[data-open] { cursor: pointer; }
+.card-grid .storage-card[data-open]:hover { border-color: var(--accent); background: var(--panel2); }
 
 /* The create card is a button in the same grid: a striped border marks it as
    an affordance rather than a real resource, and it stays present even when

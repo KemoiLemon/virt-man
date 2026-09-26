@@ -544,7 +544,7 @@ function renderDc() {
   const guestCards = connections
     .flatMap((c) => (treeVms[c.id] ?? []).map((v) => ({ conn: c, vm: v })))
     .map(({ conn, vm }) => `
-      <div class="storage-card ${vm.active ? "ok" : ""}" data-dc-vm="${esc(vm.name)}" data-dc-vm-conn="${conn.id}">
+      <div class="storage-card ${vm.active ? "ok" : ""}" data-open data-dc-vm="${esc(vm.name)}" data-dc-vm-conn="${conn.id}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.vm()}</span>
           <span class="storage-card-title">${esc(vm.name)}</span>
@@ -563,7 +563,7 @@ function renderDc() {
       </div>`).join("");
 
   const serverCards = connections.map((c) => `
-      <div class="storage-card" data-open-conn-row="${c.id}">
+      <div class="storage-card" data-open data-open-conn-row="${c.id}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.server()}</span>
           <span class="storage-card-title">${esc(c.name)}</span>
@@ -1477,7 +1477,7 @@ async function loadVms() {
         <span class="storage-card-title">Create VM</span>
       </button>`;
     setHtml(list, vms.map((v) => `
-      <div class="storage-card ${v.active ? "ok" : ""}" data-vm-open="${esc(v.name)}">
+      <div class="storage-card ${v.active ? "ok" : ""}" data-open data-vm-open="${esc(v.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.vm()}</span>
           <span class="storage-card-title">${esc(v.name)}</span>
