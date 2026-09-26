@@ -59,3 +59,12 @@ test("the hidden attribute beats layout display", () => {
   assert.match(flat(), /\[hidden\]\s*\{\s*display:\s*none\s*!important/,
     "[hidden] { display: none !important } exists in the shipped CSS");
 });
+
+// The daemon dashboard groups networking and storage pools into sections that
+// need clear separation (and cards inside a section need a real gap).
+test("dashboard sections are spaced apart", () => {
+  assert.match(flat(), /\.dash-section\s*\{\s*margin-top:\s*22px/,
+    ".dash-section has a top gap in the shipped CSS");
+  assert.match(flat(), /\.dash-section\s+\.storage-card\s*\{[^}]*margin-bottom:\s*18px/,
+    "dashboard storage cards are separated by 18px");
+});

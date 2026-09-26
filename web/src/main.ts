@@ -1111,7 +1111,7 @@ async function loadDashboard() {
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(cpu)}
-          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
         </div>
         <div class="metric-foot"><span>${h.cpus} CPU</span><span>host load</span></div>
       </div>
@@ -1125,7 +1125,7 @@ async function loadDashboard() {
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(mem, "mem")}
-          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(memUsedKib * 1024)} used</span>
@@ -1134,34 +1134,38 @@ async function loadDashboard() {
       </div>
     </div>
 
-    <div class="section-title">Networking</div>
-    <table class="grid">
-      <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
-      ${nets.map((n) => `
-        <tr><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
-        <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
-    </table>
+    <div class="dash-section">
+      <div class="section-title">Networking</div>
+      <table class="grid">
+        <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
+        ${nets.map((n) => `
+          <tr><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
+          <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
+      </table>
+    </div>
 
-    <div class="section-title">Storage pools</div>
-    ${pools.map((p) => {
-      const used = p.allocation ?? 0;
-      const cap = p.capacity ?? 0;
-      const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
-      return `
-      <div class="storage-card ${p.active ? "ok" : ""}">
-        <div class="storage-card-head">
-          <span class="storage-card-icon">${ic.storage()}</span>
-          <span class="storage-card-title">${esc(p.name)}</span>
-          <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
-        </div>
-        <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
-        <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
-        <div class="metric-foot">
-          <span>${fmtBytes(used)} used</span>
-          <span>${fmtBytes(cap)} total</span>
-        </div>
-      </div>`;
-    }).join("") || `<div class="empty">No pools.</div>`}
+    <div class="dash-section">
+      <div class="section-title">Storage pools</div>
+      ${pools.map((p) => {
+        const used = p.allocation ?? 0;
+        const cap = p.capacity ?? 0;
+        const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+        return `
+        <div class="storage-card ${p.active ? "ok" : ""}">
+          <div class="storage-card-head">
+            <span class="storage-card-icon">${ic.storage()}</span>
+            <span class="storage-card-title">${esc(p.name)}</span>
+            <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
+          </div>
+          <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
+          <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
+          <div class="metric-foot">
+            <span>${fmtBytes(used)} used</span>
+            <span>${fmtBytes(cap)} total</span>
+          </div>
+        </div>`;
+      }).join("") || `<div class="empty">No pools.</div>`}
+    </div>
     `);
   } catch (e) {
     setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -1805,7 +1809,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(cpu)}
-          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
         </div>
         <div class="metric-foot"><span>${s.vcpus} vCPU</span><span>host ${s.host.cpus} CPU</span></div>
       </div>
@@ -1819,7 +1823,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(mem, "mem")}
-          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(usedKib * 1024)} used</span>
@@ -2872,7 +2876,7 @@ function startPolling() {
     } else if (selectedConn && selectedVm && vmTab === "summary") {
       renderVmBody(selectedVm);
     }
-  }, 3000);
+  }, 1000);
 }
 
 // ---------------------------------------------------------------- helpers

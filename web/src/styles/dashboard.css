@@ -79,6 +79,13 @@
   padding: 14px 15px; display: flex; flex-direction: column; gap: 11px;
   margin-bottom: 14px; min-width: 0;
 }
+
+/* Dashboard sections get more breathing room than the dense list panes: the
+   networking table and storage pool cards are separate groups, so they need a
+   clear gap between them and between the cards themselves. */
+.dash-section { margin-top: 22px; }
+.dash-section .storage-card { margin-bottom: 18px; }
+.dash-section .storage-card:last-child { margin-bottom: 0; }
 .storage-card-head { display: flex; align-items: center; gap: 10px; }
 .storage-card-icon { width: 19px; height: 19px; color: var(--dim); flex: 0 0 19px; }
 .storage-card.ok .storage-card-icon { color: var(--ok); }
