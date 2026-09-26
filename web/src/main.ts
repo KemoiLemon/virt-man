@@ -369,7 +369,12 @@ async function refreshTreeVms() {
   }
   // Only re-render when something actually moved, so the tree does not
   // flicker or fight the user's clicks on every poll.
-  if (changed) renderTree();
+  if (changed) {
+    renderTree();
+    // The Datacenter view lists the same guests, so keep it in step; without
+    // this its Guests table stays empty until another action redraws it.
+    if (!selectedConn && !selectedVm) renderDc();
+  }
 }
 
 function renderProfileBtn() {
@@ -420,13 +425,32 @@ function renderDc() {
         </div>
       </div>`
     : "";
+  // Every guest across every server, so a VM is reachable directly from here
+  // instead of only through the sidebar.
+  const guestRows = connections
+    .flatMap((c) => (treeVms[c.id] ?? []).map((v) => ({ conn: c, vm: v })))
+    .map(({ conn, vm }) => `
+      <tr>
+        <td class="tname" style="cursor:pointer" data-open-vm="${esc(vm.name)}" data-open-conn="${conn.id}">${esc(vm.name)}</td>
+        <td>${esc(conn.name)}</td>
+        <td><span class="state ${vm.active ? "on" : ""}">${esc(vm.state)}</span></td>
+        <td class="col-actions">
+          <div class="row-actions">
+            <button class="btn icon" data-dc-start="${esc(vm.name)}" data-conn="${conn.id}" title="Start" ${vm.active ? "disabled" : ""}>${ic.start()}</button>
+            <button class="btn icon" data-dc-stop="${esc(vm.name)}" data-conn="${conn.id}" title="Shutdown" ${vm.active ? "" : "disabled"}>${ic.stop()}</button>
+            <button class="btn icon" data-dc-console="${esc(vm.name)}" data-conn="${conn.id}" title="Console">${ic.vm()}</button>
+            <button class="btn icon" data-dc-hwedit="${esc(vm.name)}" data-conn="${conn.id}" title="Edit hardware">${ic.edit()}</button>
+          </div>
+        </td>
+      </tr>`).join("");
+
   const body = dcTab === "servers"
     ? `${cards}<div class="section-title">Servers</div>
        <table class="grid">
          <tr><th>Name</th><th>URL</th><th>Cert</th><th class="col-actions"></th></tr>
          ${connections.map((c) => `
            <tr>
-             <td>${esc(c.name)}</td>
+             <td class="tname" style="cursor:pointer" data-open-conn-row="${c.id}">${esc(c.name)}</td>
              <td>${esc(c.url)}</td>
              <td>${c.fingerprint ? c.fingerprint.slice(0, 17) + "…" : "—"}</td>
              <td class="col-actions">
@@ -436,6 +460,11 @@ function renderDc() {
                </div>
              </td>
            </tr>`).join("") || `<tr><td colspan="4" class="empty">No servers yet — add one.</td></tr>`}
+       </table>
+       <div class="section-title" style="margin-top:18px">Guests</div>
+       <table class="grid">
+         <tr><th>Name</th><th>Server</th><th>State</th><th class="col-actions"></th></tr>
+         ${guestRows || `<tr><td colspan="4" class="empty">${connections.length ? "No guests on any server." : "Add a server to see its guests."}</td></tr>`}
        </table>`
     : `<div id="users-area">loading…</div>`;
 setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
@@ -453,6 +482,65 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
   content.querySelectorAll("[data-del]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => deleteConnection((b as HTMLElement).dataset.del!);
   });
+
+  // Selecting a server row opens that server's view.
+  content.querySelectorAll("[data-open-conn-row]").forEach((r: Element) => {
+    (r as HTMLElement).onclick = () => {
+      selectedConn = (r as HTMLElement).dataset.openConnRow!;
+      selectedVm = null;
+      connTab = "vms";
+      renderTree();
+      void renderConn();
+    };
+  });
+
+  /// Open a guest from the Datacenter table, switching server if needed.
+  const openVm = (connId: string, vm: string, tab: typeof vmTab) => {
+    selectedConn = connId;
+    selectedVm = vm;
+    vmTab = tab;
+    renderTree();
+    void renderVm();
+  };
+  content.querySelectorAll("[data-open-vm]").forEach((r: Element) => {
+    const el = r as HTMLElement;
+    el.onclick = () => openVm(el.dataset.openConn!, el.dataset.openVm!, "summary");
+  });
+  content.querySelectorAll("[data-dc-console]").forEach((b: Element) => {
+    const el = b as HTMLElement;
+    el.onclick = (e) => {
+      e.stopPropagation();
+      openVm(el.dataset.conn!, el.dataset.dcConsole!, "console");
+    };
+  });
+  content.querySelectorAll("[data-dc-hwedit]").forEach((b: Element) => {
+    const el = b as HTMLElement;
+    el.onclick = (e) => {
+      e.stopPropagation();
+      // The editor reads through selectedConn, so point at the owning server.
+      selectedConn = el.dataset.conn!;
+      void openHardwareEditor({ vm: el.dataset.dcHwedit! });
+    };
+  });
+  content.querySelectorAll("[data-dc-start]").forEach((b: Element) => {
+    const el = b as HTMLElement;
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      await act(`/proxy/${el.dataset.conn}/domains/${encodeURIComponent(el.dataset.dcStart!)}/start`, "POST");
+      await refreshTreeVms();
+      renderDc();
+    };
+  });
+  content.querySelectorAll("[data-dc-stop]").forEach((b: Element) => {
+    const el = b as HTMLElement;
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      await act(`/proxy/${el.dataset.conn}/domains/${encodeURIComponent(el.dataset.dcStop!)}/shutdown`, "POST");
+      await refreshTreeVms();
+      renderDc();
+    };
+  });
+
   if (dcTab === "users") loadUsers();
 }
 
