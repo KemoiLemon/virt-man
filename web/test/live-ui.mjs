@@ -250,7 +250,6 @@ await (async () => {
       const spark = m.querySelector("svg.spark");
       assert.ok(spark, "metric has a sparkline");
       assert.ok(spark.querySelector(".spark-line"), "sparkline has a trace");
-      assert.ok(m.querySelector(".spark-dot"), "sparkline marks the newest value");
     }
 
     // Memory must reflect the real guest, not a placeholder.

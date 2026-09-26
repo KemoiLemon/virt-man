@@ -45,7 +45,6 @@
 /* --------------------------------------------------------- sparkline */
 /* Stretches to the panel width; height stays fixed. */
 .chart { display: flex; flex-direction: column; gap: 4px; }
-.spark-host { position: relative; display: block; }
 .spark {
   width: 100%; height: 74px; display: block;
   background: var(--input-bg); border: 1px solid var(--line);
@@ -53,20 +52,10 @@
 .spark-line { fill: none; stroke: var(--accent); stroke-width: 1.7; vector-effect: non-scaling-stroke; }
 .spark-fill { fill: var(--accent); opacity: .16; stroke: none; }
 .spark-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: .7; }
-/* Newest-value marker: an HTML circle overlaid on the SVG, so it stays round
-   while the SVG stretches to the panel width. */
-.spark-dot {
-  position: absolute; right: 4px; width: 8px; height: 8px;
-  transform: translateY(-50%); border-radius: 50%;
-  background: var(--accent); border: 1px solid var(--panel);
-  box-sizing: border-box; pointer-events: none;
-}
 .spark.mem .spark-line { stroke: var(--ok); }
 .spark.mem .spark-fill { fill: var(--ok); }
-.spark-host.mem .spark-dot { background: var(--ok); }
 .spark.warn .spark-line { stroke: var(--warn); }
 .spark.warn .spark-fill { fill: var(--warn); }
-.spark-host.warn .spark-dot { background: var(--warn); }
 .chart-axis {
   display: flex; justify-content: space-between;
   font-size: 10px; color: var(--dim); letter-spacing: .4px;
