@@ -266,6 +266,25 @@ pub fn random_hex(bytes: usize) -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Readable random name, e.g. "brisk-otter-4f2a". Used when an API key is
+/// created without one: a pronounceable label beats a bare hex id in a list,
+/// and it needs no uniqueness check because the suffix is random.
+pub fn random_name() -> String {
+    const ADJECTIVES: [&str; 16] = [
+        "amber", "brisk", "calm", "clever", "dusty", "eager", "gentle", "hidden", "ivory", "lucky",
+        "mellow", "nimble", "quiet", "rapid", "silver", "wandering",
+    ];
+    const NOUNS: [&str; 16] = [
+        "otter", "falcon", "cedar", "harbor", "lantern", "meadow", "nebula", "oyster", "pebble",
+        "quartz", "raven", "summit", "thicket", "willow", "beacon", "cobalt",
+    ];
+    let seed = random_hex(3);
+    // Two independent nibbles pick the words; the rest becomes the suffix.
+    let a = usize::from_str_radix(&seed[0..1], 16).unwrap_or(0);
+    let n = usize::from_str_radix(&seed[1..2], 16).unwrap_or(0);
+    format!("{}-{}-{}", ADJECTIVES[a], NOUNS[n], &seed[2..])
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

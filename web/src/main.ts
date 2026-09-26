@@ -929,7 +929,9 @@ function openAddKey(users: User[], root: Element) {
   const el = openModal(
     "New API key",
     `<div class="grid2">
-       <label class="field"><span>Name</span><input id="nk-name" placeholder="ci-runner"></label>
+       <label class="field"><span>Name</span>
+         <input id="nk-name" placeholder="leave blank for a random name">
+         <small class="hint">Blank generates a readable name, e.g. brisk-otter-4f2a.</small></label>
        <label class="field"><span>Owner</span><select id="nk-owner">
          ${users.map((u) => `<option value="${u.id}" ${u.id === user?.id ? "selected" : ""}>${esc(u.username)}</option>`).join("")}
        </select></label>
@@ -952,8 +954,8 @@ function openAddKey(users: User[], root: Element) {
       const v = (s as HTMLSelectElement).value;
       if (v) scopes[(s as HTMLElement).dataset.keyscope!] = v;
     });
+    // Blank is allowed: the server generates a readable name.
     const name = $("#nk-name", el).value.trim();
-    if (!name) return toast("Key name is required", "bad");
     try {
       const k = await api.post<import("./api").ApiKey>("/keys", {
         name,
@@ -963,7 +965,7 @@ function openAddKey(users: User[], root: Element) {
       el.remove();
       // Shown once and never again, so give it its own dismissable dialog
       // rather than a toast that disappears on a timer.
-      showSecret("API key created", k.key ?? "");
+      showSecret(`API key — ${k.name}`, k.key ?? "");
       void loadAdmin(root);
     } catch (e) { toast((e as Error).message, "bad"); }
   };
@@ -2694,12 +2696,17 @@ setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done">
   };
   refreshKeys();
   $("#pf-newkey", el).onclick = async () => {
-    const name = await askText("New API key", "Key name", "", "ci-runner");
-    if (!name) return;
+    const name = await askText(
+      "New API key", "Key name (blank to generate one)", "", "leave blank for a random name");
+    // askText returns null when cancelled and "" when accepted while empty, so
+    // only null aborts; empty means "let the server name it".
+    if (name === null) return;
     try {
-      const k = await api.post<import("./api").ApiKey>("/me/keys", { name });
-      toast(`API key (copy now): ${k.key}`, "ok");
+      const k = await api.post<import("./api").ApiKey>("/me/keys", { name: name.trim() });
       refreshKeys();
+      // Shown once and never again, so it gets a dismissable dialog rather
+      // than a toast on a timer.
+      showSecret(`API key — ${k.name}`, k.key ?? "");
     } catch (e) {
       toast((e as Error).message, "bad");
     }

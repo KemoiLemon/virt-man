@@ -63,9 +63,27 @@ step that trains the user to ignore TLS errors. Only the web backend (or the
 app's sidecar) holds pins, so browsers never see a self-signed certificate at
 all.
 
+## One port, both protocols
+
+The web UI listens once, on 8006, and decides per connection.
+
+Plaintext HTTP to a TLS port gets a raw TLS alert record back — bytes that mean
+"decode_error" to a TLS client and nothing at all to a browser, which is what
+made `http://host:8006` look broken rather than merely wrong. The fix is a
+one-byte peek: every TLS connection opens with `0x16` (handshake), and no HTTP
+method does, so anything else is plaintext and earns a 308 to the `https://`
+URL. `peek()` leaves the bytes in the socket, so a real TLS handshake reaches
+rustls untouched.
+
+A second listener on port 80 was the alternative. It was rejected because it
+needs another privileged bind, another firewall hole, and it still would not
+help the person who typed the port number — which is the actual mistake being
+made. 308 rather than 302 so a redirected POST keeps its method and body.
+
 ## Auth and RBAC
 
-Scope-based, with a per-user override on top of the role:
+Scope-based. A role maps each scope to write / read / none, and a per-user
+override sits on top. The shipped defaults:
 
 | Role | vms / networks / storage / connections | users / settings |
 | --- | --- | --- |
@@ -73,10 +91,30 @@ Scope-based, with a per-user override on top of the role:
 | Operator | write | none |
 | Viewer | read | none |
 
+Roles are **stored data, not an enum**: admins can add their own and retune
+these three. Built-ins cannot be renamed or deleted, and are re-seeded on every
+load, so a store always resolves and a `role` string never dangles. Permissions
+fail closed — a scope a role omits, or a role that no longer exists, is denied
+rather than defaulted.
+
+"Administrator" is **derived from `users:write`**, not from the name "admin".
+So a custom role granting it is a real admin, and the last-admin guards hold by
+simulating the change and checking an admin survives — which catches lockout by
+role change, by scope override, and by retuning a role.
+
 A per-user scope entry beats the role, so an admin can be deliberately
 restricted. `enforce(state, user, scope, write)` is the single check, and the
 proxy derives the scope from the request path — so a new daemon endpoint is
-governed automatically rather than needing its own rule.
+governed automatically rather than needing its own rule. The scope vocabulary
+lives in `store::SCOPES` and is served to the UI, so the editor cannot offer a
+scope nothing enforces (it once offered `domains`, which the proxy calls `vms`,
+so that override silently did nothing).
+
+An API key carries its own per-scope ceiling, intersected with its owner's:
+`effective = min(key, owner)`. A key can narrow its owner but never exceed
+them, so a leaked key cannot outrank the account and demoting the owner weakens
+their keys. Keys may be created unnamed; the server generates a readable
+`adjective-noun-hex4` label, which reads better in a list than a bare id.
 
 The local app disables auth entirely (`auth_disabled`). A single-user desktop
 app gains nothing from a login screen, and the sidecar is loopback-only.

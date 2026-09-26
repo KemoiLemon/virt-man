@@ -21,16 +21,27 @@ breaks, and vice versa.
 ## Commands
 
 ```bash
-# frontend: typecheck, build, unit tests (56)
+# frontend: typecheck, build, unit tests (68)
 cd web && npx tsc --noEmit && npx vite build && pnpm test
+
+# web backend (19 tests: permissions/roles/key caps + redirect URL building)
+cd web/server && cargo clippy && cargo test
 
 # live suites — drive the real app in jsdom against a running backend
 #   arg is the base URL; defaults to http://127.0.0.1:8799
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console
 
+# auth-enabled suites need real credentials, since the account can be renamed
+# through the feature under test. Point them at an HTTPS instance:
+cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
+  [VM_LOW_USER=... VM_LOW_PASS=...] node test/live-profile.mjs https://127.0.0.1:8006
+
+# transport-level: HTTP->HTTPS redirect on the single TLS port (raw sockets)
+cd web && node test/live-redirect.mjs https://127.0.0.1:8006
+
 # daemon
-cd daemon && cargo clippy --all-targets && cargo test --bins   # 23 tests
+cd daemon && cargo clippy --all-targets && cargo test --bins   # 26 tests
 cd daemon && cargo test --test fd_leak -- --ignored            # needs libvirt
 
 # web backend
@@ -145,4 +156,14 @@ introduce a poll interval.
   SPICE (5901), network `internet`.
 
 Node rejects the web UI's self-signed cert, so point live suites at the app's
-loopback sidecar (HTTP) rather than `https://127.0.0.1:8006`.
+loopback sidecar (HTTP) rather than `https://127.0.0.1:8006`. Suites that must
+exercise login instead need `NODE_TLS_REJECT_UNAUTHORIZED=0` plus credentials
+(the loopback sidecar runs auth-disabled, so it cannot test the login path).
+For throwaway state, run a second instance with its own `VIRT_MAN_WEB_DATA`
+and seed it through `/auth/setup`.
+
+**HTTP on the TLS port redirects, it does not fail.** `http://host:8006` used
+to return a raw TLS alert record; the listener now peeks the first byte of each
+connection (TLS always starts `0x16`) and answers plaintext with a 308 to the
+`https://` URL. Only the TLS branch is wrapped, so the desktop app's
+`VIRT_MAN_WEB_LOOPBACK_HTTP=1` mode still serves plain HTTP directly.

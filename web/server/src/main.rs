@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod config;
 mod daemon;
+mod httpsredirect;
 mod state;
 mod store;
 mod tls;
@@ -52,7 +53,14 @@ async fn run() -> Result<(), String> {
         let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
             .await
             .map_err(|e| format!("failed to load TLS certificate: {e}"))?;
-        axum_server::bind_rustls(addr, tls_config)
+        // Plaintext HTTP on this port gets a 308 to https:// instead of a raw
+        // TLS alert record, so http://host:8006 works in a browser.
+        let acceptor = httpsredirect::RedirectAcceptor::new(
+            axum_server::tls_rustls::RustlsAcceptor::new(tls_config),
+            cfg.port,
+        );
+        axum_server::bind(addr)
+            .acceptor(acceptor)
             .serve(app.into_make_service())
             .await
             .map_err(|e| format!("server: {e}"))

@@ -359,7 +359,38 @@ check("keys tab can mint a key with its own permissions", () => {
   const first = modal.querySelector("[data-keyscope]");
   const vals = [...first.querySelectorAll("option")].map((o) => o.value);
   assert.deepEqual(vals, ["", "write", "read", "none"], "inherit + write/read/none");
+  // A name is optional: blank asks the server to generate one.
+  assert.match(modal.querySelector("#nk-name").placeholder, /blank/i,
+    "name field says it can be left blank");
+  assert.ok(!modal.querySelector("#nk-name").required, "name is not required");
 });
+
+// Creating with a blank name must succeed and come back named.
+document.querySelector("#nk-create").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1200);
+
+const mintedKeys = await window.fetch("/keys").then((r) => r.json());
+check("a key created with no name gets a readable generated one", () => {
+  assert.ok(mintedKeys.length, "at least one key exists now");
+  const named = mintedKeys.map((k) => k.name);
+  // adjective-noun-hex4, e.g. brisk-otter-4f2a.
+  const generated = named.filter((n) => /^[a-z]+-[a-z]+-[0-9a-f]{4}$/.test(n));
+  assert.ok(generated.length, `a generated name is present (${named})`);
+});
+
+check("the new key is shown once in a dismissable dialog", () => {
+  const secret = document.querySelector(".secret-value");
+  assert.ok(secret, "secret shown in a dialog, not a toast that times out");
+  assert.match(secret.textContent, /^vm_[0-9a-f]+$/, "looks like a real key");
+  const modal = [...document.querySelectorAll(".modal-back.open")].pop();
+  assert.match(modal.querySelector(".modal-head").textContent, /API key/, "dialog names the key");
+  // Clean up: revoke every key this run created.
+  modal.querySelector("#sv-done").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+});
+
+for (const k of mintedKeys) {
+  await window.fetch(`/keys/${k.id}`, { method: "DELETE" });
+}
 
 const fails = results.filter(([s]) => s === "FAIL");
 

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::ApiError;
 use crate::auth;
 use crate::state::AppState;
-use crate::store::{random_hex, sha256_hex, ApiKey, Scopes, User};
+use crate::store::{random_hex, random_name, sha256_hex, ApiKey, Scopes, User};
 
 pub fn routes(state: &AppState) -> Router<AppState> {
     // Own keys (any authenticated user), plus admin-wide listing/creation and
@@ -57,6 +57,9 @@ async fn all_keys(
 
 #[derive(Deserialize)]
 struct CreateKeyReq {
+    /// Omitted or blank means "generate one", so a key can be minted without
+    /// inventing a label.
+    #[serde(default)]
     name: String,
     /// Per-scope ceiling. Omitted or empty means "inherit the owner".
     #[serde(default)]
@@ -87,10 +90,10 @@ async fn create_any_key(
 }
 
 fn issue_key(state: &AppState, owner_id: &str, req: CreateKeyReq) -> Result<Json<Value>, ApiError> {
-    let name = req.name.trim().to_string();
-    if name.is_empty() {
-        return Err(ApiError::bad_request("key name is required"));
-    }
+    let name = match req.name.trim() {
+        "" => random_name(),
+        n => n.to_string(),
+    };
     super::users::validate_scopes(&req.scopes)?;
 
     let mut store = state.write();
