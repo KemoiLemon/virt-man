@@ -41,7 +41,8 @@ where
 {
     type Stream = A::Stream;
     type Service = A::Service;
-    type Future = Pin<Box<dyn std::future::Future<Output = io::Result<(A::Stream, A::Service)>> + Send>>;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = io::Result<(A::Stream, A::Service)>> + Send>>;
 
     fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
         let inner = self.inner.clone();
@@ -198,7 +199,10 @@ mod tests {
 
     #[test]
     fn a_junk_request_line_still_yields_root() {
-        assert_eq!(redirect_target("\r\nHost: h\r\n\r\n", 8006), "https://h:8006/");
+        assert_eq!(
+            redirect_target("\r\nHost: h\r\n\r\n", 8006),
+            "https://h:8006/"
+        );
     }
 
     #[test]

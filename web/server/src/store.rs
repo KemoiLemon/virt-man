@@ -271,8 +271,22 @@ pub fn random_hex(bytes: usize) -> String {
 /// and it needs no uniqueness check because the suffix is random.
 pub fn random_name() -> String {
     const ADJECTIVES: [&str; 16] = [
-        "amber", "brisk", "calm", "clever", "dusty", "eager", "gentle", "hidden", "ivory", "lucky",
-        "mellow", "nimble", "quiet", "rapid", "silver", "wandering",
+        "amber",
+        "brisk",
+        "calm",
+        "clever",
+        "dusty",
+        "eager",
+        "gentle",
+        "hidden",
+        "ivory",
+        "lucky",
+        "mellow",
+        "nimble",
+        "quiet",
+        "rapid",
+        "silver",
+        "wandering",
     ];
     const NOUNS: [&str; 16] = [
         "otter", "falcon", "cedar", "harbor", "lantern", "meadow", "nebula", "oyster", "pebble",
