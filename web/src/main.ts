@@ -844,7 +844,7 @@ setHtml(body, `<div class="console-stage" id="console-stage"><div class="console
       }).join("");
 
       setHtml(body, `
-        <div class="actions">
+        <div class="actions hw-actions">
           <button class="btn primary" id="hw-edit">${ic.edit(14)} Edit hardware</button>
           ${running ? `<span class="hw-locked">Changes apply after the guest is restarted.</span>` : ""}
         </div>

@@ -83,7 +83,17 @@
 .hwrow-label { font-size: 11px; letter-spacing: .8px; color: var(--dim); }
 .hwctl { min-width: 0; }
 .hwctl-static { font-size: 12px; word-break: break-word; }
-.hw-locked { font-size: 11px; color: var(--warn); }
+/* Keep the button and its notice on one line so margin-left:auto can push the
+   notice to the far edge; .actions wraps by default. */
+.hw-actions { flex-wrap: nowrap; align-items: center; }
+
+/* Restart notice: pushed to the trailing edge rather than sitting beside the
+   button, and vertically centred against it. */
+.hw-locked {
+  font-size: 12px; color: var(--warn);
+  margin-left: auto; display: inline-flex; align-items: center;
+  text-align: right;
+}
 
 /* Add-hardware chooser: type list on the left, generated form on the right. */
 .add-hw-modal { width: 760px; max-width: 96vw; height: 560px; max-height: 92vh; }
