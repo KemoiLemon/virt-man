@@ -266,7 +266,12 @@ await (async () => {
     assert.equal(mid.querySelectorAll(":scope > .metric").length, 2, "two cards in the middle");
     const fwCard = [...mid.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === "Firewall");
     assert.ok(fwCard, "Firewall card");
-    assert.ok(fwCard.querySelector(".factgrid .fact"), "Firewall card has a fact grid");
+    const fwChips = [...fwCard.querySelectorAll(".fw-policy-chip")];
+    assert.equal(fwChips.length, 3, "three policy chips (in/out/forward)");
+    const fwChipLabels = fwChips.map((c) => c.querySelector("b")?.textContent.trim());
+    for (const want of ["In", "Out", "Forward"]) {
+      assert.ok(fwChipLabels.includes(want), `${want} policy chip (${fwChipLabels})`);
+    }
     const netCard = [...mid.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === "Network");
     assert.ok(netCard, "Network card");
     assert.ok(netCard.querySelector(".net-chart svg.spark"), "Network card graphs Rx/Tx");

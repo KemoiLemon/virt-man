@@ -73,6 +73,27 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* Firewall policy chips: one per direction, coloured by action. */
+.fw-policy-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
+  background: var(--line); border: 1px solid var(--line);
+}
+.fw-policy-chip {
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--panel); padding: 9px 10px; min-width: 0;
+}
+.fw-policy-chip > span.ico, .fw-policy-chip > span:first-child {
+  width: 15px; height: 15px; color: var(--dim);
+}
+.fw-policy-chip b { font-size: 10px; letter-spacing: .9px; color: var(--dim); font-weight: 500; }
+.fw-policy-chip i { font-style: normal; font-size: 13px; font-weight: 600; }
+.fw-policy-chip.ok { box-shadow: inset 0 2px 0 var(--ok); }
+.fw-policy-chip.warn { box-shadow: inset 0 2px 0 var(--warn); }
+.fw-policy-chip.bad { box-shadow: inset 0 2px 0 var(--bad); }
+.fw-policy-chip.ok i { color: var(--ok); }
+.fw-policy-chip.warn i { color: var(--warn); }
+.fw-policy-chip.bad i { color: var(--bad); }
+
 /* --------------------------------------------------------- sparkline */
 /* Stretches to the panel width; height stays fixed. */
 .chart { display: flex; flex-direction: column; gap: 4px; }

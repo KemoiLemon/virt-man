@@ -2484,27 +2484,6 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       netKey, selNic?.rx ?? 0, selNic?.tx ?? 0, s.sampled_at_ms);
     const netMax = Math.max(1, ...rx, ...tx);
 
-    const factCard = (icon: string, label: string, value: string, facts: [string, string][], foot = "") => `
-      <div class="metric">
-        <div class="metric-head">
-          <span class="metric-ic">${icon}</span>
-          <b>${label}</b>
-          <span class="metric-value">${value}</span>
-        </div>
-        <div class="factgrid">
-          ${facts.length
-            ? facts.map(([k, v]) => `<div class="fact"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join("")
-            : `<div class="fact"><b>—</b><span>None</span></div>`}
-        </div>
-        ${foot ? `<div class="metric-foot">${foot}</div>` : ""}
-      </div>`;
-
-    const fwFacts: [string, string][] = [
-      ["Rules", `${fw.rules.length} active`],
-      ["In", capLabel(fw.policy.in)],
-      ["Out", capLabel(fw.policy.out)],
-      ["Forward", capLabel(fw.policy.forward)],
-    ];
     // Every hardware device in one full-width strip, in domain order.
     const hwStrip = [
       { icon: ic.cpu(), label: "BIOS", sum: bios },
@@ -2592,8 +2571,28 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         </div>
       </div>
 
-      ${factCard(ic.firewall(), "Firewall", `${fw.rules.length}`, fwFacts,
-        `<span>in ${capLabel(fw.policy.in)}</span><span>out ${capLabel(fw.policy.out)} · fwd ${capLabel(fw.policy.forward)}</span>`)}
+      <div class="metric">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.firewall()}</span>
+          <b>Firewall</b>
+          <span class="metric-value">${fw.rules.length ? `${fw.rules.length} rules` : "Open"}</span>
+        </div>
+        <div class="fw-policy-grid">
+          ${[
+            ["In", fw.policy.in, ic.down()],
+            ["Out", fw.policy.out, ic.up()],
+            ["Forward", fw.policy.forward, ic.circle()],
+          ].map(([k, v, ico]) => {
+            const action = v as FirewallPolicy["in"];
+            const cls = action === "accept" ? "ok" : action === "reject" ? "warn" : "bad";
+            return `<div class="fw-policy-chip ${cls}"><span>${ico}</span><b>${esc(k)}</b><i>${esc(capLabel(action))}</i></div>`;
+          }).join("")}
+        </div>
+        <div class="metric-foot">
+          <span>${fw.rules.length ? `${fw.rules.length} active` : "no rules"}</span>
+          <span>default policies</span>
+        </div>
+      </div>
     </div>
 
     <div class="section-title fw-cat">Hardware</div>
