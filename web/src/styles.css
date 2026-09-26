@@ -71,6 +71,7 @@ body {
   padding: 0 14px; height: 46px;
   background: var(--panel); border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
+  -webkit-user-select: none; user-select: none;
 }
 .brand { font-weight: 700; letter-spacing: 2px; font-size: 15px; }
 .brand span { color: var(--accent); }
@@ -150,6 +151,7 @@ body {
 .btn {
   background: var(--panel2); border: 1px solid var(--line2); color: var(--fg);
   padding: 5px 11px; font: inherit; font-size: 11px; letter-spacing: 1px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
 }
 .btn:hover { background: var(--hover); border-color: var(--hover-line); }
 .btn:active { transform: translateY(1px); }

@@ -96,8 +96,18 @@ export function isTauri(): boolean {
   return (window as any).__TAURI_INTERNALS__ !== undefined;
 }
 
-export async function tauriWindow() {
+/// The current Tauri window, from the injected global (withGlobalTauri: true).
+/// Synchronous, matching vm-man's wiring, so titlebar buttons and dragging
+/// don't depend on a dynamic import resolving.
+export function tauriWindow(): any | null {
   if (!isTauri()) return null;
-  const { getCurrentWindow } = await import("@tauri-apps/api/window");
-  return getCurrentWindow();
+  const tauri = (window as any).__TAURI__;
+  if (tauri?.window?.getCurrentWindow) {
+    try {
+      return tauri.window.getCurrentWindow();
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }

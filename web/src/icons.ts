@@ -3,7 +3,7 @@
 // didn't render on some systems. Named imports keep the bundle small.
 
 import type { IconNode as LucideIconNode } from "lucide";
-import { Circle, CircleDot, Minus, Play, Plus, Power, RotateCw, Square, SunMoon, Trash2, Upload, X } from "lucide";
+import { Circle, CircleDot, Globe, Minus, Play, Plus, Power, RotateCw, Square, SunMoon, Trash2, Upload, X } from "lucide";
 
 function render(node: LucideIconNode, size: number): string {
   const body = node
@@ -34,4 +34,5 @@ export const ic = {
   reboot: svg(RotateCw),
   circle: svg(Circle),
   circleDot: svg(CircleDot),
+  webui: svg(Globe),
 };

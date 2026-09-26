@@ -148,7 +148,7 @@ setHtml(app, `
       <span class="brand">virt-<span>man</span></span>
       <span class="host">${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
       <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
-      <button class="btn" id="webui-btn">Connect to webui</button>
+      <button class="btn" id="webui-btn">${ic.webui()} Connect to WebUI</button>
       ${authDisabled ? "" : `<button class="btn" id="logout-btn">Sign out</button>`}
       ${isTauri() ? `<span style="margin-left:auto;display:flex;gap:6px">
         <button class="btn icon" id="win-min" title="Minimise">${ic.min()}</button>
@@ -185,14 +185,14 @@ setHtml(app, `
 
 function wireWindowChrome() {
   if (!isTauri()) return;
-  $("#win-min")?.addEventListener("click", async () => (await tauriWindow())?.minimize());
+  const w = tauriWindow();
+  $("#win-min")?.addEventListener("click", () => { void w?.minimize(); });
   $("#win-max")?.addEventListener("click", async () => {
-    const w = await tauriWindow();
     if (!w) return;
     if (await w.isMaximized()) await w.unmaximize();
     else await w.maximize();
   });
-  $("#win-close")?.addEventListener("click", async () => (await tauriWindow())?.close());
+  $("#win-close")?.addEventListener("click", () => { void w?.close(); });
 
   // Dragging: `data-tauri-drag-region` only fires for the exact element under
   // the cursor, so flex gaps and nested spans in the topbar are dead zones.
@@ -205,14 +205,13 @@ function wireWindowChrome() {
     if (e.button !== 0) return;
     if ((e.target as Element).closest?.(interactive)) return;
     e.preventDefault();
-    void (async () => (await tauriWindow())?.startDragging())();
+    void w?.startDragging();
   });
   // Double-clicking the titlebar toggles maximise, as users expect.
   bar.addEventListener("dblclick", (evt: Event) => {
     const e = evt as MouseEvent;
     if ((e.target as Element).closest?.(interactive)) return;
     void (async () => {
-      const w = await tauriWindow();
       if (!w) return;
       if (await w.isMaximized()) await w.unmaximize();
       else await w.maximize();
