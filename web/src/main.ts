@@ -184,9 +184,6 @@ setHtml(app, `
 }
 
 function wireWindowChrome() {
-  // Frameless titlebar on Tauri; browser build has no window chrome.
-  const bar = document.querySelector(".topbar");
-  if (bar && isTauri()) bar.setAttribute("data-tauri-drag-region", "");
   if (!isTauri()) return;
   $("#win-min")?.addEventListener("click", async () => (await tauriWindow())?.minimize());
   $("#win-max")?.addEventListener("click", async () => {
@@ -196,6 +193,31 @@ function wireWindowChrome() {
     else await w.maximize();
   });
   $("#win-close")?.addEventListener("click", async () => (await tauriWindow())?.close());
+
+  // Dragging: `data-tauri-drag-region` only fires for the exact element under
+  // the cursor, so flex gaps and nested spans in the topbar are dead zones.
+  // Start the drag explicitly for any press that is not on a control.
+  const bar = document.querySelector(".topbar");
+  if (!bar) return;
+  const interactive = "button, input, select, textarea, a";
+  bar.addEventListener("mousedown", (evt: Event) => {
+    const e = evt as MouseEvent;
+    if (e.button !== 0) return;
+    if ((e.target as Element).closest?.(interactive)) return;
+    e.preventDefault();
+    void (async () => (await tauriWindow())?.startDragging())();
+  });
+  // Double-clicking the titlebar toggles maximise, as users expect.
+  bar.addEventListener("dblclick", (evt: Event) => {
+    const e = evt as MouseEvent;
+    if ((e.target as Element).closest?.(interactive)) return;
+    void (async () => {
+      const w = await tauriWindow();
+      if (!w) return;
+      if (await w.isMaximized()) await w.unmaximize();
+      else await w.maximize();
+    })();
+  });
 }
 
 /// Navigate the app window to a remote web UI. Standalone desktop builds use
@@ -237,7 +259,7 @@ function renderTree() {
 setHtml(tree, `
     <div class="tree-row node ${selectedConn === null ? "sel" : ""}" id="dc-row">Datacenter</div>
     ${connRows}
-    <div class="tree-row node" id="add-conn-row" style="color:var(--accent)">${ic.plus()} Add Server</div>`);
+    <div class="tree-row node" id="add-conn-row" style="color:var(--accent)"><span>${ic.plus()} Add Server</span></div>`);
 
   $("#dc-row").onclick = () => {
     selectedConn = null;

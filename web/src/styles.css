@@ -159,10 +159,11 @@ body {
 .btn.danger:hover { background: var(--bad-bg); color: var(--bad-fg); }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.icon { padding: 4px 8px; }
-.btn.icon, .x, .tree-row.node { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.btn.icon, .x { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .icon { flex: 0 0 auto; vertical-align: middle; }
 .btn .icon { pointer-events: none; }
 .x { padding: 4px; }
+.tree-row.node .icon { color: var(--accent); }
 
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field > span { font-size: 10px; letter-spacing: 1.2px; color: var(--dim); }
