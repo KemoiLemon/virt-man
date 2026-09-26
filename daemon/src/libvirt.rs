@@ -48,8 +48,16 @@ where
     F: FnOnce(&Connect) -> Result<T, LvError> + Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
-        let conn = Connect::open(Some(URI)).map_err(|e| format!("libvirt connect: {e}"))?;
-        f(&conn).map_err(|e| e.to_string())
+        let mut conn = Connect::open(Some(URI)).map_err(|e| format!("libvirt connect: {e}"))?;
+        let out = f(&conn).map_err(|e| e.to_string());
+        // `virt::Connect` has no Drop impl, so an unclosed connection leaks
+        // its libvirt event fds. A polling client exhausts the process fd
+        // limit after a few hundred requests, and every later call then fails
+        // with "Too many open files". Close on both the ok and error paths.
+        if let Err(e) = conn.close() {
+            tracing::warn!("libvirt connection close failed: {e}");
+        }
+        out
     })
     .await
     .map_err(|e| format!("libvirt task panicked: {e}"))?
