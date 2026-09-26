@@ -1422,16 +1422,17 @@ async function loadFilters() {
 const FW_DIRS = ["in", "out", "forward"];
 const FW_ACTIONS = ["accept", "drop", "reject"];
 const FW_PROTOS = ["tcp", "udp", "icmp", "any"];
+const FW_ACTION_LABELS: Record<string, string> = { accept: "Accept", drop: "Drop", reject: "Reject" };
 
-function fwOpt(list: string[], sel: string): string {
-  return list.map((v) => `<option value="${v}" ${v === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
+function fwOpt(list: string[], sel: string, labels?: Record<string, string>): string {
+  return list.map((v) => `<option value="${v}" ${v === sel ? "selected" : ""}>${esc(labels?.[v] ?? v)}</option>`).join("");
 }
 
 function fwRuleRow(r: FirewallRule): string {
   return `
     <tr>
       <td><select data-r-dir>${fwOpt(FW_DIRS, r.direction)}</select></td>
-      <td><select data-r-action>${fwOpt(FW_ACTIONS, r.action)}</select></td>
+      <td><select data-r-action>${fwOpt(FW_ACTIONS, r.action, FW_ACTION_LABELS)}</select></td>
       <td><select data-r-proto>${fwOpt(FW_PROTOS, r.proto)}</select></td>
       <td><input data-r-src placeholder="any" value="${esc(r.src_ip)}"></td>
       <td><input data-r-dst placeholder="any" value="${esc(r.dst_ip)}"></td>
@@ -1463,13 +1464,13 @@ function blankPolicy(): FirewallPolicy {
   return { in: "accept", out: "accept", forward: "accept" };
 }
 
-/// Three dropdowns for the per-direction default policies.
+/// Three dropdowns for the per-direction default policies, in one row.
 function fwPolicyRow(p: FirewallPolicy): string {
   return `
-    <div class="grid2 perm-grid">
-      <label class="field"><span>In</span><select data-pol-in>${fwOpt(FW_ACTIONS, p.in)}</select></label>
-      <label class="field"><span>Out</span><select data-pol-out>${fwOpt(FW_ACTIONS, p.out)}</select></label>
-      <label class="field"><span>Forward</span><select data-pol-forward>${fwOpt(FW_ACTIONS, p.forward)}</select></label>
+    <div class="fw-policy">
+      <label class="field"><span>In</span><select data-pol-in>${fwOpt(FW_ACTIONS, p.in, FW_ACTION_LABELS)}</select></label>
+      <label class="field"><span>Out</span><select data-pol-out>${fwOpt(FW_ACTIONS, p.out, FW_ACTION_LABELS)}</select></label>
+      <label class="field"><span>Forward</span><select data-pol-forward>${fwOpt(FW_ACTIONS, p.forward, FW_ACTION_LABELS)}</select></label>
     </div>`;
 }
 
@@ -1535,17 +1536,17 @@ function openFirewallEditor(netName: string) {
 
   function render() {
     setHtml($("#fw-body", el), `
-      <div class="section-title">Default policies</div>
+      <div class="section-title fw-cat">Default Policies</div>
       ${fwPolicyRow(policy)}
 
-      <div class="section-title">Rules</div>
+      <div class="section-title fw-cat">Rules</div>
       <table class="grid">
         <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
         ${rules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="fw-add-rule">${ic.plus(14)} Add rule</button></div>
 
-      <div class="section-title" style="margin-top:18px">NAT port forwards</div>
+      <div class="section-title fw-cat" style="margin-top:18px">NAT Port Forwards</div>
       <table class="grid">
         <tr><th>WAN</th><th>Proto</th><th>WAN start</th><th>WAN end</th><th>Internal IP</th><th>Start</th><th>End</th><th></th></tr>
         ${forwards.map(fwFwdRow).join("") || `<tr><td colspan="8" class="empty">No port forwards.</td></tr>`}
@@ -2275,9 +2276,9 @@ async function renderVmBody(vm: string) {
     };
     const renderRules = () => {
       setHtml(rulesBody, `
-        <div class="section-title">Default policies</div>
+        <div class="section-title fw-cat">Default Policies</div>
         ${fwPolicyRow(vmPolicy)}
-        <div class="section-title">Rules</div>
+        <div class="section-title fw-cat">Rules</div>
         <table class="grid">
           <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
           ${vmRules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}

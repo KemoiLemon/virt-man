@@ -143,7 +143,7 @@ check("firewall editor opens with rules and port-forward tables", () => {
   assert.ok(modal.querySelector("#fw-add-rule"), "add-rule action");
   assert.ok(modal.querySelector("#fw-add-fwd"), "add-forward action");
   assert.ok(modal.querySelector("#fw-save"), "apply action");
-  assert.match(modal.textContent ?? "", /NAT port forwards/);
+  assert.match(modal.textContent ?? "", /NAT Port Forwards/);
   modal.remove();
 });
 

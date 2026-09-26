@@ -165,6 +165,8 @@ body {
 .spec span { font-size: 13px; word-break: break-all; -webkit-user-select: text; user-select: text; }
 
 .section-title { font-size: 11px; letter-spacing: 1.5px; color: var(--dim); margin: 0 0 7px; }
+/* Firewall category titles are section headers first, but bigger and full-foreground. */
+.section-title.fw-cat { font-size: 13px; letter-spacing: 1.5px; color: var(--fg); }
 .cmd {
   background: var(--code-bg); border: 1px solid var(--line);
   padding: 10px; font-size: 11px; color: var(--dim);
@@ -290,6 +292,8 @@ body {
 
 /* ----------------------------------------------------------------- forms */
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* Firewall policy row: three selects in one row, with breathing room before the rules table. */
+.fw-policy { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 18px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field > span { font-size: 10px; letter-spacing: 1.2px; color: var(--dim); }
 input, select, textarea {
