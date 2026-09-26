@@ -92,7 +92,9 @@
 /* The Networks tab is a card grid, not the stacked pool list: cards flow into
    columns and the grid gap replaces the storage-card bottom margin. Network
    cards carry stacked specs plus four controls, so they get a wider minimum. */
-#nets-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+/* All implicit rows get equal height, so the create card (and a lone create
+   card on its own row) is the same height as a real network card. */
+#nets-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; grid-auto-rows: 1fr; }
 #nets-list .storage-card { margin-bottom: 0; padding: 16px 17px; }
 #nets-list .storage-card-head { flex-wrap: wrap; gap: 8px 10px; }
 /* The card header reads a touch larger so the name, type and state do not
@@ -127,7 +129,8 @@
   align-items: center;
   justify-content: center;
   gap: 11px;
-  min-height: 84px;
+  height: 100%;
+  min-height: 0;
 }
 .net-create-card:hover { color: var(--accent); border-image: repeating-linear-gradient(
   45deg, var(--accent) 0 8px, var(--panel) 8px 16px) 1; }
