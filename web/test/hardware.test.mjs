@@ -130,6 +130,32 @@ test("file-backed disks are left alone rather than mangled", () => {
     "a non-volume disk is not claimed by the editor");
 });
 
+test("an empty cdrom serialises as a source-less drive", () => {
+  const xml = hw.deviceXml({ kind: "cdrom", fields: { pool: "default", volume: "" } }, 1);
+  assert.match(xml, /<disk type="file" device="cdrom">/);
+  assert.doesNotMatch(xml, /<source/, "no source when the tray is empty");
+  assert.match(xml, /<readonly\/>/);
+  assert.equal(hw.validateDevice({ kind: "cdrom", fields: { pool: "default", volume: "" } }), null,
+    "an empty drive is valid");
+});
+
+test("a cdrom with an ISO serialises a volume source", () => {
+  const xml = hw.deviceXml({ kind: "cdrom", fields: { pool: "iso", volume: "alpine.iso" } }, 1);
+  assert.match(xml, /<disk type="volume" device="cdrom">/);
+  assert.match(xml, /pool="iso" volume="alpine\.iso"/);
+  assert.equal(hw.validateDevice({ kind: "cdrom", fields: { volume: "x.iso" } }), "A CD/DVD drive requires a pool",
+    "a volume without its pool is rejected");
+});
+
+test("an empty cdrom parses back out instead of being dropped", () => {
+  const xml = `<domain><devices><disk type="file" device="cdrom">
+    <driver name="qemu" type="raw"/><target dev="sda" bus="sata"/><readonly/>
+  </disk></devices></domain>`;
+  const got = hw.devicesFromXml(xml);
+  assert.equal(got.filter((d) => d.kind === "cdrom").length, 1, "empty drive round-trips");
+  assert.equal(got.find((d) => d.kind === "cdrom").fields.volume, "");
+});
+
 test("withDevices splices the fragment inside <devices>", () => {
   const out = hw.withDevices(SAMPLE, [
     { kind: "rng", fields: { backend: "/dev/urandom" } },

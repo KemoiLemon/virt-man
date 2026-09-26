@@ -211,13 +211,18 @@ export function deviceXml(d: HwDevice, index = 1): string {
       <target dev="${diskTarget(bus, index)}" bus="${esc(bus)}"/>
     </disk>`;
     }
-    case "cdrom":
-      return `<disk type="volume" device="cdrom">
+    case "cdrom": {
+      // No volume = an empty drive (a tray with no disc), which libvirt
+      // models as a file-backed cdrom with no <source>. Keep it valid so a
+      // default drive can be added before the user picks an ISO.
+      const vol = f("volume");
+      const src = vol ? `<source pool="${esc(f("pool"))}" volume="${esc(vol)}"/>` : "";
+      return `<disk type="${vol ? "volume" : "file"}" device="cdrom">
       <driver name="qemu" type="raw"/>
-      <source pool="${esc(f("pool"))}" volume="${esc(f("volume"))}"/>
-      <target dev="sd${String.fromCharCode(112 + index)}" bus="sata"/>
+      ${src}${src ? "\n      " : ""}<target dev="sd${String.fromCharCode(96 + index)}" bus="sata"/>
       <readonly/>
     </disk>`;
+    }
     case "interface": {
       const mac = f("mac");
       return `<interface type="network">
@@ -264,7 +269,10 @@ export function deviceSummary(d: HwDevice): string {
       }
       return `${f("pool")}/${f("volume")} (${f("bus") || "virtio"})`;
     }
-    case "cdrom": return `${f("pool")}/${f("volume")}`;
+    case "cdrom": {
+      const vol = f("volume");
+      return vol ? `${f("pool")}/${vol}` : "empty";
+    }
     case "interface": return `${f("network")} (${f("model") || "virtio"})`;
     case "hostdev": return `${f("domain")}:${f("bus")}:${f("slot")}.${f("function")}`;
     case "usb": return `${f("vendor")}:${f("product")}`;
@@ -292,7 +300,12 @@ export function validateDevice(d: HwDevice): string | null {
       }
       return need(["pool", "volume"], "A hard disk");
     }
-    case "cdrom": return need(["pool", "volume"], "A CD/DVD drive");
+    case "cdrom":
+      // An empty drive is fine; a volume requires its pool.
+      if ((d.fields.volume ?? "").trim() && !(d.fields.pool ?? "").trim()) {
+        return "A CD/DVD drive requires a pool";
+      }
+      return null;
     case "interface": return need(["network"], "A network device");
     case "hostdev": return need(["bus", "slot", "function"], "PCI passthrough");
     case "usb": return need(["vendor", "product"], "USB passthrough");
@@ -331,6 +344,12 @@ export function devicesFromXml(xml: string): HwDevice[] {
     const tgt = block.match(/<target\b[^>]*>/)?.[0] ?? "";
     const pool = attr(src, "pool");
     const volume = attr(src, "volume");
+    // An empty cdrom has no <source>: keep it as an empty drive so editing
+    // round-trips it instead of silently dropping it.
+    if (m[1] === "cdrom" && !volume) {
+      out.push({ kind: "cdrom", fields: { pool, volume } });
+      continue;
+    }
     // Only volume-backed disks round-trip; file-backed ones stay untouched.
     if (!pool || !volume) continue;
     out.push({

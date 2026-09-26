@@ -2834,6 +2834,12 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
   };
   newDisk.pool = pools[0]?.name ?? "";
 
+  // New VMs start with an empty CD/DVD drive, so attaching an ISO (or leaving
+  // the drive empty) is one click away instead of buried in Add Hardware.
+  if (!editing) {
+    devices = [{ kind: "cdrom", fields: { pool: newDisk.pool, volume: "" } }];
+  }
+
   let page = "general";
 
   const opt = (list: string[], sel: string) =>
@@ -2880,10 +2886,18 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           let list: string[] = (f.options ?? []).map((o) => o.value);
           if (f.key === "pool") list = pools.map((p) => p.name);
           if (f.key === "network") list = nets.map((n) => n.name);
-          if (f.key === "volume") list = await volumes(d.fields.pool ?? pools[0]?.name ?? "");
+          if (f.key === "volume") {
+            list = await volumes(d.fields.pool ?? pools[0]?.name ?? "");
+            // The cdrom picks an ISO; a disk may pick any volume.
+            if (d.kind === "cdrom") list = list.filter((v) => v.toLowerCase().endsWith(".iso"));
+          }
+          // A cdrom may be empty: that is a valid empty drive.
+          const emptyOpt = d.kind === "cdrom" && f.key === "volume"
+            ? `<option value="" ${val ? "" : "selected"}>No media</option>`
+            : "";
           const labels = f.options?.length
             ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
-            : opt(list, val);
+            : emptyOpt + opt(list, val);
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-field="${esc(f.key)}">${labels}</select></label>`;
         }
@@ -3021,10 +3035,18 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           let list: string[] = (f.options ?? []).map((o) => o.value);
           if (f.key === "pool") list = pools.map((p) => p.name);
           if (f.key === "network") list = nets.map((n) => n.name);
-          if (f.key === "volume") list = await volumes(draft.pool ?? pools[0]?.name ?? "");
+          if (f.key === "volume") {
+            list = await volumes(draft.pool ?? pools[0]?.name ?? "");
+            // The cdrom picks an ISO; a disk may pick any volume.
+            if (kind === "cdrom") list = list.filter((v) => v.toLowerCase().endsWith(".iso"));
+          }
+          // A cdrom may be empty: that is a valid empty drive.
+          const emptyOpt = kind === "cdrom" && f.key === "volume"
+            ? `<option value="" ${val ? "" : "selected"}>No media</option>`
+            : "";
           const labels = f.options?.length
             ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
-            : opt(list, val);
+            : emptyOpt + opt(list, val);
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-af="${esc(f.key)}">${labels}</select></label>`;
         }

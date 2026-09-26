@@ -127,6 +127,22 @@ check("connection view puts Create VM on the tab bar", () => {
   assert.ok(actions.querySelector("#create-vm"), "Create VM on the tab bar");
 });
 
+// Create VM starts with an empty CD/DVD drive in the device sidebar.
+document.querySelector("#create-vm")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1500);
+check("Create VM includes an empty CD/DVD drive by default", () => {
+  const modal = document.querySelector(".modal.hw-modal");
+  assert.ok(modal, "create-vm editor opened");
+  const items = [...modal.querySelectorAll(".hw-item")];
+  assert.ok(
+    items.some((i) => i.textContent.includes("CD/DVD Drive")),
+    "CD/DVD Drive in the sidebar",
+  );
+  results.push(["info", `create-vm sidebar: ${items.map((i) => i.querySelector(".hw-tx b")?.textContent).join(", ")}`]);
+});
+document.querySelector("#hw-cancel")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(400);
+
 for (const [tab, id] of [["Networks", "#create-net"], ["Storage", "#create-pool"]]) {
   [...document.querySelectorAll(".tabbar .tab")]
     .find((t) => t.textContent.trim() === tab)
