@@ -1,5 +1,11 @@
 # Virt-Man — Client, WebUI, and daemon install script
 
+> **Historical document.** This is the original build plan, kept for context;
+> all of its steps are done. It is not maintained against the current code, and
+> parts are now wrong — most notably the console, which no longer uses noVNC,
+> spice-html5, or a WebSocket proxy. See `DESIGN.md` for the architecture as
+> built and `AGENTS.md` for how to work in the repo.
+
 ## Context
 
 The daemon (`daemon/`) is complete: Rust + axum, token-authenticated API over

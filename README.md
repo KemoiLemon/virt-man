@@ -8,7 +8,7 @@ proxy) and a **Tauri desktop app** (standalone, same UI) sit on top.
 
 | Part | Path | What it is |
 |---|---|---|
-| daemon | `daemon/` | Rust + axum; token-authenticated HTTPS API over libvirt (domains, networks, storage pools, volumes, lifecycle, VNC/SPICE WebSocket proxy) |
+| daemon | `daemon/` | Rust + axum; token-authenticated HTTPS API over libvirt (domains, networks, storage pools, volumes, lifecycle, native VNC console + virt-viewer handoff for SPICE) |
 | web UI | `web/` | Vite + TS SPA, served by the Rust backend in `web/server/` (users, RBAC, API keys, daemon connections + TLS-pinned proxy) |
 | client | `client/` | Tauri v2 desktop shell: embeds the web UI, runs the backend as a local sidecar, NVIDIA/WebKitGTK workarounds, frameless window |
 
@@ -56,6 +56,14 @@ Builds the web UI + backend + Tauri shell and installs everything to
 "Connect to a webui" navigates the window to a remote web UI URL. The
 frameless titlebar drags/maximises/minimises/closes via the app window
 controls.
+
+## Documentation
+
+- `DESIGN.md` — architecture and the reasoning behind it, including reversed
+  decisions.
+- `AGENTS.md` — working notes for coding agents: commands, constraints, gotchas.
+- `PLAN.md` — the original build plan, kept as history (its console section is
+  superseded by `DESIGN.md`).
 
 ## Development
 

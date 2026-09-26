@@ -1,0 +1,148 @@
+# AGENTS.md
+
+Working notes for coding agents in this repo. Read `DESIGN.md` for *why* the
+system is shaped the way it is; this file is *how to work in it without
+breaking things*.
+
+## What this is
+
+Three parts, one product:
+
+| Path | Build | Role |
+| --- | --- | --- |
+| `daemon/` | `cargo` | Rust + axum over libvirt (`qemu:///system`). Runs on the hypervisor host. Token auth, HTTPS `0.0.0.0:8443`. |
+| `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, RBAC, API keys, TLS-pinned daemon proxy). HTTPS `0.0.0.0:8006`. |
+| `client/` | `pnpm tauri` | Tauri v2 desktop shell. Embeds the same SPA, runs `virt-man-web` as a loopback sidecar with auth disabled. |
+
+**One frontend build serves both browser and desktop.** There is no
+desktop-only UI code path. If you add a browser-only assumption, the app
+breaks, and vice versa.
+
+## Commands
+
+```bash
+# frontend: typecheck, build, unit tests (56)
+cd web && npx tsc --noEmit && npx vite build && pnpm test
+
+# live suites — drive the real app in jsdom against a running backend
+#   arg is the base URL; defaults to http://127.0.0.1:8799
+cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
+#   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console
+
+# daemon
+cd daemon && cargo clippy --all-targets && cargo test --bins   # 23 tests
+cd daemon && cargo test --test fd_leak -- --ignored            # needs libvirt
+
+# web backend
+cd web/server && cargo clippy --all-targets
+
+# install (builds as $SUDO_USER so repo artifacts stay user-owned)
+sudo ./daemon/install.sh && sudo ./web/install.sh && sudo ./client/install.sh
+```
+
+Live suites need a running backend. The desktop app starts one on a random
+loopback port; find it with:
+
+```bash
+ss -tlnp | grep virt-man-web | grep -v :8006
+```
+
+**Run live suites with a gap between them** (`sleep 2`). They attach real
+console sessions, and back-to-back runs collide.
+
+## Hard constraints
+
+These are not style preferences. Violating them produces broken builds or
+silently broken UI.
+
+**No native OS chrome.** `<select>` is `display:none` behind a themed
+`.select-trigger`/`.select-popover` listbox (`web/src/listbox.ts`). Never use
+`window.prompt`/`confirm`/`alert` — use `askText`/`askConfirm` in `main.ts`.
+
+**No inline event handlers.** `onclick="..."` in an HTML string is blocked by
+the desktop app's CSP. Assign handlers in JS after rendering.
+
+**`setHtml()` is the only way HTML enters the DOM** (`web/src/main.ts:18`). It
+runs `DOMPurify.sanitize` *and* `enhanceSelects`. Assigning `innerHTML`
+directly skips both, so the listbox silently stops working.
+
+**Icons: named imports only** (`web/src/icons.ts`). Importing the whole Lucide
+set takes the bundle from 81 kB to 670 kB. Stroke is defined once in `.ico >
+svg`; never set it per icon.
+
+**Every colour comes from a CSS variable** on `html[data-theme=...]`. No
+hardcoded hex outside the theme blocks. The one exception is the console
+letterbox `#000` in `base.css`, which matches vm-man.
+
+**Square aesthetic**: `border-radius: 0`, JetBrains Mono / DejaVu Sans Mono.
+The theme is ported from `/home/kemoi/Projects/Personal/vm-man` — port its CSS
+rather than inventing new styling.
+
+**Preserve these or the product regresses**: auth + RBAC on the remote web UI;
+auth-disabled local app mode; TLS-pinned daemon connections; working titlebar
+drag and window controls.
+
+## Testing rules
+
+**Verify by measurement, not assumption.** This repo has a history of bugs that
+looked fine in code review and were only caught by measuring: an fd leak
+(counted fds across 200 connections), a console that connected but never
+rendered (decoded the frame bytes), a graphics parser that silently fell back
+to loopback (asserted the parsed address).
+
+Concretely:
+
+- A test that prints nothing is **not** a passing test. Check the exit code and
+  the output. Two live suites once "passed" silently while crashing.
+- When you assert on rendered pixels or geometry, decode the PNG (Python) —
+  screenshots cannot be viewed by the agent.
+- Headless Firefox needs `--profile /tmp/vm-ffprofile` (the user runs Firefox).
+- jsdom limits to know: skips `<script type="module">` (hence the `VM_IIFE=1`
+  build), never substitutes `var()` in computed styles, and has no
+  `ResizeObserver`, `WebSocket`, or canvas 2D context.
+
+Non-trivial logic leaves one runnable check behind. Prefer a real
+`assert` in `web/test/*.test.mjs` or a Rust `#[test]` over a manual note.
+
+## Conventions
+
+- **Conventional commits** (`feat(web):`, `fix(daemon):`, `style(daemon):`).
+  Explain the *cause* in the body, not just the change.
+- Branch `dev` on `ssh://git@git.kemoi.top:2222/kemoi/virt-man.git`.
+- `rustfmt` and `clippy --all-targets` clean before committing Rust.
+- Comments explain *why*, especially where the obvious approach is wrong.
+  Several comments in this codebase exist to stop a future reader "fixing"
+  something back into a bug — leave them.
+
+## Gotchas that cost real time
+
+**libvirt `Connect` has no `Drop`.** `with_conn` must call `close()` on both
+the ok and error paths, or event fds leak and every call fails with "Too many
+open files" after a few hundred requests (`daemon/src/libvirt.rs:45`).
+
+**Read `VIR_DOMAIN_XML_INACTIVE` for firewall/filterref work.** A running
+guest's live XML omits filterrefs added since boot, so reading live XML loses
+them on the next write.
+
+**A domain can have two `<graphics>` devices** (one VNC, one SPICE). Never take
+the first one: `parse_graphics` prefers VNC (the only protocol the built-in
+viewer speaks) and the `.vv` endpoint prefers SPICE.
+
+**SPICE has no browser console.** Do not try to add one — the last attempt is
+documented in `DESIGN.md`. SPICE guests get a virt-viewer `.vv` file.
+
+**Console frames are long-polled.** `GET …/console/frame` parks in the daemon
+until pixels exist. Do not add a client-side fetch timeout, and do not
+introduce a poll interval.
+
+## Live environment
+
+- `virt-man-daemon` — HTTPS `0.0.0.0:8443`, token at `/etc/virt-man/token`
+  (root-owned, mode 0600; `sudo cat` to read it).
+- `virt-man-web` — HTTPS `0.0.0.0:8006`, admin / `password123`. A leftover
+  `viewer` / `password123` RBAC test account exists and may want removing.
+- Test VM `alpinelinux3.23` — running, 1 vCPU, 768 MB, **both** VNC (5900) and
+  SPICE (5901), network `internet`.
+
+Node rejects the web UI's self-signed cert, so point live suites at the app's
+loopback sidecar (HTTP) rather than `https://127.0.0.1:8006`.
