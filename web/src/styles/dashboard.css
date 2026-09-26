@@ -85,10 +85,10 @@
   background: var(--panel); padding: 9px 10px; min-width: 0;
 }
 .fw-policy-chip b { font-size: 10px; letter-spacing: .9px; color: var(--dim); font-weight: 500; }
-/* Icon sits inline beside the action value, not above the label. */
+/* Icon sits in front of the In/Out/Forward label, not above it. */
 .fw-policy-val { display: flex; align-items: center; gap: 6px; }
 .fw-policy-val > span { width: 15px; height: 15px; color: var(--dim); }
-.fw-policy-val i { font-style: normal; font-size: 13px; font-weight: 600; }
+.fw-policy-chip > i { font-style: normal; font-size: 13px; font-weight: 600; margin-left: 21px; }
 .fw-policy-chip.ok { box-shadow: inset 0 2px 0 var(--ok); }
 .fw-policy-chip.warn { box-shadow: inset 0 2px 0 var(--warn); }
 .fw-policy-chip.bad { box-shadow: inset 0 2px 0 var(--bad); }
