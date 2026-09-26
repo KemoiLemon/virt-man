@@ -19,11 +19,17 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 }
 
 pub fn session_cookie(token: &str) -> String {
-    format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax")
+    // Persistent (Max-Age) so a browser restart does not log the user out, and
+    // Secure so the token never rides a plaintext HTTP request — which now
+    // matters: the same port answers plain HTTP with a redirect, and without
+    // Secure a LAN client would send its session cookie in cleartext.
+    format!(
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000"
+    )
 }
 
 pub fn cleared_cookie() -> String {
-    format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+    format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0")
 }
 
 /// Resolve the logged-in user from the session cookie, if any.
@@ -132,4 +138,27 @@ pub fn user_json(u: &User) -> serde_json::Value {
         "avatar": u.avatar,
         "scopes": u.scopes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_session_cookie_persists_and_stays_https_only() {
+        let c = session_cookie("tok");
+        assert!(c.starts_with("virt-man-session=tok; "), "{c}");
+        // A browser restart must not log the user out, and the token must never
+        // ride a plaintext request (the same port answers HTTP with a redirect).
+        assert!(c.contains("Max-Age=2592000"), "persistent: {c}");
+        assert!(c.contains("Secure"), "https only: {c}");
+        assert!(c.contains("HttpOnly") && c.contains("SameSite=Lax"), "defense in depth: {c}");
+    }
+
+    #[test]
+    fn clearing_the_cookie_expires_it() {
+        let c = cleared_cookie();
+        assert!(c.contains("Max-Age=0"), "{c}");
+        assert!(c.contains("Secure"), "clear must match the set attributes: {c}");
+    }
 }
