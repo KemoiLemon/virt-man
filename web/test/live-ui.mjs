@@ -289,16 +289,16 @@ await (async () => {
     results.push(["info", `pool cards: ${cards.length}`]);
   });
 
-  // Datacenter aggregate cards.
+  // Datacenter aggregate cards (the dashboard is the landing tab).
   document.querySelector("#dc-row")
     ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await new Promise((r) => window.setTimeout(r, 600));
+  await new Promise((r) => window.setTimeout(r, 1200));
 
-  check("Datacenter renders .card summary widgets", () => {
+  check("Datacenter dashboard renders .card summary widgets", () => {
     const cards = [...document.querySelectorAll(".cards .card")];
-    assert.ok(cards.length >= 4, `${cards.length} summary card(s)`);
+    assert.ok(cards.length >= 5, `${cards.length} summary card(s)`);
     const labels = cards.map((c) => c.querySelector("i")?.textContent.trim());
-    for (const want of ["SERVERS", "GUESTS", "RUNNING", "STOPPED"]) {
+    for (const want of ["SERVERS", "GUESTS", "RUNNING", "NETWORKS", "POOLS"]) {
       assert.ok(labels.includes(want), `${want} card present (${labels})`);
     }
     for (const c of cards) {

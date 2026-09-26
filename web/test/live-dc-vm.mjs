@@ -96,13 +96,26 @@ await wait(1200);
 
 // ---- Guests get their own tab ---------------------------------------------
 
-check("Datacenter has a dedicated Guests tab", () => {
+check("Datacenter has Dashboard, Servers and Guests tabs", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
+  assert.deepEqual(tabs[0], "Dashboard", `Dashboard is the first tab (${tabs})`);
   assert.ok(tabs.includes("Servers"), `Servers tab (${tabs})`);
   assert.ok(tabs.includes("Guests"), `Guests tab (${tabs})`);
-  // The servers tab must no longer carry the guests table.
+  // The landing dashboard has no guest table either; guests are their own tab.
   assert.equal(document.querySelectorAll("[data-open-vm]").length, 0,
-    "guests are not listed on the Servers tab");
+    "guests are not listed on the Dashboard tab");
+});
+
+check("the datacenter dashboard summarises every server", () => {
+  const body = document.querySelector("#dc-dash")?.textContent ?? "";
+  assert.match(body, /Total CPU/, "aggregate CPU metric");
+  assert.match(body, /Total Memory/, "aggregate memory metric");
+  assert.match(body, /Total Disk/, "aggregate disk metric");
+  assert.match(body, /SERVERS/, "server count card");
+  assert.match(body, /NETWORKS/, "network count card");
+  assert.match(body, /Networking/, "networking summary");
+  assert.match(body, /Storage pools/, "storage pool summary");
+  assert.ok(document.querySelector("[data-dc-dash-conn]"), "per-server row links to its dashboard");
 });
 
 [...document.querySelectorAll(".tabbar .tab")]
@@ -178,6 +191,10 @@ check("console action jumps straight to the console tab", () => {
 // Server rows should still be clickable too (Servers tab).
 document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1200);
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "Servers")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(800);
 check("server rows are selectable from the table", () => {
   const cell = document.querySelector("[data-open-conn-row]");
   assert.ok(cell, "server name is clickable");

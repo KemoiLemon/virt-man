@@ -34,7 +34,7 @@ let selectedConn: string | null = null;
 let connTab: "dashboard" | "vms" | "networks" | "storage" | "firewall" = "dashboard";
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
-let dcTab: "servers" | "guests" = "servers";
+let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
 /// Which section of the admin panel modal is showing.
 let adminTab: "users" | "roles" | "keys" = "users";
 /// Scope vocabulary and roles, fetched with the admin panel. The backend is
@@ -96,7 +96,7 @@ function openCommandPalette() {
     leaveCurrentView();
     selectedConn = null;
     selectedVm = null;
-    dcTab = "servers";
+    dcTab = "dashboard";
     renderTree();
     renderDc();
   });
@@ -424,7 +424,7 @@ function renderTree() {
     leaveCurrentView();
     selectedConn = null;
     selectedVm = null;
-    dcTab = "servers";
+    dcTab = "dashboard";
     renderTree();
     renderDc();
   };
@@ -505,6 +505,7 @@ function renderDc() {
   // Real tabbar; the Users tab is hidden when the local app disables auth.
   // Actions live on the tab bar itself, right-aligned after the tabs.
   const tabs = `<div class="tabbar">
+      <button class="tab ${dcTab === "dashboard" ? "active" : ""}" data-dctab="dashboard">${ic.datacenter(14)} Dashboard</button>
       <button class="tab ${dcTab === "servers" ? "active" : ""}" data-dctab="servers">${ic.server(14)} Servers</button>
       <button class="tab ${dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
       ${dcTab === "servers"
@@ -553,7 +554,9 @@ function renderDc() {
       </tr>`).join("");
 
   let body: string;
-  if (dcTab === "servers") {
+  if (dcTab === "dashboard") {
+    body = `<div id="dc-dash">loading…</div>`;
+  } else if (dcTab === "servers") {
     body = `${cards}<div class="section-title">Servers</div>
        <table class="grid">
          <tr><th>Name</th><th>URL</th><th>Cert</th><th class="col-actions"></th></tr>
@@ -580,6 +583,8 @@ function renderDc() {
     body = `<div id="users-area">loading…</div>`;
   }
 setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
+
+  if (dcTab === "dashboard") void loadDcDashboard();
 
   $("#dc-add")?.addEventListener("click", () => openConnectionDialog());
   content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
@@ -651,6 +656,192 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
       await act(`/proxy/${el.dataset.conn}/domains/${encodeURIComponent(el.dataset.dcStop!)}/shutdown`, "POST");
       await refreshTreeVms();
       renderDc();
+    };
+  });
+}
+
+/// Datacenter dashboard: aggregate every reachable server's host metrics into
+/// one cluster view — total CPU, memory, disk, and network, plus per-server
+/// rows that open that server's own dashboard. Same widgets as the daemon
+/// dashboard, so the two reads are visually consistent.
+async function loadDcDashboard() {
+  const body = $("#dc-dash");
+  if (!body) return;
+
+  const per = await Promise.all(
+    connections.map(async (c) => {
+      try {
+        const [h, nets, pools] = await Promise.all([
+          api.get<HostStats>(`/proxy/${c.id}/host/stats`),
+          api.get<NetworkSummary[]>(`/proxy/${c.id}/networks`),
+          api.get<PoolSummary[]>(`/proxy/${c.id}/pools`),
+        ]);
+        return { c, h, nets, pools } as const;
+      } catch {
+        return null; // unreachable daemon: skip, the Servers tab still lists it
+      }
+    }),
+  );
+  const live = per.filter((x) => x !== null);
+  const vms = connections.flatMap((c) => treeVms[c.id] ?? []);
+  const running = vms.filter((v) => v.active).length;
+
+  // Cluster CPU: sum of busy jiffies over sum of total jiffies — a true
+  // cluster-wide utilisation, not an arithmetic mean of per-host percentages
+  // (which would weight a 2-core host equally with a 64-core one).
+  const agg: HostStats = {
+    cpu_total: 0,
+    cpu_idle: 0,
+    mem_total_kib: 0,
+    mem_available_kib: 0,
+    cpus: 0,
+    sampled_at_ms: 0,
+  };
+  const nets: { c: Connection; n: NetworkSummary }[] = [];
+  const pools: { c: Connection; p: PoolSummary }[] = [];
+  for (const { c, h, nets: ns, pools: ps } of live) {
+    agg.cpu_total += h.cpu_total;
+    agg.cpu_idle += h.cpu_idle;
+    agg.mem_total_kib += h.mem_total_kib;
+    agg.mem_available_kib += h.mem_available_kib;
+    agg.cpus += h.cpus;
+    agg.sampled_at_ms = Math.max(agg.sampled_at_ms, h.sampled_at_ms);
+    for (const n of ns) nets.push({ c, n });
+    for (const p of ps) pools.push({ c, p });
+  }
+
+  const { cpu, mem, cpuNow, memNow } = addHostSample("datacenter", agg);
+  const memUsedKib = agg.mem_total_kib - agg.mem_available_kib;
+  const diskTotal = pools.reduce((a, { p }) => a + (p.capacity ?? 0), 0);
+  const diskUsed = pools.reduce((a, { p }) => a + (p.allocation ?? 0), 0);
+  const diskNow = diskTotal > 0 ? Math.max(0, Math.min(100, (diskUsed / diskTotal) * 100)) : 0;
+  const activeNets = nets.filter(({ n }) => n.active).length;
+  const activePools = pools.filter(({ p }) => p.active).length;
+  const byId = new Map(live.map(({ c, h, pools: ps }) => [c.id, { h, pools: ps }] as const));
+
+  setHtml(body, `
+    <div class="cards">
+      <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${connections.length}</b><i>SERVERS</i></div></div>
+      <div class="card"><span class="card-ic">${ic.vms(20)}</span><div><b>${vms.length}</b><i>GUESTS</i></div></div>
+      <div class="card ${running > 0 ? "ok" : ""}"><span class="card-ic">${ic.start(20)}</span><div><b>${running}</b><i>RUNNING</i></div></div>
+      <div class="card ${activeNets > 0 ? "ok" : ""}"><span class="card-ic">${ic.network(20)}</span><div><b>${nets.length}</b><i>NETWORKS</i></div></div>
+      <div class="card ${activePools > 0 ? "ok" : ""}"><span class="card-ic">${ic.storage(20)}</span><div><b>${pools.length}</b><i>POOLS</i></div></div>
+    </div>
+
+    <div class="sumgrid">
+      <div class="metric ok">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.cpu()}</span>
+          <b>Total CPU</b>
+          <span class="metric-value">${pct(cpuNow)}</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(cpu)}
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot"><span>${agg.cpus} cores</span><span>${live.length} servers</span></div>
+      </div>
+
+      <div class="metric ok">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.memory()}</span>
+          <b>Total Memory</b>
+          <span class="metric-value">${pct(memNow)}</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(mem, "mem")}
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot">
+          <span>${fmtBytes(memUsedKib * 1024)} used</span>
+          <span>${fmtBytes(agg.mem_total_kib * 1024)} total</span>
+        </div>
+      </div>
+
+      <div class="metric ok">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.disk()}</span>
+          <b>Total Disk</b>
+          <span class="metric-value">${diskNow.toFixed(diskNow >= 10 ? 0 : 1)}%</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${diskNow > 85 ? "hot" : ""}" style="width:${diskNow.toFixed(1)}%"></div></div>
+        <div class="metric-foot">
+          <span>${fmtBytes(diskUsed)} used</span>
+          <span>${fmtBytes(diskTotal)} total</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="section-title">Servers</div>
+      <table class="grid">
+        <tr><th>Server</th><th>CPU</th><th>Memory</th><th>Disk</th></tr>
+        ${connections.map((c) => {
+          const row = byId.get(c.id);
+          if (!row) {
+            return `<tr><td class="tname" style="cursor:pointer" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state">unreachable</span></td><td>—</td><td>—</td><td>—</td></tr>`;
+          }
+          const { h, pools: ps } = row;
+          const { cpuNow: sCpu } = addHostSample(`dc:${c.id}`, h);
+          const mUsed = h.mem_total_kib - h.mem_available_kib;
+          const mPct = h.mem_total_kib ? Math.max(0, Math.min(100, (mUsed / h.mem_total_kib) * 100)) : 0;
+          const dTotal = ps.reduce((a, p) => a + (p.capacity ?? 0), 0);
+          const dUsed = ps.reduce((a, p) => a + (p.allocation ?? 0), 0);
+          const dPct = dTotal > 0 ? Math.max(0, Math.min(100, (dUsed / dTotal) * 100)) : 0;
+          return `
+          <tr>
+            <td class="tname" style="cursor:pointer" data-dc-dash-conn="${c.id}">${esc(c.name)}</td>
+            <td>${pct(sCpu)}</td>
+            <td>${mPct.toFixed(0)}% · ${fmtBytes(mUsed * 1024)}</td>
+            <td>${dPct.toFixed(0)}% · ${fmtBytes(dUsed)}</td>
+          </tr>`;
+        }).join("")}
+      </table>
+    </div>
+
+    <div class="dash-section">
+      <div class="section-title">Networking</div>
+      <table class="grid">
+        <tr><th>Name</th><th>Server</th><th>Bridge</th><th>State</th></tr>
+        ${nets.map(({ c, n }) => `
+          <tr><td>${esc(n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
+          <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
+      </table>
+    </div>
+
+    <div class="dash-section">
+      <div class="section-title">Storage pools</div>
+      ${pools.map(({ c, p }) => {
+        const used = p.allocation ?? 0;
+        const cap = p.capacity ?? 0;
+        const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+        return `
+        <div class="storage-card ${p.active ? "ok" : ""}">
+          <div class="storage-card-head">
+            <span class="storage-card-icon">${ic.storage()}</span>
+            <span class="storage-card-title">${esc(p.name)}<span class="host" style="display:block;font-weight:400">${esc(c.name)}</span></span>
+            <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
+          </div>
+          <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
+          <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
+          <div class="metric-foot">
+            <span>${fmtBytes(used)} used</span>
+            <span>${fmtBytes(cap)} total</span>
+          </div>
+        </div>`;
+      }).join("") || `<div class="empty">No pools.</div>`}
+    </div>
+    `);
+
+  body.querySelectorAll("[data-dc-dash-conn]").forEach((r: Element) => {
+    (r as HTMLElement).onclick = () => {
+      selectedConn = (r as HTMLElement).dataset.dcDashConn!;
+      selectedVm = null;
+      connTab = "dashboard";
+      renderTree();
+      void renderConn();
     };
   });
 }
@@ -2867,7 +3058,9 @@ function startPolling() {
     if (!user) return;
     // Keep the sidebar's guest states live regardless of the open pane.
     void refreshTreeVms();
-    if (selectedConn && !selectedVm) {
+    if (!selectedConn && !selectedVm && dcTab === "dashboard") {
+      loadDcDashboard();
+    } else if (selectedConn && !selectedVm) {
       if (connTab === "dashboard") loadDashboard();
       else if (connTab === "vms") loadVms();
       else if (connTab === "networks") loadNetworks();

@@ -87,6 +87,13 @@ check("the topbar action group hugs the window controls", () => {
   }
 });
 
+// The dashboard is the landing tab; these layout checks target the Servers
+// tab (Add Server action + the server table's action column).
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "Servers")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(800);
+
 check("tab-bar actions align with the content edge", () => {
   const actions = document.querySelector(".tabbar-actions");
   assert.ok(actions, "tab bar carries actions");

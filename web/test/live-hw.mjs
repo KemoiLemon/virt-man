@@ -59,6 +59,13 @@ check("sidebar auto-expands guests without selecting the server", () => {
   results.push(["info", `auto-expanded guests: ${guests.length}`]);
 });
 
+// The dashboard is the landing tab; the server-management checks below target
+// the Servers tab (Add Server action + per-row edit/delete buttons).
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "Servers")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(800);
+
 check("Datacenter actions live on the tab bar", () => {
   const bar = document.querySelector(".tabbar");
   assert.ok(bar, "tab bar present");
