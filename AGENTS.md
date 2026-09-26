@@ -129,6 +129,16 @@ Non-trivial logic leaves one runnable check behind. Prefer a real
 
 ## Gotchas that cost real time
 
+**Add Server doubles as the daemon installer.** When `POST /connections` cannot
+reach the daemon (fresh host, not installed yet) and the token was blank or
+"generate", the save does not fail: it stores the connection with a freshly
+generated token and returns an `install_script` that runs `daemon/install.sh`
+with `VIRT_MAN_TOKEN` set to that same token (so the daemon and the stored
+token match). The SPA shows the script and polls
+`GET /connections/{id}/cert` every second until the daemon is up, then pins the
+cert through the normal `PUT`. `install.sh` honours `VIRT_MAN_TOKEN` by writing
+it to the token file instead of generating one.
+
 **libvirt `Connect` has no `Drop`.** `with_conn` must call `close()` on both
 the ok and error paths, or event fds leak and every call fails with "Too many
 open files" after a few hundred requests (`daemon/src/libvirt.rs:45`).

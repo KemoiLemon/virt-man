@@ -73,6 +73,14 @@ export interface Connection {
   has_cert: boolean;
 }
 
+/// `POST /connections` result. When the daemon is not reachable yet, the
+/// backend saves the connection pending a cert and hands back an install
+/// script carrying the freshly generated token.
+export interface CreateConnectionResult extends Connection {
+  daemon_unreachable?: boolean;
+  install_script?: string;
+}
+
 export interface ApiKey {
   id: string;
   name: string;

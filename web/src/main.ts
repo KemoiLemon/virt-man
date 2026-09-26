@@ -1,6 +1,6 @@
 import { openCropDialog } from "./crop";
 import { api } from "./api";
-import type { Connection, DomainSummary, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
+import type { Connection, CreateConnectionResult, DomainSummary, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
 import { attachConsole, detachConsole, isTauri, tauriWindow } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -43,6 +43,9 @@ let adminTab: "users" | "roles" | "keys" = "users";
 let adminScopes: string[] = [];
 let adminRoles: RoleDef[] = [];
 let pollTimer: number | null = null;
+/// Retries for a daemon saved while unreachable: re-fetches its cert every
+/// second until it is up, then pins it.
+let pendingPoll: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
 /// without every render refetching.
 const treeVms: Record<string, DomainSummary[]> = {};
@@ -306,6 +309,7 @@ function renderLogin() {
 }
 
 async function logout() {
+  stopPendingPoll();
   await api.post("/auth/logout");
   user = null;
   renderLogin();
@@ -2001,20 +2005,6 @@ function openConnectionDialog(editId?: string) {
     <p class="hint" id="conn-fp">${existing?.fingerprint ? `Pinned certificate: ${esc(existing.fingerprint)}` : ""}</p>`,
     `<button class="btn" id="conn-save">Save</button>`,
   );
-  const fpEl = $("#conn-fp", el);
-  $("#conn-url", el).onblur = async () => {
-    const url = $("#conn-url", el).value.trim();
-    if (!url.startsWith("https://")) return;
-    try {
-      const r = await api.post<{ cert: string; fingerprint: string }>("/connections/_fetch_cert", { url });
-      fpEl.textContent = `Certificate fingerprint: ${r.fingerprint}`;
-      fpEl.className = "hint ok";
-      (el as any)._cert = r.cert;
-    } catch (e) {
-      fpEl.textContent = `Cert fetch failed: ${(e as Error).message}`;
-      fpEl.className = "hint bad";
-    }
-  };
   $("#conn-save", el).onclick = async () => {
     try {
       const body: any = {
@@ -2026,21 +2016,85 @@ function openConnectionDialog(editId?: string) {
       // On edit an empty token means "keep the current one"; the backend
       // leaves it untouched when the field is absent.
       if (!body.generate_token && (typedToken || !existing)) body.token = typedToken;
-      if ((el as any)._cert) body.cert = (el as any)._cert;
 
-      if (existing) await api.put(`/connections/${existing.id}`, body);
-      else await api.post("/connections", body);
+      if (existing) {
+        await api.put(`/connections/${existing.id}`, body);
+        toast("Server updated");
+        el.remove();
+        await reloadConnections();
+        return;
+      }
 
-      toast(existing ? "Server updated" : "Server added");
+      const created = await api.post<CreateConnectionResult>("/connections", body);
       el.remove();
-      connections = await api.get<Connection[]>("/connections");
-      renderTree();
-      renderDc();
-      void refreshTreeVms();
+      await reloadConnections();
+      if (created.daemon_unreachable) {
+        const statusEl = offerInstallScript(created.install_script ?? "");
+        void pollUntilCertPinned(created.id, statusEl);
+        return;
+      }
+      toast("Server added");
     } catch (e) {
       toast((e as Error).message, "bad");
     }
   };
+}
+
+async function reloadConnections() {
+  connections = await api.get<Connection[]>("/connections");
+  renderTree();
+  renderDc();
+  void refreshTreeVms();
+}
+
+/// Show the generated installer for a daemon that was saved while unreachable.
+/// Returns the status line element so the poller can update it in place.
+function offerInstallScript(script: string): HTMLElement | null {
+  const el = openModal(
+    "Daemon not reachable",
+    `
+    <p class="hint">The daemon is not answering yet. Run this script on the daemon (hypervisor) host, then leave this dialog open — the connection is pinned automatically once it is up.</p>
+    <label class="field"><span>Install script</span>
+      <textarea id="install-script" rows="14" readonly spellcheck="false">${esc(script)}</textarea>
+    </label>
+    <p class="hint" id="pending-status">Waiting for the daemon…</p>`,
+    `<button class="btn" id="dl-script">Download script</button>`,
+  );
+  $("#dl-script", el).onclick = () => {
+    const blob = new Blob([script], { type: "application/x-sh" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "install-virt-man-daemon.sh";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  return $("#pending-status", el);
+}
+
+/// Poll a pending daemon every second until its cert can be fetched, then pin
+/// it. The generated install script may still be running.
+function pollUntilCertPinned(connId: string, statusEl: HTMLElement | null) {
+  stopPendingPoll();
+  pendingPoll = window.setInterval(async () => {
+    try {
+      const r = await api.get<{ cert: string; fingerprint: string }>(`/connections/${connId}/cert`);
+      stopPendingPoll();
+      const conn = connections.find((c) => c.id === connId);
+      if (conn) await api.put(`/connections/${connId}`, { name: conn.name, url: conn.url, cert: r.cert });
+      toast("Daemon connected — certificate pinned");
+      await reloadConnections();
+    } catch {
+      if (statusEl) statusEl.textContent = "Waiting for the daemon…";
+    }
+  }, 1000);
+}
+
+function stopPendingPoll() {
+  if (pendingPoll !== null) {
+    window.clearInterval(pendingPoll);
+    pendingPoll = null;
+  }
 }
 
 async function loadFormData(conn: string) {

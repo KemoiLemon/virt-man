@@ -58,7 +58,10 @@ install -Dm755 "target/release/$BIN_NAME" "$DESTDIR$PREFIX/bin/$BIN_NAME"
 
 # --- token -----------------------------------------------------------------
 install -d -m 700 "$DESTDIR$ETC"
-if [[ -s "$DESTDIR$TOKEN_PATH" ]]; then
+if [[ -n "${VIRT_MAN_TOKEN:-}" ]]; then
+  say "using supplied VIRT_MAN_TOKEN"
+  printf '%s\n' "$VIRT_MAN_TOKEN" > "$DESTDIR$TOKEN_PATH"
+elif [[ -s "$DESTDIR$TOKEN_PATH" ]]; then
   say "keeping existing token at $DESTDIR$TOKEN_PATH"
 else
   say "generating token at $DESTDIR$TOKEN_PATH"
