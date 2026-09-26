@@ -57,10 +57,7 @@ pub struct RoleDef {
 }
 
 fn scopes_of(pairs: &[(&str, Permission)]) -> Scopes {
-    pairs
-        .iter()
-        .map(|(s, p)| ((*s).to_string(), *p))
-        .collect()
+    pairs.iter().map(|(s, p)| ((*s).to_string(), *p)).collect()
 }
 
 /// The three built-in roles, matching the permissions this app shipped with
@@ -77,14 +74,28 @@ pub fn builtin_roles() -> Vec<RoleDef> {
             name: "operator".into(),
             builtin: true,
             scopes: scopes_of(&SCOPES.map(|s| {
-                (s, if matches!(s, "users" | "settings") { No } else { Write })
+                (
+                    s,
+                    if matches!(s, "users" | "settings") {
+                        No
+                    } else {
+                        Write
+                    },
+                )
             })),
         },
         RoleDef {
             name: "viewer".into(),
             builtin: true,
             scopes: scopes_of(&SCOPES.map(|s| {
-                (s, if matches!(s, "users" | "settings") { No } else { Read })
+                (
+                    s,
+                    if matches!(s, "users" | "settings") {
+                        No
+                    } else {
+                        Read
+                    },
+                )
             })),
         },
     ]
@@ -308,7 +319,11 @@ mod tests {
         let viewer = user("viewer");
 
         for scope in SCOPES {
-            assert_eq!(s.permission(&admin, scope), Permission::Write, "admin {scope}");
+            assert_eq!(
+                s.permission(&admin, scope),
+                Permission::Write,
+                "admin {scope}"
+            );
         }
         assert_eq!(s.permission(&operator, "users"), Permission::None);
         assert_eq!(s.permission(&operator, "settings"), Permission::None);
@@ -404,7 +419,10 @@ mod tests {
             scopes: scopes_of(&[("users", Permission::Write)]),
         });
         let u = user("custom-admin");
-        assert!(s.is_admin(&u), "a custom role granting users:write is an admin");
+        assert!(
+            s.is_admin(&u),
+            "a custom role granting users:write is an admin"
+        );
         s.users = vec![u];
         assert_eq!(s.admin_count(), 1);
     }
