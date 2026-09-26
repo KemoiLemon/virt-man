@@ -107,3 +107,63 @@ test("a missing netmask still yields the bare address", () => {
   const parsed = xml.networkFormFromXml(out);
   assert.equal(parsed.ip, "10.1.2.3/24");
 });
+
+test("UEFI guests get the real OVMF loader and a templated nvram store", () => {
+  const out = xml.domainXml({
+    name: "box",
+    cpus: 2,
+    memory_mb: 2048,
+    firmware: "uefi",
+    graphics: "vnc",
+    existing_volume: "",
+    new_disk: false,
+    disk_size_gb: 10,
+    disk_format: "qcow2",
+    pool: "default",
+    iso: "",
+    iso_pool: "",
+    network: "",
+    bridge: "",
+  });
+  assert.match(out, /<loader readonly="yes" type="pflash" format="raw">\/usr\/share\/edk2\/x64\/OVMF_CODE\.4m\.fd<\/loader>/);
+  assert.match(out, /<nvram template="\/usr\/share\/edk2\/x64\/OVMF_VARS\.4m\.fd"[^>]*>/);
+  assert.match(out, /\/var\/lib\/libvirt\/qemu\/nvram\/box_VARS\.fd/);
+});
+
+test("BIOS guests have no loader or nvram", () => {
+  const out = xml.domainXml({
+    name: "box",
+    cpus: 2,
+    memory_mb: 2048,
+    firmware: "bios",
+    graphics: "vnc",
+    existing_volume: "",
+    new_disk: false,
+    disk_size_gb: 10,
+    disk_format: "qcow2",
+    pool: "default",
+    iso: "",
+    iso_pool: "",
+    network: "",
+    bridge: "",
+  });
+  assert.doesNotMatch(out, /<loader/);
+  assert.doesNotMatch(out, /<nvram/);
+});
+
+test("withFirmware swaps loader/nvram in place and strips on BIOS", () => {
+  const uefi = xml.domainXml({
+    name: "box", cpus: 2, memory_mb: 2048, firmware: "uefi", graphics: "vnc",
+    existing_volume: "", new_disk: false, disk_size_gb: 10, disk_format: "qcow2",
+    pool: "default", iso: "", iso_pool: "", network: "", bridge: "",
+  });
+  const bios = xml.withFirmware(uefi, "bios", "box");
+  assert.doesNotMatch(bios, /<loader/);
+  assert.doesNotMatch(bios, /<nvram/);
+  assert.match(bios, /<os>\s*<type/, "plain os block");
+  const back = xml.withFirmware(bios, "uefi", "box");
+  assert.match(back, /OVMF_CODE\.4m\.fd/);
+  assert.match(back, /OVMF_VARS\.4m\.fd/);
+  assert.equal((back.match(/<loader/g) || []).length, 1, "exactly one loader after switching back");
+  assert.equal((back.match(/<nvram/g) || []).length, 1, "exactly one nvram after switching back");
+});

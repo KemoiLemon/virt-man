@@ -10,6 +10,38 @@ export function esc(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
+/// OVMF loader + NVRAM fragment for a UEFI guest. The code path is the
+/// read-only firmware; the nvram is the per-guest variable store, copied
+/// from the OVMF_VARS template on first define. BIOS guests get nothing.
+/// The `.4m.fd` paths are what edk2 actually installs on this host; the
+/// shorter `OVMF_CODE.fd` name does not exist and silently breaks boot.
+export function firmwareXml(firmware: "uefi" | "bios", name: string): string {
+  if (firmware !== "uefi") return "";
+  return `<loader readonly="yes" type="pflash" format="raw">/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>
+    <nvram template="/usr/share/edk2/x64/OVMF_VARS.4m.fd" format="raw">/var/lib/libvirt/qemu/nvram/${esc(name)}_VARS.fd</nvram>`;
+}
+
+/// Rewrite an existing domain's firmware selection in place. Strips whatever
+/// loader/nvram the guest already has (so a BIOS<->UEFI switch actually
+/// takes effect) and splices the new fragment after the <os> opening tag.
+export function withFirmware(
+  domainXml: string,
+  firmware: "uefi" | "bios",
+  name: string,
+): string {
+  let out = domainXml
+    .replace(/\s*<loader\b[^>]*\/?>\s*/g, "")
+    .replace(/\s*<loader\b[\s\S]*?<\/loader>\s*/g, "")
+    .replace(/\s*<nvram\b[^>]*\/?>\s*/g, "")
+    .replace(/\s*<nvram\b[\s\S]*?<\/nvram>\s*/g, "")
+    .replace(/(<os\b[^>]*)\s+firmware=['"][^'"]*['"]/g, "$1");
+  const frag = firmwareXml(firmware, name);
+  if (frag) {
+    out = out.replace(/(<os\b[^>]*>)/, `$1\n    ${frag}`);
+  }
+  return out;
+}
+
 export interface DomainForm {
   name: string;
   cpus: number;
@@ -35,9 +67,7 @@ export function domainXml(f: DomainForm): string {
   const mem = Math.max(128, f.memory_mb) * 1024; // KiB
   const cpus = Math.max(1, f.cpus);
   const arch = "x86_64";
-  const loader = f.firmware === "uefi"
-    ? `<loader readonly="yes" type="pflash">/usr/share/edk2/x64/OVMF_CODE.fd</loader>`
-    : "";
+  const loader = firmwareXml(f.firmware, f.name);
   const graphicsPort = f.graphics === "spice" ? "5901" : "5900";
 
   let disks = "";

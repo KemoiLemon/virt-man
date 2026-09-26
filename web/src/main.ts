@@ -11,7 +11,7 @@ import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
-import { domainXml, esc, networkFormFromXml, networkUuid, networkXml, poolXml, volumeXml } from "./xml";
+import { domainXml, esc, networkFormFromXml, networkUuid, networkXml, poolXml, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
@@ -3395,7 +3395,7 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
           .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
         set("defining domain");
         await api.putXml(`/proxy/${conn}/domains/${encodeURIComponent(target)}/xml`,
-          withDevices(stripped, devices));
+          withFirmware(withDevices(stripped, devices), general.firmware, target));
         await refreshTreeVms();
       });
       toast("Hardware update started");
