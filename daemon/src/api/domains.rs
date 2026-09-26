@@ -17,7 +17,10 @@ pub fn routes() -> Router {
         .route("/domains/{name}/state", get(get_state))
         .route("/domains/{name}/stats", get(get_stats))
         .route("/domains/{name}/graphics", get(get_graphics))
-        .route("/domains/{name}/firewall", get(get_firewall).put(put_firewall))
+        .route(
+            "/domains/{name}/firewall",
+            get(get_firewall).put(put_firewall),
+        )
         .route("/domains/{name}/start", post(start))
         .route("/domains/{name}/shutdown", post(shutdown))
         .route("/domains/{name}/reboot", post(reboot))
@@ -437,7 +440,10 @@ mod tests {
     #[test]
     fn applying_a_filter_preserves_the_rest_of_the_interface() {
         let out = set_interface_filters(XML, Some("clean-traffic"));
-        assert!(out.contains("<filterref filter='clean-traffic'/>"), "filter added");
+        assert!(
+            out.contains("<filterref filter='clean-traffic'/>"),
+            "filter added"
+        );
         // Everything that was there must survive: losing any of these would
         // silently break the guest's networking.
         for keep in [
@@ -450,7 +456,11 @@ mod tests {
         ] {
             assert!(out.contains(keep), "lost {keep} from:\n{out}");
         }
-        assert_eq!(out.matches("<interface").count(), 1, "no duplicated interface");
+        assert_eq!(
+            out.matches("<interface").count(),
+            1,
+            "no duplicated interface"
+        );
         assert_eq!(out.matches("</interface>").count(), 1);
     }
 
@@ -473,7 +483,10 @@ mod tests {
         assert!(!cleared.contains("filterref"), "filter removed:\n{cleared}");
         assert!(cleared.contains("<mac address='52:54:00:3d:53:9e'/>"));
         assert!(cleared.contains("<source network='internet'/>"));
-        assert_eq!(interface_filters(&cleared)[0]["filter"], serde_json::Value::Null);
+        assert_eq!(
+            interface_filters(&cleared)[0]["filter"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
@@ -482,7 +495,11 @@ mod tests {
         for _ in 0..3 {
             xml = set_interface_filters(&xml, Some("clean-traffic"));
         }
-        assert_eq!(xml.matches("filterref").count(), 1, "exactly one filterref:\n{xml}");
+        assert_eq!(
+            xml.matches("filterref").count(),
+            1,
+            "exactly one filterref:\n{xml}"
+        );
     }
 
     #[test]
@@ -502,7 +519,10 @@ mod tests {
              \n        <parameter name='IP' value='10.0.0.5'/>\n      </filterref>",
         );
         let out = set_interface_filters(&nested, Some("allow-arp"));
-        assert!(!out.contains("parameter name='IP'"), "stale parameters dropped:\n{out}");
+        assert!(
+            !out.contains("parameter name='IP'"),
+            "stale parameters dropped:\n{out}"
+        );
         assert_eq!(out.matches("filterref").count(), 1);
         assert!(out.contains("allow-arp"));
     }
