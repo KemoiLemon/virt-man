@@ -1,9 +1,9 @@
-// Console presets and the guest-typing fallback.
+// Console viewer: pixel decode, fit scaling, and keysym mapping.
 //
-// The preset table maps onto noVNC's 0..9 quality/compression scales, where
-// the two knobs move in opposite directions: "fast" wants small payloads
-// (high compression, low quality), "quality" wants fidelity. Getting these
-// backwards would silently make the "fast" preset the slowest one.
+// The RFB client lives in the daemon; the browser only decodes rectangles of
+// base64 BGRA and paints them. These are the parts that silently corrupt the
+// picture when wrong: a swapped channel tints the whole screen, and a fit
+// scale that upscales past 1:1 blurs a small guest on a big display.
 //
 // Run: pnpm test
 
@@ -20,48 +20,92 @@ before(async () => {
   con = await import("./_build/console.js");
 });
 
-test("all three presets exist with a label and a hint", () => {
-  for (const name of ["fast", "balanced", "quality"]) {
-    const p = con.PRESETS[name];
-    assert.ok(p, `${name} preset defined`);
-    assert.ok(p.label, `${name} has a label`);
-    assert.ok(p.hint, `${name} explains its trade-off`);
+// ---- pixel decode ----------------------------------------------------------
+
+test("BGRA from the guest becomes RGBA with opaque alpha", () => {
+  // One pixel, little-endian BGRX: blue=0x10, green=0x20, red=0x30.
+  const bin = String.fromCharCode(0x10, 0x20, 0x30, 0x00);
+  const px = con.bgraToRgba(bin, 1, 1);
+  assert.deepEqual([...px], [0x30, 0x20, 0x10, 255], "channels swap, alpha forced");
+});
+
+test("every decoded pixel is fully opaque", () => {
+  // The guest sends BGRX, where the 4th byte is padding, not alpha. Trusting
+  // it would paint a fully transparent screen.
+  const bin = String.fromCharCode(...Array.from({ length: 16 }, () => 0));
+  const px = con.bgraToRgba(bin, 2, 2);
+  for (let i = 3; i < px.length; i += 4) {
+    assert.equal(px[i], 255, `pixel ${(i - 3) / 4} opaque`);
   }
 });
 
-test("preset values are inside noVNC's 0..9 integer range", () => {
-  for (const [name, p] of Object.entries(con.PRESETS)) {
-    for (const key of ["quality", "compression"]) {
-      const v = p[key];
-      assert.ok(Number.isInteger(v), `${name}.${key} is an integer (${v})`);
-      assert.ok(v >= 0 && v <= 9, `${name}.${key} in range (${v})`);
-    }
+test("a short payload decodes to null instead of a torn image", () => {
+  // A truncated frame must be dropped, not painted as garbage.
+  assert.equal(con.bgraToRgba("abc", 4, 4), null);
+});
+
+test("decoded buffers are ImageData-compatible", () => {
+  // ImageData rejects a SharedArrayBuffer-backed array; the decode must
+  // always hand back a plain ArrayBuffer.
+  const px = con.bgraToRgba(String.fromCharCode(0, 0, 0, 0), 1, 1);
+  assert.ok(px.buffer instanceof ArrayBuffer, "backed by a plain ArrayBuffer");
+  assert.equal(px.length, 4, "exactly one pixel");
+});
+
+// ---- fit scaling -----------------------------------------------------------
+
+test("fit never upscales past 1:1", () => {
+  // A small guest on a big stage must stay crisp rather than be blown up.
+  assert.equal(con.fitScale(800, 600, 1920, 1080), 1);
+});
+
+test("fit shrinks to the tighter axis", () => {
+  // 1600x1200 into 800x900: width is the constraint, so 0.5.
+  assert.equal(con.fitScale(1600, 1200, 800, 900), 0.5);
+  // 1600x1200 into 1600x600: height constrains instead.
+  assert.equal(con.fitScale(1600, 1200, 1600, 600), 0.5);
+});
+
+test("fit is defensive about a stage with no size", () => {
+  // Called before layout, or on a hidden tab: must not divide by zero.
+  for (const args of [[0, 0, 100, 100], [800, 600, 0, 0], [800, 600, -5, 10]]) {
+    const s = con.fitScale(...args);
+    assert.ok(Number.isFinite(s) && s > 0, `finite scale for ${args}: ${s}`);
   }
 });
 
-test("quality rises from fast to quality", () => {
-  const { fast, balanced, quality } = con.PRESETS;
-  assert.ok(fast.quality < balanced.quality, "fast is lossier than balanced");
-  assert.ok(balanced.quality < quality.quality, "quality is the most faithful");
+test("aspect ratio is preserved by the fit scale", () => {
+  const [gw, gh] = [1024, 768];
+  const s = con.fitScale(gw, gh, 500, 500);
+  assert.ok(Math.abs((gw * s) / (gh * s) - gw / gh) < 1e-9, "ratio unchanged");
+  assert.ok(gw * s <= 500 && gh * s <= 500, "fits inside the stage");
 });
 
-test("compression falls as quality rises", () => {
-  // Compression is host CPU spent shrinking payloads: worth it on a slow
-  // link (fast), wasteful on a LAN (quality).
-  const { fast, balanced, quality } = con.PRESETS;
-  assert.ok(fast.compression > balanced.compression, "fast compresses hardest");
-  assert.ok(balanced.compression > quality.compression, "quality compresses least");
+// ---- keysyms ---------------------------------------------------------------
+
+test("printable keys map to their character code", () => {
+  assert.equal(con.keysymFor("a"), 0x61);
+  assert.equal(con.keysymFor("Z"), 0x5a);
+  assert.equal(con.keysymFor(" "), 0x20, "space has an explicit entry");
 });
 
-test("fast and quality sit at opposite ends", () => {
-  const { fast, quality } = con.PRESETS;
-  assert.notEqual(fast.quality, quality.quality);
-  assert.notEqual(fast.compression, quality.compression);
+test("named keys map to X11 keysyms", () => {
+  // These are the values the RFB server expects; ASCII would be wrong.
+  assert.equal(con.keysymFor("Enter"), 0xff0d);
+  assert.equal(con.keysymFor("Escape"), 0xff1b);
+  assert.equal(con.keysymFor("Backspace"), 0xff08);
+  assert.equal(con.keysymFor("ArrowUp"), 0xff52);
+  assert.equal(con.keysymFor("F1"), 0xffbe);
+  assert.equal(con.keysymFor("Control"), 0xffe3);
 });
 
-// ---- typing fallback -------------------------------------------------------
-// attachConsole needs a live socket, so exercise the typing path through a
-// stub RFB captured via the module's exported behaviour.
+test("unknown multi-character keys map to nothing", () => {
+  // 0 means "do not send", rather than a bogus keysym the guest misreads.
+  assert.equal(con.keysymFor("Unidentified"), 0);
+  assert.equal(con.keysymFor("MediaPlayPause"), 0);
+});
+
+// ---- handle contract -------------------------------------------------------
 
 test("module exposes the console contract the UI depends on", () => {
   assert.equal(typeof con.attachConsole, "function");
@@ -74,28 +118,27 @@ test("detachConsole is safe with nothing attached", () => {
   assert.equal(con.currentConsole(), null, "no console after detaching");
 });
 
-test("attachConsole reports failure instead of throwing", async () => {
-  // An unreachable URL must surface through onStatus, not crash the tab.
+test("a non-VNC guest is refused with a virt-viewer hint", async () => {
+  // SPICE has no browser client: the tab must say so instead of half-attaching.
   const stage = document.createElement("div");
   const seen = [];
-  const handle = await con.attachConsole(stage, "vnc", "ws://127.0.0.1:1/none",
-    (m) => seen.push(m), "balanced");
-  // Either it returns a handle (socket errors arrive later) or null after an
-  // import/construction failure; both must leave a status message behind.
-  assert.ok(seen.length > 0, `status reported: ${JSON.stringify(seen)}`);
-  if (handle) {
-    assert.equal(typeof handle.setPreset, "function");
-    assert.equal(typeof handle.setZoom, "function");
-    assert.equal(typeof handle.pasteToGuest, "function");
-    assert.equal(typeof handle.typeToGuest, "function");
-    assert.equal(handle.getZoom(), 0, "starts fitted to the stage");
-    con.detachConsole();
-  }
+  const handle = await con.attachConsole(stage, "spice", "/proxy/x/domains/y/console",
+    (m) => seen.push(m));
+  assert.equal(handle, null, "no viewer for SPICE");
+  assert.match(seen.join(" "), /virt-viewer/i, `status mentions virt-viewer: ${seen}`);
 });
 
-// ---- zoom + preset behaviour against a stub viewer -------------------------
-// The live suite cannot exercise these (jsdom has no WebSocket, so noVNC never
-// attaches). Drive the same handle contract through a stub RFB instead.
+test("attachConsole reports failure instead of throwing", async () => {
+  // The connect call cannot succeed here (no backend), so this must degrade to
+  // a status message rather than crashing the tab.
+  const stage = document.createElement("div");
+  const seen = [];
+  globalThis.fetch = () => Promise.reject(new Error("no backend"));
+  const handle = await con.attachConsole(stage, "vnc", "/proxy/x/domains/y/console",
+    (m) => seen.push(m));
+  assert.equal(handle, null, "no handle when the daemon refuses");
+  assert.ok(seen.length > 0, `status reported: ${JSON.stringify(seen)}`);
+});
 
 test("zoom stepping clamps and round-trips through fit", () => {
   // Mirrors the nudge() logic in main.ts: stepping from Fit starts at 1:1.
@@ -110,23 +153,4 @@ test("zoom stepping clamps and round-trips through fit", () => {
   assert.equal(z, 4, "clamps at 400%");
   for (let i = 0; i < 100; i++) z = step(z, -1);
   assert.equal(z, 0.25, "clamps at 25%");
-});
-
-test("preset values are the ones handed to noVNC", () => {
-  // Guards the wiring: a handle built over a stub must push both knobs.
-  const applied = [];
-  const rfb = {
-    set qualityLevel(v) { applied.push(["quality", v]); },
-    set compressionLevel(v) { applied.push(["compression", v]); },
-  };
-  for (const name of ["fast", "balanced", "quality"]) {
-    const p = con.PRESETS[name];
-    rfb.qualityLevel = p.quality;
-    rfb.compressionLevel = p.compression;
-  }
-  assert.deepEqual(applied, [
-    ["quality", con.PRESETS.fast.quality], ["compression", con.PRESETS.fast.compression],
-    ["quality", con.PRESETS.balanced.quality], ["compression", con.PRESETS.balanced.compression],
-    ["quality", con.PRESETS.quality.quality], ["compression", con.PRESETS.quality.compression],
-  ]);
 });

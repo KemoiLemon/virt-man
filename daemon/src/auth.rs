@@ -24,7 +24,7 @@ impl Auth {
         Ok(Self { token })
     }
 
-    pub fn token_ok(&self, candidate: &str) -> bool {
+    fn token_ok(&self, candidate: &str) -> bool {
         // Constant-time compare; lengths are public info, only content is secret.
         self.token.len() == candidate.len()
             && bool::from(self.token.as_bytes().ct_eq(candidate.as_bytes()))
@@ -52,13 +52,4 @@ pub async fn require_token(
     } else {
         StatusCode::UNAUTHORIZED.into_response()
     }
-}
-
-pub fn check_query_token(query: &str, auth: &Auth) -> bool {
-    query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(k, _)| *k == "token")
-        .map(|(_, v)| auth.token_ok(v))
-        .unwrap_or(false)
 }

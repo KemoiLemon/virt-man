@@ -8,12 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@novnc/novnc':
-        specifier: ^1.5.0
-        version: 1.7.0
-      '@spice-project/spice-html5':
-        specifier: ^0.2.1
-        version: 0.2.1
       '@tauri-apps/api':
         specifier: ^2
         version: 2.11.1
@@ -92,9 +86,6 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
-
-  '@novnc/novnc@1.7.0':
-    resolution: {integrity: sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==}
 
   '@oxc-project/types@0.151.0':
     resolution: {integrity: sha512-J1yXrIlNDZVzE3ada310xeAw7nH8yCAyLPuUIsjKatFPmfn5bS1oW+cM+QsGOtVWd5nhSpbwZWx/rue+r5Z+PA==}
@@ -197,9 +188,6 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
-
-  '@spice-project/spice-html5@0.2.1':
-    resolution: {integrity: sha512-NY86i+x/0ldKK89enXghsXCzWwfb5DQ91hQFu9hbyLcAfCVn+ZKoYsw7xUWX6/HQBRrdu/4F1id7SdOwNqpG9g==}
 
   '@tauri-apps/api@2.11.1':
     resolution: {integrity: sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==}
@@ -531,8 +519,6 @@ snapshots:
 
   '@exodus/bytes@1.16.0': {}
 
-  '@novnc/novnc@1.7.0': {}
-
   '@oxc-project/types@0.151.0': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.10':
@@ -581,8 +567,6 @@ snapshots:
     optional: true
 
   '@rolldown/pluginutils@1.0.1': {}
-
-  '@spice-project/spice-html5@0.2.1': {}
 
   '@tauri-apps/api@2.11.1': {}
 

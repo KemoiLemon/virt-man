@@ -13,6 +13,7 @@ import {
   Copy,
   Cpu,
   Database,
+  Download,
   FileCode,
   Globe,
   HardDrive,
@@ -130,4 +131,5 @@ export const ic = {
   copy: svg(Copy),
   type: svg(Keyboard),
   clip: svg(Clipboard),
+  download: svg(Download),
 };

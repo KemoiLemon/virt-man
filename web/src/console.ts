@@ -1,358 +1,319 @@
-// Console tab: VNC via noVNC, SPICE via spice-html5. Both talk to the
-// backend's TLS-pinned WebSocket proxy, so only the session cookie is needed.
+// VNC console: a canvas fed raw pixels by the daemon.
 //
-// noVNC and spice-html5 are imported dynamically: they are only needed when a
-// console opens, it keeps them out of the main bundle, and noVNC's top-level
-// await cannot be bundled into a classic script.
+// Ported from vm-man, which drives the same viewer over Tauri IPC. The RFB
+// client itself lives in the daemon (daemon/src/rfb.rs): it holds the guest
+// framebuffer and hands out only the rectangle that changed, as base64 BGRA.
+// So there is no VNC client in the browser at all — no noVNC, no WebSocket,
+// just putImageData.
+//
+// Scaling contract (also from vm-man): the displayed size is computed from the
+// LOCAL stage box and devicePixelRatio, using the guest resolution purely as an
+// aspect ratio. The guest is never asked to resize, and guest pixels never set
+// layout size.
+//
+// SPICE is not RFB and has no usable browser client, so those guests are handed
+// a virt-viewer file instead of being rendered here.
 
-/** Encoding trade-off presets, mapped onto noVNC's 0..9 scales. */
-export type Preset = "fast" | "balanced" | "quality";
-
-/**
- * noVNC exposes two independent knobs:
- *  - qualityLevel 0..9: JPEG quality for Tight encoding (9 = lossless-ish)
- *  - compressionLevel 0..9: zlib effort (9 = smallest, most host CPU)
- *
- * "fast" trades visual fidelity for latency on a slow link; "quality" sends
- * near-lossless frames and leans on a fast link; "balanced" is noVNC's own
- * default pairing.
- */
-export const PRESETS: Record<Preset, { quality: number; compression: number; label: string; hint: string }> = {
-  fast: {
-    quality: 3, compression: 9,
-    label: "Fast",
-    hint: "Lowest latency: lossy frames, smallest payloads. Best over slow links.",
-  },
-  balanced: {
-    quality: 6, compression: 2,
-    label: "Balanced",
-    hint: "noVNC's defaults: good fidelity without much host CPU.",
-  },
-  quality: {
-    quality: 9, compression: 0,
-    label: "Quality",
-    hint: "Near-lossless frames and no compression effort. Best on a LAN.",
-  },
-};
+import { api } from "./api";
 
 export interface ConsoleHandle {
-  stop: () => void;
-  /** Guest -> host clipboard text, updated as the guest copies. */
-  onGuestClipboard: (fn: (text: string) => void) => void;
-  /** Host -> guest: paste text into the guest's clipboard. */
-  pasteToGuest: (text: string) => void;
-  /** Type text as key events, for guests without a clipboard agent. */
-  typeToGuest: (text: string) => Promise<void>;
-  setPreset: (p: Preset) => void;
-  /** 0 = fit to the stage; otherwise an explicit scale factor. */
-  setZoom: (factor: number) => void;
-  getZoom: () => number;
-  /** Re-fit after the stage changes size. */
-  refit: () => void;
-  sendCtrlAltDel: () => void;
-  kind: "vnc" | "spice";
-  /** Which controls this backend can actually honour. */
-  supports: { clipboard: boolean; zoom: boolean; preset: boolean; type: boolean };
+  kind: string;
+  /** Local zoom: 0 means fit-to-stage, otherwise a scale factor. */
+  getZoom(): number;
+  setZoom(z: number): void;
+  refit(): void;
+  sendCtrlAltDel(): Promise<void>;
+  /** Stop streaming and drop the daemon-side session. */
+  stop(): void;
 }
 
-let active: ConsoleHandle | null = null;
-
-export function detachConsole() {
-  if (active) {
-    try {
-      active.stop();
-    } catch {
-      /* ignore */
-    }
-    active = null;
-  }
+/** One frame update as the daemon serialises it. */
+interface FrameUpdate {
+  seq: number;
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  pixels: string;
 }
+
+let current: ConsoleHandle | null = null;
 
 export function currentConsole(): ConsoleHandle | null {
-  return active;
+  return current;
 }
 
+export function detachConsole() {
+  current?.stop();
+  current = null;
+}
+
+/// X11 keysyms for the keys that are not plain ASCII.
+const KEYSYM: Record<string, number> = {
+  Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b, Delete: 0xffff,
+  Home: 0xff50, ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53,
+  ArrowDown: 0xff54, PageUp: 0xff55, PageDown: 0xff56, End: 0xff57, Insert: 0xff63,
+  F1: 0xffbe, F2: 0xffbf, F3: 0xffc0, F4: 0xffc1, F5: 0xffc2, F6: 0xffc3,
+  F7: 0xffc4, F8: 0xffc5, F9: 0xffc6, F10: 0xffc7, F11: 0xffc8, F12: 0xffc9,
+  Shift: 0xffe1, Control: 0xffe3, Alt: 0xffe9, Meta: 0xffeb, CapsLock: 0xffe5,
+  " ": 0x20,
+};
+
+export function keysymFor(key: string): number {
+  if (KEYSYM[key]) return KEYSYM[key];
+  return key.length === 1 ? key.charCodeAt(0) : 0;
+}
+
+/// Pure: largest scale that fits the guest in the stage, never upscaling past
+/// 1:1 so a small guest on a big screen stays crisp instead of being blown up.
+export function fitScale(guestW: number, guestH: number, stageW: number, stageH: number): number {
+  if (!guestW || !guestH || stageW <= 0 || stageH <= 0) return 1;
+  return Math.min(stageW / guestW, stageH / guestH, 1);
+}
+
+/// Decode one base64 BGRA rectangle into RGBA for putImageData.
+/// The guest sends BGRX, so alpha is forced opaque.
+// The ArrayBuffer parameter is load-bearing: TypeScript otherwise infers
+// ArrayBufferLike, which ImageData refuses because it could be shared.
+export function bgraToRgba(
+  bin: string,
+  w: number,
+  h: number,
+): Uint8ClampedArray<ArrayBuffer> | null {
+  const need = w * h * 4;
+  if (bin.length < need) return null;
+  const px = new Uint8ClampedArray(new ArrayBuffer(need));
+  for (let i = 0; i < need; i += 4) {
+    px[i] = bin.charCodeAt(i + 2) & 255;
+    px[i + 1] = bin.charCodeAt(i + 1) & 255;
+    px[i + 2] = bin.charCodeAt(i) & 255;
+    px[i + 3] = 255;
+  }
+  return px;
+}
+
+/**
+ * Attach the viewer to `stage` for one VM.
+ *
+ * `base` is the console endpoint prefix, e.g.
+ * `/proxy/{conn}/domains/{name}/console`. Returns null when the guest is not
+ * VNC or the daemon refused to attach; `onStatus` carries the reason.
+ */
 export async function attachConsole(
   stage: HTMLElement,
   kind: string,
-  wsUrl: string,
+  base: string,
   onStatus: (msg: string | null) => void,
-  preset: Preset = "balanced",
 ): Promise<ConsoleHandle | null> {
   detachConsole();
+
+  if (kind !== "vnc") {
+    onStatus(`${kind.toUpperCase()} consoles open in virt-viewer.`);
+    return null;
+  }
+
+  let info: { width: number; height: number };
+  try {
+    info = await api.post<{ width: number; height: number }>(`${base}/connect`);
+  } catch (e) {
+    onStatus((e as Error).message);
+    return null;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "vnc-screen";
+  canvas.setAttribute("aria-label", "guest console");
   stage.textContent = "";
+  stage.appendChild(canvas);
+  if (!stage.hasAttribute("tabindex")) stage.tabIndex = 0;
 
-  active = kind === "spice"
-    ? await attachSpice(stage, wsUrl, onStatus)
-    : await attachVnc(stage, wsUrl, onStatus, preset);
-  return active;
-}
-
-async function attachVnc(
-  stage: HTMLElement,
-  wsUrl: string,
-  onStatus: (m: string | null) => void,
-  preset: Preset,
-): Promise<ConsoleHandle | null> {
-  onStatus("connecting…");
-  try {
-    const RFB = (await import("@novnc/novnc")).default;
-    const rfb = new RFB(stage, wsUrl, { credentials: {} });
-
-    // Fit-to-stage by default; an explicit zoom switches to clipped scrolling.
-    let zoom = 0;
-    rfb.scaleViewport = true;
-    rfb.clipViewport = false;
-    // Never ask the guest to change its resolution: scaling is local, which
-    // keeps a small guest crisp and avoids fighting the display driver.
-    rfb.resizeSession = false;
-    rfb.background = "#000";
-
-    const applyPreset = (p: Preset) => {
-      const { quality, compression } = PRESETS[p];
-      rfb.qualityLevel = quality;
-      rfb.compressionLevel = compression;
-    };
-    applyPreset(preset);
-
-    let clipboardSink: ((t: string) => void) | null = null;
-    rfb.addEventListener("clipboard", (e: any) => {
-      const text = e?.detail?.text;
-      if (typeof text === "string") clipboardSink?.(text);
-    });
-    rfb.addEventListener("connect", () => onStatus(null));
-    rfb.addEventListener("disconnect", () => onStatus("disconnected"));
-    rfb.addEventListener("credentialsrequired", () => onStatus("credentials required"));
-
-    const applyZoom = () => {
-      if (zoom === 0) {
-        // Fit: noVNC scales the canvas to the stage box.
-        rfb.scaleViewport = true;
-        rfb.clipViewport = false;
-      } else {
-        // Explicit zoom: clip and scroll, so overflow stays reachable.
-        rfb.scaleViewport = false;
-        rfb.clipViewport = true;
-        const canvas = stage.querySelector("canvas");
-        if (canvas) {
-          canvas.style.transformOrigin = "center center";
-          canvas.style.transform = `scale(${zoom})`;
-        }
-      }
-    };
-
-    const handle: ConsoleHandle = {
-      kind: "vnc",
-      supports: { clipboard: true, zoom: true, preset: true, type: true },
-      stop: () => {
-        try {
-          rfb.disconnect();
-        } catch {
-          /* ignore */
-        }
-      },
-      onGuestClipboard: (fn) => { clipboardSink = fn; },
-      pasteToGuest: (text) => rfb.clipboardPasteFrom(text),
-      typeToGuest: (text) => typeText(rfb, text),
-      setPreset: applyPreset,
-      setZoom: (factor) => {
-        zoom = factor;
-        applyZoom();
-      },
-      getZoom: () => zoom,
-      refit: () => applyZoom(),
-      sendCtrlAltDel: () => rfb.sendCtrlAltDel(),
-    };
-    return handle;
-  } catch (e) {
-    onStatus(`noVNC error: ${e instanceof Error ? e.message : e}`);
-    return null;
-  }
-}
-
-/**
- * Send text as individual key events.
- *
- * Needed when the guest has no clipboard channel (no agent, or a display
- * server that ignores RFB clipboard messages) — the characters still arrive
- * because they look like ordinary typing.
- */
-async function typeText(rfb: any, text: string): Promise<void> {
-  for (const ch of text) {
-    // Enter must be the keysym, not the literal newline codepoint.
-    const keysym = ch === "\n" || ch === "\r" ? 0xff0d : ch.codePointAt(0);
-    if (keysym === undefined) continue;
-    rfb.sendKey(keysym, null, true);
-    rfb.sendKey(keysym, null, false);
-    // A short gap: bursting faster than the guest's input layer drops keys.
-    await new Promise((r) => setTimeout(r, 8));
-  }
-}
-
-/**
- * Map a character to a `KeyboardEvent.code`, which is what spice-html5's
- * key handler translates into a scancode. Only the unshifted ASCII range is
- * covered; anything else is skipped rather than sent as the wrong key.
- */
-function spiceCodeFor(ch: string): { code: string; shift: boolean } | null {
-  if (ch >= "a" && ch <= "z") return { code: `Key${ch.toUpperCase()}`, shift: false };
-  if (ch >= "A" && ch <= "Z") return { code: `Key${ch}`, shift: true };
-  if (ch >= "0" && ch <= "9") return { code: `Digit${ch}`, shift: false };
-  const plain: Record<string, string> = {
-    " ": "Space", "\n": "Enter", "\r": "Enter", "\t": "Tab",
-    "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight",
-    "\\": "Backslash", ";": "Semicolon", "'": "Quote", ",": "Comma",
-    ".": "Period", "/": "Slash", "`": "Backquote",
+  let ctx: CanvasRenderingContext2D | null = null;
+  const state = {
+    w: info.width, h: info.height,
+    seq: -1, zoom: 0, buttons: 0,
+    live: true,
   };
-  if (plain[ch]) return { code: plain[ch], shift: false };
-  const shifted: Record<string, string> = {
-    "!": "Digit1", "@": "Digit2", "#": "Digit3", "$": "Digit4", "%": "Digit5",
-    "^": "Digit6", "&": "Digit7", "*": "Digit8", "(": "Digit9", ")": "Digit0",
-    "_": "Minus", "+": "Equal", "{": "BracketLeft", "}": "BracketRight",
-    "|": "Backslash", ":": "Semicolon", '"': "Quote", "<": "Comma",
-    ">": "Period", "?": "Slash", "~": "Backquote",
-  };
-  if (shifted[ch]) return { code: shifted[ch], shift: true };
-  return null;
-}
 
-/**
- * Type text into a SPICE guest.
- *
- * spice-html5 builds its scancode from a real `KeyboardEvent.code`, so
- * synthetic events through its own handler are more reliable than
- * hand-rolling the scancode table.
- */
-async function typeSpiceText(text: string): Promise<void> {
-  const target = document.getElementById("spice-screen") ?? document.body;
-  for (const ch of text) {
-    const mapped = spiceCodeFor(ch);
-    if (!mapped) continue;
-    const init: KeyboardEventInit = {
-      code: mapped.code,
-      key: ch,
-      shiftKey: mapped.shift,
-      bubbles: true,
-      cancelable: true,
-    };
-    target.dispatchEvent(new KeyboardEvent("keydown", init));
-    target.dispatchEvent(new KeyboardEvent("keyup", init));
-    await new Promise((r) => setTimeout(r, 8));
-  }
-}
-
-async function attachSpice(
-  stage: HTMLElement,
-  wsUrl: string,
-  onStatus: (m: string | null) => void,
-): Promise<ConsoleHandle | null> {
-  onStatus("connecting…");
-  try {
-    const spice = await import("@spice-project/spice-html5/src/main.js");
-    const screen = document.createElement("div");
-    screen.id = "spice-screen";
-    screen.className = "spice-screen";
-    // Do NOT force width/height here: spice-html5 sets this element's height
-    // to the guest's surface height when the primary surface arrives
-    // (display.js). Pinning it to 100% fights that and leaves the canvas
-    // mis-sized, which looks like a frozen display.
-    stage.appendChild(screen);
-
-    const sc = new (spice as any).SpiceMainConn({
-      uri: wsUrl,
-      screen_id: "spice-screen",
-      onerror: () => onStatus("spice connection failed"),
-      onsuccess: () => onStatus(null),
-    });
-
-    let zoom = 0;
-    const applyZoom = () => {
-      // spice-html5 renders into a canvas sized to the guest surface. Scale
-      // it with a transform: object-fit does nothing for canvas content, and
-      // changing width/height would fight the library's own sizing.
-      const canvas = screen.querySelector("canvas");
-      if (!canvas) return;
-      canvas.style.transformOrigin = "center center";
-      if (zoom === 0) {
-        // Fit: scale down to the stage, never up past 1:1 so a small guest
-        // stays crisp.
-        const box = stage.getBoundingClientRect();
-        const cw = canvas.width || canvas.clientWidth;
-        const ch = canvas.height || canvas.clientHeight;
-        if (!cw || !ch || !box.width || !box.height) return;
-        const factor = Math.min(1, box.width / cw, box.height / ch);
-        canvas.style.transform = factor < 1 ? `scale(${factor})` : "";
-      } else {
-        canvas.style.transform = `scale(${zoom})`;
-      }
-    };
-    // The canvas only appears once the primary surface arrives, and it is
-    // replaced on a guest resolution change, so watch instead of guessing a
-    // delay. Re-fitting on every mutation also keeps zoom applied after the
-    // library swaps the canvas out.
-    const canvasWatcher = new MutationObserver(() => applyZoom());
-    canvasWatcher.observe(screen, { childList: true, subtree: true });
-
-    const handle: ConsoleHandle = {
-      kind: "spice",
-      // spice-html5 defines the VD_AGENT_CLIPBOARD constants but implements
-      // no clipboard path, and SPICE negotiates its own encoding, so neither
-      // control applies here. Typing still works: it is just key events.
-      supports: { clipboard: false, zoom: true, preset: false, type: true },
-      stop: () => {
-        canvasWatcher.disconnect();
-        try {
-          sc.stop();
-        } catch {
-          /* ignore */
-        }
-      },
-      onGuestClipboard: () => {},
-      pasteToGuest: () => {},
-      // Typing is plain key events, which SPICE handles like any other input.
-      typeToGuest: (text) => typeSpiceText(text),
-      setPreset: () => {},
-      setZoom: (factor) => {
-        zoom = factor;
-        applyZoom();
-      },
-      getZoom: () => zoom,
-      refit: applyZoom,
-      sendCtrlAltDel: () => {
-        try {
-          // Takes no argument: it acts on spice-html5's own module-global
-          // connection, so passing `sc` here was simply ignored.
-          (spice as any).sendCtrlAltDel();
-        } catch {
-          /* ignore */
-        }
-      },
-    };
-    return handle;
-  } catch (e) {
-    onStatus(`spice error: ${e instanceof Error ? e.message : e}`);
-    return null;
-  }
-}
-
-// The browser build has no Tauri window controls; guard them so the desktop
-// shell can wire its frameless titlebar.
-export function isTauri(): boolean {
-  return (window as any).__TAURI_INTERNALS__ !== undefined;
-}
-
-/// The current Tauri window, from the injected global (withGlobalTauri: true).
-/// Synchronous, matching vm-man's wiring, so titlebar buttons and dragging
-/// don't depend on a dynamic import resolving.
-export function tauriWindow(): any | null {
-  if (!isTauri()) return null;
-  const tauri = (window as any).__TAURI__;
-  if (tauri?.window?.getCurrentWindow) {
-    try {
-      return tauri.window.getCurrentWindow();
-    } catch {
-      return null;
+  const applyScale = () => {
+    if (!state.w || !state.h) return;
+    if (canvas.width !== state.w || canvas.height !== state.h) {
+      canvas.width = state.w;
+      canvas.height = state.h;
     }
-  }
-  return null;
+    // clientWidth/Height exclude any scrollbar gutter; a bounding rect does
+    // not, and fitting to that leaves the image off-centre when it nearly
+    // fills the stage.
+    const scale = state.zoom === 0
+      ? fitScale(state.w, state.h, stage.clientWidth, stage.clientHeight)
+      : state.zoom;
+    // Round to whole device pixels so scaling never resamples.
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(state.w * scale * dpr) / dpr);
+    const h = Math.max(1, Math.round(state.h * scale * dpr) / dpr);
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+    // Crisp when magnifying, smooth when minifying.
+    canvas.style.imageRendering = scale >= 1 ? "pixelated" : "auto";
+  };
+
+  /// Map a local mouse event to guest pixels (the inverse of the scale).
+  const toGuest = (ev: MouseEvent) => {
+    const r = canvas.getBoundingClientRect();
+    const x = ((ev.clientX - r.left) / (r.width || 1)) * state.w;
+    const y = ((ev.clientY - r.top) / (r.height || 1)) * state.h;
+    return {
+      x: Math.max(0, Math.min(state.w - 1, Math.round(x))),
+      y: Math.max(0, Math.min(state.h - 1, Math.round(y))),
+    };
+  };
+
+  const sendPointer = (x: number, y: number, buttons: number) =>
+    api.post(`${base}/pointer`, { x, y, buttons }).catch(() => {});
+  const sendKey = (keysym: number, down: boolean) =>
+    api.post(`${base}/key`, { keysym, down }).catch(() => {});
+
+  const paint = (u: FrameUpdate) => {
+    if (canvas.width !== u.width || canvas.height !== u.height) {
+      canvas.width = u.width;
+      canvas.height = u.height;
+      ctx = null; // resizing a canvas clears its context state
+    }
+    if (u.width !== state.w || u.height !== state.h) {
+      state.w = u.width;
+      state.h = u.height;
+      applyScale();
+    }
+    if (u.w > 0 && u.h > 0 && u.pixels) {
+      const px = bgraToRgba(atob(u.pixels), u.w, u.h);
+      if (px) {
+        ctx ??= canvas.getContext("2d", { alpha: false });
+        ctx?.putImageData(new ImageData(px, u.w, u.h), u.x, u.y);
+      }
+    }
+    state.seq = u.seq;
+    onStatus(null);
+  };
+
+  /// Continuous stream. Each request parks in the daemon until a frame newer
+  /// than `seq` exists, so pixels are already on the way when the guest paints:
+  /// one hop per frame, no polling interval.
+  const stream = async () => {
+    while (state.live) {
+      let u: FrameUpdate | null = null;
+      try {
+        u = await api.get<FrameUpdate>(`${base}/frame?since=${Math.max(0, state.seq)}`);
+      } catch {
+        if (!state.live) break;
+        // A dropped session or a transient error: back off, then surface it.
+        await new Promise((r) => setTimeout(r, 400));
+        try {
+          const st = await api.get<{ connected: boolean; error?: string }>(`${base}/status`);
+          if (!st.connected) {
+            onStatus(st.error || "Console disconnected.");
+            return;
+          }
+        } catch { /* keep trying */ }
+        continue;
+      }
+      if (!state.live) break;
+      if (!u || !u.seq) continue; // nothing new before the daemon's timeout
+      paint(u);
+    }
+  };
+
+  // --- input forwarding
+  // Mouse moves fire far faster than the guest consumes them and each one is a
+  // request, so coalesce to one per animation frame. Buttons and keys always go
+  // immediately.
+  let movePending: { x: number; y: number } | null = null;
+  const onMove = (e: MouseEvent) => {
+    const had = movePending !== null;
+    movePending = toGuest(e);
+    if (had) return;
+    requestAnimationFrame(() => {
+      const p = movePending;
+      movePending = null;
+      if (p && state.live) void sendPointer(p.x, p.y, state.buttons);
+    });
+  };
+  const onDown = (e: MouseEvent) => {
+    e.preventDefault();
+    stage.focus();
+    state.buttons |= 1 << e.button;
+    movePending = null; // a click must not be reordered behind a move
+    const p = toGuest(e);
+    void sendPointer(p.x, p.y, state.buttons);
+  };
+  const onUp = (e: MouseEvent) => {
+    state.buttons &= ~(1 << e.button);
+    movePending = null;
+    const p = toGuest(e);
+    void sendPointer(p.x, p.y, state.buttons);
+  };
+  const onContext = (e: Event) => e.preventDefault();
+  const onWheel = (e: WheelEvent) => {
+    if (e.ctrlKey) return; // Ctrl+wheel is local zoom, handled by the caller
+    e.preventDefault();
+    const p = toGuest(e);
+    const bit = e.deltaY < 0 ? 8 : 16; // buttons 4/5 = wheel up/down
+    void sendPointer(p.x, p.y, state.buttons | bit)
+      .then(() => sendPointer(p.x, p.y, state.buttons));
+  };
+  const onKeyDown = (e: KeyboardEvent) => {
+    e.preventDefault();
+    const k = keysymFor(e.key);
+    if (k) void sendKey(k, true);
+  };
+  const onKeyUp = (e: KeyboardEvent) => {
+    e.preventDefault();
+    const k = keysymFor(e.key);
+    if (k) void sendKey(k, false);
+  };
+
+  canvas.addEventListener("mousemove", onMove);
+  canvas.addEventListener("mousedown", onDown);
+  window.addEventListener("mouseup", onUp);
+  canvas.addEventListener("contextmenu", onContext);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+  stage.addEventListener("keydown", onKeyDown);
+  stage.addEventListener("keyup", onKeyUp);
+
+  applyScale();
+  void stream();
+
+  const handle: ConsoleHandle = {
+    kind,
+    getZoom: () => state.zoom,
+    setZoom: (z) => { state.zoom = z; applyScale(); },
+    refit: () => { if (state.zoom === 0) applyScale(); },
+    sendCtrlAltDel: async () => {
+      const seq = [0xffe3, 0xffe9, 0xffff]; // Ctrl, Alt, Del
+      for (const k of seq) await sendKey(k, true);
+      for (const k of [...seq].reverse()) await sendKey(k, false);
+    },
+    stop: () => {
+      state.live = false;
+      canvas.removeEventListener("mousemove", onMove);
+      canvas.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mouseup", onUp);
+      canvas.removeEventListener("contextmenu", onContext);
+      canvas.removeEventListener("wheel", onWheel);
+      stage.removeEventListener("keydown", onKeyDown);
+      stage.removeEventListener("keyup", onKeyUp);
+      // Drop the daemon-side session so the framebuffer thread stops.
+      api.post(`${base}/disconnect`).catch(() => {});
+    },
+  };
+  current = handle;
+  return handle;
+}
+
+export function isTauri(): boolean {
+  return typeof (window as any).__TAURI__ !== "undefined";
+}
+
+export function tauriWindow(): any | null {
+  return (window as any).__TAURI__?.window?.getCurrentWindow?.() ?? null;
 }

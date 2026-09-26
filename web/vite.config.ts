@@ -14,10 +14,6 @@ export default defineConfig({
     ? {
         lib: { entry: "src/main.ts", name: "VirtMan", formats: ["iife"], fileName: () => "app.iife.js" },
         emptyOutDir: true,
-        // The console libraries are loaded on demand and carry top-level
-        // await, which no classic script can express. The DOM smoke test
-        // never opens a console, so leave them unbundled.
-        rollupOptions: { external: ["@novnc/novnc", "@spice-project/spice-html5/src/main.js"] },
       }
     : {},
   server: {

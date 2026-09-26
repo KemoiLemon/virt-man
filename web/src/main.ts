@@ -1,7 +1,6 @@
 import { api } from "./api";
 import type { Connection, DomainSummary, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
-import { PRESETS, attachConsole, detachConsole, isTauri, tauriWindow } from "./console";
-import type { Preset } from "./console";
+import { attachConsole, detachConsole, isTauri, tauriWindow } from "./console";
 import DOMPurify from "dompurify";
 import { ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
@@ -40,7 +39,6 @@ let pollTimer: number | null = null;
 const treeVms: Record<string, DomainSummary[]> = {};
 /// Console view settings, kept across tab switches and reconnects.
 let consoleZoom = 0; // 0 = fit to the stage
-let consolePreset: Preset = "balanced";
 let consoleResizeObserver: ResizeObserver | null = null;
 
 /// Tear down a live console: its WebSocket and the stage resize observer.
@@ -999,6 +997,7 @@ async function renderVmBody(vm: string) {
   const body = $("#vm-body");
   if (vmTab === "console") {
     const zoomLabel = (z: number) => (z === 0 ? "Fit" : `${Math.round(z * 100)}%`);
+    const vvUrl = `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/console/vv`;
     setHtml(body, `
       <div class="console-bar">
         <span class="console-group">
@@ -1007,53 +1006,63 @@ async function renderVmBody(vm: string) {
           <button class="btn icon" id="con-zoom-in" title="Zoom in">${ic.zoomIn()}</button>
           <button class="btn icon" id="con-fit" title="Fit to window">${ic.fit()}</button>
         </span>
-        <span class="console-group">
-          <label class="field console-preset"><span>Performance</span>
-            <select id="con-preset">
-              ${(Object.keys(PRESETS) as Preset[]).map((p) =>
-                `<option value="${p}" ${p === consolePreset ? "selected" : ""}>${esc(PRESETS[p].label)}</option>`).join("")}
-            </select></label>
-        </span>
-        <span class="console-group">
-          <button class="btn" id="con-paste" title="Send host clipboard to the guest">${ic.clipboard(14)} Paste</button>
-          <button class="btn" id="con-type" title="Type text as key events">${ic.type(14)} Type…</button>
-          <button class="btn" id="con-copy" title="Copy the guest's clipboard">${ic.copy(14)} Copy</button>
-        </span>
         <span class="console-group" style="margin-left:auto">
           <button class="btn" id="con-cad" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
         </span>
       </div>
-      <div class="console-hint" id="con-hint">${esc(PRESETS[consolePreset].hint)}</div>
-      <div class="console-stage" id="console-stage">
+      <div class="console-hint" id="con-hint"></div>
+      <div class="console-stage" id="console-stage" tabindex="0">
         <div class="console-msg" id="console-msg">connecting…</div>
       </div>`);
+
+    const setHint = (t: string) => {
+      const h = $("#con-hint");
+      if (h) h.textContent = t;
+    };
 
     try {
       const g = await api.get<{ graphics: { kind: string } | null }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/graphics`);
       const kind = g.graphics?.kind ?? "vnc";
-      const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/proxy/${selectedConn}/console/domains/${encodeURIComponent(vm)}`;
-      const con = await attachConsole($("#console-stage"), kind, url, (msg) => {
-        const m = $("#console-msg");
-        if (m) m.textContent = msg ?? "";
-      }, consolePreset);
+      const base = `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/console`;
 
-      if (!con) {
-        // The viewer failed to construct (bad URL, blocked import). Leave the
-        // toolbar visible but inert rather than silently dead, and say why.
-        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset",
-          "#con-preset", "#con-paste", "#con-type", "#con-copy", "#con-cad"]) {
+      // SPICE is not RFB and has no usable browser client, so hand the guest
+      // over to virt-viewer instead of pretending to render it here.
+      if (kind !== "vnc") {
+        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
           const el = $(id);
           if (el) el.disabled = true;
         }
-        const hint = $("#con-hint");
-        if (hint) hint.textContent = "Console unavailable — controls disabled until it connects.";
+        setHint(`${kind.toUpperCase()} cannot be displayed in a browser. Open it in virt-viewer instead.`);
+        const stage = $("#console-stage");
+        setHtml(stage, `
+          <div class="console-offer">
+            <p>This guest uses <b>${esc(kind.toUpperCase())}</b>, which needs a native client.</p>
+            <a class="btn primary" id="con-vv" href="${vvUrl}" download="${esc(vm)}.vv">${ic.download(14)} Open in virt-viewer</a>
+            <p class="muted">Downloads a connection file. Add a VNC graphics device to use the built-in console.</p>
+          </div>`);
         return;
       }
 
-      // Guest -> host: remember what the guest copied so Copy can hand it over
-      // (the browser forbids writing the clipboard outside a user gesture).
-      let guestClipboard = "";
-      con.onGuestClipboard((t) => { guestClipboard = t; });
+      const con = await attachConsole($("#console-stage"), kind, base, (msg) => {
+        const m = $("#console-msg");
+        if (m) {
+          m.textContent = msg ?? "";
+          m.classList.toggle("hidden", !msg);
+        }
+      });
+
+      if (!con) {
+        // The daemon refused to attach. Leave the toolbar visible but inert
+        // rather than silently dead, and say why.
+        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
+          const el = $(id);
+          if (el) el.disabled = true;
+        }
+        setHint("Console unavailable — controls disabled until it connects.");
+        return;
+      }
+
+      setHint("Click the screen to grab input. Ctrl+wheel zooms.");
 
       const setZoomLabel = () => {
         const b = $("#con-zoom-reset");
@@ -1073,77 +1082,14 @@ async function renderVmBody(vm: string) {
       $("#con-fit").onclick = fit;
       $("#con-zoom-reset").onclick = fit;
 
-      // Ctrl+wheel zooms, like every other viewer.
+      // Ctrl+wheel zooms locally instead of scrolling the guest.
       $("#console-stage").addEventListener("wheel", (e: WheelEvent) => {
         if (!e.ctrlKey) return;
         e.preventDefault();
         nudge(e.deltaY < 0 ? 1 : -1);
       }, { passive: false });
 
-      const presetSel = $("#con-preset");
-      presetSel.onchange = () => {
-        consolePreset = presetSel.value as Preset;
-        con.setPreset(consolePreset);
-        const hint = $("#con-hint");
-        if (hint) hint.textContent = PRESETS[consolePreset].hint;
-        toast(`${PRESETS[consolePreset].label} preset applied`);
-      };
-      presetSel.disabled = !con.supports.preset;
-      if (!con.supports.preset) {
-        presetSel.title = `${con.kind.toUpperCase()} negotiates its own encoding`;
-      }
-
-      $("#con-paste").onclick = async () => {
-        try {
-          const text = await navigator.clipboard.readText();
-          if (!text) return toast("Host clipboard is empty", "bad");
-          con.pasteToGuest(text);
-          toast(`Sent ${text.length} chars to the guest clipboard`);
-        } catch {
-          // Clipboard read can be denied; typing always works.
-          toast("Clipboard blocked — use Type instead", "bad");
-        }
-      };
-      $("#con-type").onclick = async () => {
-        const text = await askText("Type into the guest", "Text", "",
-          "sent as key events, for guests without a clipboard agent");
-        if (!text) return;
-        toast(`Typing ${text.length} characters…`);
-        await con.typeToGuest(text);
-      };
-      $("#con-copy").onclick = async () => {
-        if (!guestClipboard) {
-          return toast("Nothing copied in the guest yet", "bad");
-        }
-        try {
-          await navigator.clipboard.writeText(guestClipboard);
-          toast(`Copied ${guestClipboard.length} chars from the guest`);
-        } catch {
-          toast("Host clipboard write was blocked", "bad");
-        }
-      };
-      // Disable only what this backend genuinely cannot do, and say why —
-      // a silently greyed-out toolbar looks broken. SPICE has no clipboard
-      // path in spice-html5, but typing (plain key events) still works.
-      for (const id of ["#con-paste", "#con-copy"]) {
-        const b = $(id);
-        if (!b) continue;
-        b.disabled = !con.supports.clipboard;
-        if (!con.supports.clipboard) {
-          b.title = "SPICE clipboard needs the guest agent, which spice-html5 does not implement — use Type instead";
-        }
-      }
-      const typeBtn = $("#con-type");
-      if (typeBtn) typeBtn.disabled = !con.supports.type;
-
-      const notes: string[] = [];
-      if (con.supports.preset) notes.push(PRESETS[consolePreset].hint);
-      else notes.push(`${con.kind.toUpperCase()} negotiates its own encoding, so presets do not apply.`);
-      if (!con.supports.clipboard) notes.push("Clipboard is unavailable over SPICE; Type sends key events instead.");
-      const hintEl = $("#con-hint");
-      if (hintEl) hintEl.textContent = notes.join(" ");
-
-      $("#con-cad").onclick = () => con.sendCtrlAltDel();
+      $("#con-cad").onclick = () => void con.sendCtrlAltDel();
 
       // Re-fit when the pane resizes, so the guest stays centred.
       const stage = $("#console-stage");

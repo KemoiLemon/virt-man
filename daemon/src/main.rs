@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod config;
 mod libvirt;
+mod rfb;
 mod tls;
 
 use std::os::unix::fs::PermissionsExt;

@@ -338,9 +338,6 @@ table.grid tr:hover td { background: var(--hover); }
 }
 .console-group { display: flex; align-items: center; gap: 6px; }
 /* The preset picker is a labelled control, but must not stretch. */
-.console-preset { flex-direction: row; align-items: center; gap: 8px; }
-.console-preset > span { white-space: nowrap; }
-.console-preset select, .console-preset .select-trigger { width: auto; min-width: 118px; }
 .console-hint { font-size: 11px; color: var(--dim); padding-bottom: 10px; }
 
 /* The screen is centred in the stage and scaled to the LOCAL viewport; the
@@ -360,16 +357,16 @@ table.grid tr:hover td { background: var(--hover); }
   outline: none;
   border: 1px solid var(--line);
 }
-.console-stage canvas, .console-stage #spice-screen, .console-stage .spice-screen { display: block; }
-/* noVNC wraps its canvas in a div; both must centre rather than stretch. */
-.console-stage > div { margin: auto; }
-.console-stage canvas { margin: auto; }
-/* spice-html5 ships its own .spice-screen rules (min-height 600px, a margin
-   and a grey background) and sets the element's height from the guest
-   surface. Neutralise the decoration but leave the height to the library. */
-.console-stage .spice-screen {
-  min-height: 0; margin: auto; padding: 0; background: transparent;
+/* The viewer owns the canvas' pixel size; margin centres it in the stage. */
+.console-stage canvas { display: block; margin: auto; }
+/* Offer shown instead of a screen when the guest needs a native client. */
+.console-offer {
+  margin: auto; padding: 24px; text-align: center; max-width: 420px;
+  display: flex; flex-direction: column; gap: 12px; align-items: center;
+  color: var(--fg); font-size: 12px;
 }
+.console-offer p { margin: 0; }
+.console-offer .muted { color: var(--dim); }
 .console-msg {
   position: absolute; top: 50%; left: 50%;
   transform: translate(-50%, -50%);

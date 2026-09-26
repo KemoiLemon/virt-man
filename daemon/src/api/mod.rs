@@ -31,6 +31,10 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
+    pub fn not_found(message: impl std::fmt::Display) -> Self {
+        Self::new(StatusCode::NOT_FOUND, message)
+    }
+
     pub fn internal(message: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }

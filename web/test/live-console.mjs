@@ -23,16 +23,6 @@ virtualConsole.on("jsdomError", (e) => {
   }
 });
 virtualConsole.on("error", () => {});
-// spice-html5 logs unimplemented channels/messages very loudly once it
-// connects for real; keep the results readable.
-for (const k of ["log", "warn", "error"]) {
-  const orig = console[k].bind(console);
-  console[k] = (...a) => {
-    const s = a.map(String).join(" ");
-    if (/^(ERROR|WARNING):|Channel type|Unknown message|Connected to ws/.test(s)) return;
-    orig(...a);
-  };
-}
 
 const dom = new JSDOM(
   `<!doctype html><html data-theme="dark"><head><style>${css}</style></head>` +
@@ -47,27 +37,14 @@ window.fetch = (input, init) => {
 };
 // jsdom has no ResizeObserver; the console registers one to re-fit.
 window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-// spice-html5 reaches for `window` from inside WebSocket callbacks. jsdom has
-// no WebSocket, so the page uses Node's global one, whose events fire outside
-// the jsdom realm — publish the globals it needs rather than let it throw.
+// jsdom has no WebSocket, but the viewer no longer needs one: the RFB client
+// lives in the daemon and frames arrive over fetch. Publish the globals the
+// bundle expects when it runs outside a module scope.
 globalThis.window = window;
 globalThis.document = document;
-// jsdom's canvas has no 2D context, so spice-html5 throws the moment its
-// display channel receives the first frame. That happens off our call stack
-// (inside a WebSocket event), so swallow it: reaching the display channel
-// already proves the transport works, and rendering is not assertable here.
-const IGNORABLE = /reading 'save'|getContext|canvas|Permission denied|ErrorEvent/i;
-const ignorable = (e) => IGNORABLE.test(String(e?.message ?? "")) ||
-  IGNORABLE.test(String(e?.error?.message ?? "")) ||
-  (e && typeof e === "object" && e.constructor?.name === "ErrorEvent");
-process.on("uncaughtException", (e) => {
-  if (ignorable(e)) return;
-  // Canvas: jsdom has no 2D context. Permission denied: SPICE only admits
-  // one session at a time, so a re-run while another viewer holds it is
-  // expected. Neither says anything about the code under test.
-  if (/reading 'save'|getContext|canvas|Permission denied/i.test(String(e?.message))) return;
-  throw e;
-});
+// jsdom's canvas has no 2D context, so painting a frame would throw. The
+// viewer's putImageData sits behind an optional call, so it degrades to a
+// no-op here; geometry and controls are still assertable.
 window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
 const tabNamed = (n) => [...document.querySelectorAll(".tabbar .tab")]
@@ -118,84 +95,87 @@ check("zoom controls are present and start fitted", () => {
     "starts fitted to the window");
 });
 
-// jsdom cannot complete the console WebSocket, so the viewer never attaches.
-// That is the "console unavailable" path: the toolbar must stay visible but
-// inert, never silently dead. Interactive zoom/preset behaviour is covered by
-// the unit tests over the same module.
-const connected = !document.querySelector("#con-zoom-in").disabled;
-results.push(["info", connected ? "viewer attached" : "viewer unavailable (jsdom has no WebSocket)"]);
+// The console tab renders one of two things: the canvas viewer for a VNC
+// guest, or a virt-viewer handoff for anything else. Which one depends on the
+// live VM, so detect it rather than assuming.
+const offer = document.querySelector(".console-offer");
+const spice = !!offer;
+results.push(["info", spice
+  ? "guest is not VNC — virt-viewer handoff shown"
+  : "guest is VNC — canvas viewer attached"]);
 
-if (connected) {
-  const label = () => document.querySelector("#con-zoom-reset").textContent.trim();
-  document.querySelector("#con-zoom-in").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await wait(200);
-  check("zooming in leaves fit mode and reports a percentage", () => {
-    assert.match(label(), /^\d+%$/, `zoom label is a percentage (${label()})`);
-  });
-
-  document.querySelector("#con-fit").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await wait(200);
-  check("fit restores automatic scaling", () => {
-    assert.equal(label(), "Fit", "back to fit");
+if (spice) {
+  check("a non-VNC guest is offered virt-viewer instead of a dead screen", () => {
+    const link = document.querySelector("#con-vv");
+    assert.ok(link, "download link present");
+    assert.match(link.getAttribute("href") ?? "", /\/console\/vv$/, "points at the .vv endpoint");
+    assert.ok((link.getAttribute("download") ?? "").endsWith(".vv"), "downloads a .vv file");
+    const hint = document.querySelector("#con-hint")?.textContent ?? "";
+    assert.match(hint, /virt-viewer/i, `explains why: ${hint}`);
   });
 
-  for (let i = 0; i < 30; i++) {
-    document.querySelector("#con-zoom-in").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  }
-  await wait(200);
-  check("zoom clamps at a sane maximum", () => {
-    assert.ok(parseInt(label(), 10) <= 400, `clamped (${label()})`);
-  });
-  for (let i = 0; i < 40; i++) {
-    document.querySelector("#con-zoom-out").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  }
-  await wait(200);
-  check("zoom clamps at a sane minimum", () => {
-    assert.ok(parseInt(label(), 10) >= 25, `clamped (${label()})`);
-  });
-} else {
-  check("an unavailable console disables its controls instead of going dead", () => {
-    for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-preset",
-      "#con-paste", "#con-type", "#con-copy", "#con-cad"]) {
+  check("controls that cannot work are disabled, not left pretending", () => {
+    for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
       assert.equal(document.querySelector(id).disabled, true, `${id} disabled`);
     }
-    const hint = document.querySelector("#con-hint")?.textContent ?? "";
-    assert.match(hint, /unavailable/i, `explains why: ${hint}`);
   });
+} else {
+  const canvas = document.querySelector(".console-stage canvas");
+  const connected = !document.querySelector("#con-zoom-in").disabled;
+
+  if (connected) {
+    check("the viewer paints into a canvas sized to the guest", () => {
+      assert.ok(canvas, "canvas present");
+      assert.ok(canvas.width > 0 && canvas.height > 0,
+        `backing store is guest-sized (${canvas.width}x${canvas.height})`);
+    });
+
+    const label = () => document.querySelector("#con-zoom-reset").textContent.trim();
+    document.querySelector("#con-zoom-in").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await wait(200);
+    check("zooming in leaves fit mode and reports a percentage", () => {
+      assert.match(label(), /^\d+%$/, `zoom label is a percentage (${label()})`);
+    });
+
+    document.querySelector("#con-fit").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await wait(200);
+    check("fit restores automatic scaling", () => {
+      assert.equal(label(), "Fit", "back to fit");
+    });
+
+    for (let i = 0; i < 30; i++) {
+      document.querySelector("#con-zoom-in").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    }
+    await wait(200);
+    check("zoom clamps at a sane maximum", () => {
+      assert.ok(parseInt(label(), 10) <= 400, `clamped (${label()})`);
+    });
+    for (let i = 0; i < 40; i++) {
+      document.querySelector("#con-zoom-out").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    }
+    await wait(200);
+    check("zoom clamps at a sane minimum", () => {
+      assert.ok(parseInt(label(), 10) >= 25, `clamped (${label()})`);
+    });
+  } else {
+    check("an unavailable console disables its controls instead of going dead", () => {
+      for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
+        assert.equal(document.querySelector(id).disabled, true, `${id} disabled`);
+      }
+      const hint = document.querySelector("#con-hint")?.textContent ?? "";
+      assert.match(hint, /unavailable/i, `explains why: ${hint}`);
+    });
+  }
 }
 
-check("performance presets are offered", () => {
-  const sel = document.querySelector("#con-preset");
-  assert.ok(sel, "preset selector present");
-  const values = [...sel.options].map((o) => o.value);
-  assert.deepEqual(values, ["fast", "balanced", "quality"], `presets: ${values}`);
-  assert.equal(sel.value, "balanced", "defaults to balanced");
-  const hint = document.querySelector("#con-hint")?.textContent ?? "";
-  assert.ok(hint.length > 10, `explains the trade-off: ${hint}`);
-});
-
-if (connected) {
-  const sel = document.querySelector("#con-preset");
-  sel.value = "fast";
-  sel.dispatchEvent(new window.Event("change", { bubbles: true }));
-  await wait(300);
-  check("choosing a preset updates the explanation", () => {
-    const hint = document.querySelector("#con-hint")?.textContent ?? "";
-    assert.match(hint, /latency|slow links/i, `hint tracks the preset: ${hint}`);
-  });
-}
-
-check("clipboard controls cover both directions plus typing", () => {
-  assert.ok(document.querySelector("#con-paste"), "paste (host -> guest)");
-  assert.ok(document.querySelector("#con-copy"), "copy (guest -> host)");
-  assert.ok(document.querySelector("#con-type"), "type as key events");
+check("the toolbar offers zoom and Ctrl+Alt+Del, and no dead preset picker", () => {
   assert.ok(document.querySelector("#con-cad"), "Ctrl+Alt+Del");
-});
-
-check("the preset picker uses the themed listbox", () => {
-  const sel = document.querySelector("#con-preset");
-  assert.equal(window.getComputedStyle(sel).display, "none", "native select hidden");
-  assert.ok(sel.nextElementSibling?.classList.contains("select-trigger"), "themed trigger");
+  assert.ok(document.querySelector("#con-fit"), "fit");
+  // The noVNC preset/clipboard controls are gone with the library itself;
+  // leaving them behind would advertise features nothing implements.
+  for (const id of ["#con-preset", "#con-paste", "#con-copy", "#con-type"]) {
+    assert.equal(document.querySelector(id), null, `${id} removed`);
+  }
 });
 
 // Leaving the console must tear the session down.

@@ -151,17 +151,6 @@ pub fn http_client(conn: &Connection) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("build pinned client: {e}"))
 }
 
-/// WebSocket connector for tokio-tungstenite: rustls pinned to the daemon's
-/// cert for wss, plain for ws.
-pub fn ws_connector(conn: &Connection) -> Result<tokio_tungstenite::Connector, String> {
-    if conn.url.starts_with("http://") || conn.url.starts_with("ws://") {
-        return Ok(tokio_tungstenite::Connector::Plain);
-    }
-    Ok(tokio_tungstenite::Connector::Rustls(Arc::new(
-        pinned_config(conn)?,
-    )))
-}
-
 /// rustls verifier that accepts anything. Used only to *read* the peer cert
 /// during first contact; the real connection uses the pinned cert.
 #[derive(Debug)]
