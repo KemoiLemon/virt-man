@@ -81,14 +81,14 @@
   background: var(--line); border: 1px solid var(--line);
 }
 .fw-policy-chip {
-  display: flex; flex-direction: column; justify-content: center; gap: 3px;
+  display: flex; flex-direction: column; justify-content: center; gap: 4px;
   background: var(--panel); padding: 9px 10px; min-width: 0;
 }
-.fw-policy-chip > span.ico, .fw-policy-chip > span:first-child {
-  width: 15px; height: 15px; color: var(--dim);
-}
 .fw-policy-chip b { font-size: 10px; letter-spacing: .9px; color: var(--dim); font-weight: 500; }
-.fw-policy-chip i { font-style: normal; font-size: 13px; font-weight: 600; }
+/* Icon sits inline beside the action value, not above the label. */
+.fw-policy-val { display: flex; align-items: center; gap: 6px; }
+.fw-policy-val > span { width: 15px; height: 15px; color: var(--dim); }
+.fw-policy-val i { font-style: normal; font-size: 13px; font-weight: 600; }
 .fw-policy-chip.ok { box-shadow: inset 0 2px 0 var(--ok); }
 .fw-policy-chip.warn { box-shadow: inset 0 2px 0 var(--warn); }
 .fw-policy-chip.bad { box-shadow: inset 0 2px 0 var(--bad); }

@@ -2586,7 +2586,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           ].map(([k, v, ico]) => {
             const action = v as FirewallPolicy["in"];
             const cls = action === "accept" ? "ok" : action === "reject" ? "warn" : "bad";
-            return `<div class="fw-policy-chip ${cls}"><span>${ico}</span><b>${esc(k)}</b><i>${esc(capLabel(action))}</i></div>`;
+            return `<div class="fw-policy-chip ${cls}"><b>${esc(k)}</b><div class="fw-policy-val"><span>${ico}</span><i>${esc(capLabel(action))}</i></div></div>`;
           }).join("")}
         </div>
         <div class="metric-foot">
