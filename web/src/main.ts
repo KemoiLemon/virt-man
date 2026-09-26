@@ -1229,8 +1229,8 @@ setHtml(content, `
       <button class="tab ${connTab === "firewall" ? "active" : ""}" data-tab="firewall">${ic.firewall(14)} Firewall</button>
       <div class="tabbar-actions">
         ${connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
-        ${connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create network</button>` : ""}
-        ${connTab === "storage" ? `<button class="btn primary" id="create-pool">${ic.plus(14)} Create pool</button>` : ""}
+        ${connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create Network</button>` : ""}
+        ${connTab === "storage" ? `<button class="btn primary" id="create-pool">${ic.plus(14)} Create Pool</button>` : ""}
       </div>
     </div>
     <div id="conn-body"></div>`);
@@ -1528,7 +1528,7 @@ async function loadNetworks() {
     const createCard = `
       <button class="storage-card net-card net-create-card" id="net-create-card">
         <span class="storage-card-icon">${ic.plus()}</span>
-        <span class="storage-card-title">Create network</span>
+        <span class="storage-card-title">Create Network</span>
       </button>`;
     setHtml(list, nets.map((n) => `
       <div class="storage-card net-card ${n.active ? "ok" : ""}">
