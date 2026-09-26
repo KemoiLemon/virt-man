@@ -105,25 +105,88 @@ export interface NetworkForm {
   dhcp_end: string;
 }
 
-export function networkXml(f: NetworkForm): string {
+/** Optional uuid from an existing definition, preserved so editing/renaming
+ *  updates the network in place instead of defining a duplicate. */
+export function networkXml(f: NetworkForm, uuid = ""): string {
   const name = esc(f.name);
-  const forward = f.forward === "nat" ? `<forward mode="nat"><nat><port start="1024" end="65535"/></nat></forward>`
-    : f.forward === "bridge" ? `<forward mode="bridge"/>`
-    : "";
-  const bridge = f.bridge ? `<bridge name="${esc(f.bridge)}"/>` : "";
+  const id = uuid ? `<uuid>${esc(uuid)}</uuid>` : "";
+  let forward = "";
+  if (f.forward === "nat") {
+    forward = `<forward mode="nat"><nat><port start="1024" end="65535"/></nat></forward>`;
+  } else if (f.forward === "bridge") {
+    forward = `<forward mode="bridge"/>`;
+  }
+  // Only a bridge-mode network attaches to a host bridge device.
+  const bridge = f.forward === "bridge" && f.bridge ? `<bridge name="${esc(f.bridge)}"/>` : "";
+  // NAT and isolated networks may carry their own subnet; a bridge network
+  // takes its addressing from the bridge and must not define <ip>.
   let ip = "";
-  if (f.ip) {
+  if (f.forward !== "bridge" && f.ip) {
+    const address = f.ip.split("/")[0];
     const range = f.dhcp_start && f.dhcp_end
       ? `<dhcp><range start="${esc(f.dhcp_start)}" end="${esc(f.dhcp_end)}"/></dhcp>`
       : "";
-    ip = `<ip address="${esc(f.ip.split("/")[0])}" netmask="${esc(netmask(f.ip))}">${range}</ip>`;
+    ip = `<ip address="${esc(address)}" netmask="${esc(netmask(f.ip))}">${range}</ip>`;
   }
   return `<network>
   <name>${name}</name>
+  ${id}
   ${forward}
   ${bridge}
   ${ip}
 </network>`;
+}
+
+/// Parse a network's XML back into form fields, so the edit dialog can start
+/// from the live definition instead of a blank form. Missing bits read empty.
+/// Only attribute-free leaf tags (<name>, <bridge>, <uuid>) go through here;
+/// <ip> carries attributes and is read directly in networkFormFromXml.
+function tag(xml: string, name: string): string {
+  const open = `<${name}>`;
+  const close = `</${name}>`;
+  const i = xml.indexOf(open);
+  if (i < 0) return "";
+  const j = xml.indexOf(close, i + open.length);
+  if (j < 0) return "";
+  return xml.slice(i + open.length, j);
+}
+
+export function networkFormFromXml(xml: string): NetworkForm {
+  const forwardMatch = /<forward mode="([^"]+)"/.exec(xml);
+  const forward = (forwardMatch?.[1] ?? "none") as NetworkForm["forward"];
+  const ipMatch = /<ip[^>]*address="([^"]+)"/.exec(xml);
+  const netmaskMatch = /<ip[^>]*netmask="([^"]+)"/.exec(xml);
+  const range = /<range start="([^"]+)" end="([^"]+)"/.exec(xml);
+  let cidr = ipMatch?.[1] ?? "";
+  // The <ip> tag carries only the address; rebuild the CIDR from its netmask
+  // so the field round-trips through the same netmask() path.
+  if (cidr && netmaskMatch) {
+    cidr = `${cidr}/${netmaskBits(netmaskMatch[1])}`;
+  }
+  return {
+    name: tag(xml, "name"),
+    forward,
+    bridge: tag(xml, "bridge"),
+    ip: cidr,
+    dhcp_start: range?.[1] ?? "",
+    dhcp_end: range?.[2] ?? "",
+  };
+}
+
+export function networkUuid(xml: string): string {
+  return tag(xml, "uuid");
+}
+
+function netmaskBits(mask: string): number {
+  return mask.split(".").reduce((bits, octet) => {
+    const n = parseInt(octet, 10);
+    let ones = 0;
+    for (let b = 7; b >= 0; b--) {
+      if (n & (1 << b)) ones++;
+      else break;
+    }
+    return bits + ones;
+  }, 0);
 }
 
 function netmask(cidr: string): string {

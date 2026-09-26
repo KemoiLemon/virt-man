@@ -155,3 +155,21 @@ test("keyboard opens the popover from the trigger", () => {
   trigger.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   assert.equal(document.querySelector(".select-popover").hidden, false, "Enter opens");
 });
+
+test("scrolling the popover itself does not close it", () => {
+  // The capture scroll listener used to close on ANY scroll, including the
+  // popover's own overflow-y:auto, so trying to scroll a long dropdown
+  // dismissed it. A scroll event from inside .select-popover must be ignored.
+  makeSelect([["a", "A"], ["b", "B"]], "a");
+  listbox.enhanceSelects(document);
+  document.querySelector(".select-trigger").click();
+  const pop = document.querySelector(".select-popover");
+  assert.equal(pop.hidden, false, "popover open");
+
+  pop.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+  assert.equal(pop.hidden, false, "popover stays open when it scrolls");
+
+  // A scroll elsewhere (a background pane) still closes it.
+  document.body.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+  assert.equal(pop.hidden, true, "background scroll closes the popover");
+});

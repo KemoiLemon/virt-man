@@ -41,7 +41,20 @@ export const api = {
       headers: { "Content-Type": contentType },
       body: body as BodyInit,
     }).then(handle<T>),
+  // Raw XML body: the daemon's define/create endpoints read a bare String, so
+  // JSON-stringifying would wrap the XML in quotes and libvirt rejects it.
+  postXml: <T = unknown>(url: string, xml: string) => sendXml<T>("POST", url, xml),
+  putXml: <T = unknown>(url: string, xml: string) => sendXml<T>("PUT", url, xml),
 };
+
+function sendXml<T>(method: string, url: string, xml: string): Promise<T> {
+  return fetch(url, {
+    method,
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/xml" },
+    body: xml,
+  }).then(handle<T>);
+}
 
 // ---------------------------------------------------------------- types
 
@@ -109,6 +122,7 @@ export interface NetworkSummary {
   bridge: string;
   active: boolean;
   persistent: boolean;
+  autostart: boolean;
 }
 
 export interface PoolSummary {

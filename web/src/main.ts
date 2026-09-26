@@ -11,7 +11,7 @@ import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addSample, fmtBytes, pct, sparkline } from "./stats";
 import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
-import { domainXml, esc, networkXml, poolXml, volumeXml } from "./xml";
+import { domainXml, esc, networkFormFromXml, networkUuid, networkXml, poolXml, volumeXml } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
 /// Single HTML injection point. Every template's dynamic parts are escaped via
@@ -1520,13 +1520,37 @@ async function loadNetworks() {
     const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
     const list = $("#nets-list");
     if (!list) return;
-setHtml(list, `<table class="grid">
-      <tr><th>Name</th><th>Bridge</th><th>State</th><th></th></tr>
-      ${nets.map((n) => `
-        <tr><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
-        <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td>
-        <td><button class="btn danger icon" data-delnet="${esc(n.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
-    </table>`);
+    setHtml(list, nets.map((n) => `
+      <div class="storage-card ${n.active ? "ok" : ""}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.network()}</span>
+          <span class="storage-card-title">${esc(n.name)}</span>
+          <span class="badge ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span>
+        </div>
+        <div class="specs">
+          <div class="spec"><b>Bridge</b><span>${esc(n.bridge || "—")}</span></div>
+          <div class="spec"><b>Autostart</b><span>${n.autostart ? "yes" : "no"}</span></div>
+        </div>
+        <div class="storage-card-actions">
+          <button class="btn" data-net-start="${esc(n.name)}" ${n.active ? "disabled" : ""}>${ic.start(14)} Start</button>
+          <button class="btn" data-net-stop="${esc(n.name)}" ${n.active ? "" : "disabled"}>${ic.stop(14)} Stop</button>
+          <button class="btn" data-net-autostart="${esc(n.name)}">${n.autostart ? "Autostart off" : "Autostart on"}</button>
+          <button class="btn" data-net-edit="${esc(n.name)}">${ic.edit(14)} Edit</button>
+          <button class="btn danger icon" data-delnet="${esc(n.name)}">${ic.trash()}</button>
+        </div>
+      </div>`).join("") || `<div class="empty">No networks.</div>`);
+    list.querySelectorAll("[data-net-start]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => netAction("start", (b as HTMLElement).dataset.netStart!);
+    });
+    list.querySelectorAll("[data-net-stop]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => netAction("stop", (b as HTMLElement).dataset.netStop!);
+    });
+    list.querySelectorAll("[data-net-autostart]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => toggleAutostart((b as HTMLElement).dataset.netAutostart!);
+    });
+    list.querySelectorAll("[data-net-edit]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => openEditNetwork((b as HTMLElement).dataset.netEdit!);
+    });
     list.querySelectorAll("[data-delnet]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => deleteNetwork((b as HTMLElement).dataset.delnet!);
     });
@@ -1534,6 +1558,131 @@ setHtml(list, `<table class="grid">
     const list = $("#nets-list");
     if (list) setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
+}
+
+async function netAction(action: "start" | "stop", name: string) {
+  if (!selectedConn) return;
+  try {
+    await api.post(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/${action}`);
+    await loadNetworks();
+  } catch (e) {
+    toast((e as Error).message, "bad");
+  }
+}
+
+async function toggleAutostart(name: string) {
+  if (!selectedConn) return;
+  const net = (await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`))
+    .find((n) => n.name === name);
+  if (!net) return;
+  try {
+    await api.post(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/autostart`,
+      { autostart: !net.autostart });
+    await loadNetworks();
+  } catch (e) {
+    toast((e as Error).message, "bad");
+  }
+}
+
+async function openEditNetwork(name: string) {
+  if (!selectedConn) return;
+  let xml = "";
+  try {
+    xml = (await api.get<{ xml: string }>(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/xml`)).xml;
+  } catch (e) {
+    return toast((e as Error).message, "bad");
+  }
+  openNetworkForm(networkFormFromXml(xml), networkUuid(xml));
+}
+
+function openCreateNetwork() {
+  openNetworkForm(
+    { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "" },
+    "",
+  );
+}
+
+/// One network form for create and edit. Fields appear and disappear with the
+/// forward mode: bridge mode offers a bridge picker and no IP/DHCP (the bridge
+/// owns addressing); NAT and isolated offer IP/DHCP and no bridge.
+function openNetworkForm(initial: NetworkForm, uuid: string) {
+  if (!selectedConn) return;
+  const el = openModal(
+    uuid ? `Edit network — ${esc(initial.name)}` : "Create network",
+    `<div class="grid2">
+      <label class="field"><span>Name</span><input id="net-name" value="${esc(initial.name)}"></label>
+      <label class="field"><span>Mode</span><select id="net-mode">
+        <option value="nat" ${initial.forward === "nat" ? "selected" : ""}>NAT</option>
+        <option value="bridge" ${initial.forward === "bridge" ? "selected" : ""}>Bridge</option>
+        <option value="none" ${initial.forward === "none" ? "selected" : ""}>Isolated</option>
+      </select></label>
+      <label class="field" data-net-field="bridge"><span>Bridge</span><select id="net-bridge">
+        <option value="">Select a bridge…</option>
+        ${initial.bridge ? `<option value="${esc(initial.bridge)}" selected>${esc(initial.bridge)}</option>` : ""}
+      </select></label>
+      <label class="field" data-net-field="ip"><span>Network (CIDR, optional)</span><input id="net-ip" placeholder="192.168.100.1/24" value="${esc(initial.ip)}"></label>
+      <label class="field" data-net-field="dhcp-start"><span>DHCP start</span><input id="net-dhcp-start" placeholder="192.168.100.10" value="${esc(initial.dhcp_start)}"></label>
+      <label class="field" data-net-field="dhcp-end"><span>DHCP end</span><input id="net-dhcp-end" placeholder="192.168.100.200" value="${esc(initial.dhcp_end)}"></label>
+    </div>`,
+    `<button class="btn primary" id="net-save">${uuid ? "Save" : "Create"}</button>`,
+  );
+
+  const mode = () => ($("#net-mode", el) as HTMLSelectElement).value as NetworkForm["forward"];
+  const sync = () => {
+    const m = mode();
+    el.querySelectorAll("[data-net-field]").forEach((f: Element) => {
+      const field = (f as HTMLElement).dataset.netField!;
+      const show = m === "bridge" ? field === "bridge" : field !== "bridge";
+      (f as HTMLElement).hidden = !show;
+    });
+  };
+  $("#net-mode", el).addEventListener("change", sync);
+
+  // Bridge mode picks from the host's real bridge devices.
+  const bridgeSelect = $("#net-bridge", el) as HTMLSelectElement;
+  api.get<string[]>(`/proxy/${selectedConn}/networks/bridges`)
+    .then((bridges) => {
+      const current = initial.bridge;
+      bridgeSelect.replaceChildren();
+      const ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = "Select a bridge…";
+      bridgeSelect.append(ph);
+      for (const b of bridges) {
+        const o = document.createElement("option");
+        o.value = b;
+        o.textContent = b;
+        o.selected = b === current;
+        bridgeSelect.append(o);
+      }
+      enhanceSelects(bridgeSelect);
+    })
+    .catch(() => {}); // no bridges: the picker shows just the placeholder
+
+  $("#net-save", el).onclick = async () => {
+    const form: NetworkForm = {
+      name: $("#net-name", el).value,
+      forward: mode(),
+      bridge: (bridgeSelect as HTMLSelectElement).value,
+      ip: $("#net-ip", el).value,
+      dhcp_start: $("#net-dhcp-start", el).value,
+      dhcp_end: $("#net-dhcp-end", el).value,
+    };
+    if (!form.name) return toast("Name is required", "bad");
+    if (form.forward === "bridge" && !form.bridge) {
+      return toast("Select a bridge", "bad");
+    }
+    el.remove();
+    const xml = networkXml(form, uuid);
+    runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
+      if (uuid) await api.putXml(`/proxy/${selectedConn}/networks/${encodeURIComponent(initial.name)}/xml`, xml);
+      else await api.postXml(`/proxy/${selectedConn}/networks`, xml);
+    });
+    toast(`${uuid ? "Update" : "Creation"} started`);
+    setTimeout(() => void renderConn(), 600);
+  };
+
+  sync();
 }
 
 async function loadPools() {
@@ -1856,7 +2005,7 @@ async function renderVmBody(vm: string) {
           next = next.replace(/(<name>[^<]*<\/name>)/, `$1\n${meta}`);
         }
         runTask(`Update options for ${target}`, async () => {
-          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(target)}/xml`, next);
+          await api.putXml(`/proxy/${selectedConn}/domains/${encodeURIComponent(target)}/xml`, next);
         });
         toast("Options update started");
       });
@@ -2689,7 +2838,7 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`)
           .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
         set("defining domain");
-        await api.put(`/proxy/${conn}/domains/${encodeURIComponent(target)}/xml`,
+        await api.putXml(`/proxy/${conn}/domains/${encodeURIComponent(target)}/xml`,
           withDevices(stripped, devices));
         await refreshTreeVms();
       });
@@ -2722,7 +2871,7 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
         xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }),
       });
       set("defining domain");
-      await api.post(`/proxy/${conn}/domains?start=true`, withDevices(domainXml(form), devices));
+      await api.postXml(`/proxy/${conn}/domains?start=true`, withDevices(domainXml(form), devices));
     });
     toast("VM creation started");
     renderConn();
@@ -2734,41 +2883,6 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
 /// Back-compat entry point used by the VMs tab button.
 function openCreateVm() {
   void openHardwareEditor();
-}
-
-function openCreateNetwork() {
-  if (!selectedConn) return;
-  const el = openModal(
-    "Create network",
-    `<div class="grid2">
-      <label class="field"><span>Name</span><input id="net-name"></label>
-      <label class="field"><span>Mode</span><select id="net-mode">
-        <option value="nat">NAT</option><option value="bridge">Bridge</option><option value="none">Isolated</option>
-      </select></label>
-      <label class="field"><span>Bridge (bridge mode)</span><input id="net-bridge" placeholder="br0"></label>
-      <label class="field"><span>Network (CIDR, optional)</span><input id="net-ip" placeholder="192.168.100.1/24"></label>
-      <label class="field"><span>DHCP start</span><input id="net-dhcp-start" placeholder="192.168.100.10"></label>
-      <label class="field"><span>DHCP end</span><input id="net-dhcp-end" placeholder="192.168.100.200"></label>
-    </div>`,
-    `<button class="btn primary" id="net-create">Create</button>`,
-  );
-  $("#net-create", el).onclick = async () => {
-    const form: NetworkForm = {
-      name: $("#net-name", el).value,
-      forward: ($("#net-mode", el) as HTMLSelectElement).value as NetworkForm["forward"],
-      bridge: $("#net-bridge", el).value,
-      ip: $("#net-ip", el).value,
-      dhcp_start: $("#net-dhcp-start", el).value,
-      dhcp_end: $("#net-dhcp-end", el).value,
-    };
-    if (!form.name) return toast("Name is required", "bad");
-    el.remove();
-    runTask(`Create network ${form.name}`, async () => {
-      await api.post(`/proxy/${selectedConn}/networks`, { xml: networkXml(form) });
-    });
-    toast("Network creation started");
-    renderConn();
-  };
 }
 
 function openCreatePool() {
@@ -2796,7 +2910,7 @@ function openCreatePool() {
     if (!form.name || !form.target) return toast("Name and target are required", "bad");
     el.remove();
     runTask(`Create pool ${form.name}`, async () => {
-      await api.post(`/proxy/${selectedConn}/pools`, { xml: poolXml(form) });
+      await api.postXml(`/proxy/${selectedConn}/pools`, poolXml(form));
     });
     toast("Pool creation started");
     renderConn();

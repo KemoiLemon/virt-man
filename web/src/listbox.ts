@@ -175,6 +175,11 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeSelect();
 });
-// A scrolling pane would leave the fixed popover stranded.
+// A scrolling pane would leave the fixed popover stranded — but scrolling the
+// popover itself (it is overflow-y:auto) must NOT close it, or the dropdown
+// vanishes the moment the user tries to scroll its options.
 window.addEventListener("resize", closeSelect);
-document.addEventListener("scroll", closeSelect, true);
+document.addEventListener("scroll", (e) => {
+  if ((e.target as Element)?.closest?.(".select-popover")) return;
+  closeSelect();
+}, true);
