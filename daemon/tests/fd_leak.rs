@@ -12,7 +12,9 @@
 use std::fs;
 
 fn open_fds() -> usize {
-    fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+    fs::read_dir("/proc/self/fd")
+        .map(|d| d.count())
+        .unwrap_or(0)
 }
 
 /// Open and close many connections the way `with_conn` does; the fd count
