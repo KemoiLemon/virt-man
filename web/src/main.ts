@@ -1,6 +1,6 @@
 import { openCropDialog } from "./crop";
 import { api } from "./api";
-import type { Connection, CreateConnectionResult, DomainSummary, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
+import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallRule, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -1394,75 +1394,177 @@ async function loadDashboard() {
   }
 }
 
-/// Host-wide libvirt nwfilters, and which guests reference them.
+/// Per-network firewall editor: rules and NAT port forwards, enforced by the
+/// daemon via nftables. Replaces the old host-wide nwfilter preset list.
 async function loadFilters() {
   if (!selectedConn) return;
   const list = $("#filters-list");
   if (!list) return;
   try {
-    const filters = await api.get<{ name: string; uuid: string }[]>(
-      `/proxy/${selectedConn}/filters`);
-    // Which guests use which filter, so the table is actionable rather than
-    // just a catalogue.
-    const vms = treeVms[selectedConn] ?? [];
-    // Read each guest's filters, then fold the results in afterwards: the map
-    // callback returns its data instead of mutating shared state.
-    const perVm = await Promise.all(vms.map(async (v) => {
-      try {
-        const fw = await api.get<{ interfaces: { filter: string | null }[] }>(
-          `/proxy/${selectedConn}/domains/${encodeURIComponent(v.name)}/firewall`);
-        return { vm: v.name, filters: fw.interfaces.map((i) => i.filter) };
-      } catch {
-        // A guest that cannot be read simply contributes no usage.
-        return { vm: v.name, filters: [] as (string | null)[] };
-      }
-    }));
-    const usage: Record<string, string[]> = {};
-    for (const { vm: name, filters: fs } of perVm) {
-      for (const f of fs) {
-        if (f) (usage[f] ??= []).push(name);
-      }
-    }
-
+    const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
     setHtml(list, `
-      <div class="hw-note" style="margin-bottom:14px">Network filters are defined on the
-        host and attached to a guest from its Firewall tab.</div>
+      <div class="hw-note" style="margin-bottom:14px">Firewall rules and NAT port
+        forwards are defined per network and enforced on the daemon host. Rules
+        apply to routed traffic; port forwards rewrite a WAN destination to an
+        internal address.</div>
       <table class="grid">
-        <tr><th>Filter</th><th>Used by</th><th class="col-actions"></th></tr>
-        ${filters.map((f) => `
+        <tr><th>Network</th><th>Type</th><th>Subnet</th><th class="col-actions"></th></tr>
+        ${nets.map((n) => `
           <tr>
-            <td>${esc(f.name)}</td>
-            <td>${usage[f.name]?.length
-              ? `<span class="state on">${esc(usage[f.name].join(", "))}</span>`
-              : `<span class="state">—</span>`}</td>
+            <td class="tname">${esc(n.name)}</td>
+            <td>${esc(n.forward === "bridge" ? "Bridge" : n.forward === "nat" ? "NAT" : "Isolated")}</td>
+            <td>${n.ip ? esc(n.ip) : "—"}</td>
             <td class="col-actions">
               <div class="row-actions">
-                <button class="btn icon" data-fxml="${esc(f.name)}" title="View XML">${ic.xml()}</button>
+                <button class="btn" data-fwedit="${esc(n.name)}">${ic.firewall(14)} Rules</button>
               </div>
             </td>
-          </tr>`).join("") || `<tr><td colspan="3" class="empty">No filters defined.</td></tr>`}
+          </tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>`);
-
-    list.querySelectorAll("[data-fxml]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = async () => {
-        const name = (b as HTMLElement).dataset.fxml!;
-        try {
-          const { xml } = await api.get<{ xml: string }>(
-            `/proxy/${selectedConn}/filters/${encodeURIComponent(name)}/xml`);
-          // Wire the close handler in JS: an inline onclick would be blocked
-          // by the desktop app's CSP.
-          const modal = openModal(`Filter — ${esc(name)}`,
-            `<div class="cmd">${esc(xml)}</div>`,
-            `<button class="btn" id="fxml-close">Close</button>`);
-          $("#fxml-close", modal).onclick = () => modal.remove();
-        } catch (e) {
-          toast((e as Error).message, "bad");
-        }
-      };
+    list.querySelectorAll("[data-fwedit]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => openFirewallEditor((b as HTMLElement).dataset.fwedit!);
     });
   } catch (e) {
     setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
+}
+
+/// Rules + port-forward editor for one network.
+function openFirewallEditor(netName: string) {
+  if (!selectedConn) return;
+  let rules: FirewallRule[] = [];
+  let forwards: FirewallForward[] = [];
+
+  const el = openModal(
+    `Firewall — ${esc(netName)}`,
+    `<div id="fw-body">loading…</div>`,
+    `<button class="btn" id="fw-cancel">Cancel</button>
+     <button class="btn primary" id="fw-save">Apply</button>`,
+  );
+  el.querySelector(".modal")?.classList.add("wide");
+
+  const opt = (list: string[], sel: string) =>
+    list.map((v) => `<option value="${v}" ${v === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
+
+  const ruleRow = (r: FirewallRule) => `
+    <tr>
+      <td><select data-r-dir>${opt(["in", "out", "forward"], r.direction)}</select></td>
+      <td><select data-r-action>${opt(["accept", "drop", "reject"], r.action)}</select></td>
+      <td><select data-r-proto>${opt(["tcp", "udp", "icmp", "any"], r.proto)}</select></td>
+      <td><input data-r-src placeholder="any" value="${esc(r.src_ip)}"></td>
+      <td><input data-r-dst placeholder="any" value="${esc(r.dst_ip)}"></td>
+      <td><input data-r-sport placeholder="any" value="${esc(r.src_port)}"></td>
+      <td><input data-r-dport placeholder="any" value="${esc(r.dst_port)}"></td>
+      <td><button class="btn danger icon" data-r-del title="Remove">${ic.trash()}</button></td>
+    </tr>`;
+
+  const fwdRow = (f: FirewallForward) => `
+    <tr>
+      <td><input data-f-wanip placeholder="0.0.0.0 = any" value="${f.wan_ip === "0.0.0.0" ? "" : esc(f.wan_ip)}"></td>
+      <td><select data-f-proto>${opt(["tcp", "udp"], f.proto)}</select></td>
+      <td><input data-f-wstart type="number" min="1" max="65535" value="${f.wan_start}"></td>
+      <td><input data-f-wend type="number" min="1" max="65535" value="${f.wan_end}"></td>
+      <td><input data-f-lanip placeholder="192.168.x.x" value="${esc(f.lan_ip)}"></td>
+      <td><input data-f-lstart type="number" min="1" max="65535" value="${f.lan_start}"></td>
+      <td><input data-f-lend type="number" min="1" max="65535" value="${f.lan_end}"></td>
+      <td><button class="btn danger icon" data-f-del title="Remove">${ic.trash()}</button></td>
+    </tr>`;
+
+  // Capture the current DOM rows back into the working copies, so add/remove
+  // (which re-render) never discard in-progress field edits.
+  function read() {
+    // Walk up from the per-row inputs so the header row is never included.
+    const rows = [...el.querySelectorAll("#fw-body [data-r-dir]")]
+      .map((s) => (s as HTMLElement).closest("tr")!);
+    rules = rows.map((tr) => ({
+      direction: (tr.querySelector("[data-r-dir]") as HTMLSelectElement).value as FirewallRule["direction"],
+      action: (tr.querySelector("[data-r-action]") as HTMLSelectElement).value as FirewallRule["action"],
+      proto: (tr.querySelector("[data-r-proto]") as HTMLSelectElement).value as FirewallRule["proto"],
+      src_ip: (tr.querySelector("[data-r-src]") as HTMLInputElement).value,
+      dst_ip: (tr.querySelector("[data-r-dst]") as HTMLInputElement).value,
+      src_port: (tr.querySelector("[data-r-sport]") as HTMLInputElement).value,
+      dst_port: (tr.querySelector("[data-r-dport]") as HTMLInputElement).value,
+    }));
+    const frows = [...el.querySelectorAll("#fw-body [data-f-lanip]")]
+      .map((s) => (s as HTMLElement).closest("tr")!);
+    forwards = frows.map((tr) => ({
+      proto: (tr.querySelector("[data-f-proto]") as HTMLSelectElement).value as FirewallForward["proto"],
+      wan_ip: (tr.querySelector("[data-f-wanip]") as HTMLInputElement).value || "0.0.0.0",
+      wan_start: +(tr.querySelector("[data-f-wstart]") as HTMLInputElement).value,
+      wan_end: +(tr.querySelector("[data-f-wend]") as HTMLInputElement).value,
+      lan_ip: (tr.querySelector("[data-f-lanip]") as HTMLInputElement).value,
+      lan_start: +(tr.querySelector("[data-f-lstart]") as HTMLInputElement).value,
+      lan_end: +(tr.querySelector("[data-f-lend]") as HTMLInputElement).value,
+    }));
+  }
+
+  function render() {
+    setHtml($("#fw-body", el), `
+      <div class="section-title">Rules</div>
+      <table class="grid">
+        <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
+        ${rules.map(ruleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
+      </table>
+      <div class="actions"><button class="btn" id="fw-add-rule">${ic.plus(14)} Add rule</button></div>
+
+      <div class="section-title" style="margin-top:18px">NAT port forwards</div>
+      <table class="grid">
+        <tr><th>WAN</th><th>Proto</th><th>WAN start</th><th>WAN end</th><th>Internal IP</th><th>Start</th><th>End</th><th></th></tr>
+        ${forwards.map(fwdRow).join("") || `<tr><td colspan="8" class="empty">No port forwards.</td></tr>`}
+      </table>
+      <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>
+      <div class="hw-note">WAN <code>0.0.0.0</code> forwards on every address except the guest subnet; set a specific WAN IP to forward only that address.</div>`);
+
+    $("#fw-add-rule", el).onclick = () => {
+      read();
+      rules.push({ direction: "in", action: "accept", proto: "any", src_ip: "", dst_ip: "", src_port: "", dst_port: "" });
+      render();
+    };
+    $("#fw-add-fwd", el).onclick = () => {
+      read();
+      forwards.push({ wan_ip: "0.0.0.0", wan_start: 1, wan_end: 1, lan_ip: "", lan_start: 1, lan_end: 1, proto: "tcp" });
+      render();
+    };
+    el.querySelectorAll("[data-r-del]").forEach((b) => {
+      (b as HTMLElement).onclick = () => {
+        read();
+        const tr = (b as HTMLElement).closest("tr")!;
+        rules.splice([...tr.parentElement!.children].indexOf(tr), 1);
+        render();
+      };
+    });
+    el.querySelectorAll("[data-f-del]").forEach((b) => {
+      (b as HTMLElement).onclick = () => {
+        read();
+        const tr = (b as HTMLElement).closest("tr")!;
+        forwards.splice([...tr.parentElement!.children].indexOf(tr), 1);
+        render();
+      };
+    });
+  }
+
+  // Load the persisted rules, then bind inputs to the working copies on save.
+  api.get<{ rules: FirewallRule[]; forwards: FirewallForward[] }>(
+    `/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`)
+    .then((fw) => {
+      rules = fw.rules ?? [];
+      forwards = fw.forwards ?? [];
+      render();
+    })
+    .catch((e) => toast((e as Error).message, "bad"));
+
+  $("#fw-cancel", el).onclick = () => el.remove();
+  $("#fw-save", el).onclick = async () => {
+    read();
+    try {
+      await api.put(`/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`,
+        { rules, forwards });
+      toast("Firewall applied");
+      el.remove();
+    } catch (e) {
+      toast((e as Error).message, "bad");
+    }
+  };
 }
 
 async function loadVms() {

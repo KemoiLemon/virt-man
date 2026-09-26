@@ -1,6 +1,7 @@
 pub mod console;
 pub mod domains;
 pub mod filters;
+pub mod firewall;
 pub mod health;
 pub mod host;
 pub mod networks;
@@ -56,6 +57,7 @@ pub fn build(auth: Auth) -> Router {
         .merge(filters::routes())
         .merge(pools::routes())
         .merge(volumes::routes())
+        .merge(firewall::routes(firewall::FirewallState::new()))
         .layer(middleware::from_fn(crate::auth::require_token));
 
     // console authenticates via ?token= (browsers can't set WS headers), so it

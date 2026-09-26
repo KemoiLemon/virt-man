@@ -126,26 +126,24 @@ check("start/stop and autostart highlights follow their state", () => {
 tabNamed("Firewall")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1800);
 
-check("daemon Firewall tab lists host nwfilters", () => {
+check("daemon Firewall tab lists networks with a rules action", () => {
   const active = document.querySelector(".tabbar .tab.active")?.textContent.trim();
   assert.equal(active, "Firewall", "Firewall tab active");
-  const rows = [...document.querySelectorAll("[data-fxml]")];
-  assert.ok(rows.length > 5, `${rows.length} filters listed (host defines ~24)`);
-  results.push(["info", `host filters listed: ${rows.length}`]);
+  const rows = [...document.querySelectorAll("[data-fwedit]")];
+  assert.ok(rows.length > 0, `${rows.length} network(s) listed`);
+  assert.ok(document.querySelector("[data-fwedit]"), "Rules action present per network");
 });
 
-check("each filter row can show its XML", () => {
-  assert.ok(document.querySelector("[data-fxml]"), "XML action present");
-});
-
-document.querySelector("[data-fxml]")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+// Open the first network's firewall editor.
+document.querySelector("[data-fwedit]")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1200);
-check("filter XML opens in a themed modal", () => {
+check("firewall editor opens with rules and port-forward tables", () => {
   const modal = document.querySelector(".modal-back.open");
   assert.ok(modal, "modal opened");
-  const body = modal.querySelector(".cmd")?.textContent ?? "";
-  assert.match(body, /<filter/, `shows filter XML (got: ${body.slice(0, 60)})`);
-  assert.ok(modal.querySelector("#fxml-close"), "close button is wired in JS, not inline");
+  assert.ok(modal.querySelector("#fw-add-rule"), "add-rule action");
+  assert.ok(modal.querySelector("#fw-add-fwd"), "add-forward action");
+  assert.ok(modal.querySelector("#fw-save"), "apply action");
+  assert.match(modal.textContent ?? "", /NAT port forwards/);
   modal.remove();
 });
 

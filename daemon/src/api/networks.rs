@@ -66,6 +66,12 @@ fn forward_mode(xml: &str) -> &str {
 }
 
 /// The first `<ip>` element's subnet, as `address/prefix` (or empty).
+/// The first `<ip>` element's subnet, as `address/prefix` (or empty).
+pub(crate) fn network_subnet(xml: &str) -> Option<String> {
+    let c = ip_cidr(xml);
+    if c.is_empty() { None } else { Some(c) }
+}
+
 fn ip_cidr(xml: &str) -> String {
     let Some(ip) = xml.find("<ip") else {
         return String::new();

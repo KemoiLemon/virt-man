@@ -129,6 +129,26 @@ export interface NetworkSummary {
   ip: string;
 }
 
+export interface FirewallRule {
+  direction: "in" | "out" | "forward";
+  action: "accept" | "drop" | "reject";
+  proto: "tcp" | "udp" | "icmp" | "any";
+  src_ip: string;
+  dst_ip: string;
+  src_port: string;
+  dst_port: string;
+}
+
+export interface FirewallForward {
+  wan_ip: string;
+  wan_start: number;
+  wan_end: number;
+  lan_ip: string;
+  lan_start: number;
+  lan_end: number;
+  proto: "tcp" | "udp";
+}
+
 export interface PoolSummary {
   name: string;
   active: boolean;

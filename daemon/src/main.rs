@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod firewall;
 mod libvirt;
 mod rfb;
 mod tls;
@@ -27,6 +28,16 @@ async fn run() -> Result<(), String> {
 
     let cfg = config::Config::load()?;
     let auth = auth::Auth::from_file(&cfg.token_path)?;
+
+    // Re-apply any persisted firewall rules at startup: nftables is not
+    // persistent across reboot, so the daemon restores the virt-man table.
+    let fw_path = std::path::PathBuf::from(firewall::FIREWALL_PATH);
+    if fw_path.exists()
+        && let Ok(map) = firewall::load(&fw_path)
+        && let Err(e) = api::firewall::reapply(map).await
+    {
+        tracing::warn!("failed to re-apply firewall rules: {e}");
+    }
 
     // TLS: configured cert/key or generated self-signed.
     let (cert, key) = cfg.tls_cert_key();
