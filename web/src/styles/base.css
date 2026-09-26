@@ -173,6 +173,11 @@ body {
   font: inherit; font-size: 11px; letter-spacing: 1px;
   cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  /* Inline-level boxes align on their baseline by default, and an icon-only
+     button's baseline (the svg's bottom edge) sits lower than a text
+     button's. Side-by-side buttons would then be vertically offset, so pin
+     them to the middle instead. */
+  vertical-align: middle;
 }
 .btn:hover { background: var(--hover); border-color: var(--hover-line); }
 .btn:active { transform: translateY(1px); }
@@ -183,6 +188,8 @@ body {
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.icon { padding: 5px 7px; }
 .btn .ico { pointer-events: none; }
+/* Same reasoning for a bare icon used outside a button. */
+.ico { vertical-align: middle; }
 .icon-label { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; }
 
 /* ------------------------------------------------- frameless window controls */
