@@ -129,7 +129,7 @@ document.querySelector(".tree-row.tree-vm")?.dispatchEvent(new window.MouseEvent
 await wait(1200);
 check("VM view offers a Hardware tab", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Summary", "Hardware", "Console", "XML"]);
+  assert.deepEqual(tabs, ["Summary", "Hardware", "Options", "Firewall", "Console", "XML"]);
 });
 
 [...document.querySelectorAll(".tabbar .tab")]

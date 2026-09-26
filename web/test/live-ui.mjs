@@ -179,8 +179,8 @@ await (async () => {
     const tabs = [...bar.querySelectorAll(".tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["VMs", "Networks", "Storage"],
-      "all three connection tabs render",
+      ["VMs", "Networks", "Storage", "Firewall"],
+      "all connection tabs render",
     );
     assert.equal(
       bar.querySelectorAll(".tab.active").length,
@@ -213,7 +213,7 @@ await (async () => {
     const tabs = [...document.querySelectorAll(".tabbar .tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["Summary", "Hardware", "Console", "XML"],
+      ["Summary", "Hardware", "Options", "Firewall", "Console", "XML"],
       "all VM tabs render",
     );
     assert.equal(

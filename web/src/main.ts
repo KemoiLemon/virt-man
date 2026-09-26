@@ -29,9 +29,9 @@ let user: User | null = null;
 let authDisabled = false;
 let connections: Connection[] = [];
 let selectedConn: string | null = null;
-let connTab: "vms" | "networks" | "storage" = "vms";
+let connTab: "vms" | "networks" | "storage" | "firewall" = "vms";
 let selectedVm: string | null = null;
-let vmTab: "summary" | "hardware" | "console" | "xml" = "summary";
+let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
 let dcTab: "servers" | "guests" | "users" = "servers";
 let pollTimer: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
@@ -647,6 +647,7 @@ setHtml(content, `
       <button class="tab ${connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
       <button class="tab ${connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
       <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
+      <button class="tab ${connTab === "firewall" ? "active" : ""}" data-tab="firewall">${ic.firewall(14)} Firewall</button>
       <div class="tabbar-actions">
         ${connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
         ${connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create network</button>` : ""}
@@ -677,10 +678,84 @@ async function renderConnBody() {
     setHtml(body, `<div id="nets-list">loading…</div>`);
     $("#create-net")?.addEventListener("click", () => openCreateNetwork());
     await loadNetworks();
-  } else {
+  } else if (connTab === "storage") {
     setHtml(body, `<div id="pools-list">loading…</div>`);
     $("#create-pool")?.addEventListener("click", () => openCreatePool());
     await loadPools();
+  } else {
+    setHtml(body, `<div id="filters-list">loading…</div>`);
+    await loadFilters();
+  }
+}
+
+/// Host-wide libvirt nwfilters, and which guests reference them.
+async function loadFilters() {
+  if (!selectedConn) return;
+  const list = $("#filters-list");
+  if (!list) return;
+  try {
+    const filters = await api.get<{ name: string; uuid: string }[]>(
+      `/proxy/${selectedConn}/filters`);
+    // Which guests use which filter, so the table is actionable rather than
+    // just a catalogue.
+    const vms = treeVms[selectedConn] ?? [];
+    // Read each guest's filters, then fold the results in afterwards: the map
+    // callback returns its data instead of mutating shared state.
+    const perVm = await Promise.all(vms.map(async (v) => {
+      try {
+        const fw = await api.get<{ interfaces: { filter: string | null }[] }>(
+          `/proxy/${selectedConn}/domains/${encodeURIComponent(v.name)}/firewall`);
+        return { vm: v.name, filters: fw.interfaces.map((i) => i.filter) };
+      } catch {
+        // A guest that cannot be read simply contributes no usage.
+        return { vm: v.name, filters: [] as (string | null)[] };
+      }
+    }));
+    const usage: Record<string, string[]> = {};
+    for (const { vm: name, filters: fs } of perVm) {
+      for (const f of fs) {
+        if (f) (usage[f] ??= []).push(name);
+      }
+    }
+
+    setHtml(list, `
+      <div class="hw-note" style="margin-bottom:14px">Network filters are defined on the
+        host and attached to a guest from its Firewall tab.</div>
+      <table class="grid">
+        <tr><th>Filter</th><th>Used by</th><th class="col-actions"></th></tr>
+        ${filters.map((f) => `
+          <tr>
+            <td>${esc(f.name)}</td>
+            <td>${usage[f.name]?.length
+              ? `<span class="state on">${esc(usage[f.name].join(", "))}</span>`
+              : `<span class="state">—</span>`}</td>
+            <td class="col-actions">
+              <div class="row-actions">
+                <button class="btn icon" data-fxml="${esc(f.name)}" title="View XML">${ic.xml()}</button>
+              </div>
+            </td>
+          </tr>`).join("") || `<tr><td colspan="3" class="empty">No filters defined.</td></tr>`}
+      </table>`);
+
+    list.querySelectorAll("[data-fxml]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = async () => {
+        const name = (b as HTMLElement).dataset.fxml!;
+        try {
+          const { xml } = await api.get<{ xml: string }>(
+            `/proxy/${selectedConn}/filters/${encodeURIComponent(name)}/xml`);
+          // Wire the close handler in JS: an inline onclick would be blocked
+          // by the desktop app's CSP.
+          const modal = openModal(`Filter — ${esc(name)}`,
+            `<div class="cmd">${esc(xml)}</div>`,
+            `<button class="btn" id="fxml-close">Close</button>`);
+          $("#fxml-close", modal).onclick = () => modal.remove();
+        } catch (e) {
+          toast((e as Error).message, "bad");
+        }
+      };
+    });
+  } catch (e) {
+    setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
 
@@ -862,8 +937,10 @@ setHtml(content, `
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
       <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
+      <button class="tab ${vmTab === "options" ? "active" : ""}" data-vmtab="options">${ic.options(14)} Options</button>
+      <button class="tab ${vmTab === "firewall" ? "active" : ""}" data-vmtab="firewall">${ic.firewall(14)} Firewall</button>
       <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
-      <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">XML</button>
+      <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">${ic.xml(14)} XML</button>
       <div class="tabbar-actions row-actions">
         <button class="btn icon" id="vm-start" title="Start">${ic.start()}</button>
         <button class="btn icon" id="vm-shutdown" title="Shutdown">${ic.stop()}</button>
@@ -908,6 +985,138 @@ setHtml(body, `<div class="console-stage" id="console-stage"><div class="console
     }
     return;
   }
+  if (vmTab === "options") {
+    try {
+      const [{ xml }, info] = await Promise.all([
+        api.get<{ xml: string }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/xml`),
+        api.get<any>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}`),
+      ]);
+      const pick = (re: RegExp, fallback = "—") => xml.match(re)?.[1] ?? fallback;
+      const title = pick(/<title>([^<]*)<\/title>/, "");
+      const description = pick(/<description>([^<]*)<\/description>/, "");
+      const bootDev = pick(/<boot dev='([^']*)'/, "hd");
+      const machine = pick(/machine='([^']*)'/);
+      const arch = pick(/arch='([^']*)'/);
+      const onPoweroff = pick(/<on_poweroff>([^<]*)<\/on_poweroff>/);
+      const onReboot = pick(/<on_reboot>([^<]*)<\/on_reboot>/);
+      const onCrash = pick(/<on_crash>([^<]*)<\/on_crash>/);
+      const autostartHint = info.persistent ? "persistent" : "transient";
+
+      setHtml(body, `
+        <div class="actions">
+          <button class="btn primary" id="opt-save">${ic.edit(14)} Save options</button>
+          <span class="hw-locked">Changes apply after the guest is restarted.</span>
+        </div>
+        <div class="grid2">
+          <label class="field"><span>Name</span>
+            <input id="opt-name" value="${esc(vm)}" disabled></label>
+          <label class="field"><span>Title</span>
+            <input id="opt-title" value="${esc(title)}" placeholder="short label"></label>
+        </div>
+        <label class="field"><span>Description</span>
+          <textarea id="opt-desc" rows="3" placeholder="free-form notes">${esc(description)}</textarea></label>
+        <div class="grid2">
+          <label class="field"><span>Boot device</span>
+            <select id="opt-boot">
+              ${["hd", "cdrom", "network"].map((d) =>
+                `<option value="${d}" ${d === bootDev ? "selected" : ""}>${d}</option>`).join("")}
+            </select></label>
+          <label class="field"><span>UUID</span>
+            <input value="${esc(info.uuid ?? "—")}" disabled></label>
+        </div>
+        <div class="section-title" style="margin-top:14px">Lifecycle</div>
+        <div class="specs">
+          <div class="spec"><b>On poweroff</b><span>${esc(onPoweroff)}</span></div>
+          <div class="spec"><b>On reboot</b><span>${esc(onReboot)}</span></div>
+          <div class="spec"><b>On crash</b><span>${esc(onCrash)}</span></div>
+          <div class="spec"><b>Persistence</b><span>${esc(autostartHint)}</span></div>
+          <div class="spec"><b>Machine</b><span>${esc(machine)}</span></div>
+          <div class="spec"><b>Architecture</b><span>${esc(arch)}</span></div>
+        </div>`);
+
+      $("#opt-save")?.addEventListener("click", async () => {
+        const newTitle = $("#opt-title").value.trim();
+        const newDesc = $("#opt-desc").value.trim();
+        const newBoot = ($("#opt-boot") as HTMLSelectElement).value;
+        // Rewrite only the elements this form owns, leaving the rest of the
+        // definition untouched.
+        let next = xml
+          .replace(/\s*<title>[^<]*<\/title>/, "")
+          .replace(/\s*<description>[^<]*<\/description>/, "")
+          .replace(/<boot dev='[^']*'\/>/, `<boot dev='${esc(newBoot)}'/>`);
+        const meta = [
+          newTitle ? `  <title>${esc(newTitle)}</title>` : "",
+          newDesc ? `  <description>${esc(newDesc)}</description>` : "",
+        ].filter(Boolean).join("\n");
+        if (meta) {
+          // libvirt requires title/description right after <name>.
+          next = next.replace(/(<name>[^<]*<\/name>)/, `$1\n${meta}`);
+        }
+        runTask(`Update options for ${vm}`, async () => {
+          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/xml`, next);
+        });
+        toast("Options update started");
+      });
+    } catch (e) {
+      setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
+    }
+    return;
+  }
+
+  if (vmTab === "firewall") {
+    try {
+      const [fw, filters] = await Promise.all([
+        api.get<{ interfaces: { mac: string; network: string; filter: string | null }[] }>(
+          `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`),
+        api.get<{ name: string }[]>(`/proxy/${selectedConn}/filters`),
+      ]);
+      const current = fw.interfaces.find((i) => i.filter)?.filter ?? "";
+      const names = filters.map((f) => f.name).sort((a, b) => a.localeCompare(b));
+
+      setHtml(body, `
+        <div class="actions">
+          <button class="btn primary" id="fw-apply">${ic.firewall(14)} Apply to all interfaces</button>
+          <span class="hw-locked">Takes effect when the guest next starts.</span>
+        </div>
+        <label class="field" style="max-width:420px"><span>Network filter</span>
+          <select id="fw-filter">
+            <option value="" ${current ? "" : "selected"}>none (unfiltered)</option>
+            ${names.map((n) =>
+              `<option value="${esc(n)}" ${n === current ? "selected" : ""}>${esc(n)}</option>`).join("")}
+          </select></label>
+        <div class="hw-note">libvirt nwfilters are applied per interface via
+          <code>&lt;filterref&gt;</code>. <code>clean-traffic</code> blocks MAC/IP
+          spoofing; the <code>no-*</code> filters each block one class of traffic.</div>
+        <div class="section-title" style="margin-top:16px">Interfaces</div>
+        <table class="grid">
+          <tr><th>MAC</th><th>Network</th><th>Filter</th></tr>
+          ${fw.interfaces.map((i) => `
+            <tr>
+              <td>${esc(i.mac || "—")}</td>
+              <td>${esc(i.network || "—")}</td>
+              <td>${i.filter
+                ? `<span class="state on">${esc(i.filter)}</span>`
+                : `<span class="state">none</span>`}</td>
+            </tr>`).join("") || `<tr><td colspan="3" class="empty">This guest has no network interfaces.</td></tr>`}
+        </table>`);
+
+      $("#fw-apply")?.addEventListener("click", async () => {
+        const value = ($("#fw-filter") as HTMLSelectElement).value;
+        try {
+          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`,
+            { filter: value || null });
+          toast(value ? `Applied ${value}` : "Filter cleared");
+          void renderVmBody(vm);
+        } catch (e) {
+          toast((e as Error).message, "bad");
+        }
+      });
+    } catch (e) {
+      setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
+    }
+    return;
+  }
+
   if (vmTab === "hardware") {
     try {
       const [{ xml }, info] = await Promise.all([
