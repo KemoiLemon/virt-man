@@ -194,8 +194,9 @@ body {
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 .btn.danger:hover { background: var(--bad-bg); color: var(--bad-fg); }
 /* A stateful toggle (e.g. autostart on) reads as "lit" rather than merely
-   coloured: accent border + text over a tinted background, like .badge.on. */
-.btn.on { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+   coloured: accent border + text, no fill, so the highlight is a subtle
+   outline rather than a block of colour. */
+.btn.on { border-color: var(--accent); color: var(--accent); }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.icon { padding: 5px 7px; }
 .btn .ico { pointer-events: none; }

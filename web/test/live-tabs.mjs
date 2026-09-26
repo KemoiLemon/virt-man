@@ -84,9 +84,16 @@ check("Networks tab renders cards with type, subnet and merged controls", () => 
   const first = cards[0];
   const badges = [...first.querySelectorAll(".storage-card-head .badge")].map((b) => b.textContent.trim());
   assert.ok(badges.some((b) => ["NAT", "Bridge", "Isolated"].includes(b)), `type badge (${badges})`);
-  assert.ok(first.querySelector(".spec b"), "spec rows present");
-  assert.ok(first.querySelector("[data-net-toggle]"), "merged start/stop toggle");
+  // Bridge stacked above subnet.
+  const specLabels = [...first.querySelectorAll(".spec b")].map((b) => b.textContent.trim());
+  assert.ok(specLabels.indexOf("Bridge") < specLabels.indexOf("Subnet"),
+    `Bridge above Subnet (${specLabels})`);
+  // Merged start/stop toggle: icon-only, no text.
+  const toggle = first.querySelector("[data-net-toggle]");
+  assert.ok(toggle, "merged start/stop toggle");
   assert.equal(first.querySelectorAll("[data-net-toggle]").length, 1, "exactly one toggle");
+  assert.ok(toggle.querySelector("svg"), "toggle has an icon");
+  assert.equal(toggle.textContent.trim(), "", "toggle is icon-only");
   const auto = first.querySelector("[data-net-autostart]");
   assert.ok(auto, "autostart button");
   assert.ok(auto.querySelector("svg"), "autostart has an icon");
@@ -94,13 +101,17 @@ check("Networks tab renders cards with type, subnet and merged controls", () => 
   assert.ok(first.querySelector("[data-delnet]"), "delete button");
 });
 
-check("autostart button highlights follow the autostart state", () => {
+check("start/stop and autostart highlights follow their state", () => {
   for (const c of document.querySelectorAll("#nets-list .net-card")) {
-    const btn = c.querySelector("[data-net-autostart]");
+    const toggle = c.querySelector("[data-net-toggle]");
+    const cardActive = c.querySelector(".storage-card-head .badge.on")?.textContent.trim() === "active";
+    assert.equal(toggle.classList.contains("on"), cardActive,
+      `toggle highlight matches the active badge`);
+    const auto = c.querySelector("[data-net-autostart]");
     assert.equal(
-      btn.classList.contains("on"),
-      /Autostart on/.test(btn.title),
-      `highlight matches the autostart title (${btn.title})`,
+      auto.classList.contains("on"),
+      /Autostart on/.test(auto.title),
+      `autostart highlight matches its title (${auto.title})`,
     );
   }
 });

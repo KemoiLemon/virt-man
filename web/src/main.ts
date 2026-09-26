@@ -1534,11 +1534,11 @@ async function loadNetworks() {
           <span class="badge ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span>
         </div>
         <div class="specs">
-          <div class="spec"><b>Subnet</b><span>${n.ip ? esc(n.ip) : "—"}</span></div>
           <div class="spec"><b>Bridge</b><span>${esc(n.bridge || "—")}</span></div>
+          <div class="spec"><b>Subnet</b><span>${n.ip ? esc(n.ip) : "—"}</span></div>
         </div>
         <div class="storage-card-actions net-actions">
-          <button class="btn" data-net-toggle="${esc(n.name)}" data-net-action="${n.active ? "stop" : "start"}">${n.active ? `${ic.stop(14)} Stop` : `${ic.start(14)} Start`}</button>
+          <button class="btn icon ${n.active ? "on" : ""}" data-net-toggle="${esc(n.name)}" data-net-action="${n.active ? "stop" : "start"}" title="${n.active ? "Stop" : "Start"}">${n.active ? ic.stop() : ic.start()}</button>
           <button class="btn icon ${n.autostart ? "on" : ""}" data-net-autostart="${esc(n.name)}" title="${n.autostart ? "Autostart on" : "Autostart off"}">${ic.autostart()}</button>
           <button class="btn icon" data-net-edit="${esc(n.name)}" title="Edit">${ic.edit()}</button>
           <button class="btn danger icon" data-delnet="${esc(n.name)}" title="Delete">${ic.trash()}</button>
