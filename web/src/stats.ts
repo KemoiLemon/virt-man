@@ -162,6 +162,49 @@ export function addDiskSample(key: string, pctValue: number): number[] {
   return entry.slice();
 }
 
+/// Per-NIC byte-rate history for the VM summary's Network card. Byte counters
+/// are cumulative, so each sample folds a delta into KiB/s and pushes it onto
+/// rx/tx series of raw rates.
+interface NetSeries {
+  rx: number[];
+  tx: number[];
+  prev?: { rx_bytes: number; tx_bytes: number; sampled_at_ms: number };
+}
+
+const netSeries = new Map<string, NetSeries>();
+
+export function addNetSample(
+  key: string,
+  rxBytes: number,
+  txBytes: number,
+  sampledAtMs: number,
+): { rx: number[]; tx: number[]; rxNow: number; txNow: number } {
+  let entry = netSeries.get(key);
+  if (!entry) {
+    entry = { rx: blank().cpu, tx: blank().mem };
+    netSeries.set(key, entry);
+  }
+  let rxNow = 0;
+  let txNow = 0;
+  if (entry.prev) {
+    const dtS = (sampledAtMs - entry.prev.sampled_at_ms) / 1000;
+    const dRx = rxBytes - entry.prev.rx_bytes;
+    const dTx = txBytes - entry.prev.tx_bytes;
+    // A restarted guest resets the counters; treat a negative delta as idle.
+    if (dtS > 0 && dRx >= 0) rxNow = (dRx / 1024) / dtS;
+    if (dtS > 0 && dTx >= 0) txNow = (dTx / 1024) / dtS;
+  }
+  entry.prev = { rx_bytes: rxBytes, tx_bytes: txBytes, sampled_at_ms: sampledAtMs };
+  push(entry.rx, rxNow);
+  push(entry.tx, txNow);
+  return { rx: entry.rx.slice(), tx: entry.tx.slice(), rxNow, txNow };
+}
+
+/** Drop a NIC's rate history. */
+export function forgetNetSeries(key: string) {
+  netSeries.delete(key);
+}
+
 /** Current series without recording a new sample. */
 export function peekSeries(name: string): { cpu: number[]; mem: number[] } {
   const entry = series.get(name) ?? blank();
@@ -174,15 +217,16 @@ const W = 240;
 const H = 74;
 
 /**
- * Sparkline as inline SVG on a fixed 0..100 scale, with gridlines, a filled
- * area, the trace, and a marker on the newest value at the right edge.
- * `viewBox` + `preserveAspectRatio=none` lets it stretch to the panel width
- * while the stroke stays 1px via `vector-effect` in CSS.
+ * Sparkline as inline SVG on a 0..max scale (default 0..100), with
+ * gridlines, a filled area, the trace, and a marker on the newest value at
+ * the right edge. `viewBox` + `preserveAspectRatio=none` lets it stretch to
+ * the panel width while the stroke stays 1px via `vector-effect` in CSS.
  */
-export function sparkline(values: number[], variant = ""): string {
+export function sparkline(values: number[], variant = "", max = 100): string {
   const pts = values.length ? values : Array.from({ length: SERIES_LEN }, () => 0);
+  const ceil = Math.max(1, max);
   const step = W / Math.max(1, pts.length - 1);
-  const y = (v: number) => H - (clampPercent(v) / 100) * H;
+  const y = (v: number) => H - (Math.max(0, Math.min(ceil, v)) / ceil) * H;
   const coords = pts.map((v, i) => `${(i * step).toFixed(2)},${y(v).toFixed(2)}`);
   const line = `M${coords.join(" L")}`;
   const area = `${line} L${W},${H} L0,${H} Z`;
@@ -201,6 +245,12 @@ export function sparkline(values: number[], variant = ""): string {
 /** Percentage formatted for a metric headline. */
 export function pct(n: number): string {
   return `${clampPercent(n).toFixed(n >= 10 ? 0 : 1)}%`;
+}
+
+/** Bytes-per-second (KiB/s based input) formatted for a metric footer. */
+export function fmtRate(kibPerSec: number): string {
+  if (kibPerSec < 1024) return `${kibPerSec.toFixed(kibPerSec >= 10 ? 0 : 1)} KiB/s`;
+  return `${(kibPerSec / 1024).toFixed(1)} MiB/s`;
 }
 
 /** Human-readable bytes; KiB-valued inputs should be scaled by the caller. */

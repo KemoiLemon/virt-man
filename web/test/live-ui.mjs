@@ -264,11 +264,12 @@ await (async () => {
     const mid = document.querySelector(".vm-mid");
     assert.ok(mid, "vm-mid row present");
     assert.equal(mid.querySelectorAll(":scope > .metric").length, 2, "two cards in the middle");
-    for (const label of ["Network", "Firewall"]) {
-      const m = [...mid.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === label);
-      assert.ok(m, `${label} card`);
-      assert.ok(m.querySelector(".factgrid .fact"), `${label} card has a fact grid`);
-    }
+    const fwCard = [...mid.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === "Firewall");
+    assert.ok(fwCard, "Firewall card");
+    assert.ok(fwCard.querySelector(".factgrid .fact"), "Firewall card has a fact grid");
+    const netCard = [...mid.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === "Network");
+    assert.ok(netCard, "Network card");
+    assert.ok(netCard.querySelector(".net-chart svg.spark"), "Network card graphs Rx/Tx");
 
     // Bottom: full-width hardware strip.
     const strip = document.querySelector(".hw-strip");

@@ -16,6 +16,7 @@ pub fn routes() -> Router {
         .route("/domains/{name}/xml", get(get_xml).put(put_xml))
         .route("/domains/{name}/state", get(get_state))
         .route("/domains/{name}/stats", get(get_stats))
+        .route("/domains/{name}/interfaces", get(get_interfaces))
         .route("/domains/{name}/graphics", get(get_graphics))
         .route("/domains/{name}/start", post(start))
         .route("/domains/{name}/shutdown", post(shutdown))
@@ -285,6 +286,83 @@ async fn get_stats(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     Ok(Json(v))
 }
 
+/// Parse one `<interface>…</interface>` fragment's target dev, MAC and model.
+/// These are child elements, so reading them off the opening tag (as the old
+/// handler did) returned None for everything but the network name.
+fn interface_info(frag: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let child = |tag: &str, name: &str| -> Option<String> {
+        let open = frag.find(&format!("<{tag}"))?;
+        let tag_frag = &frag[open..];
+        let tag_end = tag_frag.find('>')?;
+        let t = &tag_frag[..=tag_end];
+        let mut from = 0;
+        while let Some(rel) = t[from..].find(name) {
+            let j = from + rel;
+            from = j + name.len();
+            let r = t[from..].trim_start();
+            let Some(r) = r.strip_prefix('=') else {
+                continue;
+            };
+            let r = r.trim_start();
+            let q = r.chars().next().unwrap_or(' ');
+            if q != '\'' && q != '"' {
+                continue;
+            }
+            let inner = &r[q.len_utf8()..];
+            if let Some(k) = inner.find(q) {
+                return Some(inner[..k].to_string());
+            }
+        }
+        None
+    };
+    (
+        child("target", "dev"),
+        child("mac", "address"),
+        child("model", "type"),
+    )
+}
+
+/// Point-in-time per-interface byte counters, so the client can graph
+/// tx/rx rates. `interface_stats` needs the guest's `target dev` name (not
+/// the MAC), which is read from the domain XML first.
+async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    let v = with_conn(move |c| {
+        let d = Domain::lookup_by_name(c, &name)?;
+        // Live XML: a running guest carries its `target dev` (e.g. vnet0),
+        // which interface_stats needs; inactive XML omits it, and a shut-off
+        // guest has no counters anyway.
+        let xml = d.get_xml_desc(0)?;
+        let mut out = Vec::new();
+        let mut rest = xml.as_str();
+        while let Some(i) = rest.find("<interface") {
+            let block = &rest[i..];
+            let Some(end) = block.find("</interface>") else {
+                break;
+            };
+            let (dev, mac, model) = interface_info(&block[..end]);
+            let (rx_bytes, tx_bytes) = match dev.as_deref() {
+                Some(target) => d
+                    .interface_stats(target)
+                    .map(|s| (s.rx_bytes.max(0) as u64, s.tx_bytes.max(0) as u64))
+                    .unwrap_or((0, 0)),
+                None => (0, 0),
+            };
+            out.push(json!({
+                "dev": dev,
+                "mac": mac,
+                "model": model,
+                "rx_bytes": rx_bytes,
+                "tx_bytes": tx_bytes,
+            }));
+            rest = &block[end + 12..];
+        }
+        Ok(json!({ "name": d.get_name().unwrap_or_default(), "interfaces": out }))
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(v))
+}
+
 async fn get_graphics(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
         let d = Domain::lookup_by_name(c, &name)?;
@@ -463,6 +541,22 @@ mod tests {
     #[test]
     fn rename_without_a_name_element_is_none() {
         assert!(rename_xml("<domain><devices/></domain>", "x").is_none());
+    }
+
+    #[test]
+    fn interface_info_reads_child_elements_not_tag_attributes() {
+        let frag = "<interface type='network'>\n      <mac address='52:54:00:12:34:56'/>\n      <source network='internet'/>\n      <model type='virtio'/>\n      <target dev='vnet0'/>\n    </interface>";
+        assert_eq!(
+            interface_info(frag),
+            (
+                Some("vnet0".into()),
+                Some("52:54:00:12:34:56".into()),
+                Some("virtio".into()),
+            )
+        );
+        // A shut-off guest's inactive XML has no <target dev>.
+        let no_target = "<interface type='network'>\n      <mac address='52:54:00:12:34:56'/>\n      <model type='virtio'/>\n    </interface>";
+        assert_eq!(interface_info(no_target).0, None);
     }
 
     #[test]

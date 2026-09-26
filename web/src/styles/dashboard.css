@@ -87,6 +87,21 @@
 .spark.mem .spark-fill { fill: var(--ok); }
 .spark.warn .spark-line { stroke: var(--warn); }
 .spark.warn .spark-fill { fill: var(--warn); }
+.spark.disk .spark-line { stroke: var(--warn); }
+.spark.disk .spark-fill { fill: var(--warn); }
+/* Rx = receive (down), Tx = transmit (up), colour-distinct on one graph. */
+.spark.rx .spark-line { stroke: var(--ok); }
+.spark.rx .spark-fill { fill: var(--ok); }
+.spark.tx .spark-line { stroke: var(--accent); }
+.spark.tx .spark-fill { fill: var(--accent); }
+.spark.rx, .spark.tx { height: 34px; }
+.net-chart { gap: 3px; }
+.net-legend {
+  display: flex; justify-content: space-between;
+  font-size: 10px; letter-spacing: .4px; color: var(--dim);
+}
+.net-legend .rx { color: var(--ok); }
+.net-legend .tx { color: var(--accent); }
 .chart-axis {
   display: flex; justify-content: space-between;
   font-size: 10px; color: var(--dim); letter-spacing: .4px;

@@ -8,7 +8,7 @@ import { ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
-import { addDiskSample, addHostSample, addSample, fmtBytes, pct, sparkline } from "./stats";
+import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { domainXml, esc, networkFormFromXml, networkUuid, networkXml, poolXml, volumeXml } from "./xml";
@@ -54,6 +54,8 @@ let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" =
 /// Which disk the summary's Disks card is graphing, per VM, so the 1s poll
 /// does not reset the user's selection back to the first disk.
 let summaryDiskSel: Record<string, string> = {};
+/// Which NIC the summary's Network card is graphing, per VM.
+let summaryNetSel: Record<string, string> = {};
 let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
 /// Which section of the admin panel modal is showing.
 let adminTab: "users" | "roles" | "keys" = "users";
@@ -2389,13 +2391,16 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
   // summary: six cards — CPU, Memory, Disks, Network, Firewall, Hardware.
   try {
-    const [d, s, xr, fw] = await Promise.all([
+    const [d, s, xr, fw, nic] = await Promise.all([
       api.get<any>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}`),
       api.get<DomainStats>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/stats`),
       api.get<{ xml: string }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/xml`),
       api.get<{ rules: FirewallRule[]; policy: FirewallPolicy }>(
         `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`)
         .catch(() => ({ rules: [] as FirewallRule[], policy: blankPolicy() })),
+      api.get<{ interfaces: { dev: string | null; mac: string | null; model: string | null; rx_bytes: number; tx_bytes: number }[] }>(
+        `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/interfaces`)
+        .catch(() => ({ interfaces: [] })),
     ]);
     const xml = xr.xml;
 
@@ -2460,6 +2465,24 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     const selPct = selCap > 0 ? Math.max(0, Math.min(100, (selAlloc / selCap) * 100)) : 0;
     const selDiskKey = `${vm}:${selDisk?.dev ?? "disk"}`;
     const diskHist = addDiskSample(selDiskKey, selPct);
+
+    // The NIC list: live counters from the daemon when present, otherwise
+    // the XML inventory (a shut-off guest has no counters, but still shows).
+    const nicList = (nic.interfaces ?? []).map((x, i) => ({
+      key: x.dev || x.mac || `nic${i}`,
+      dev: x.dev || x.mac || `nic${i}`,
+      model: x.model || nics[i]?.model || "virtio",
+      rx: x.rx_bytes ?? 0,
+      tx: x.tx_bytes ?? 0,
+    }));
+    const netSel = summaryNetSel[vm] && nicList.some((x) => x.key === summaryNetSel[vm])
+      ? summaryNetSel[vm]
+      : nicList[0]?.key;
+    const selNic = nicList.find((x) => x.key === netSel);
+    const netKey = `${vm}:${selNic?.key ?? "net"}`;
+    const { rx, tx, rxNow, txNow } = addNetSample(
+      netKey, selNic?.rx ?? 0, selNic?.tx ?? 0, s.sampled_at_ms);
+    const netMax = Math.max(1, ...rx, ...tx);
 
     const factCard = (icon: string, label: string, value: string, facts: [string, string][], foot = "") => `
       <div class="metric">
@@ -2530,12 +2553,11 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         <div class="metric-head">
           <span class="metric-ic">${ic.disk()}</span>
           <b>Disks</b>
-          <span class="metric-value">${selCap > 0 ? pct(selPct) : disks.length}</span>
-        </div>
-        ${disks.length > 1 ? `<label class="field"><span>Disk</span>
-          <select id="disk-sel">${disks.map((x) =>
+          ${disks.length > 1 ? `<label class="field metric-sel"><select id="disk-sel">${disks.map((x) =>
             `<option value="${esc(x.dev)}" ${x.dev === diskSel ? "selected" : ""}>${esc(x.dev)} — ${esc(x.label)}</option>`).join("")}
           </select></label>` : ""}
+          <span class="metric-value">${selCap > 0 ? pct(selPct) : disks.length}</span>
+        </div>
         <div class="meter"><div class="meter-fill ${selPct > 85 ? "hot" : ""}" style="width:${selPct.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(diskHist, "disk")}
@@ -2549,8 +2571,27 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     </div>
 
     <div class="sumgrid vm-sumgrid vm-mid">
-      ${factCard(ic.network(), "Network", `${nics.length}`, nics.map((x) => [x.net || "network", x.model || "virtio"]),
-        `<span>${nics.length} NIC</span><span>${[...new Set(nics.map((x) => x.model).filter(Boolean))].join(", ") || "virtio"}</span>`)}
+      <div class="metric ${running ? "ok" : ""}">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.network()}</span>
+          <b>Network</b>
+          ${nicList.length > 1 ? `<label class="field metric-sel"><select id="net-sel">${nicList.map((x) =>
+            `<option value="${esc(x.key)}" ${x.key === netSel ? "selected" : ""}>${esc(x.dev)}</option>`).join("")}
+          </select></label>` : ""}
+          <span class="metric-value">${fmtRate(Math.max(rxNow, txNow))}</span>
+        </div>
+        <div class="chart net-chart">
+          <div class="net-legend"><span class="rx">▼ RX ${fmtRate(rxNow)}</span><span class="tx">▲ TX ${fmtRate(txNow)}</span></div>
+          ${sparkline(rx, "rx", netMax)}
+          ${sparkline(tx, "tx", netMax)}
+          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot">
+          <span>${selNic?.dev ?? "—"}</span>
+          <span>${esc(selNic?.model ?? "virtio")}</span>
+        </div>
+      </div>
+
       ${factCard(ic.firewall(), "Firewall", `${fw.rules.length}`, fwFacts,
         `<span>in ${capLabel(fw.policy.in)}</span><span>out ${capLabel(fw.policy.out)} · fwd ${capLabel(fw.policy.forward)}</span>`)}
     </div>
@@ -2566,6 +2607,9 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
 
     $("#disk-sel", body)?.addEventListener("change", (e: Event) => {
       summaryDiskSel[vm] = (e.target as HTMLSelectElement).value;
+    });
+    $("#net-sel", body)?.addEventListener("change", (e: Event) => {
+      summaryNetSel[vm] = (e.target as HTMLSelectElement).value;
     });
   } catch (e) {
     setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
