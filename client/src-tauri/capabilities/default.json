@@ -1,8 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Window controls for the frameless titlebar and remote-webui navigation.",
+  "description": "Window controls for the frameless titlebar. The app navigates to its local sidecar (http://127.0.0.1:<port>), which Tauri treats as a REMOTE url, so the capability must list it explicitly or every window IPC call is denied.",
   "windows": ["main"],
+  "local": true,
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

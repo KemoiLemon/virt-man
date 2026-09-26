@@ -175,8 +175,36 @@ input, select, textarea {
   user-select: text;
 }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
-select { -webkit-appearance: none; appearance: none; cursor: pointer; }
+input:hover, select:hover, textarea:hover { border-color: var(--hover-line); }
+input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
+input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
 textarea { resize: vertical; }
+
+/* Dropdowns: drop the native widget so the control matches the theme on
+   every platform, and draw the caret from currentColor. */
+select {
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  padding-right: 26px; cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 15px) 52%, calc(100% - 10px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+/* The popup list is drawn by the OS; this keeps it in-theme where honoured. */
+select option { background: var(--panel); color: var(--fg); }
+
+/* File pickers: the native button ignores the theme, so restyle it. */
+input[type="file"] { padding: 4px; cursor: pointer; }
+input[type="file"]::file-selector-button {
+  background: var(--panel2); border: 1px solid var(--line2); color: var(--fg);
+  padding: 4px 10px; margin-right: 10px; font: inherit; font-size: 11px;
+  letter-spacing: 1px; cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover {
+  background: var(--hover); border-color: var(--hover-line);
+}
 input[type="checkbox"] {
   -webkit-appearance: none; appearance: none; width: 14px; height: 14px; min-width: 14px; padding: 0;
   background: var(--input-bg); border: 1px solid var(--line2); cursor: pointer;

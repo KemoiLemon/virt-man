@@ -223,7 +223,7 @@ function wireWindowChrome() {
 /// this instead of local connections; the remote web UI is the same software.
 async function connectToWebui() {
   const url = localStorage.getItem("virt-man-webui") ?? "https://localhost:8006";
-  const next = window.prompt("Web UI URL", url);
+  const next = await askText("Connect to WebUI", "Web UI URL", url, "https://host:8006");
   if (!next) return;
   let target: URL;
   try {
@@ -670,8 +670,13 @@ async function act(url: string, method: "POST" | "DELETE" = "POST") {
 
 async function deleteVm(name: string) {
   if (!selectedConn) return;
-  if (!confirm(`Delete VM "${name}"?`)) return;
-  const removeStorage = confirm("Also remove its storage?");
+  if (!(await askConfirm("Delete VM", `Delete VM "${name}"?`, "Delete", true))) return;
+  const removeStorage = await askConfirm(
+    "Remove storage",
+    `Also delete the disks belonging to "${name}"? This cannot be undone.`,
+    "Delete disks",
+    true,
+  );
   try {
     await api.del(`/proxy/${selectedConn}/domains/${encodeURIComponent(name)}?remove_storage=${removeStorage}`);
     toast("Deleted");
@@ -683,7 +688,8 @@ async function deleteVm(name: string) {
 }
 
 async function deleteNetwork(name: string) {
-  if (!selectedConn || !confirm(`Delete network "${name}"?`)) return;
+  if (!selectedConn) return;
+  if (!(await askConfirm("Delete network", `Delete network "${name}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -694,7 +700,8 @@ async function deleteNetwork(name: string) {
 }
 
 async function deletePool(name: string) {
-  if (!selectedConn || !confirm(`Delete pool "${name}"?`)) return;
+  if (!selectedConn) return;
+  if (!(await askConfirm("Delete pool", `Delete storage pool "${name}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -705,7 +712,8 @@ async function deletePool(name: string) {
 }
 
 async function deleteVolume(pool: string, name: string) {
-  if (!selectedConn || !confirm(`Delete volume "${name}"?`)) return;
+  if (!selectedConn) return;
+  if (!(await askConfirm("Delete volume", `Delete volume "${name}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -726,7 +734,8 @@ async function testConnection(id: string) {
 
 async function deleteConnection(id: string) {
   const c = connections.find((x) => x.id === id);
-  if (!c || !confirm(`Remove server "${c.name}"?`)) return;
+  if (!c) return;
+  if (!(await askConfirm("Remove server", `Remove server "${c.name}"?`, "Remove", true))) return;
   try {
     await api.del(`/connections/${id}`);
     connections = await api.get<Connection[]>("/connections");
@@ -753,6 +762,61 @@ setHtml(el, `
   (el.querySelector(".x") as HTMLElement).onclick = () => el.remove();
   el.onclick = (e) => { if (e.target === el) el.remove(); };
   return el;
+}
+
+/// Themed replacement for window.prompt — the native dialog ignores the app
+/// theme and looks alien inside the frameless window.
+function askText(title: string, label: string, value = "", placeholder = ""): Promise<string | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: string | null) => {
+      if (done) return;
+      done = true;
+      el.remove();
+      resolve(v);
+    };
+    const el = openModal(
+      title,
+      `<label class="field"><span>${esc(label)}</span>
+         <input id="ask-input" value="${esc(value)}" placeholder="${esc(placeholder)}"></label>`,
+      `<button class="btn" id="ask-cancel">Cancel</button>
+       <button class="btn primary" id="ask-ok">OK</button>`,
+    );
+    const input = $("#ask-input", el);
+    $("#ask-ok", el).onclick = () => finish(input.value);
+    $("#ask-cancel", el).onclick = () => finish(null);
+    (el.querySelector(".x") as HTMLElement).onclick = () => finish(null);
+    el.onclick = (e: Event) => { if (e.target === el) finish(null); };
+    input.onkeydown = (e: KeyboardEvent) => {
+      if (e.key === "Enter") finish(input.value);
+      if (e.key === "Escape") finish(null);
+    };
+    input.focus();
+    input.select();
+  });
+}
+
+/// Themed replacement for window.confirm.
+function askConfirm(title: string, message: string, okLabel = "Confirm", danger = false): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: boolean) => {
+      if (done) return;
+      done = true;
+      el.remove();
+      resolve(v);
+    };
+    const el = openModal(
+      title,
+      `<p class="hint" style="font-size:12px;color:var(--fg)">${esc(message)}</p>`,
+      `<button class="btn" id="ask-no">Cancel</button>
+       <button class="btn ${danger ? "danger" : "primary"}" id="ask-yes">${esc(okLabel)}</button>`,
+    );
+    $("#ask-yes", el).onclick = () => finish(true);
+    $("#ask-no", el).onclick = () => finish(false);
+    (el.querySelector(".x") as HTMLElement).onclick = () => finish(false);
+    el.onclick = (e: Event) => { if (e.target === el) finish(false); };
+  });
 }
 
 function openConnectionDialog() {
@@ -1071,7 +1135,7 @@ setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done">
   };
   refreshKeys();
   $("#pf-newkey", el).onclick = async () => {
-    const name = prompt("Key name");
+    const name = await askText("New API key", "Key name", "", "ci-runner");
     if (!name) return;
     try {
       const k = await api.post<import("./api").ApiKey>("/me/keys", { name });
