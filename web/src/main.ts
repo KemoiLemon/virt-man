@@ -4,7 +4,7 @@ import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
-import { ic } from "./icons";
+import { closeSvg, ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
@@ -229,17 +229,34 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------------------------------------------------------------- toast
-
+// Toasts stack bottom-right in a column instead of overlapping at the
+// bottom-centre, and each one is dismissible.
 function toast(msg: string, kind: "ok" | "bad" = "ok") {
+  let dock = document.getElementById("toast-dock");
+  if (!dock) {
+    dock = document.createElement("div");
+    dock.id = "toast-dock";
+    document.body.appendChild(dock);
+  }
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
-  el.textContent = msg;
-  document.body.appendChild(el);
-  requestAnimationFrame(() => el.classList.add("show"));
-  setTimeout(() => {
+  const text = document.createElement("span");
+  text.className = "toast-msg";
+  text.textContent = msg;
+  const close = document.createElement("button");
+  close.className = "toast-close";
+  close.type = "button";
+  close.setAttribute("aria-label", "Dismiss");
+  close.append(closeSvg());
+  el.append(text, close);
+  dock.appendChild(el);
+  const dismiss = () => {
     el.classList.remove("show");
     setTimeout(() => el.remove(), 200);
-  }, 4000);
+  };
+  close.onclick = dismiss;
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(dismiss, 4000);
 }
 
 // ---------------------------------------------------------------- boot
