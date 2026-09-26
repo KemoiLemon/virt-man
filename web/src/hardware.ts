@@ -243,7 +243,7 @@ export function deviceXml(d: HwDevice, index = 1): string {
       <backend model="random">${esc(f("backend") || "/dev/urandom")}</backend>
     </rng>`;
     case "memballoon":
-      return `<memballoon model="virtio"/>`;
+      return `<memballoon model="${esc(f("model") || "virtio")}"/>`;
     case "channel":
       return `<channel type="unix">
       <target type="virtio" name="org.qemu.guest_agent.0"/>
@@ -253,7 +253,9 @@ export function deviceXml(d: HwDevice, index = 1): string {
       <backend type="emulator" version="${esc(f("version") || "2.0")}"/>
     </tpm>`;
     case "watchdog":
-      return `<watchdog model="i6300esb" action="${esc(f("action") || "reset")}"/>`;
+      // Preserve the existing model on a round trip; only newly added
+      // watchdogs default to i6300esb.
+      return `<watchdog model="${esc(f("model") || "i6300esb")}" action="${esc(f("action") || "reset")}"/>`;
     default:
       return "";
   }
@@ -277,10 +279,10 @@ export function deviceSummary(d: HwDevice): string {
     case "hostdev": return `${f("domain")}:${f("bus")}:${f("slot")}.${f("function")}`;
     case "usb": return `${f("vendor")}:${f("product")}`;
     case "rng": return f("backend") || "/dev/urandom";
-    case "memballoon": return "virtio";
+    case "memballoon": return f("model") || "virtio";
     case "channel": return "org.qemu.guest_agent.0";
     case "tpm": return `emulated ${f("version") || "2.0"}`;
-    case "watchdog": return `i6300esb (${f("action") || "reset"})`;
+    case "watchdog": return `${f("model") || "i6300esb"} (${f("action") || "reset"})`;
     default: return d.kind;
   }
 }
@@ -368,14 +370,17 @@ export function devicesFromXml(xml: string): HwDevice[] {
       },
     });
   }
-  if (/<memballoon\b/.test(xml)) out.push({ kind: "memballoon", fields: {} });
+  if (/<memballoon\b/.test(xml)) {
+    const tag = xml.match(/<memballoon\b[^>]*>/)?.[0] ?? "";
+    out.push({ kind: "memballoon", fields: { model: attr(tag, "model") } });
+  }
   if (/org\.qemu\.guest_agent/.test(xml)) out.push({ kind: "channel", fields: {} });
   if (/<tpm\b/.test(xml)) {
     const version = /version=["']([^"']+)/.exec(xml)?.[1] ?? "2.0";
     out.push({ kind: "tpm", fields: { version } });
   }
   for (const m of xml.matchAll(/<watchdog\b[^>]*\/?>/g)) {
-    out.push({ kind: "watchdog", fields: { action: attr(m[0], "action") } });
+    out.push({ kind: "watchdog", fields: { action: attr(m[0], "action"), model: attr(m[0], "model") } });
   }
   for (const m of xml.matchAll(/<rng\b[\s\S]*?<\/rng>/g)) {
     const backend = m[0].match(/<backend[^>]*>([^<]*)<\/backend>/)?.[1] ?? "";

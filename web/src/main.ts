@@ -3139,10 +3139,14 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           .replace(/<disk\b[^>]*device=['"](disk|cdrom)['"][\s\S]*?<\/disk>\s*/g, "")
           .replace(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>\s*/g, "")
           .replace(/<rng\b[\s\S]*?<\/rng>\s*/g, "")
-          .replace(/<memballoon\b[^>]*\/>\s*/g, "")
+          // Both self-closing and child-bearing shapes must be stripped:
+          // libvirt writes <memballoon model='virtio'> with an <address>
+          // child, and <watchdog> as self-closing, so matching only one shape
+          // leaves the other behind and the splice re-adds a duplicate.
+          .replace(/<memballoon\b(?:[^>]*\/>|[\s\S]*?<\/memballoon>)\s*/g, "")
           .replace(/<channel\b[\s\S]*?org\.qemu\.guest_agent[\s\S]*?<\/channel>\s*/g, "")
           .replace(/<tpm\b[\s\S]*?<\/tpm>\s*/g, "")
-          .replace(/<watchdog\b[^>]*\/?>\s*/g, "")
+          .replace(/<watchdog\b(?:[^>]*\/>|[\s\S]*?<\/watchdog>)\s*/g, "")
           .replace(/<vcpu([^>]*)>\d+<\/vcpu>/, `<vcpu$1>${general.cpus}</vcpu>`)
           .replace(/<memory([^>]*)>\d+<\/memory>/, `<memory$1>${general.memory_mb * 1024}</memory>`)
           .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`)

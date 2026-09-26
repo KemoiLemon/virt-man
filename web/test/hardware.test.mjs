@@ -189,3 +189,17 @@ test("summaries describe each device for the sidebar", () => {
   assert.match(hw.deviceSummary({ kind: "interface", fields: { network: "n" } }), /n/);
   assert.equal(hw.deviceSummary({ kind: "memballoon", fields: {} }), "virtio");
 });
+
+test("watchdog and memballoon models survive a round trip", () => {
+  const xml = `<domain><devices>
+    <watchdog model="itco" action="reset"/>
+    <memballoon model="virtio"><address type="pci" domain="0x0000" bus="0x03" slot="0x00" function="0x0"/></memballoon>
+  </devices></domain>`;
+  const got = hw.devicesFromXml(xml);
+  const wd = got.find((d) => d.kind === "watchdog");
+  assert.equal(wd.fields.model, "itco", "watchdog model is captured, not defaulted");
+  assert.match(hw.deviceXml(wd, 1), /model="itco"/, "watchdog model is re-serialised");
+  const bal = got.find((d) => d.kind === "memballoon");
+  assert.equal(bal.fields.model, "virtio", "balloon model is captured");
+  assert.match(hw.deviceXml(bal, 1), /<memballoon model="virtio"\/>/, "balloon re-serialises");
+});

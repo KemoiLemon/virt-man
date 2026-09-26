@@ -67,7 +67,6 @@
 /* Custom devices appended below the fixed device pages. */
 .hw-custom-list { border-top: 1px solid var(--line); }
 .hw-custom-list:empty { display: none; }
-.hw-custom .hw-ic { color: var(--warn); }
 .hw-custom.active .hw-ic { color: var(--accent); }
 
 /* Device table on the VM Hardware tab. */
