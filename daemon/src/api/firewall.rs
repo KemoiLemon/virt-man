@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::ApiError;
-use crate::firewall::{self, FirewallStore, NetworkFirewall, VmFirewall};
+use crate::firewall::{self, FirewallStore, NetworkFirewall, PolicySet, VmFirewall};
 
 #[derive(Clone)]
 pub struct FirewallState {
@@ -74,6 +74,8 @@ struct NetworkReq {
     rules: Vec<firewall::Rule>,
     #[serde(default)]
     forwards: Vec<firewall::Forward>,
+    #[serde(default)]
+    policy: PolicySet,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +83,8 @@ struct NetworkReq {
 struct VmReq {
     #[serde(default)]
     rules: Vec<firewall::Rule>,
+    #[serde(default)]
+    policy: PolicySet,
 }
 
 async fn put_network(
@@ -91,6 +95,16 @@ async fn put_network(
     let _guard = state.lock.lock().await;
     let mut store = load_store(&state)?;
 
+    // Rules are scoped to this network's subnet, so a typo'd name would
+    // silently persist but never apply. Fail fast instead.
+    let n = name.clone();
+    crate::libvirt::with_conn(move |c| {
+        virt::network::Network::lookup_by_name(c, &n).map(|_| ())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::not_found(format!("network '{name}': {e}")))?;
+
     let mut fw = NetworkFirewall::default();
     for r in &req.rules {
         fw.rules
@@ -100,6 +114,7 @@ async fn put_network(
         fw.forwards
             .push(firewall::validate_forward(f).map_err(ApiError::bad_request)?);
     }
+    fw.policy = req.policy;
 
     if fw.is_empty() {
         store.networks.remove(&name);
@@ -121,11 +136,22 @@ async fn put_vm(
     let _guard = state.lock.lock().await;
     let mut store = load_store(&state)?;
 
+    // Rules are scoped to this guest's MACs, so a typo'd name would silently
+    // persist but never apply. Fail fast instead.
+    let n = name.clone();
+    crate::libvirt::with_conn(move |c| {
+        virt::domain::Domain::lookup_by_name(c, &n).map(|_| ())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::not_found(format!("domain '{name}': {e}")))?;
+
     let mut fw = VmFirewall::default();
     for r in &req.rules {
         fw.rules
             .push(firewall::validate_rule(r).map_err(ApiError::bad_request)?);
     }
+    fw.policy = req.policy;
 
     if fw.is_empty() {
         store.vms.remove(&name);
@@ -188,6 +214,7 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
             subnet: n.subnet.clone(),
             rules: &n.fw.rules,
             forwards: &n.fw.forwards,
+            policy: n.fw.policy,
         })
         .collect();
     let rendered_vms: Vec<firewall::RenderedVm> = vms
@@ -195,6 +222,7 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
         .map(|v| firewall::RenderedVm {
             macs: v.macs.clone(),
             rules: &v.fw.rules,
+            policy: v.fw.policy,
         })
         .collect();
     let script = firewall::render_ruleset(&rendered_nets, &rendered_vms);

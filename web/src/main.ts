@@ -1,6 +1,6 @@
 import { openCropDialog } from "./crop";
 import { api } from "./api";
-import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallRule, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
+import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -1459,6 +1459,29 @@ function blankRule(): FirewallRule {
   return { direction: "in", action: "accept", proto: "any", src_ip: "", dst_ip: "", src_port: "", dst_port: "" };
 }
 
+function blankPolicy(): FirewallPolicy {
+  return { in: "accept", out: "accept", forward: "accept" };
+}
+
+/// Three dropdowns for the per-direction default policies.
+function fwPolicyRow(p: FirewallPolicy): string {
+  return `
+    <div class="grid2 perm-grid">
+      <label class="field"><span>In</span><select data-pol-in>${fwOpt(FW_ACTIONS, p.in)}</select></label>
+      <label class="field"><span>Out</span><select data-pol-out>${fwOpt(FW_ACTIONS, p.out)}</select></label>
+      <label class="field"><span>Forward</span><select data-pol-forward>${fwOpt(FW_ACTIONS, p.forward)}</select></label>
+    </div>`;
+}
+
+function readFwPolicy(root: Element): FirewallPolicy {
+  const v = (sel: string) => (root.querySelector(sel) as HTMLSelectElement)?.value as FirewallPolicy["in"];
+  return {
+    in: v("[data-pol-in]") ?? "accept",
+    out: v("[data-pol-out]") ?? "accept",
+    forward: v("[data-pol-forward]") ?? "accept",
+  };
+}
+
 function readFwRuleRows(root: Element): FirewallRule[] {
   return [...root.querySelectorAll("[data-r-dir]")].map((s) => {
     const tr = (s as HTMLElement).closest("tr")!;
@@ -1494,6 +1517,7 @@ function openFirewallEditor(netName: string) {
   if (!selectedConn) return;
   let rules: FirewallRule[] = [];
   let forwards: FirewallForward[] = [];
+  let policy: FirewallPolicy = blankPolicy();
 
   const el = openModal(
     `Firewall — ${esc(netName)}`,
@@ -1506,10 +1530,14 @@ function openFirewallEditor(netName: string) {
   const read = () => {
     rules = readFwRuleRows(el);
     forwards = readFwFwdRows(el);
+    policy = readFwPolicy(el);
   };
 
   function render() {
     setHtml($("#fw-body", el), `
+      <div class="section-title">Default policies</div>
+      ${fwPolicyRow(policy)}
+
       <div class="section-title">Rules</div>
       <table class="grid">
         <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
@@ -1557,11 +1585,12 @@ function openFirewallEditor(netName: string) {
     });
   }
 
-  api.get<{ rules: FirewallRule[]; forwards: FirewallForward[] }>(
+  api.get<{ rules: FirewallRule[]; forwards: FirewallForward[]; policy: FirewallPolicy }>(
     `/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`)
     .then((fw) => {
       rules = fw.rules ?? [];
       forwards = fw.forwards ?? [];
+      policy = fw.policy ?? blankPolicy();
       render();
     })
     .catch((e) => toast((e as Error).message, "bad"));
@@ -1571,7 +1600,7 @@ function openFirewallEditor(netName: string) {
     read();
     try {
       await api.put(`/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`,
-        { rules, forwards });
+        { rules, forwards, policy });
       toast("Firewall applied");
       el.remove();
     } catch (e) {
@@ -2230,17 +2259,25 @@ async function renderVmBody(vm: string) {
     // Inline rules editor, scoped to this guest by its interface MACs.
     const rulesBody = body;
     let vmRules: FirewallRule[] = [];
+    let vmPolicy: FirewallPolicy = blankPolicy();
     try {
-      const fw = await api.get<{ rules: FirewallRule[] }>(
+      const fw = await api.get<{ rules: FirewallRule[]; policy: FirewallPolicy }>(
         `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`);
       vmRules = fw.rules ?? [];
+      vmPolicy = fw.policy ?? blankPolicy();
     } catch {
       vmRules = [];
     }
 
-    const readRules = () => { vmRules = readFwRuleRows(rulesBody); };
+    const readRules = () => {
+      vmRules = readFwRuleRows(rulesBody);
+      vmPolicy = readFwPolicy(rulesBody);
+    };
     const renderRules = () => {
       setHtml(rulesBody, `
+        <div class="section-title">Default policies</div>
+        ${fwPolicyRow(vmPolicy)}
+        <div class="section-title">Rules</div>
         <table class="grid">
           <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source port</th><th>Dest port</th><th></th></tr>
           ${vmRules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
@@ -2257,7 +2294,7 @@ async function renderVmBody(vm: string) {
       $("#vmfw-apply", rulesBody).onclick = async () => {
         readRules();
         try {
-          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`, { rules: vmRules });
+          await api.put(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/firewall`, { rules: vmRules, policy: vmPolicy });
           toast("Firewall applied");
         } catch (e) {
           toast((e as Error).message, "bad");

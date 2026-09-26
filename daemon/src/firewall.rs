@@ -40,12 +40,16 @@ pub struct NetworkFirewall {
     pub rules: Vec<Rule>,
     #[serde(default)]
     pub forwards: Vec<Forward>,
+    #[serde(default)]
+    pub policy: PolicySet,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VmFirewall {
     #[serde(default)]
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub policy: PolicySet,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -72,13 +76,13 @@ pub struct Forward {
 
 impl NetworkFirewall {
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty() && self.forwards.is_empty()
+        self.rules.is_empty() && self.forwards.is_empty() && self.policy.is_accept_all()
     }
 }
 
 impl VmFirewall {
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty()
+        self.rules.is_empty() && self.policy.is_accept_all()
     }
 }
 
@@ -244,26 +248,72 @@ pub fn network_prefix(cidr: &str) -> Option<String> {
     Some(format!("{}/{prefix}", Ipv4Addr::from(u32::from(ip) & mask)))
 }
 
+/// Default action for traffic not matched by any explicit rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Policy {
+    #[default]
+    Accept,
+    Reject,
+    Drop,
+}
+
+impl Policy {
+    pub fn action(&self) -> &'static str {
+        match self {
+            Policy::Accept => "accept",
+            Policy::Reject => "reject",
+            Policy::Drop => "drop",
+        }
+    }
+}
+
+/// Per-direction default policies for a network or VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PolicySet {
+    #[serde(default, rename = "in")]
+    pub in_: Policy,
+    #[serde(default, rename = "out")]
+    pub out: Policy,
+    #[serde(default, rename = "forward")]
+    pub forward: Policy,
+}
+
+impl PolicySet {
+    pub fn is_accept_all(&self) -> bool {
+        self.in_ == Policy::Accept && self.out == Policy::Accept && self.forward == Policy::Accept
+    }
+}
+
 // ------------------------------------------------------------------ render
 
-/// One network's rules and forwards, with the subnet the direction matches
-/// against. `subnet` is a network CIDR like 192.168.167.0/24.
+/// One network's rules, forwards and default policies, with the subnet the
+/// direction matches against. `subnet` is a network CIDR like 192.168.167.0/24.
 pub struct RenderedNet<'a> {
     pub subnet: String,
     pub rules: &'a [Rule],
     pub forwards: &'a [Forward],
+    pub policy: PolicySet,
 }
 
-/// One VM's firewall rules, matched by the guest's interface MAC addresses.
+/// One VM's firewall rules and default policies, matched by the guest's
+/// interface MAC addresses.
 pub struct RenderedVm<'a> {
     pub macs: Vec<String>,
     pub rules: &'a [Rule],
+    pub policy: PolicySet,
 }
 
 /// Build the complete nftables script for the `virt-man` table. Pure, so the
 /// rule mapping is unit-testable without touching the host.
+///
+/// Explicit rules come first; per-direction default policies (anything not
+/// ACCEPT) follow, scoped exactly like the rules they are the default for.
+/// The chain base policy stays ACCEPT, so traffic outside every configured
+/// scope falls through unharmed.
 pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
     let mut rules = Vec::new();
+    let mut defaults = Vec::new();
     let mut forwards = Vec::new();
     for n in nets {
         for r in n.rules {
@@ -271,6 +321,7 @@ pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
                 rules.push(line);
             }
         }
+        defaults.extend(net_policy_defaults(n));
         for f in n.forwards {
             if let Some(line) = render_forward(f, &n.subnet) {
                 forwards.push(line);
@@ -283,14 +334,15 @@ pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
         for r in v.rules {
             rules.extend(render_vm_rule(r, &v.macs));
         }
+        defaults.extend(vm_policy_defaults(v));
     }
 
     let mut out = String::from("table ip virt-man {\n");
     out.push_str("  chain vm-forward {\n");
     out.push_str("    type filter hook forward priority filter - 1; policy accept;\n");
-    for r in rules {
+    for r in rules.iter().chain(defaults.iter()) {
         out.push_str("    ");
-        out.push_str(&r);
+        out.push_str(r);
         out.push('\n');
     }
     out.push_str("  }\n");
@@ -303,6 +355,41 @@ pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
     }
     out.push_str("  }\n");
     out.push_str("}\n");
+    out
+}
+
+/// Default-policy lines for a network. Only non-ACCEPT policies need a rule:
+/// the chain base policy is ACCEPT, so anything without one falls through.
+fn net_policy_defaults(n: &RenderedNet) -> Vec<String> {
+    let mut out = Vec::new();
+    if n.policy.in_ != Policy::Accept {
+        out.push(format!("ip daddr {} {}", n.subnet, n.policy.in_.action()));
+    }
+    if n.policy.out != Policy::Accept {
+        out.push(format!("ip saddr {} {}", n.subnet, n.policy.out.action()));
+    }
+    // forward is unscoped, matching how a forward rule behaves.
+    if n.policy.forward != Policy::Accept {
+        out.push(n.policy.forward.action().to_string());
+    }
+    out
+}
+
+/// Default-policy lines for a VM, scoped to its MACs. "forward" covers both
+/// directions, so it emits two lines.
+fn vm_policy_defaults(v: &RenderedVm) -> Vec<String> {
+    let set = format!("{{ {} }}", v.macs.join(", "));
+    let mut out = Vec::new();
+    if v.policy.in_ != Policy::Accept {
+        out.push(format!("ether daddr {set} {}", v.policy.in_.action()));
+    }
+    if v.policy.out != Policy::Accept {
+        out.push(format!("ether saddr {set} {}", v.policy.out.action()));
+    }
+    if v.policy.forward != Policy::Accept {
+        out.push(format!("ether saddr {set} {}", v.policy.forward.action()));
+        out.push(format!("ether daddr {set} {}", v.policy.forward.action()));
+    }
     out
 }
 
@@ -543,6 +630,7 @@ mod tests {
             subnet: "192.168.167.0/24".into(),
             rules: &[in_rule],
             forwards: &[],
+            policy: PolicySet::default(),
         }];
         let out = render_ruleset(&nets, &[]);
         assert!(out.contains("hook forward priority filter - 1"));
@@ -577,6 +665,40 @@ mod tests {
     }
 
     #[test]
+    fn non_accept_policies_emit_scoped_defaults_after_explicit_rules() {
+        let explicit = Rule {
+            direction: "in".into(),
+            proto: "tcp".into(),
+            dst_port: "443".into(),
+            ..base()
+        };
+        let policy = PolicySet {
+            in_: Policy::Drop,
+            out: Policy::Accept,
+            forward: Policy::Reject,
+        };
+        let nets = [RenderedNet {
+            subnet: "192.168.167.0/24".into(),
+            rules: &[explicit],
+            forwards: &[],
+            policy,
+        }];
+        let out = render_ruleset(&nets, &[]);
+        let explicit_pos = out.find("tcp dport 443 accept").unwrap();
+        let in_default = out.find("ip daddr 192.168.167.0/24 drop").unwrap();
+        let fwd_default = out.find("reject").unwrap();
+        assert!(explicit_pos < in_default, "explicit rules precede defaults");
+        assert!(
+            in_default < fwd_default,
+            "in default precedes the unscoped forward default"
+        );
+        assert!(
+            !out.contains("ip saddr 192.168.167.0/24"),
+            "ACCEPT defaults emit no rule"
+        );
+    }
+
+    #[test]
     fn a_vm_with_no_macs_contributes_no_rules() {
         let vm = RenderedVm {
             macs: vec![],
@@ -584,6 +706,7 @@ mod tests {
                 direction: "in".into(),
                 ..base()
             }],
+            policy: PolicySet::default(),
         };
         let out = render_ruleset(&[], &[vm]);
         // The chain header says "policy accept"; no rule line may contain an

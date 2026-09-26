@@ -149,6 +149,12 @@ export interface FirewallForward {
   proto: "tcp" | "udp";
 }
 
+export interface FirewallPolicy {
+  in: "accept" | "reject" | "drop";
+  out: "accept" | "reject" | "drop";
+  forward: "accept" | "reject" | "drop";
+}
+
 export interface PoolSummary {
   name: string;
   active: boolean;
