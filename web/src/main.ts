@@ -2575,7 +2575,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         <div class="metric-head">
           <span class="metric-ic">${ic.firewall()}</span>
           <b>Firewall</b>
-          <span class="metric-value">${fw.rules.length ? `${fw.rules.length} rules` : "Open"}</span>
+          <span class="metric-value">${fw.rules.length} rules</span>
         </div>
         <div class="fw-policy-grid">
           ${[

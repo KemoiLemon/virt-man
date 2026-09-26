@@ -73,13 +73,15 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* Firewall policy chips: one per direction, coloured by action. */
+/* Firewall policy chips: one per direction, coloured by action. The grid
+   flexes to fill the card height, and each chip centres its content. */
 .fw-policy-grid {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
+  flex: 1 1 auto; display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
   background: var(--line); border: 1px solid var(--line);
 }
 .fw-policy-chip {
-  display: flex; flex-direction: column; gap: 3px;
+  display: flex; flex-direction: column; justify-content: center; gap: 3px;
   background: var(--panel); padding: 9px 10px; min-width: 0;
 }
 .fw-policy-chip > span.ico, .fw-policy-chip > span:first-child {
