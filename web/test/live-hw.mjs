@@ -107,6 +107,11 @@ check("edit opens a prefilled dialog", () => {
 // Connection view: create buttons on the tab bar.
 document.querySelector(".tree-row.tree-group")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1200);
+// The server opens on the Dashboard tab; Create VM lives on the VMs tab.
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "VMs")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(700);
 check("connection view puts Create VM on the tab bar", () => {
   const actions = document.querySelector(".tabbar .tabbar-actions");
   assert.ok(actions, "connection tab bar has actions");

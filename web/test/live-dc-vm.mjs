@@ -186,7 +186,7 @@ check("server rows are selectable from the table", () => {
 await wait(1400);
 check("clicking a server opens its view", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["VMs", "Networks", "Storage", "Firewall"], `server tabs render (${tabs})`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall"], `server tabs render (${tabs})`);
 });
 
 for (const [state, name2] of results) {

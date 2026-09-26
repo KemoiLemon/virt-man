@@ -1,7 +1,6 @@
-// Window-control + icon-handling checks (task-3 / criterion 1 + 3).
+// Icon-handling checks (task-3 / criterion 3).
 //
 // Asserts against the SHIPPED stylesheet and the real icon renderer:
-//  - .win-btn is full-height, fixed-width, and hovers to --bad on close
 //  - icons carry no inline stroke attributes (one .ico > svg rule owns them)
 //
 // Run: pnpm test
@@ -28,28 +27,6 @@ before(async () => {
 /** Collapse whitespace so rule matching is layout-insensitive. */
 const flat = () => css.replace(/\s+/g, " ");
 
-test("window controls use dedicated .win-btn styling, not .btn.icon", () => {
-  const rule = flat().match(/\.win-btn\s*\{([^}]*)\}/);
-  assert.ok(rule, ".win-btn rule exists in the shipped CSS");
-  const body = rule[1];
-  assert.match(body, /width:\s*44px/, "fixed width");
-  assert.match(body, /height:\s*100%/, "full height");
-  assert.match(body, /border:\s*0/, "no generic button border");
-});
-
-test("close control hovers to the --bad colour", () => {
-  const hover = flat().match(/\.win-btn\.close:hover\s*\{([^}]*)\}/);
-  assert.ok(hover, ".win-btn.close:hover rule exists");
-  assert.match(hover[1], /background:\s*var\(--bad\)/, "hover background is --bad");
-});
-
-test("win-btn hover uses theme variables only", () => {
-  const hover = flat().match(/\.win-btn:hover\s*\{([^}]*)\}/);
-  assert.ok(hover, ".win-btn:hover rule exists");
-  assert.match(hover[1], /var\(--fg\)/);
-  assert.match(hover[1], /var\(--hover\)/);
-});
-
 test("stroke weight is defined once in CSS, not per icon", () => {
   const rule = flat().match(/\.ico\s*>\s*svg\s*\{([^}]*)\}/);
   assert.ok(rule, ".ico > svg rule exists");
@@ -60,7 +37,7 @@ test("stroke weight is defined once in CSS, not per icon", () => {
 });
 
 test("rendered icons carry no inline stroke attributes", () => {
-  for (const name of ["min", "max", "close", "theme", "webui", "trash", "admin", "logout"]) {
+  for (const name of ["close", "theme", "trash", "admin", "logout"]) {
     const html = icons.ic[name]();
     assert.match(html, /class="ico"/, `${name} is wrapped in .ico`);
     assert.match(html, /<svg viewBox="0 0 24 24">/, `${name} svg is attribute-free`);

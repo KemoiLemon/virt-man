@@ -179,7 +179,7 @@ await (async () => {
     const tabs = [...bar.querySelectorAll(".tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["VMs", "Networks", "Storage", "Firewall"],
+      ["Dashboard", "VMs", "Networks", "Storage", "Firewall"],
       "all connection tabs render",
     );
     assert.equal(
@@ -191,7 +191,7 @@ await (async () => {
   });
 
   // Every tab must still switch.
-  for (const name of ["Networks", "Storage", "VMs"]) {
+  for (const name of ["Networks", "Storage", "VMs", "Dashboard"]) {
     const tab = [...document.querySelectorAll(".tabbar .tab")]
       .find((t) => t.textContent.trim() === name);
     tab?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

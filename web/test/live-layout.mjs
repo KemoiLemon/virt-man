@@ -112,6 +112,11 @@ check("datacenter table uses the compact action column", () => {
 document.querySelector(".tree-row.tree-group")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1500);
+// The server opens on the Dashboard tab; the VM table lives on the VMs tab.
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "VMs")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(800);
 
 check("VM table matches the datacenter table's action layout", () => {
   const td = document.querySelector("#vms-list table.grid td.col-actions");

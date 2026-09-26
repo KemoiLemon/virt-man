@@ -1,10 +1,9 @@
 // VNC console: a canvas fed raw pixels by the daemon.
 //
-// Ported from vm-man, which drives the same viewer over Tauri IPC. The RFB
-// client itself lives in the daemon (daemon/src/rfb.rs): it holds the guest
-// framebuffer and hands out only the rectangle that changed, as base64 BGRA.
-// So there is no VNC client in the browser at all — no noVNC, no WebSocket,
-// just putImageData.
+// Ported from vm-man's viewer. The RFB client itself lives in the daemon
+// (daemon/src/rfb.rs): it holds the guest framebuffer and hands out only the
+// rectangle that changed, as base64 BGRA. So there is no VNC client in the
+// browser at all — no noVNC, no WebSocket, just putImageData.
 //
 // Scaling contract (also from vm-man): the displayed size is computed from the
 // LOCAL stage box and devicePixelRatio, using the guest resolution purely as an
@@ -308,12 +307,4 @@ export async function attachConsole(
   };
   current = handle;
   return handle;
-}
-
-export function isTauri(): boolean {
-  return typeof (window as any).__TAURI__ !== "undefined";
-}
-
-export function tauriWindow(): any | null {
-  return (window as any).__TAURI__?.window?.getCurrentWindow?.() ?? null;
 }

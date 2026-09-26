@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=virt-man
-Comment=Personal VM manager (libvirt)
-Exec=/opt/virt-man/virt-man
-Icon=/opt/virt-man/icon.png
-Terminal=false
-Categories=System;Emulator;

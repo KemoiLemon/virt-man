@@ -281,12 +281,22 @@ check("the add-user button is spaced away from the table above it", () => {
 });
 
 check("role choices are spaced apart in the picker", () => {
-  // The themed listbox popover renders the role options; a small gap keeps
-  // adjacent role names from reading as one block.
+  // Open the per-user editor, then its role select: the themed listbox popover
+  // renders the role options; a small gap keeps adjacent role names from
+  // reading as one block. (The popover only exists once a select is opened.)
+  document.querySelector("[data-edituser]")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const roleSelect = document.querySelector("#eu-role");
+  assert.ok(roleSelect, "role select present in the edit modal");
+  const trigger = roleSelect.nextElementSibling;
+  assert.ok(trigger?.classList.contains("select-trigger"), "listbox trigger rendered");
+  trigger.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   const pop = document.querySelector(".select-popover");
   assert.ok(pop, "select popover exists in the DOM");
   const gap = px(pop, "gap");
   assert.ok(gap > 0 && gap <= 4, `options have a tiny gap (${gap}px)`);
+  // Close only the per-user editor, leaving the admin panel open for the
+  // Roles tab checks that follow.
+  document.querySelector("#eu-cancel")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 });
 
 // ---- Roles tab: create a custom role, then clean it up.

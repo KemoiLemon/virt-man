@@ -92,7 +92,6 @@ body {
   stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
 }
 /* Context sizes override the 16px default without touching the svg itself. */
-.win-btn .ico { width: 16px; height: 16px; }
 .tab .ico { width: 14px; height: 14px; }
 .tree-ic { width: 16px; height: 16px; flex: 0 0 16px; }
 .card-ic { width: 20px; height: 20px; flex: 0 0 20px; }
@@ -103,9 +102,7 @@ body {
   display: flex;
   align-items: center;
   gap: 16px;
-  /* No right padding: the window controls run flush to the window edge like
-     a real titlebar. */
-  padding: 0 0 0 14px;
+  padding: 0 14px;
   height: 46px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
@@ -113,17 +110,11 @@ body {
   -webkit-user-select: none;
   user-select: none;
 }
-/* App actions sit together at the trailing edge, hugging the window controls.
-   The 16px topbar flex gap plus this negative margin leaves ~6px of breathing
-   room before the first win-btn's divider. `.host` flexes, but it can shrink
-   to nothing, so this group still needs margin-left:auto to stay pinned right
-   when the host label is short. */
+/* App actions sit together at the trailing edge. */
 .topbar-quick {
   margin-left: auto; display: flex; align-items: center; gap: 7px;
-  flex: 0 0 auto; margin-right: -10px;
+  flex: 0 0 auto;
 }
-/* Without window controls (browser build) the actions still need a gutter. */
-.topbar > .topbar-quick:last-child { margin-right: 0; padding-right: 14px; }
 .brand { font-weight: 700; letter-spacing: 2px; font-size: 15px; }
 .brand span { color: var(--accent); }
 .host { color: var(--dim); font-size: 11px; flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -209,17 +200,7 @@ body {
 .ico { vertical-align: middle; }
 .icon-label { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; }
 
-/* ------------------------------------------------- frameless window controls */
-.window-controls { align-self: stretch; display: flex; flex: 0 0 auto; }
-.win-btn {
-  width: 44px; height: 100%; border: 0; border-left: 1px solid var(--line);
-  background: transparent; color: var(--dim); cursor: pointer; display: grid; place-items: center;
-}
-.win-btn .ico { width: 16px; height: 16px; }
-.win-btn:hover { color: var(--fg); background: var(--hover); }
-.win-btn.close:hover { color: var(--accent-fg); background: var(--bad); }
-
-/* ---------------------------------------------------------------- modals */
+/* ------------------------------------------------------------- modals */
 .modal-back {
   position: fixed; inset: 0; background: var(--shade);
   display: none; align-items: center; justify-content: center; z-index: 50;

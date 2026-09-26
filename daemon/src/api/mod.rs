@@ -2,6 +2,7 @@ pub mod console;
 pub mod domains;
 pub mod filters;
 pub mod health;
+pub mod host;
 pub mod networks;
 pub mod pools;
 pub mod volumes;
@@ -49,6 +50,7 @@ impl IntoResponse for ApiError {
 pub fn build(auth: Auth) -> Router {
     let authed = Router::new()
         .merge(health::routes())
+        .merge(host::routes())
         .merge(domains::routes())
         .merge(networks::routes())
         .merge(filters::routes())

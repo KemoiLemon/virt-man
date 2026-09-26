@@ -52,10 +52,25 @@ document.querySelector(".tree-row.tree-group")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1500);
 
-check("server view has a Firewall tab", () => {
+check("server view has a Dashboard tab first, then the resource tabs", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["VMs", "Networks", "Storage", "Firewall"], `tabs: ${tabs}`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall"], `tabs: ${tabs}`);
+  assert.ok(tabNamed("Dashboard").querySelector("svg"), "Dashboard tab has an icon");
   assert.ok(tabNamed("Firewall").querySelector("svg"), "Firewall tab has an icon");
+});
+
+await wait(1500); // first dashboard render fetches host stats + lists
+check("the dashboard is the landing tab and shows host + resource summaries", () => {
+  const active = document.querySelector(".tabbar .tab.active")?.textContent.trim();
+  assert.equal(active, "Dashboard", "Dashboard tab active on open");
+  const body = document.querySelector("#conn-body")?.textContent ?? "";
+  assert.match(body, /CPU/, "CPU metric rendered");
+  assert.match(body, /Memory/, "Memory metric rendered");
+  assert.match(body, /VMS/, "VM count card rendered");
+  assert.match(body, /NETWORKS/, "network count card rendered");
+  assert.match(body, /POOLS/, "pool count card rendered");
+  assert.match(body, /Networking/, "networking summary rendered");
+  assert.match(body, /Storage pools/, "storage pool summary rendered");
 });
 
 tabNamed("Firewall")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

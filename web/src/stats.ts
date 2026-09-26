@@ -24,6 +24,16 @@ export interface DomainStats {
   sampled_at_ms: number;
 }
 
+/// Host-wide metrics from `GET /host/stats`, for the daemon dashboard.
+export interface HostStats {
+  cpu_total: number;
+  cpu_idle: number;
+  mem_total_kib: number;
+  mem_available_kib: number;
+  cpus: number;
+  sampled_at_ms: number;
+}
+
 interface Series {
   cpu: number[];
   mem: number[];
@@ -94,6 +104,47 @@ export function addSample(s: DomainStats): { cpu: number[]; mem: number[]; cpuNo
 /** Drop a domain's history (e.g. after deletion). */
 export function forgetSeries(name: string) {
   series.delete(name);
+}
+
+/// Host CPU/memory history, keyed by connection id so each daemon dashboard
+/// keeps its own series. CPU is a jiffy-counter delta; memory is instantaneous.
+interface HostSeries {
+  cpu: number[];
+  mem: number[];
+  prev?: { cpu_total: number; cpu_idle: number; sampled_at_ms: number };
+}
+
+const hostSeries = new Map<string, HostSeries>();
+
+/** Fold one host sample into its series and return the current values. */
+export function addHostSample(
+  key: string,
+  s: HostStats,
+): { cpu: number[]; mem: number[]; cpuNow: number; memNow: number } {
+  let entry = hostSeries.get(key);
+  if (!entry) {
+    entry = { cpu: blank().cpu, mem: blank().mem };
+    hostSeries.set(key, entry);
+  }
+
+  let cpuNow = 0;
+  if (entry.prev) {
+    const dtMs = s.sampled_at_ms - entry.prev.sampled_at_ms;
+    const dTotal = s.cpu_total - entry.prev.cpu_total;
+    const dIdle = s.cpu_idle - entry.prev.cpu_idle;
+    if (dtMs > 0 && dTotal > 0) {
+      cpuNow = clampPercent(100 * (1 - dIdle / dTotal));
+    }
+  }
+  entry.prev = { cpu_total: s.cpu_total, cpu_idle: s.cpu_idle, sampled_at_ms: s.sampled_at_ms };
+
+  const memNow = s.mem_total_kib
+    ? clampPercent(100 * (1 - s.mem_available_kib / s.mem_total_kib))
+    : 0;
+
+  push(entry.cpu, cpuNow);
+  push(entry.mem, memNow);
+  return { cpu: entry.cpu.slice(), mem: entry.mem.slice(), cpuNow, memNow };
 }
 
 /** Current series without recording a new sample. */

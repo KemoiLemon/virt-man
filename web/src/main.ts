@@ -1,15 +1,15 @@
 import { openCropDialog } from "./crop";
 import { api } from "./api";
 import type { Connection, CreateConnectionResult, DomainSummary, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
-import { attachConsole, detachConsole, isTauri, tauriWindow } from "./console";
+import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
 import { ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
-import { addSample, fmtBytes, pct, sparkline } from "./stats";
-import type { DomainStats } from "./stats";
+import { addHostSample, addSample, fmtBytes, pct, sparkline } from "./stats";
+import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { domainXml, esc, networkXml, poolXml, volumeXml } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
@@ -31,7 +31,7 @@ let user: User | null = null;
 let authDisabled = false;
 let connections: Connection[] = [];
 let selectedConn: string | null = null;
-let connTab: "vms" | "networks" | "storage" | "firewall" = "vms";
+let connTab: "dashboard" | "vms" | "networks" | "storage" | "firewall" = "dashboard";
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
 let dcTab: "servers" | "guests" = "servers";
@@ -106,7 +106,7 @@ function openCommandPalette() {
       leaveCurrentView();
       selectedConn = c.id;
       selectedVm = null;
-      connTab = "vms";
+      connTab = "dashboard";
       renderTree();
       void renderConn();
     });
@@ -323,18 +323,12 @@ function renderApp() {
 setHtml(app, `
     <div class="topbar">
       <span class="brand">virt-<span>man</span></span>
-      <span class="host">${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
+      <span class="host">web${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
       <span class="topbar-quick">
-        ${isTauri() ? `<button class="btn icon" id="webui-btn" title="Connect to a remote WebUI">${ic.webui()}</button>` : ""}
         <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
         ${canAdmin() ? `<button class="btn icon" id="admin-btn" title="Admin panel">${ic.admin()}</button>` : ""}
         ${authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign out">${ic.logout()}</button>`}
       </span>
-      ${isTauri() ? `<span class="window-controls">
-        <button class="win-btn" id="win-min" title="Minimise">${ic.min()}</button>
-        <button class="win-btn" id="win-max" title="Maximise">${ic.max()}</button>
-        <button class="win-btn close" id="win-close" title="Close">${ic.close()}</button>
-      </span>` : ""}
     </div>
     <div class="layout">
       <div class="pane list-pane">
@@ -354,55 +348,17 @@ setHtml(app, `
   $("#theme-btn").onclick = toggleTheme;
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
   if ($("#admin-btn")) $("#admin-btn").onclick = openAdmin;
-  if ($("#webui-btn")) $("#webui-btn").onclick = connectToWebui;
   $("#add-conn-row").onclick = () => openConnectionDialog();
   $("#tasks-close").onclick = () => $("#tasks").classList.add("hidden");
 
   onTasks(renderTasks);
   renderTree();
   renderProfileBtn();
-  wireWindowChrome();
   if (!selectedConn) renderDc();
   // Populate the auto-expanded tree immediately rather than waiting for the
   // first poll tick or a server click.
   void refreshTreeVms();
   startPolling();
-}
-
-function wireWindowChrome() {
-  if (!isTauri()) return;
-  const w = tauriWindow();
-  $("#win-min")?.addEventListener("click", () => { void w?.minimize(); });
-  $("#win-max")?.addEventListener("click", async () => {
-    if (!w) return;
-    if (await w.isMaximized()) await w.unmaximize();
-    else await w.maximize();
-  });
-  $("#win-close")?.addEventListener("click", () => { void w?.close(); });
-
-  // Dragging: `data-tauri-drag-region` only fires for the exact element under
-  // the cursor, so flex gaps and nested spans in the topbar are dead zones.
-  // Start the drag explicitly for any press that is not on a control.
-  const bar = document.querySelector(".topbar");
-  if (!bar) return;
-  const interactive = "button, input, select, textarea, a";
-  bar.addEventListener("mousedown", (evt: Event) => {
-    const e = evt as MouseEvent;
-    if (e.button !== 0) return;
-    if ((e.target as Element).closest?.(interactive)) return;
-    e.preventDefault();
-    void w?.startDragging();
-  });
-  // Double-clicking the titlebar toggles maximise, as users expect.
-  bar.addEventListener("dblclick", (evt: Event) => {
-    const e = evt as MouseEvent;
-    if ((e.target as Element).closest?.(interactive)) return;
-    void (async () => {
-      if (!w) return;
-      if (await w.isMaximized()) await w.unmaximize();
-      else await w.maximize();
-    })();
-  });
 }
 
 /// Whether to offer the admin panel. Mirrors the backend's `permission()`
@@ -414,28 +370,6 @@ function canAdmin(): boolean {
   const override = user.scopes?.users;
   if (override) return override === "write";
   return user.role === "admin";
-}
-
-/// Navigate the app window to a remote web UI. Standalone desktop builds use
-/// this instead of local connections; the remote web UI is the same software.
-async function connectToWebui() {
-  const url = localStorage.getItem("virt-man-webui") ?? "https://localhost:8006";
-  const next = await askText("Connect to WebUI", "Web UI URL", url, "https://host:8006");
-  if (!next) return;
-  let target: URL;
-  try {
-    target = new URL(next);
-  } catch {
-    toast("Invalid URL", "bad");
-    return;
-  }
-  if (target.protocol !== "https:" && target.protocol !== "http:") {
-    toast("Only http(s) URLs are allowed", "bad");
-    return;
-  }
-  localStorage.setItem("virt-man-webui", target.toString());
-  // pi-lens-ignore: no-open-redirect-js
-  location.href = target.toString();
 }
 
 // ---------------------------------------------------------------- tree
@@ -499,7 +433,7 @@ function renderTree() {
       leaveCurrentView();
       selectedConn = (row as HTMLElement).dataset.conn!;
       selectedVm = null;
-      connTab = "vms";
+      connTab = "dashboard";
       renderTree();
       renderConn();
       void refreshTreeVms();
@@ -666,7 +600,7 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
     (r as HTMLElement).onclick = () => {
       selectedConn = (r as HTMLElement).dataset.openConnRow!;
       selectedVm = null;
-      connTab = "vms";
+      connTab = "dashboard";
       renderTree();
       void renderConn();
     };
@@ -1092,6 +1026,7 @@ setHtml(content, `
     </div>
     <div class="dsub">${esc(conn.url)}${conn.fingerprint ? " · " + conn.fingerprint : ""}</div>
     <div class="tabbar">
+      <button class="tab ${connTab === "dashboard" ? "active" : ""}" data-tab="dashboard">${ic.datacenter(14)} Dashboard</button>
       <button class="tab ${connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
       <button class="tab ${connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
       <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
@@ -1118,7 +1053,10 @@ async function renderConnBody() {
   const body = $("#conn-body");
   // The create buttons live on the tab bar (rendered by renderConn), so the
   // body only carries the list itself.
-  if (connTab === "vms") {
+  if (connTab === "dashboard") {
+    setHtml(body, `<div id="dash">loading…</div>`);
+    await loadDashboard();
+  } else if (connTab === "vms") {
     setHtml(body, `<div id="vms-list">loading…</div>`);
     $("#create-vm")?.addEventListener("click", () => openCreateVm());
     await loadVms();
@@ -1133,6 +1071,100 @@ async function renderConnBody() {
   } else {
     setHtml(body, `<div id="filters-list">loading…</div>`);
     await loadFilters();
+  }
+}
+
+/// Daemon dashboard: host CPU/RAM with sparklines, then counts and summaries
+/// for VMs, networks, and storage pools. Reuses the existing list endpoints.
+async function loadDashboard() {
+  if (!selectedConn) return;
+  const body = $("#dash");
+  if (!body) return;
+  try {
+    const [h, nets, pools] = await Promise.all([
+      api.get<HostStats>(`/proxy/${selectedConn}/host/stats`),
+      api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`),
+      api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`),
+    ]);
+    const vms = treeVms[selectedConn] ?? [];
+    const running = vms.filter((v) => v.active).length;
+    const { cpu, mem, cpuNow, memNow } = addHostSample(`host:${selectedConn}`, h);
+    const memUsedKib = h.mem_total_kib - h.mem_available_kib;
+    const activeNets = nets.filter((n) => n.active).length;
+    const activePools = pools.filter((p) => p.active).length;
+
+    setHtml(body, `
+    <div class="cards">
+      <div class="card"><span class="card-ic">${ic.vms(20)}</span><div><b>${vms.length}</b><i>VMS</i></div></div>
+      <div class="card ${running > 0 ? "ok" : ""}"><span class="card-ic">${ic.start(20)}</span><div><b>${running}</b><i>RUNNING</i></div></div>
+      <div class="card ${activeNets > 0 ? "ok" : ""}"><span class="card-ic">${ic.network(20)}</span><div><b>${nets.length}</b><i>NETWORKS</i></div></div>
+      <div class="card ${activePools > 0 ? "ok" : ""}"><span class="card-ic">${ic.storage(20)}</span><div><b>${pools.length}</b><i>POOLS</i></div></div>
+    </div>
+
+    <div class="sumgrid">
+      <div class="metric ok">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.cpu()}</span>
+          <b>CPU</b>
+          <span class="metric-value">${pct(cpuNow)}</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(cpu)}
+          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot"><span>${h.cpus} CPU</span><span>host load</span></div>
+      </div>
+
+      <div class="metric ok">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.memory()}</span>
+          <b>Memory</b>
+          <span class="metric-value">${pct(memNow)}</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
+        <div class="chart">
+          ${sparkline(mem, "mem")}
+          <div class="chart-axis"><span>-3m</span><span>now</span></div>
+        </div>
+        <div class="metric-foot">
+          <span>${fmtBytes(memUsedKib * 1024)} used</span>
+          <span>${fmtBytes(h.mem_total_kib * 1024)} total</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">Networking</div>
+    <table class="grid">
+      <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
+      ${nets.map((n) => `
+        <tr><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
+        <td><span class="state ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
+    </table>
+
+    <div class="section-title">Storage pools</div>
+    ${pools.map((p) => {
+      const used = p.allocation ?? 0;
+      const cap = p.capacity ?? 0;
+      const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+      return `
+      <div class="storage-card ${p.active ? "ok" : ""}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.storage()}</span>
+          <span class="storage-card-title">${esc(p.name)}</span>
+          <span class="badge ${p.active ? "on" : ""}">${p.active ? "active" : "inactive"}</span>
+        </div>
+        <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
+        <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
+        <div class="metric-foot">
+          <span>${fmtBytes(used)} used</span>
+          <span>${fmtBytes(cap)} total</span>
+        </div>
+      </div>`;
+    }).join("") || `<div class="empty">No pools.</div>`}
+    `);
+  } catch (e) {
+    setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
 
@@ -2642,7 +2674,7 @@ function renderIdentity() {
   renderProfileBtn();
   const host = $(".topbar .host");
   if (host && user) {
-    host.textContent = `${isTauri() ? "desktop" : "web"}${authDisabled ? " · local" : ` · ${user.nickname}`}`;
+  host.textContent = `web${authDisabled ? " · local" : ` · ${user.nickname}`}`;
   }
 }
 
@@ -2832,9 +2864,11 @@ function startPolling() {
     // Keep the sidebar's guest states live regardless of the open pane.
     void refreshTreeVms();
     if (selectedConn && !selectedVm) {
-      if (connTab === "vms") loadVms();
+      if (connTab === "dashboard") loadDashboard();
+      else if (connTab === "vms") loadVms();
       else if (connTab === "networks") loadNetworks();
-      else loadPools();
+      else if (connTab === "storage") loadPools();
+      else loadFilters();
     } else if (selectedConn && selectedVm && vmTab === "summary") {
       renderVmBody(selectedVm);
     }

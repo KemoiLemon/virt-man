@@ -7,24 +7,22 @@ the decisions that were reversed and why.
 ## The problem
 
 Proxmox is too heavy for a personal hypervisor; raw `virsh` is too light. This
-is the middle: a real UI over libvirt, usable from a browser on the LAN and from
-a desktop app, without running a distro-sized management stack.
+is the middle: a real UI over libvirt, usable from a browser on the LAN,
+without running a distro-sized management stack.
 
 ## Shape
 
 ```text
-browser ──HTTPS(8006)──┐
-                       ├── virt-man-web ──HTTPS(8443, pinned cert)── virt-man-daemon ── libvirt
-desktop app ──HTTP─────┘   (auth, RBAC,                              (on the hypervisor)
-  (loopback sidecar,        daemon proxy)
-   auth disabled)
+browser ──HTTPS(8006)── virt-man-web ──HTTPS(8443, pinned cert)── virt-man-daemon ── libvirt
+            (auth, RBAC,             (on the hypervisor)
+             daemon proxy)
 ```
 
-Three processes, three deliberate choices:
+Two processes, two deliberate choices:
 
 **The daemon owns libvirt and nothing else.** No users, no sessions, no
 policy — one token, one hypervisor. That keeps the privileged component small
-enough to reason about. It listens on `0.0.0.0:8443` because remote management
+enough to reason about. It listens on `[::]:8443` because remote management
 is the point; TLS is what makes that acceptable.
 
 It also serves the same API on a Unix socket (`/run/virt-man/daemon.sock`) for
@@ -38,19 +36,6 @@ daemons live here. It is also the only thing that talks to daemons, so **the
 daemon token never reaches the browser** — the backend attaches it server-side
 on every proxied call.
 
-**The desktop app is not a thin client.** It embeds the same SPA but runs its
-own `virt-man-web` as a loopback sidecar with auth disabled, storing daemon
-connections in `~/.local/share/virt-man`. So the app is standalone: it manages
-hypervisors without any remote web UI existing. "Connect to a webui" simply
-navigates the window to a remote instance.
-
-### One frontend, two hosts
-
-`web/src` builds once and serves both. The alternative — a shared component
-library with two shells — doubles the surface for a UI this size. The cost is
-that no code may assume it is in a browser *or* in Tauri; the few places that
-care go through `isTauri()`.
-
 ## Certificate pinning, not a CA
 
 Every daemon connection stores that daemon's exact certificate, confirmed by
@@ -59,9 +44,8 @@ SHA-256 fingerprint when it is added.
 A CA would mean provisioning trust before a daemon is useful. Pinning means an
 already-running daemon can be adopted by pasting its token and confirming a
 fingerprint — no PKI, no system trust store, and no "just accept the warning"
-step that trains the user to ignore TLS errors. Only the web backend (or the
-app's sidecar) holds pins, so browsers never see a self-signed certificate at
-all.
+step that trains the user to ignore TLS errors. Only the web backend holds
+pins, so browsers never see a self-signed certificate at all.
 
 ## One port, both protocols
 
@@ -116,8 +100,10 @@ them, so a leaked key cannot outrank the account and demoting the owner weakens
 their keys. Keys may be created unnamed; the server generates a readable
 `adjective-noun-hex4` label, which reads better in a list than a bare id.
 
-The local app disables auth entirely (`auth_disabled`). A single-user desktop
-app gains nothing from a login screen, and the sidecar is loopback-only.
+The local loopback mode (`VIRT_MAN_WEB_LOOPBACK_HTTP=1`) disables auth
+exactly because a single-user loopback instance gains nothing from a login
+screen; it is what the live test suites run against, and doubles as a dev
+mode. The remote HTTPS service always has auth on.
 
 ## The console: the most-revised decision
 
@@ -200,15 +186,16 @@ Icons are inline Lucide SVGs using `currentColor`, imported by name — the whol
 set costs 670 kB against 81 kB for named imports.
 
 Native OS chrome is avoided throughout (custom listbox, no `window.prompt`)
-because a frameless desktop app with OS-styled widgets inside it looks broken.
+so the controls match the square, monospace theme instead of the host OS.
 
 ## State and storage
 
 JSON files, not a database. The web backend keeps users, connections, and keys
-in its data dir (`/var/lib/virt-man`, or `~/.local/share/virt-man` for the app);
-the daemon keeps a token and TLS material in `/etc/virt-man`. A personal
-hypervisor manager has single-digit users and single-digit daemons — a database
-would be infrastructure to back up, migrate, and corrupt for no benefit.
+in its data dir (`/var/lib/virt-man` as root, `~/.local/share/virt-man` as a
+regular user); the daemon keeps a token and TLS material in `/etc/virt-man`.
+A personal hypervisor manager has single-digit users and single-digit daemons
+— a database would be infrastructure to back up, migrate, and corrupt for no
+benefit.
 
 Nothing is cached: the SPA polls the daemon through the proxy. Live hypervisor
 state is the only state, so there is no invalidation logic to get wrong.
