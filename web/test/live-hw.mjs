@@ -159,52 +159,33 @@ document.querySelector(".tree-row.tree-vm")?.dispatchEvent(new window.MouseEvent
 await wait(1200);
 check("VM view offers a Hardware tab", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Summary", "Hardware", "Options", "Firewall", "Console", "XML"]);
+  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"]);
 });
 
+// Open the inline hardware editor embedded in the Hardware tab.
 [...document.querySelectorAll(".tabbar .tab")]
   .find((t) => t.textContent.trim() === "Hardware")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(1500);
-check("Hardware tab lists devices read from the domain XML", () => {
-  const table = document.querySelector(".hwtable");
-  assert.ok(table, ".hwtable rendered");
-  const rows = [...table.querySelectorAll(".hwrow")];
-  assert.ok(rows.length >= 4, `${rows.length} hardware rows`);
-  const labels = rows.map((r) => r.querySelector(".hwrow-label")?.textContent.trim());
-  for (const want of ["Processors", "Memory", "BIOS", "Display"]) {
-    assert.ok(labels.includes(want), `${want} row present (${labels})`);
-  }
-  // Values must come from the real guest, not placeholders.
-  const cpuRow = rows.find((r) => r.querySelector(".hwrow-label")?.textContent.trim() === "Processors");
-  assert.match(cpuRow.querySelector(".hwctl").textContent, /\d+ vCPU/);
-  assert.ok(document.querySelector("#hw-edit"), "Edit hardware button present");
-  results.push(["info", `hardware rows: ${labels.join(", ")}`]);
-});
-
-// Open the editor itself.
-document.querySelector("#hw-edit")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1800);
-check("hardware editor opens with a device sidebar", () => {
-  const modal = document.querySelector(".modal.hw-modal");
-  assert.ok(modal, "hw-modal opened");
-  assert.ok(modal.querySelector(".hw-side"), "device sidebar present");
-  assert.ok(modal.querySelector(".hw-pane"), "form pane present");
-  const items = [...modal.querySelectorAll(".hw-item")];
+check("Hardware tab embeds the editor, no edit button", () => {
+  assert.ok(document.querySelector(".hw-inline"), "inline editor rendered");
+  assert.ok(document.querySelector(".hw-inline .hw-side"), "device sidebar present");
+  assert.ok(document.querySelector(".hw-inline .hw-pane"), "form pane present");
+  assert.equal(document.querySelectorAll("#hw-edit").length, 0, "no edit-hardware button remains");
+  const items = [...document.querySelectorAll(".hw-inline .hw-item")];
   assert.ok(items.length >= 4, `${items.length} sidebar entries`);
-  assert.equal(modal.querySelectorAll(".hw-item.active").length, 1, "one active entry");
-  // Sidebar rows show the current value, Proxmox style.
-  assert.ok(items.every((i) => i.querySelector(".hw-tx b")), "each row has a label");
-  assert.ok(modal.querySelector("#hw-add"), "Add Hardware pinned to the sidebar");
+  assert.equal(document.querySelectorAll(".hw-inline .hw-item.active").length, 1, "one active entry");
+  assert.ok(document.querySelector(".hw-inline #hw-add"), "Add Hardware pinned to the sidebar");
+  assert.ok(document.querySelector(".hw-inline #hw-save"), "Save action present");
 });
 
 // Navigate to Processors and confirm the form is populated.
-[...document.querySelectorAll(".hw-item")]
+[...document.querySelectorAll(".hw-inline .hw-item")]
   .find((i) => i.textContent.includes("Processors"))
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(500);
 check("selecting a device opens its form page", () => {
-  const page = document.querySelector(".hw-page.active");
+  const page = document.querySelector(".hw-inline .hw-page.active");
   assert.ok(page, "a page is active");
   assert.match(page.querySelector(".hw-title").textContent, /Processors/);
   const input = page.querySelector("#g-cpus");
@@ -212,7 +193,7 @@ check("selecting a device opens its form page", () => {
   assert.ok(+input.value >= 1, `prefilled from the guest (${input.value})`);
 });
 
-// Add Hardware chooser.
+// Add Hardware chooser (still a modal, opened from the inline sidebar).
 document.querySelector("#hw-add")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(900);
 check("Add Hardware offers a catalogue with an XML preview", () => {

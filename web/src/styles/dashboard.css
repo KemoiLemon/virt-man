@@ -42,6 +42,14 @@
 .meter-fill.hot { background: var(--bad); }
 .meter-fill.system { background: var(--storage-system); }
 
+/* VM status card: headline state plus a fact grid, matching vm-man. */
+.status-metric .factgrid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px 14px;
+}
+.fact b { display: block; font-size: 10px; letter-spacing: .9px; color: var(--dim); font-weight: 500; margin-bottom: 3px; }
+.fact span { font-size: 13px; word-break: break-word; }
+
 /* --------------------------------------------------------- sparkline */
 /* Stretches to the panel width; height stays fixed. */
 .chart { display: flex; flex-direction: column; gap: 4px; }

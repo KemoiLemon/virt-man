@@ -64,24 +64,42 @@
 .hw-add:hover { background: var(--accent-bg); color: var(--accent-fg); }
 .hw-add .ico { width: 15px; height: 15px; }
 
+/* Inline editor embedded in the Hardware tab: the same sidebar + form as the
+   modal, but bordered to the pane and with a pinned Save/Discard footer. */
+.hw-inline {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line);
+  height: 600px; max-height: calc(100vh - 180px);
+}
+.hw-inline-body { flex: 1 1 auto; min-height: 0; display: flex; }
+.hw-inline-body .hw-body { flex: 1; }
+.hw-foot {
+  flex: 0 0 auto; display: flex; gap: 8px; justify-content: flex-end;
+  padding: 10px 12px; border-top: 1px solid var(--line); background: var(--panel2);
+}
+
 /* Custom devices appended below the fixed device pages. */
 .hw-custom-list { border-top: 1px solid var(--line); }
 .hw-custom-list:empty { display: none; }
 .hw-custom.active .hw-ic { color: var(--accent); }
 
-/* Device table on the VM Hardware tab. */
-.hwtable { border: 1px solid var(--line); }
+/* Device/option inventory rows: icon, label, inline control. */
+.hwtable { border: 1px solid var(--line); margin-bottom: 16px; }
 .hwrow {
-  display: grid; grid-template-columns: 20px 150px 1fr auto;
-  align-items: center; gap: 10px;
-  padding: 8px 11px; border-bottom: 1px solid var(--line);
+  display: grid; grid-template-columns: 20px minmax(150px, 210px) 1fr;
+  align-items: center; gap: 13px;
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
 }
 .hwrow:last-child { border-bottom: none; }
 .hwrow:hover { background: var(--hover); }
 .hwrow-ic { color: var(--dim); width: 17px; height: 17px; }
-.hwrow-label { font-size: 11px; letter-spacing: .8px; color: var(--dim); }
+.hwrow-label b { display: block; font-size: 13px; font-weight: 600; color: var(--fg); }
+.hwrow-label i {
+  display: block; font-style: normal; font-size: 10px; color: var(--dim);
+  margin-top: 2px; word-break: break-all;
+}
 .hwctl { min-width: 0; }
-.hwctl-static { font-size: 12px; word-break: break-word; }
+.hwctl-static { font-size: 13px; word-break: break-all; color: var(--dim); }
 /* Keep the button and its notice on one line so margin-left:auto can push the
    notice to the far edge; .actions wraps by default. */
 .hw-actions { flex-wrap: nowrap; align-items: center; }

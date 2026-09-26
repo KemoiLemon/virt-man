@@ -154,7 +154,7 @@ await wait(1600);
 
 check("VM view exposes Options and Firewall tabs, and XML has an icon", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Summary", "Hardware", "Options", "Firewall", "Console", "XML"],
+  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"],
     `tabs: ${tabs}`);
   assert.ok(tabNamed("XML").querySelector("svg"), "XML tab now carries an icon");
   assert.ok(tabNamed("Options").querySelector("svg"), "Options tab has an icon");

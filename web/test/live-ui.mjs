@@ -213,7 +213,7 @@ await (async () => {
     const tabs = [...document.querySelectorAll(".tabbar .tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["Summary", "Hardware", "Options", "Firewall", "Console", "XML"],
+      ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"],
       "all VM tabs render",
     );
     assert.equal(
@@ -236,14 +236,16 @@ await (async () => {
 
   // The Summary tab is open again; it must carry the live dashboard widgets.
   await new Promise((r) => window.setTimeout(r, 800));
-  check("VM summary renders .metric/.meter/.spark widgets from live stats", () => {
+  check("VM summary renders a status card plus live metrics", () => {
     const metrics = [...document.querySelectorAll(".metric")];
-    assert.ok(metrics.length >= 2, `${metrics.length} .metric panel(s) (CPU + memory)`);
     const labels = metrics.map((m) => m.querySelector("b")?.textContent.trim());
     assert.ok(labels.includes("CPU"), `CPU metric present (${labels})`);
     assert.ok(labels.includes("Memory"), `Memory metric present (${labels})`);
+    assert.ok(labels.includes("Status"), `Status card present (${labels})`);
 
-    for (const m of metrics) {
+    for (const label of ["CPU", "Memory"]) {
+      const m = metrics.find((x) => x.querySelector("b")?.textContent.trim() === label);
+      assert.ok(m, `${label} metric`);
       assert.ok(m.querySelector(".metric-ic svg"), "metric has a Lucide icon");
       assert.ok(m.querySelector(".metric-value"), "metric shows a headline value");
       assert.ok(m.querySelector(".meter .meter-fill"), "metric has a meter");
@@ -251,6 +253,10 @@ await (async () => {
       assert.ok(spark, "metric has a sparkline");
       assert.ok(spark.querySelector(".spark-line"), "sparkline has a trace");
     }
+
+    // The status card holds the VM facts, not another meter/spark pair.
+    const status = metrics.find((x) => x.querySelector("b")?.textContent.trim() === "Status");
+    assert.ok(status.querySelector(".factgrid .fact"), "status card has a fact grid");
 
     // Memory must reflect the real guest, not a placeholder.
     const memFoot = metrics

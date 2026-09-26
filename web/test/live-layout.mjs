@@ -165,7 +165,7 @@ await wait(1500);
 check("VM detail actions live on the tab bar as icon buttons", () => {
   const actions = document.querySelector(".tabbar .tabbar-actions");
   assert.ok(actions, "VM tab bar carries the actions");
-  for (const id of ["#vm-start", "#vm-shutdown", "#vm-reboot", "#vm-destroy", "#vm-hwedit", "#vm-delete"]) {
+  for (const id of ["#vm-start", "#vm-shutdown", "#vm-reboot", "#vm-destroy", "#vm-delete"]) {
     assert.ok(actions.querySelector(id), `${id} present`);
   }
   assert.equal(document.querySelectorAll(".dhead + .actions").length, 0,

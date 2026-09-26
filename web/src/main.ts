@@ -163,7 +163,10 @@ function openCommandPalette() {
       void renderVm();
     });
     add("vm-hwedit", `Edit hardware — ${vm}`, "Selected VM", () => {
-      void openHardwareEditor({ vm });
+      leaveCurrentView();
+      vmTab = "hardware";
+      renderTree();
+      void renderVm();
     });
     add("vm-rename", `Rename — ${vm}`, "Selected VM", () => {
       void renameVm(vm);
@@ -2019,17 +2022,16 @@ setHtml(content, `
     <div class="dhead"><span class="dtitle">${esc(vm)}</span></div>
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
+      <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
       <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
       <button class="tab ${vmTab === "options" ? "active" : ""}" data-vmtab="options">${ic.options(14)} Options</button>
       <button class="tab ${vmTab === "firewall" ? "active" : ""}" data-vmtab="firewall">${ic.firewall(14)} Firewall</button>
-      <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
       <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">${ic.xml(14)} XML</button>
       <div class="tabbar-actions row-actions">
         <button class="btn icon" id="vm-start" title="Start">${ic.start()}</button>
         <button class="btn icon" id="vm-shutdown" title="Shutdown">${ic.stop()}</button>
         <button class="btn icon" id="vm-reboot" title="Reboot">${ic.reboot()}</button>
         <button class="btn icon" id="vm-destroy" title="Force stop">${ic.forceStop()}</button>
-        <button class="btn icon" id="vm-hwedit" title="Edit hardware">${ic.edit()}</button>
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
@@ -2048,7 +2050,6 @@ setHtml(content, `
   $("#vm-shutdown").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/shutdown`, "POST").then(renderVm);
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(renderVm);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(renderVm);
-  $("#vm-hwedit").onclick = () => void openHardwareEditor({ vm });
   $("#vm-delete").onclick = () => deleteVm(vm);
   await renderVmBody(vm);
 }
@@ -2182,31 +2183,44 @@ async function renderVmBody(vm: string) {
       const onReboot = pick(/<on_reboot>([^<]*)<\/on_reboot>/);
       const onCrash = pick(/<on_crash>([^<]*)<\/on_crash>/);
       const autostartHint = info.persistent ? "persistent" : "transient";
+      const running = info.active === true;
 
       setHtml(body, `
         <div class="actions">
           <button class="btn primary" id="opt-save">${ic.edit(14)} Save Options</button>
-          <span class="hw-locked">Changes apply after the guest is restarted.</span>
+          ${running ? `<span class="hw-locked">Changes apply after the guest is restarted.</span>` : ""}
         </div>
-        <div class="grid2">
-          <label class="field"><span>Name</span>
-            <input id="opt-name" value="${esc(vm)}">
-            </label>
-          <label class="field"><span>Title</span>
-            <input id="opt-title" value="${esc(title)}" placeholder="short label"></label>
-        </div>
-        <label class="field"><span>Description</span>
-          <textarea id="opt-desc" rows="3" placeholder="free-form notes">${esc(description)}</textarea></label>
-        <div class="grid2">
-          <label class="field"><span>Boot Device</span>
-            <select id="opt-boot">
+        <div class="hwtable">
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.vm()}</span>
+            <div class="hwrow-label"><b>Name</b><i>Renamed via the dedicated endpoint</i></div>
+            <div class="hwctl"><input id="opt-name" value="${esc(vm)}"></div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.edit()}</span>
+            <div class="hwrow-label"><b>Title</b></div>
+            <div class="hwctl"><input id="opt-title" value="${esc(title)}" placeholder="short label"></div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.options()}</span>
+            <div class="hwrow-label"><b>Description</b></div>
+            <div class="hwctl"><textarea id="opt-desc" rows="2" placeholder="free-form notes">${esc(description)}</textarea></div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.disk()}</span>
+            <div class="hwrow-label"><b>Boot Device</b></div>
+            <div class="hwctl"><select id="opt-boot">
               ${["hd", "cdrom", "network"].map((d) =>
                 `<option value="${d}" ${d === bootDev ? "selected" : ""}>${d}</option>`).join("")}
-            </select></label>
-          <label class="field"><span>UUID</span>
-            <input value="${esc(info.uuid ?? "—")}" disabled></label>
+            </select></div>
+          </div>
+          <div class="hwrow">
+            <span class="hwrow-ic">${ic.key()}</span>
+            <div class="hwrow-label"><b>UUID</b></div>
+            <div class="hwctl hwctl-static">${esc(info.uuid ?? "—")}</div>
+          </div>
         </div>
-        <div class="section-title" style="margin-top:14px">Lifecycle</div>
+        <div class="section-title" style="margin-top:16px">Lifecycle</div>
         <div class="specs">
           <div class="spec"><b>On Poweroff</b><span>${esc(onPoweroff)}</span></div>
           <div class="spec"><b>On Reboot</b><span>${esc(onReboot)}</span></div>
@@ -2329,53 +2343,9 @@ async function renderVmBody(vm: string) {
   }
 
   if (vmTab === "hardware") {
-    try {
-      const [{ xml }, info] = await Promise.all([
-        api.get<{ xml: string }>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/xml`),
-        api.get<any>(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}`),
-      ]);
-      const devices = devicesFromXml(xml);
-      const cpus = xml.match(/<vcpu[^>]*>(\d+)<\/vcpu>/)?.[1] ?? "?";
-      const memMb = Math.round(+(xml.match(/<memory[^>]*>(\d+)<\/memory>/)?.[1] ?? 0) / 1024);
-      const fw = /pflash|OVMF/i.test(xml) ? "UEFI (OVMF)" : "BIOS (SeaBIOS)";
-      const gfx = /<graphics[^>]*type=['"]spice/.test(xml) ? "spice" : "vnc";
-      const running = info.active === true;
-
-      const fixed = [
-        { ico: ic.cpu(), label: "Processors", val: `${cpus} vCPU` },
-        { ico: ic.memory(), label: "Memory", val: `${memMb} MB` },
-        { ico: ic.cpu(), label: "BIOS", val: fw },
-        { ico: ic.vm(), label: "Display", val: gfx },
-      ];
-      const rows = fixed.map((r) => `
-        <div class="hwrow">
-          <span class="hwrow-ic hw-ic">${r.ico}</span>
-          <span class="hwrow-label">${esc(r.label)}</span>
-          <span class="hwctl hwctl-static">${esc(r.val)}</span>
-          <span></span>
-        </div>`).join("");
-      const devRows = devices.map((d) => {
-        const t = hwType(d.kind);
-        return `
-        <div class="hwrow">
-          <span class="hwrow-ic hw-ic">${ic[t?.icon ?? "cpu"]()}</span>
-          <span class="hwrow-label">${esc(t?.label ?? d.kind)}</span>
-          <span class="hwctl hwctl-static">${esc(deviceSummary(d))}</span>
-          <span></span>
-        </div>`;
-      }).join("");
-
-      setHtml(body, `
-        <div class="actions hw-actions">
-          <button class="btn primary" id="hw-edit">${ic.edit(14)} Edit hardware</button>
-          ${running ? `<span class="hw-locked">Changes apply after the guest is restarted.</span>` : ""}
-        </div>
-        <div class="hwtable">${rows}${devRows}</div>
-        `);
-      $("#hw-edit")?.addEventListener("click", () => void openHardwareEditor({ vm }));
-    } catch (e) {
-      setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
-    }
+    // The hardware editor is embedded here — no read-only table and no
+    // "Edit hardware" click. Devices are edited in place and saved.
+    await openHardwareEditor({ vm, inline: true });
     return;
   }
   if (vmTab === "xml") {
@@ -2404,6 +2374,21 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
 
     setHtml(body, `
     <div class="sumgrid vm-sumgrid">
+      <div class="metric status-metric ${running ? "ok" : ""}">
+        <div class="metric-head">
+          <span class="metric-ic">${running ? ic.start() : ic.stop()}</span>
+          <b>Status</b>
+          <span class="metric-value">${esc(capLabel(d.state))}</span>
+        </div>
+        <div class="factgrid">
+          <div class="fact"><b>State</b><span>${esc(capLabel(d.state))}</span></div>
+          <div class="fact"><b>ID</b><span>${d.id}</span></div>
+          <div class="fact"><b>UUID</b><span>${esc(d.uuid ?? "—")}</span></div>
+          <div class="fact"><b>Persistence</b><span>${d.persistent ? "Persistent" : "Transient"}</span></div>
+          <div class="fact"><b>Graphics</b><span>${esc(g.graphics?.kind ?? "none")}${g.graphics ? ` ${esc(g.graphics.host)}:${g.graphics.port}` : ""}</span></div>
+        </div>
+      </div>
+
       <div class="metric ${running ? "ok" : ""}">
         <div class="metric-head">
           <span class="metric-ic">${ic.cpu()}</span>
@@ -2434,14 +2419,6 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           <span>${fmtBytes(s.max_memory_kib * 1024)} max</span>
         </div>
       </div>
-    </div>
-
-    <div class="specs">
-      <div class="spec"><b>State</b><span>${esc(capLabel(d.state))}</span></div>
-      <div class="spec"><b>ID</b><span>${d.id}</span></div>
-      <div class="spec"><b>UUID</b><span>${esc(d.uuid ?? "—")}</span></div>
-      <div class="spec"><b>Persistent</b><span>${d.persistent}</span></div>
-      <div class="spec"><b>Graphics</b><span>${esc(g.graphics?.kind ?? "none")}${g.graphics ? ` ${esc(g.graphics.host)}:${g.graphics.port}` : ""}</span></div>
     </div>`);
   } catch (e) {
     setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -2770,10 +2747,11 @@ async function createPendingVolumes(
 /// Proxmox-style hardware editor: device list on the LEFT, the selected
 /// device's form on the right. Used for both "Create VM" and editing an
 /// existing guest's hardware, so the two can never drift apart.
-async function openHardwareEditor(opts: { vm?: string } = {}) {
+async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) {
   if (!selectedConn) return;
   const conn = selectedConn;
   const editing = !!opts.vm;
+  const inline = !!opts.inline;
 
   // Existing guest: read its current definition so the form starts populated.
   let baseXml = "";
@@ -2808,13 +2786,16 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
   // New VM: one disk is created up front, described by these fields.
   const newDisk = { pool: "", size_gb: 10, format: "qcow2" as "raw" | "qcow2" };
 
-  const el = openModal(
+  // Create VM keeps its modal; editing an existing guest renders the editor
+  // inline in the Hardware tab, so devices are editable without an extra
+  // "Edit hardware" click.
+  const modal = inline ? null : openModal(
     editing ? `Hardware — ${esc(opts.vm ?? "")}` : "Create VM",
     "",
     `<button class="btn" id="hw-cancel">Cancel</button>
      <button class="btn primary" id="hw-save">${editing ? "Save" : "Create"}</button>`,
   );
-  el.querySelector(".modal")?.classList.add("hw-modal");
+  if (modal) modal.querySelector(".modal")?.classList.add("hw-modal");
 
   const { pools, nets } = await loadFormData(conn);
   // Volumes per pool, fetched lazily and cached for the device forms.
@@ -2832,6 +2813,20 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
     }
     return volCache[pool];
   };
+  // Pools that contain at least one ISO. The cdrom pool dropdown hides
+  // every other pool, so a pool with no bootable media never appears.
+  let isoPoolsCache: string[] | null = null;
+  const isoPools = async (): Promise<string[]> => {
+    if (isoPoolsCache) return isoPoolsCache;
+    const out: string[] = [];
+    for (const p of pools) {
+      if ((await volumes(p.name)).some((v) => v.toLowerCase().endsWith(".iso"))) {
+        out.push(p.name);
+      }
+    }
+    isoPoolsCache = out;
+    return out;
+  };
   newDisk.pool = pools[0]?.name ?? "";
 
   // New VMs start with an empty CD/DVD drive, so attaching an ISO (or leaving
@@ -2839,6 +2834,30 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
   if (!editing) {
     devices = [{ kind: "cdrom", fields: { pool: newDisk.pool, volume: "" } }];
   }
+
+  // Where the editor paints. Inline mode reuses the Hardware tab body; the
+  // footer buttons live outside the re-rendered region so their handlers
+  // survive field edits (render() replaces only the .hw-body area).
+  let host: HTMLElement;
+  let bodyHost: HTMLElement;
+  if (inline) {
+    host = $("#vm-body") as HTMLElement;
+    setHtml(host, `<div class="hw-inline">
+      <div class="hw-inline-body"></div>
+      <div class="hw-foot">
+        <button class="btn" id="hw-cancel">Discard</button>
+        <button class="btn primary" id="hw-save">Save</button>
+      </div>
+    </div>`);
+    bodyHost = host.querySelector(".hw-inline-body") as HTMLElement;
+  } else {
+    host = modal!.querySelector(".modal-body") as HTMLElement;
+    bodyHost = host;
+    host.style.padding = "0";
+    host.style.overflow = "hidden";
+  }
+  // The foot buttons live in `root` (the modal wrapper or the inline host).
+  const root = (inline ? host : modal!) as HTMLElement;
 
   let page = "general";
 
@@ -2880,11 +2899,19 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
       const d = devices[i];
       const t = hwType(d.kind);
       if (!t) return `<div class="hw-page active"><div class="hw-note">Unknown device.</div></div>`;
+      // A cdrom whose pool has no ISOs points at the first pool that does,
+      // so its volume list is never silently empty.
+      if (d.kind === "cdrom") {
+        const withIsos = await isoPools();
+        if (withIsos.length && !withIsos.includes(d.fields.pool ?? "")) {
+          d.fields.pool = withIsos[0];
+        }
+      }
       const fields = await Promise.all(t.fields.map(async (f) => {
         const val = d.fields[f.key] ?? f.value ?? "";
         if (f.type === "select") {
           let list: string[] = (f.options ?? []).map((o) => o.value);
-          if (f.key === "pool") list = pools.map((p) => p.name);
+          if (f.key === "pool") list = d.kind === "cdrom" ? await isoPools() : pools.map((p) => p.name);
           if (f.key === "network") list = nets.map((n) => n.name);
           if (f.key === "volume") {
             list = await volumes(d.fields.pool ?? pools[0]?.name ?? "");
@@ -2957,25 +2984,26 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
   }
 
   async function render() {
-    setHtml(el.querySelector(".modal-body")!, `<div class="hw-body">
+    setHtml(bodyHost, `<div class="hw-body">
       <nav class="hw-side" id="hw-side">${sidebar()}</nav>
       <div class="hw-pane" id="hw-pane">${await pageHtml()}</div>
     </div>`);
-    // The body is a grid host for the editor, so drop the default padding.
-    (el.querySelector(".modal-body") as HTMLElement).style.padding = "0";
-    (el.querySelector(".modal-body") as HTMLElement).style.overflow = "hidden";
+    if (!inline) {
+      (bodyHost as HTMLElement).style.padding = "0";
+      (bodyHost as HTMLElement).style.overflow = "hidden";
+    }
 
-    el.querySelectorAll("[data-hw]").forEach((b: Element) => {
+    root.querySelectorAll("[data-hw]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => {
         page = (b as HTMLElement).dataset.hw!;
         void render();
       };
     });
-    $("#hw-add", el).onclick = () => openAddHardware();
+    $("#hw-add", root).onclick = () => openAddHardware();
 
     // General/spec fields write straight back into the model.
     const bind = (sel: string, fn: (v: string) => void) => {
-      const n = $(sel, el);
+      const n = $(sel, root);
       if (!n) return;
       n.onchange = () => { fn(n.value); void render(); };
     };
@@ -2991,7 +3019,7 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
     // Device field edits, plus removal.
     if (page.startsWith("dev-")) {
       const i = +page.slice(4);
-      el.querySelectorAll("[data-field]").forEach((n: Element) => {
+      root.querySelectorAll("[data-field]").forEach((n: Element) => {
         (n as HTMLElement).onchange = () => {
           const key = (n as HTMLElement).dataset.field!;
           devices[i].fields[key] = (n as HTMLInputElement).value;
@@ -2999,7 +3027,7 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
           void render();
         };
       });
-      const rm = $("#hw-remove", el);
+      const rm = $("#hw-remove", root);
       if (rm) rm.onclick = () => {
         devices.splice(i, 1);
         page = "general";
@@ -3037,10 +3065,13 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
         const val = draft[f.key] ?? f.value ?? "";
         if (f.type === "select") {
           let list: string[] = (f.options ?? []).map((o) => o.value);
-          if (f.key === "pool") list = pools.map((p) => p.name);
+          if (f.key === "pool") list = kind === "cdrom" ? await isoPools() : pools.map((p) => p.name);
           if (f.key === "network") list = nets.map((n) => n.name);
           if (f.key === "volume") {
-            list = await volumes(draft.pool ?? pools[0]?.name ?? "");
+            const pool = kind === "cdrom"
+              ? (draft.pool ?? (await isoPools())[0] ?? "")
+              : (draft.pool ?? pools[0]?.name ?? "");
+            list = await volumes(pool);
             // The cdrom picks an ISO; a disk may pick any volume.
             if (kind === "cdrom") list = list.filter((v) => v.toLowerCase().endsWith(".iso"));
           }
@@ -3118,8 +3149,11 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
     void renderAdd();
   }
 
-  $("#hw-cancel", el).onclick = () => el.remove();
-  $("#hw-save", el).onclick = async () => {
+  $("#hw-cancel", root).onclick = () => {
+    if (modal) modal.remove();
+    else void renderVm();
+  };
+  $("#hw-save", root).onclick = async () => {
     for (const d of devices) {
       const bad = validateDevice(d);
       if (bad) return toast(bad, "bad");
@@ -3128,7 +3162,9 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
     if (editing && opts.vm) {
       const oldName = opts.vm;
       const renamed = general.name.trim() && general.name.trim() !== oldName;
-      el.remove();
+      // Close only the modal; the inline editor stays visible and the
+      // post-task renderVm() below refreshes it from the new definition.
+      modal?.remove();
       runTask(`Update ${general.name.trim() || oldName}`, async (set) => {
         let target = oldName;
         if (renamed) {
@@ -3190,7 +3226,7 @@ async function openHardwareEditor(opts: { vm?: string } = {}) {
       iso: "",
       iso_pool: newDisk.pool,
     };
-    el.remove();
+    modal?.remove();
     runTask(`Create VM ${form.name}`, async (set) => {
       set(`creating ${newDisk.size_gb} GB volume`);
       await api.post(`/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`, {
