@@ -1520,30 +1520,35 @@ async function loadNetworks() {
     const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
     const list = $("#nets-list");
     if (!list) return;
+    const typeLabel = (n: NetworkSummary) => {
+      if (n.forward === "bridge") return "Bridge";
+      if (n.forward === "nat") return "NAT";
+      return "Isolated";
+    };
     setHtml(list, nets.map((n) => `
-      <div class="storage-card ${n.active ? "ok" : ""}">
+      <div class="storage-card net-card ${n.active ? "ok" : ""}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.network()}</span>
           <span class="storage-card-title">${esc(n.name)}</span>
+          <span class="badge">${esc(typeLabel(n))}</span>
           <span class="badge ${n.active ? "on" : ""}">${n.active ? "active" : "inactive"}</span>
         </div>
         <div class="specs">
+          <div class="spec"><b>Subnet</b><span>${n.ip ? esc(n.ip) : "—"}</span></div>
           <div class="spec"><b>Bridge</b><span>${esc(n.bridge || "—")}</span></div>
-          <div class="spec"><b>Autostart</b><span>${n.autostart ? "yes" : "no"}</span></div>
         </div>
-        <div class="storage-card-actions">
-          <button class="btn" data-net-start="${esc(n.name)}" ${n.active ? "disabled" : ""}>${ic.start(14)} Start</button>
-          <button class="btn" data-net-stop="${esc(n.name)}" ${n.active ? "" : "disabled"}>${ic.stop(14)} Stop</button>
-          <button class="btn" data-net-autostart="${esc(n.name)}">${n.autostart ? "Autostart off" : "Autostart on"}</button>
-          <button class="btn" data-net-edit="${esc(n.name)}">${ic.edit(14)} Edit</button>
-          <button class="btn danger icon" data-delnet="${esc(n.name)}">${ic.trash()}</button>
+        <div class="storage-card-actions net-actions">
+          <button class="btn" data-net-toggle="${esc(n.name)}" data-net-action="${n.active ? "stop" : "start"}">${n.active ? `${ic.stop(14)} Stop` : `${ic.start(14)} Start`}</button>
+          <button class="btn icon ${n.autostart ? "on" : ""}" data-net-autostart="${esc(n.name)}" title="${n.autostart ? "Autostart on" : "Autostart off"}">${ic.autostart()}</button>
+          <button class="btn icon" data-net-edit="${esc(n.name)}" title="Edit">${ic.edit()}</button>
+          <button class="btn danger icon" data-delnet="${esc(n.name)}" title="Delete">${ic.trash()}</button>
         </div>
       </div>`).join("") || `<div class="empty">No networks.</div>`);
-    list.querySelectorAll("[data-net-start]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => netAction("start", (b as HTMLElement).dataset.netStart!);
-    });
-    list.querySelectorAll("[data-net-stop]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => netAction("stop", (b as HTMLElement).dataset.netStop!);
+    list.querySelectorAll("[data-net-toggle]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => netAction(
+        (b as HTMLElement).dataset.netAction === "start" ? "start" : "stop",
+        (b as HTMLElement).dataset.netToggle!,
+      );
     });
     list.querySelectorAll("[data-net-autostart]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => toggleAutostart((b as HTMLElement).dataset.netAutostart!);

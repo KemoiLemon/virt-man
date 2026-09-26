@@ -123,6 +123,8 @@ export interface NetworkSummary {
   active: boolean;
   persistent: boolean;
   autostart: boolean;
+  forward: "nat" | "bridge" | "none" | string;
+  ip: string;
 }
 
 export interface PoolSummary {

@@ -90,6 +90,11 @@
 .storage-card-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 
 /* The Networks tab is a card grid, not the stacked pool list: cards flow into
-   columns and the grid gap replaces the storage-card bottom margin. */
-#nets-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
-#nets-list .storage-card { margin-bottom: 0; }
+   columns and the grid gap replaces the storage-card bottom margin. Network
+   cards carry a spec row plus four controls, so they get a wider minimum. */
+#nets-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+#nets-list .storage-card { margin-bottom: 0; padding: 16px 17px; }
+#nets-list .storage-card-head { flex-wrap: wrap; gap: 8px 10px; }
+/* Controls share one row: the state toggle, autostart, edit and delete. */
+#nets-list .net-actions { flex-wrap: nowrap; }
+#nets-list .net-actions .btn:first-child { flex: 1 1 auto; justify-content: flex-start; }

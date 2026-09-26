@@ -73,6 +73,38 @@ check("the dashboard is the landing tab and shows host + resource summaries", ()
   assert.match(body, /Storage pools/, "storage pool summary rendered");
 });
 
+tabNamed("Networks")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1500);
+
+check("Networks tab renders cards with type, subnet and merged controls", () => {
+  const active = document.querySelector(".tabbar .tab.active")?.textContent.trim();
+  assert.equal(active, "Networks", "Networks tab active");
+  const cards = [...document.querySelectorAll("#nets-list .net-card")];
+  assert.ok(cards.length > 0, `${cards.length} network card(s)`);
+  const first = cards[0];
+  const badges = [...first.querySelectorAll(".storage-card-head .badge")].map((b) => b.textContent.trim());
+  assert.ok(badges.some((b) => ["NAT", "Bridge", "Isolated"].includes(b)), `type badge (${badges})`);
+  assert.ok(first.querySelector(".spec b"), "spec rows present");
+  assert.ok(first.querySelector("[data-net-toggle]"), "merged start/stop toggle");
+  assert.equal(first.querySelectorAll("[data-net-toggle]").length, 1, "exactly one toggle");
+  const auto = first.querySelector("[data-net-autostart]");
+  assert.ok(auto, "autostart button");
+  assert.ok(auto.querySelector("svg"), "autostart has an icon");
+  assert.ok(first.querySelector("[data-net-edit]"), "edit button");
+  assert.ok(first.querySelector("[data-delnet]"), "delete button");
+});
+
+check("autostart button highlights follow the autostart state", () => {
+  for (const c of document.querySelectorAll("#nets-list .net-card")) {
+    const btn = c.querySelector("[data-net-autostart]");
+    assert.equal(
+      btn.classList.contains("on"),
+      /Autostart on/.test(btn.title),
+      `highlight matches the autostart title (${btn.title})`,
+    );
+  }
+});
+
 tabNamed("Firewall")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1800);
 
