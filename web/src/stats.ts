@@ -177,12 +177,21 @@ export function sparkline(values: number[], variant = ""): string {
     .map((f) => `<line class="spark-grid" x1="0" y1="${(H * f).toFixed(1)}" x2="${W}" y2="${(H * f).toFixed(1)}"/>`)
     .join("");
 
-  return `<svg class="spark ${variant}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
-    ${grid}
-    <path class="spark-fill" d="${area}"/>
-    <path class="spark-line" d="${line}"/>
-    <circle class="spark-dot" cx="${W}" cy="${lastY.toFixed(2)}" r="2.2"/>
-  </svg>`;
+  // The newest-value marker is an HTML circle overlaid on the SVG, not a
+  // <circle> inside it: preserveAspectRatio="none" stretches the viewBox, and
+  // a stretched filled circle reads as an oval. An HTML element stays round in
+  // screen pixels. Clamp it 4px from each edge so a 0%/100% reading does not
+  // spill past the panel border.
+  const dotY = Math.min(Math.max(lastY, 4), 70);
+
+  return `<span class="spark-host${variant ? ` ${variant}` : ""}">
+    <svg class="spark${variant ? ` ${variant}` : ""}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+      ${grid}
+      <path class="spark-fill" d="${area}"/>
+      <path class="spark-line" d="${line}"/>
+    </svg>
+    <span class="spark-dot" style="top:${(dotY + 1).toFixed(2)}px"></span>
+  </span>`;
 }
 
 /** Percentage formatted for a metric headline. */

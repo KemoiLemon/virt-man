@@ -115,17 +115,18 @@ test("memory% prefers balloon 'usable', falling back to RSS", () => {
 
 test("sparkline renders a full-width trace with a marker at the right edge", () => {
   const svg = stats.sparkline([0, 50, 100]);
-  assert.match(svg, /class="spark /, "carries the .spark class");
+  assert.match(svg, /class="spark-host"/, "wraps the chart and its dot");
   assert.match(svg, /preserveAspectRatio="none"/, "stretches to the panel");
   assert.match(svg, /class="spark-grid"/, "has gridlines");
   assert.match(svg, /class="spark-fill"/, "has the filled area");
   assert.match(svg, /class="spark-line"/, "has the trace");
-  assert.match(svg, /class="spark-dot" cx="240"/, "marker pinned to the right edge");
+  assert.match(svg, /class="spark-dot" style="top:/, "marker overlaid on the right edge");
   // 100% must sit at the top (y=0) and 0% at the bottom (y=74).
   assert.match(svg, /L240\.00,0\.00/, "max value reaches the top of the chart");
 });
 
 test("sparkline variants select the themed colour class", () => {
+  assert.match(stats.sparkline([1, 2], "mem"), /class="spark-host mem"/);
   assert.match(stats.sparkline([1, 2], "mem"), /class="spark mem"/);
 });
 
