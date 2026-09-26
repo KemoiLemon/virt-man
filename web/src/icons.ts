@@ -3,8 +3,36 @@
 // didn't render on some systems. Named imports keep the bundle small.
 
 import type { IconNode as LucideIconNode } from "lucide";
-import { Circle, CircleDot, Globe, Minus, Play, Plus, Power, RotateCw, Square, SunMoon, Trash2, Upload, X } from "lucide";
+import {
+  Boxes,
+  ChevronDown,
+  Circle,
+  CircleDot,
+  Cpu,
+  Database,
+  Globe,
+  HardDrive,
+  LayoutDashboard,
+  MemoryStick,
+  Minus,
+  Monitor,
+  Network,
+  Play,
+  Plus,
+  Power,
+  RotateCw,
+  Server,
+  Square,
+  SunMoon,
+  Trash2,
+  Upload,
+  Users,
+  X,
+} from "lucide";
 
+// The Lucide pack ships path data only. Stroke weight, caps and joins are
+// defined once in CSS (`.ico > svg`), so no icon repeats them inline and the
+// whole set restyles from one rule — the same arrangement vm-man uses.
 function render(node: LucideIconNode, size: number): string {
   const body = node
     .map(([tag, attrs]) => {
@@ -15,10 +43,40 @@ function render(node: LucideIconNode, size: number): string {
       return `<${tag} ${a}></${tag}>`;
     })
     .join("");
-  return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+  return `<span class="ico" style="width:${size}px;height:${size}px" aria-hidden="true">` +
+    `<svg viewBox="0 0 24 24">${body}</svg></span>`;
 }
 
 const svg = (node: LucideIconNode) => (size = 16) => render(node, size);
+
+/** Build a real <svg> element (not markup) for DOM-constructed controls.
+ *  Callers place it inside an `.ico` wrapper, which supplies the stroke. */
+function element(node: LucideIconNode, size: number): SVGSVGElement {
+  const NS = "http://www.w3.org/2000/svg";
+  const root = document.createElementNS(NS, "svg");
+  root.setAttribute("width", String(size));
+  root.setAttribute("height", String(size));
+  root.setAttribute("viewBox", "0 0 24 24");
+  root.setAttribute("fill", "none");
+  root.setAttribute("stroke", "currentColor");
+  root.setAttribute("stroke-width", "2");
+  root.setAttribute("stroke-linecap", "round");
+  root.setAttribute("stroke-linejoin", "round");
+  root.setAttribute("aria-hidden", "true");
+  for (const [tag, attrs] of node) {
+    const child = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v !== undefined) child.setAttribute(k, String(v));
+    }
+    root.append(child);
+  }
+  return root;
+}
+
+/** Caret used by the themed listbox trigger. */
+export function chevronSvg(size = 14): SVGSVGElement {
+  return element(ChevronDown, size);
+}
 
 // Shorthands used throughout the UI.
 export const ic = {
@@ -35,4 +93,16 @@ export const ic = {
   circle: svg(Circle),
   circleDot: svg(CircleDot),
   webui: svg(Globe),
+  chevron: svg(ChevronDown),
+  // Resource tree + dashboard
+  datacenter: svg(LayoutDashboard),
+  server: svg(Server),
+  vm: svg(Monitor),
+  vms: svg(Boxes),
+  network: svg(Network),
+  storage: svg(Database),
+  disk: svg(HardDrive),
+  cpu: svg(Cpu),
+  memory: svg(MemoryStick),
+  users: svg(Users),
 };

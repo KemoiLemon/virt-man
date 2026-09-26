@@ -1,7 +1,9 @@
 // Console tab: VNC via noVNC, SPICE via spice-html5. Both talk to the
 // backend's TLS-pinned WebSocket proxy, so only the session cookie is needed.
 
-import RFB from "@novnc/novnc";
+// noVNC is imported dynamically (like spice-html5 below): it is only needed
+// when a console tab opens, it keeps it out of the main bundle, and its
+// top-level await cannot be bundled into a classic script.
 
 let active: { stop: () => void } | null = null;
 
@@ -32,9 +34,10 @@ export function attachConsole(
   }
 }
 
-function attachVnc(stage: HTMLElement, wsUrl: string, onStatus: (m: string | null) => void) {
+async function attachVnc(stage: HTMLElement, wsUrl: string, onStatus: (m: string | null) => void) {
   onStatus("connecting…");
   try {
+    const RFB = (await import("@novnc/novnc")).default;
     const rfb = new RFB(stage, wsUrl, { credentials: {} });
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
