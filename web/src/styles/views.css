@@ -17,7 +17,7 @@
 .tree-ic.on { color: var(--ok); }
 .tree-row.sel .tree-ic { color: var(--accent); }
 .tree-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tree-state { font-size: 10px; color: var(--dim); letter-spacing: .5px; }
+.tree-state { font-size: 12px; color: var(--dim); letter-spacing: .5px; }
 .tree-state.on { color: var(--ok); }
 .tree-empty { padding: 14px 16px; color: var(--dim); font-size: 11px; }
 
@@ -28,7 +28,7 @@
 table.grid th.col-actions, table.grid td.col-actions { width: 1%; white-space: nowrap; }
 .row-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 
-.state { font-size: 10px; letter-spacing: 1px; color: var(--dim); }
+.state { font-size: 12px; letter-spacing: 1px; color: var(--dim); }
 .state.on { color: var(--ok); }
 .tname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 table.grid td.tname:hover { color: var(--accent); }
