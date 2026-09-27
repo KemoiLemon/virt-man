@@ -25,6 +25,9 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    // reqwest (URL fetches) is built without its own TLS provider; install
+    // the aws-lc-rs one axum-server already uses, or building a client panics.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     config::ensure_privileges()?;
 
     let cfg = config::Config::load()?;

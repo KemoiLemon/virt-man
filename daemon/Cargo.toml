@@ -21,3 +21,8 @@ libc = "0.2"
 base64 = "0.22"
 # Volume hashing, so a staged upload can be verified after transfer.
 sha2 = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+# Fetching an ISO from a URL straight into a pool. webpki roots, so it trusts
+# the public CAs without depending on the host's certificate bundle; the
+# crypto provider is the aws-lc-rs one axum-server already brings.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "stream"] }

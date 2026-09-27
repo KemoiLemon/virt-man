@@ -175,3 +175,20 @@ table.grid + .actions { margin-top: 12px; }
 .key-list .task-row { padding: 7px 9px; }
 .key-list .task-row:last-child { border-bottom: 0; }
 .key-list .empty { padding: 7px 9px; line-height: 1.5; }
+
+/* ------------------------------------------------------------- downtime */
+.offline-panel {
+  display: flex; gap: 14px; align-items: flex-start;
+  margin: 16px 0; padding: 16px 18px;
+  background: var(--panel); border: 1px solid var(--bad);
+}
+.offline-panel b { display: block; margin-bottom: 6px; }
+.offline-panel p { margin: 0 0 4px; color: var(--fg); }
+.offline-panel .muted { color: var(--dim); }
+.offline-ic { color: var(--bad); flex: none; }
+.tree-row.offline .tree-ic { color: var(--bad); }
+.tree-state.bad { color: var(--bad); }
+/* Last-known resources of an offline server: shown, but clearly not live. */
+.tree-stale { opacity: .45; }
+.tree-stale .tree-ic.on, .tree-stale .tree-state.on { color: var(--dim); }
+.state.bad { color: var(--bad); }

@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod config;
 mod daemon;
+mod health;
 mod history;
 mod httpsredirect;
 mod state;
@@ -45,6 +46,7 @@ async fn run() -> Result<(), String> {
     // delete anything incomplete, which could never be resumed safely.
     api::uploads::restore(&state);
     tokio::spawn(history::collect(state.clone()));
+    tokio::spawn(health::watch(state.clone()));
 
     let index = cfg.dist_dir.join("index.html");
     let app = api::build(state.clone())
@@ -58,9 +60,12 @@ async fn run() -> Result<(), String> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| format!("bind {addr}: {e}"))?;
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| format!("server: {e}"))
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| format!("server: {e}"))
     } else {
         let (cert, key) = (cfg.cert_path(), cfg.key_path());
         tls::ensure_cert(&cert, &key)?;
@@ -75,7 +80,7 @@ async fn run() -> Result<(), String> {
         );
         axum_server::bind(addr)
             .acceptor(acceptor)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
             .map_err(|e| format!("server: {e}"))
     }

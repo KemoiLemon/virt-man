@@ -1,5 +1,6 @@
 pub mod console;
 pub mod domains;
+pub mod fetch;
 pub mod filters;
 pub mod firewall;
 pub mod health;
@@ -68,6 +69,7 @@ pub fn build(auth: Auth) -> Router {
         .merge(filters::routes())
         .merge(pools::routes())
         .merge(volumes::routes())
+        .merge(fetch::routes())
         // One firewall state for both: a NIC change re-applies the ruleset,
         // and must take the same lock as a rules PUT.
         .merge(firewall::routes(fw.clone()))

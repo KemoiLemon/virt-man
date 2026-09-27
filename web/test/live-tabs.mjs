@@ -333,6 +333,10 @@ check("Options tab shows editable metadata read from the guest", () => {
 
 tabNamed("Network")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1800);
+// The fixture may reuse a guest that already has rules; compare against what
+// the daemon holds for it rather than assuming an empty ruleset.
+const openVm = document.querySelector(".tree-row.tree-vm.sel")?.dataset.vm ?? fixture.name;
+const fwRules = (await (await fetch(`${base}/proxy/${fixture.conn}/domains/${encodeURIComponent(openVm)}/firewall`)).json()).rules ?? [];
 
 check("VM Network tab lists the guest's interfaces", () => {
   assert.equal(document.querySelector(".tabbar .tab.active")?.textContent.trim(), "Network");
@@ -353,9 +357,11 @@ check("VM Network tab carries the firewall editor with add and apply", () => {
   assert.ok(document.querySelector("#vmfw-add").querySelector("svg"), "add-rule has an icon");
 });
 
-check("the VM rules table starts with the no-rules empty state", () => {
+check("the VM rules table shows the guest's rules, or the empty state when it has none", () => {
   const body = document.querySelector("#vm-body")?.textContent ?? "";
-  assert.match(body, /No rules/, "empty state for a guest without rules");
+  const rows = document.querySelectorAll("#vmnet-fw [data-r-dir]").length;
+  if (fwRules.length) assert.equal(rows, fwRules.length, `${rows} rows for ${fwRules.length} rules`);
+  else assert.match(body, /No rules/, "empty state for a guest without rules");
 });
 
 for (const [state, name] of results) {

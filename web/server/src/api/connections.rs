@@ -69,8 +69,13 @@ pub fn routes(state: &AppState) -> Router<AppState> {
         .layer(middleware::from_fn(auth::require_user(state.clone())))
 }
 
-fn conn_json(c: &Connection) -> Value {
+fn conn_json(c: &Connection, health: Option<&crate::health::DaemonHealth>) -> Value {
     json!({
+        // Unknown until the first probe (a few seconds after start): report
+        // online rather than flash an offline banner for a healthy server.
+        "online": health.is_none_or(|h| h.online),
+        "offline_since_ms": health.filter(|h| !h.online).map(|h| h.since_ms),
+        "offline_error": health.filter(|h| !h.online).and_then(|h| h.error.clone()),
         "id": c.id,
         "name": c.name,
         "url": c.url,
@@ -81,7 +86,13 @@ fn conn_json(c: &Connection) -> Value {
 }
 
 async fn list(State(state): State<AppState>) -> Json<Value> {
-    let conns: Vec<Value> = state.read().connections.iter().map(conn_json).collect();
+    let health = state.health.read().expect("health lock poisoned").clone();
+    let conns: Vec<Value> = state
+        .read()
+        .connections
+        .iter()
+        .map(|c| conn_json(c, health.get(&c.id)))
+        .collect();
     Json(json!(conns))
 }
 
@@ -155,7 +166,7 @@ async fn create(
     store.save(&state.data_dir)?;
     drop(store);
 
-    let mut out = conn_json(&conn);
+    let mut out = conn_json(&conn, None);
     if unreachable {
         out["daemon_unreachable"] = json!(true);
         out["install_script"] = json!(install_script(&conn.token));
@@ -194,7 +205,7 @@ async fn update(
     }
     let conn = conn.clone();
     store.save(&state.data_dir)?;
-    Ok(Json(conn_json(&conn)))
+    Ok(Json(conn_json(&conn, None)))
 }
 
 async fn remove(

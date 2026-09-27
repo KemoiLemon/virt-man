@@ -28,6 +28,7 @@ import MemoryStick from "@phosphor-icons/core/assets/fill/memory-fill.svg?raw";
 import Monitor from "@phosphor-icons/core/assets/fill/desktop-fill.svg?raw";
 import Network from "@phosphor-icons/core/assets/fill/network-fill.svg?raw";
 import OctagonX from "@phosphor-icons/core/assets/fill/prohibit-fill.svg?raw";
+import Plugs from "@phosphor-icons/core/assets/fill/plugs-fill.svg?raw";
 import Pencil from "@phosphor-icons/core/assets/fill/pencil-simple-fill.svg?raw";
 import Play from "@phosphor-icons/core/assets/fill/play-fill.svg?raw";
 import Plus from "@phosphor-icons/core/assets/fill/plus-fill.svg?raw";
@@ -104,6 +105,7 @@ export const ic = {
   // Resource tree + dashboard
   datacenter: svg(LayoutDashboard),
   server: svg(Server),
+  offline: svg(Plugs),
   vm: svg(Monitor),
   vms: svg(Monitor),
   network: svg(Network),

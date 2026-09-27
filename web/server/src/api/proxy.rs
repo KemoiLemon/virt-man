@@ -80,13 +80,73 @@ pub fn routes(state: &AppState) -> Router<AppState> {
         .layer(middleware::from_fn(auth::require_user(state.clone())))
 }
 
+/// The daemon URL for a `.vv` request, with the viewer's address and the
+/// daemon's host appended. Both are set here, never taken from the browser: a
+/// client-chosen `client` would let anyone open the relay to any address.
+///
+fn vv_target(target: &str, viewer: std::net::IpAddr, daemon_host: &str) -> String {
+    let viewer = match viewer {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(viewer, std::net::IpAddr::V4),
+        v4 => v4,
+    };
+    // Strip anything the browser put in the query for these two keys.
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|kv| !kv.is_empty() && !kv.starts_with("client=") && !kv.starts_with("host="))
+        .collect();
+    let mut q = kept.join("&");
+    if !q.is_empty() {
+        q.push('&');
+    }
+    let enc = |s: &str| {
+        s.replace('%', "%25")
+            .replace(':', "%3A")
+            .replace('[', "%5B")
+            .replace(']', "%5D")
+    };
+    format!(
+        "{path}?{q}client={}&host={}",
+        enc(&viewer.to_string()),
+        enc(daemon_host)
+    )
+}
+
+/// The host a viewer should dial for the relay.
+///
+/// The daemon's own URL is the right answer when it names a real host. When it
+/// is loopback (web UI and daemon on one machine, the usual setup) it is useless
+/// to a viewer elsewhere; the host the browser reached *us* by is the same
+/// machine and is known to be reachable from the viewer, so use that.
+fn vv_host(headers: &HeaderMap, daemon_host: &str) -> String {
+    let loopback = matches!(daemon_host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+        || daemon_host.starts_with("127.");
+    if !loopback {
+        return daemon_host.to_string();
+    }
+    let browser = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| match h.rfind(']') {
+            Some(end) => &h[..=end],
+            None => h.rsplit_once(':').map_or(h, |(a, _)| a),
+        })
+        .unwrap_or("");
+    if browser.is_empty() {
+        daemon_host.to_string()
+    } else {
+        browser.to_string()
+    }
+}
+
 /// Map a proxied daemon path to the permission scope it belongs to.
 fn path_scope(path: &str) -> &'static str {
     if path.contains("/domains") {
         "vms"
     } else if path.contains("/networks") {
         "networks"
-    } else if path.contains("/pools") {
+    } else if path.contains("/pools") || path.contains("/fetches") {
+        // URL fetches write into a pool.
         "storage"
     } else {
         "connections"
@@ -219,10 +279,14 @@ fn record_delete(state: &AppState, user: &User, path_and_query: &str, status: u1
 
 /// All daemon calls proxy through here. The daemon token never reaches the
 /// browser: the backend attaches it server-side.
+// axum extractors are the arguments; bundling them into a struct would only
+// move the list somewhere else.
+#[allow(clippy::too_many_arguments)]
 async fn proxy(
     State(state): State<AppState>,
     Path((conn_id, _rest)): Path<(String, String)>,
     axum::extract::Extension(user): axum::extract::Extension<User>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
@@ -241,13 +305,22 @@ async fn proxy(
         c.clone()
     };
 
-    let base = daemon::parse_url(&conn.url)?.base;
+    let addr = daemon::parse_url(&conn.url)?;
+    let base = addr.base.clone();
     // uri comes in as /proxy/{id}/rest/of/path — strip the prefix.
     let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let rest = path_and_query
         .strip_prefix(&format!("/proxy/{conn_id}"))
         .unwrap_or(path_and_query);
     let target = format!("{}{}", base, rest);
+    // A virt-viewer file names a relay the daemon opens for one viewer: tell
+    // it who that viewer is (the browser, not this server) and the host name
+    // to write, so the file works from the machine that downloaded it.
+    let target = if uri.path().ends_with("/console/vv") {
+        vv_target(&target, peer.ip(), &vv_host(&headers, &addr.host))
+    } else {
+        target
+    };
 
     if !write && headers.contains_key(PREFER_CACHE) {
         let hit = read_cache()
@@ -337,6 +410,48 @@ async fn proxy(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fetching_into_a_pool_needs_storage_access() {
+        assert_eq!(super::path_scope("/proxy/c/pools/ISOs/fetch"), "storage");
+        assert_eq!(super::path_scope("/proxy/c/fetches"), "storage");
+        assert_eq!(super::path_scope("/proxy/c/fetches/abc"), "storage");
+    }
+
+    #[test]
+    fn a_loopback_daemon_hands_out_the_host_the_browser_used() {
+        let mut h = super::HeaderMap::new();
+        h.insert("host", "optibox.lan:8006".parse().unwrap());
+        assert_eq!(super::vv_host(&h, "localhost"), "optibox.lan");
+        assert_eq!(super::vv_host(&h, "127.0.0.1"), "optibox.lan");
+        assert_eq!(
+            super::vv_host(&h, "hv2.lan"),
+            "hv2.lan",
+            "a real daemon host wins"
+        );
+        h.insert("host", "[fd00::2]:8006".parse().unwrap());
+        assert_eq!(super::vv_host(&h, "::1"), "[fd00::2]");
+    }
+
+    #[test]
+    fn a_vv_request_carries_the_viewer_and_daemon_host_not_the_browsers_say_so() {
+        let v4: std::net::IpAddr = "::ffff:192.168.1.20".parse().unwrap();
+        let out = super::vv_target(
+            "https://hv:8443/domains/web/console/vv?kind=vnc&client=6.6.6.6&host=evil",
+            v4,
+            "hv.lan",
+        );
+        assert_eq!(
+            out,
+            "https://hv:8443/domains/web/console/vv?kind=vnc&client=192.168.1.20&host=hv.lan"
+        );
+        let v6: std::net::IpAddr = "fd00::5".parse().unwrap();
+        let out = super::vv_target("https://hv/domains/x/console/vv", v6, "[fd00::1]");
+        assert_eq!(
+            out,
+            "https://hv/domains/x/console/vv?client=fd00%3A%3A5&host=%5Bfd00%3A%3A1%5D"
+        );
+    }
+
     use super::{delete_activity, delete_label, summarize_cleanup, ReadCache, MAX_CACHED_BODY};
 
     #[test]

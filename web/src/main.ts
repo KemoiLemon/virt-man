@@ -211,11 +211,27 @@ function renderCurrent() {
 }
 
 function renderView() {
+  if (selectedConn && isOffline(selectedConn)) return renderOffline();
   if (!selectedConn) renderDc();
   else if (selectedVm) void renderVm();
   else if (selectedNet) { showPageSkeleton(); void fastLoad(renderNetPage); }
   else if (selectedPool) { showPageSkeleton(); void renderPoolPage(); }
   else renderConn();
+}
+
+/// The open view's server is down: keep its header (so it is clear which
+/// server and page this is, and the tree still lines up) and show one offline
+/// panel in place of the body.
+function renderOffline() {
+  if (!selectedConn) return;
+  beginRender();
+  syncUrl();
+  const c = connections.find((x) => x.id === selectedConn);
+  const title = selectedVm ?? selectedNet ?? selectedPool ?? c?.name ?? "";
+  const content = $("#content");
+  setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.offline(20)}</span><span class="dtitle">${esc(title)}</span>
+    ${selectedVm || selectedNet || selectedPool ? `<span class="badge">${esc(c?.name ?? "")}</span>` : ""}</div>
+    ${offlinePanel(selectedConn)}`);
 }
 
 // Chart range buttons: one delegated handler, since the dashboards re-render
@@ -313,6 +329,7 @@ function openCommandPalette() {
     const power = (id: string, label: string, icon: string, path: string) =>
       add(id, `${label} — ${vm}`, "This VM", icon, () => void treeVmPower(conn, vm, path));
     if (running) {
+      add("vm-vv", `Open in virt-viewer — ${vm}`, "This VM", ic.download(), () => void downloadVv(conn, vm));
       power("vm-shutdown", "Shutdown", ic.stop(), "/shutdown");
       power("vm-reboot", "Reboot", ic.reboot(), "/reboot");
       power("vm-reset", "Reset", ic.reset(), "/reset");
@@ -619,6 +636,61 @@ function canAdmin(): boolean {
   return user.role === "admin";
 }
 
+// ---------------------------------------------------------------- downtime
+
+/// Whether the web server's probes currently reach this server's daemon.
+function isOffline(connId: string | null): boolean {
+  return !!connId && connections.find((c) => c.id === connId)?.online === false;
+}
+
+/// "3 min", "2 h", for how long something has been down.
+function ago(ms: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  if (s < 86400) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86400)} d`;
+}
+
+/// One panel for a server that cannot be reached, in place of the raw
+/// transport error each view used to print ("daemon error: error sending
+/// request … Connection refused").
+function offlinePanel(connId: string): string {
+  const c = connections.find((x) => x.id === connId);
+  return `<div class="offline-panel" data-offline="${esc(connId)}">
+    <span class="offline-ic">${ic.offline(28)}</span>
+    <div>
+      <b>${esc(c?.name ?? "This server")} is offline</b>
+      <p>${esc(c?.offline_error ?? "The daemon is not answering.")}${c?.offline_since_ms ? ` · for ${ago(c.offline_since_ms)}` : ""}</p>
+      <p class="muted">Retrying every few seconds; this page reloads by itself when it is back.</p>
+    </div>
+  </div>`;
+}
+
+/// Refresh reachability. When a server's state flips, repaint what shows it:
+/// the sidebar always, and the open view if it belongs to that server (a view
+/// that came back re-reads everything, instead of waiting for the user).
+async function refreshHealth() {
+  let fresh: Connection[];
+  try {
+    fresh = await api.get<Connection[]>("/connections");
+  } catch {
+    return; // the web server itself is unreachable; nothing to compare
+  }
+  const was = new Map(connections.map((c) => [c.id, c.online !== false] as const));
+  const flipped = fresh.filter((c) => was.has(c.id) && was.get(c.id) !== (c.online !== false));
+  connections = fresh;
+  if (!flipped.length) return;
+  renderTree();
+  for (const c of flipped) {
+    toast(c.online === false ? `${c.name} went offline` : `${c.name} is back online`, c.online === false ? "bad" : "ok");
+  }
+  if (!selectedConn || flipped.some((c) => c.id === selectedConn)) {
+    if (flipped.some((c) => c.online !== false)) void refreshTreeVms();
+    renderView();
+  }
+}
+
 // ---------------------------------------------------------------- tree
 
 /// Nested resource tree: Datacenter root -> servers -> guests, mirroring
@@ -635,6 +707,7 @@ function renderTree() {
       const nets = treeNets[c.id] ?? [];
       const pools = treePools[c.id] ?? [];
       const running = vms.filter((v) => v.active).length;
+      const offline = c.online === false;
       // Servers auto-expand: guests show as soon as they are known, without
       // requiring the server to be selected first.
       // A guest row carries its owning connection: selecting it must switch
@@ -679,12 +752,15 @@ function renderTree() {
             )
             .join("")
         : `<div class="tree-empty tree-res-empty">No pools.</div>`;
+      // Offline: the guest, network and pool states below are last known,
+      // not current, so they are greyed rather than shown as live.
       return `
-      <button class="tree-row tree-group ${selected ? "sel" : ""}" data-conn="${c.id}">
-        <span class="tree-ic ${running > 0 ? "on" : ""}">${ic.server()}</span>
+      <button class="tree-row tree-group ${selected ? "sel" : ""} ${offline ? "offline" : ""}" data-conn="${c.id}"
+        ${offline ? `title="Offline${c.offline_error ? `: ${esc(c.offline_error)}` : ""}"` : ""}>
+        <span class="tree-ic ${running > 0 && !offline ? "on" : ""}">${offline ? ic.offline() : ic.server()}</span>
         <span class="tree-label">${esc(c.name)}</span>
-        <span class="tree-state">${vms.length ? `${running}/${vms.length}` : ""}</span>
-      </button>${guestRows}${netRows}${poolRows}`;
+        <span class="tree-state ${offline ? "bad" : ""}">${offline ? "Offline" : vms.length ? `${running}/${vms.length}` : ""}</span>
+      </button>${offline ? `<div class="tree-stale">${guestRows}${netRows}${poolRows}</div>` : `${guestRows}${netRows}${poolRows}`}`;
     })
     .join("");
 
@@ -830,6 +906,30 @@ async function treeNetPower(conn: string, net: string, action: "start" | "stop")
 
 /// Actions for one guest. Shared by the tree, the VM cards and the datacenter
 /// guest cards, so a guest offers the same menu wherever it is right-clicked.
+/// Download a virt-viewer file for a running guest and hand it to the
+/// browser. Fetched on click, never linked: the file names a relay the daemon
+/// opens for one viewer and one minute, so a stale href would point nowhere.
+async function downloadVv(connId: string, vm: string) {
+  try {
+    const res = await fetch(`/proxy/${connId}/domains/${encodeURIComponent(vm)}/console/vv`, { credentials: "same-origin" });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error((e as { error?: string }).error ?? res.statusText);
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${vm}.vv`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    toast("virt-viewer file downloaded — open it within a minute");
+  } catch (e) {
+    toast(`virt-viewer: ${(e as Error).message}`, "bad");
+  }
+}
+
 function vmMenu(connId: string, vmName: string): CtxItem[] {
   const guest = (treeVms[connId] ?? []).find((v) => v.name === vmName);
   const running = guest?.active === true;
@@ -856,6 +956,7 @@ function vmMenu(connId: string, vmName: string): CtxItem[] {
       run: () => void treeVmPower(connId, vmName, "/destroy"),
     },
     { label: "Console", icon: ic.vm(), separator: true, run: () => selectVmRow(connId, vmName, "console") },
+    { label: "Open in virt-viewer", icon: ic.download(), disabled: !running, run: () => void downloadVv(connId, vmName) },
     { label: "Hardware", icon: ic.cpu(), run: () => selectVmRow(connId, vmName, "hardware") },
     { label: "Options", icon: ic.options(), run: () => selectVmRow(connId, vmName, "options") },
     { label: "Network", icon: ic.network(), run: () => selectVmRow(connId, vmName, "network") },
@@ -920,6 +1021,7 @@ function poolMenu(connId: string, poolName: string): CtxItem[] {
   return [
     { label: "Open", icon: ic.storage(), run: () => selectPoolRow(connId, poolName) },
     { label: "Upload ISO", icon: ic.upload(), separator: true, run: onConn(() => openUpload(poolName)) },
+    { label: "Download ISO from URL", icon: ic.download(), run: onConn(() => openFetch(poolName)) },
     { label: "New volume", icon: ic.disk(), run: onConn(() => openCreateVolume(poolName)) },
     {
       label: "Delete pool", icon: ic.trash(), danger: true, separator: true,
@@ -1403,7 +1505,7 @@ async function loadDcDashboard() {
         ${connections.map((c) => {
           const row = byId.get(c.id);
           if (!row) {
-            return `<tr><td class="tname" style="cursor:pointer" tabindex="0" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state">Unreachable</span></td><td>—</td><td>—</td><td>—</td></tr>`;
+            return `<tr><td class="tname" style="cursor:pointer" tabindex="0" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state bad">Offline</span></td><td colspan="3" class="muted">${esc(c.offline_error ?? "not answering")}</td></tr>`;
           }
           const { h, pools: ps } = row;
           const { cpuNow: sCpu } = addHostSample(`dc:${c.id}`, h);
@@ -1883,6 +1985,7 @@ function leaveMissing(tab: "networks" | "storage", message: string) {
 /// (MAC -> IP DHCP hosts) and the lifecycle/edit actions.
 async function renderNetPage() {
   if (!selectedConn || !selectedNet) return;
+  if (isOffline(selectedConn)) return renderOffline();
   const gen = beginRender();
   syncUrl();
   const conn = selectedConn; // narrowed copy for nested closures
@@ -2131,6 +2234,7 @@ async function autoAllocateIpam(conn: string, vmName: string) {
 /// Dedicated storage page: one pool's capacity plus full volume management.
 async function renderPoolPage() {
   if (!selectedConn || !selectedPool) return;
+  if (isOffline(selectedConn)) return renderOffline();
   const gen = beginRender();
   syncUrl();
   const content = $("#content");
@@ -2160,6 +2264,7 @@ async function renderPoolPage() {
       <div class="dsub">Storage pool</div>
       <div class="actions">
         <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
+        <button class="btn" id="pool-fetch">${ic.download(14)} From URL</button>
         <button class="btn" id="pool-newvol">${ic.plus(14)} New volume</button>
         <button class="btn danger" id="pool-del">${ic.trash(14)} Delete pool</button>
       </div>
@@ -2177,6 +2282,7 @@ async function renderPoolPage() {
         </div>
       </div>
       <div id="pool-uploads">${uploadsSection(name)}</div>
+      <div id="pool-fetches">${fetchesSection(conn, name)}</div>
       <div class="section-title fw-cat" style="margin-top:18px">Volumes</div>
       <table class="grid">
         <tr><th>Volume</th><th>Size</th><th>Allocated</th><th></th></tr>
@@ -2186,6 +2292,7 @@ async function renderPoolPage() {
       </table>`);
 
     $("#pool-upload", content).onclick = () => openUpload(name);
+    $("#pool-fetch", content).onclick = () => openFetch(name);
     $("#pool-newvol", content).onclick = () => openCreateVolume(name);
     $("#pool-del", content).onclick = async () => {
       await deletePool(name);
@@ -2197,6 +2304,8 @@ async function renderPoolPage() {
       };
     });
     bindUploads();
+    bindFetches(conn);
+    void pollFetches(conn);
     // Refresh the transfers section on entry: the cached list may predate this
     // visit, and a transfer that finished meanwhile should not look stuck.
     void pollUploads();
@@ -2216,6 +2325,7 @@ async function renderPoolPage() {
 
 async function renderConn() {
   if (!selectedConn) return;
+  if (isOffline(selectedConn)) return renderOffline();
   const conn = connections.find((c) => c.id === selectedConn);
   if (!conn) return;
   // Server view owns the pane: invalidates any in-flight resource render.
@@ -3089,11 +3199,12 @@ function syncVmActions() {
     if (b) b.disabled = !on;
   };
   set("vm-start", !running);
-  for (const id of ["vm-shutdown", "vm-reboot", "vm-reset", "vm-destroy"]) set(id, running);
+  for (const id of ["vm-shutdown", "vm-reboot", "vm-reset", "vm-destroy", "vm-vv"]) set(id, running);
 }
 
 async function renderVm() {
   if (!selectedConn || !selectedVm) return;
+  if (isOffline(selectedConn)) return renderOffline();
   // VM view owns the pane: invalidates any in-flight resource render.
   beginRender();
   syncUrl();
@@ -3117,6 +3228,7 @@ setHtml(content, `
         <button class="btn icon" id="vm-reboot" title="Reboot" ${running ? "" : "disabled"}>${ic.reboot()}</button>
         <button class="btn icon" id="vm-reset" title="Reset" ${running ? "" : "disabled"}>${ic.reset()}</button>
         <button class="btn icon" id="vm-destroy" title="Force stop" ${running ? "" : "disabled"}>${ic.forceStop()}</button>
+        <button class="btn icon" id="vm-vv" title="Open in virt-viewer" ${running ? "" : "disabled"}>${ic.download()}</button>
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
@@ -3145,6 +3257,8 @@ setHtml(content, `
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(refresh);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(refresh);
   $("#vm-delete").onclick = () => deleteVm(vm);
+  const vvConn = selectedConn;
+  $("#vm-vv").onclick = () => void downloadVv(vvConn, vm);
   // XML is read-only, so painting a cached answer first is safe. Summary shows
   // live statistics, which must never be painted stale, and the editing tabs
   // load once: a second paint would discard what the user typed meanwhile.
@@ -3165,7 +3279,6 @@ async function renderVmBody(vm: string) {
   body.parentElement?.classList.remove("vm-fill");
   if (vmTab === "console") {
     const zoomLabel = (z: number) => (z === 0 ? "Fit" : `${Math.round(z * 100)}%`);
-    const vvUrl = `/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/console/vv`;
     setHtml(body, `
       <div class="console-bar">
         <span class="console-group">
@@ -3205,9 +3318,11 @@ async function renderVmBody(vm: string) {
         setHtml(stage, `
           <div class="console-offer">
             <p>This guest uses <b>${esc(kind.toUpperCase())}</b>, which needs a native client.</p>
-            <a class="btn primary" id="con-vv" href="${vvUrl}" download="${esc(vm)}.vv">${ic.download(14)} Open in virt-viewer</a>
-            <p class="muted">Downloads a connection file. Add a VNC graphics device to use the built-in console.</p>
+            <button class="btn primary" id="con-vv">${ic.download(14)} Open in virt-viewer</button>
+            <p class="muted">Downloads a connection file, good for one viewer within a minute. Add a VNC graphics device to use the built-in console.</p>
           </div>`);
+        const vvBtn = $("#con-vv");
+        if (vvBtn) vvBtn.onclick = () => void downloadVv(conn, vm);
         return;
       }
 
@@ -5132,6 +5247,151 @@ function bindUploads() {
   }
 }
 
+// ------------------------------------------------------------ URL fetches
+
+interface FetchJob {
+  id: string; pool: string; name: string; url: string;
+  phase: "downloading" | "verifying" | "writing" | "done" | "failed" | "cancelled";
+  received: number; total: number | null; speed_bps: number;
+  sha256: string | null; error: string | null;
+}
+/// Last known fetches, per server. The daemon owns the jobs; this is only
+/// what the pool page last saw.
+const fetchJobs = new Map<string, FetchJob[]>();
+const fetchSeen = new Map<string, string>();
+let fetchTimer: number | null = null;
+const FETCH_LABEL: Record<string, string> = {
+  downloading: "Downloading", verifying: "Verifying", writing: "Writing",
+  done: "Stored", failed: "Failed", cancelled: "Cancelled",
+};
+const liveFetch = (j: FetchJob) => j.phase === "downloading" || j.phase === "verifying" || j.phase === "writing";
+
+/// Ask the daemon to download an ISO into `pool` itself. The bytes never pass
+/// through this server or the browser, and the job survives closing the tab.
+function openFetch(pool: string) {
+  if (!selectedConn) return;
+  const conn = selectedConn;
+  const el = openModal(
+    `Download ISO into ${esc(pool)}`,
+    `<label class="field"><span>URL</span>
+       <input id="fetch-url" placeholder="https://…/image.iso" spellcheck="false"></label>
+     <label class="field"><span>Volume Name</span>
+       <input id="fetch-name" placeholder="Leave blank to use the file name"></label>
+     <label class="field"><span>SHA-256 (optional)</span>
+       <input id="fetch-sha" placeholder="Checked before the image is stored" spellcheck="false"></label>
+     <p class="hint">The server downloads the image itself; you can close this page while it runs.</p>`,
+    `<button class="btn primary" id="fetch-go">Download</button>`,
+  );
+  const url = $("#fetch-url", el) as HTMLInputElement;
+  const name = $("#fetch-name", el) as HTMLInputElement;
+  // Suggest the URL's file name, but never overwrite one the user typed.
+  let autoName = "";
+  url.addEventListener("input", () => {
+    let file = "";
+    try { file = decodeURIComponent(new URL(url.value.trim()).pathname.split("/").pop() ?? ""); } catch { /* not a URL yet */ }
+    const next = autoVolumeName(name.value, autoName, file);
+    if (next === null) return;
+    name.value = next;
+    autoName = next;
+  });
+  const go = $("#fetch-go", el) as HTMLButtonElement;
+  go.onclick = async () => {
+    go.disabled = true;
+    try {
+      await api.post(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/fetch`, {
+        url: url.value.trim(),
+        name: name.value.trim() || undefined,
+        sha256: ($("#fetch-sha", el) as HTMLInputElement).value.trim() || undefined,
+      });
+    } catch (e) {
+      go.disabled = false;
+      return toast((e as Error).message, "bad");
+    }
+    el.remove();
+    toast("Download started on the server");
+    await pollFetches(conn);
+  };
+  url.focus();
+}
+
+async function pollFetches(conn: string) {
+  let jobs: FetchJob[];
+  try {
+    jobs = await api.get<FetchJob[]>(`/proxy/${conn}/fetches`);
+  } catch {
+    return; // transient, or the daemon is down: the next poll retries
+  }
+  fetchJobs.set(conn, jobs);
+  for (const j of jobs) {
+    const before = fetchSeen.get(j.id);
+    fetchSeen.set(j.id, j.phase);
+    if (before === undefined || before === j.phase) continue;
+    if (j.phase === "done") {
+      toast(`${j.name} downloaded and stored`);
+      void api.post("/activity", { label: `Download ${j.name} into pool ${j.pool}`, status: "done", message: j.url }).catch(() => {});
+      if (selectedPool === j.pool && selectedConn === conn) void renderPoolPage();
+    } else if (j.phase === "failed") {
+      toast(`${j.name}: ${j.error ?? "download failed"}`, "bad");
+      void api.post("/activity", { label: `Download ${j.name} into pool ${j.pool}`, status: "failed", message: `${j.error ?? ""} (${j.url})` }).catch(() => {});
+    }
+  }
+  if (jobs.some(liveFetch)) {
+    if (fetchTimer === null) fetchTimer = window.setInterval(() => void pollFetches(conn), 1000);
+  } else if (fetchTimer !== null) {
+    window.clearInterval(fetchTimer);
+    fetchTimer = null;
+  }
+  const host = document.getElementById("pool-fetches");
+  if (host && selectedPool && selectedConn === conn) {
+    setHtml(host, fetchesSection(conn, selectedPool));
+    bindFetches(conn);
+  }
+}
+
+function fetchesSection(conn: string, pool: string): string {
+  const jobs = (fetchJobs.get(conn) ?? []).filter((j) => j.pool === pool);
+  if (!jobs.length) return "";
+  return `
+    <div class="section-title fw-cat" style="margin-top:18px">Downloads</div>
+    ${jobs.map((j) => {
+      const live = liveFetch(j);
+      const pctDone = j.total ? Math.min(100, (j.received / j.total) * 100) : 0;
+      const width = live ? (j.total ? pctDone : 0) : 100;
+      return `<div class="metric" data-fetch-id="${esc(j.id)}">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.download()}</span>
+          <b>${esc(j.name)}</b>
+          <span class="metric-value">${esc(FETCH_LABEL[j.phase] ?? j.phase)}</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${j.phase === "failed" ? "hot" : ""}" style="width:${width.toFixed(1)}%"></div></div>
+        <div class="metric-foot">
+          <span>${fmtBytes(j.received)}${j.total ? ` of ${fmtBytes(j.total)}` : ""}</span>
+          <span>${live && j.speed_bps > 0 ? fmtRate(j.speed_bps / 1024) : ""}</span>
+          <span>${j.phase === "done" && j.sha256 ? `sha256 ${esc(j.sha256.slice(0, 12))}…` : ""}</span>
+          <button class="btn icon" data-fetch-${live ? "cancel" : "clear"}="${esc(j.id)}"
+            title="${live ? "Cancel the download" : "Dismiss"}">${ic.close()}</button>
+        </div>
+        <p class="hint" title="${esc(j.url)}">${esc(j.phase === "failed" ? j.error ?? "download failed" : j.url)}</p>
+      </div>`;
+    }).join("")}`;
+}
+
+function bindFetches(conn: string) {
+  const host = document.getElementById("pool-fetches");
+  if (!host) return;
+  for (const b of host.querySelectorAll<HTMLElement>("[data-fetch-cancel], [data-fetch-clear]")) {
+    b.onclick = async () => {
+      const id = b.dataset.fetchCancel ?? b.dataset.fetchClear!;
+      try {
+        await api.del(`/proxy/${conn}/fetches/${id}`);
+      } catch (e) {
+        return toast((e as Error).message, "bad");
+      }
+      await pollFetches(conn);
+    };
+  }
+}
+
 function openUpload(pool: string) {
   if (!selectedConn) return;
   const conn = selectedConn;
@@ -5407,6 +5667,10 @@ function startPolling() {
   if (pollTimer) window.clearInterval(pollTimer);
   pollTimer = window.setInterval(() => {
     if (!user) return;
+    void refreshHealth();
+    // A down server's views show the offline panel; polling its daemon would
+    // only fail again and paint the raw error over it.
+    if (isOffline(selectedConn)) return;
     // Keep the sidebar's guest states live regardless of the open pane.
     void refreshTreeVms();
     if (!selectedConn && !selectedVm && dcTab === "dashboard") {

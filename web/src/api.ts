@@ -163,6 +163,10 @@ export interface Connection {
   fingerprint: string | null;
   has_token: boolean;
   has_cert: boolean;
+  /// Reachability, from the web server's own probes (health.rs).
+  online?: boolean;
+  offline_since_ms?: number | null;
+  offline_error?: string | null;
 }
 
 /// `POST /connections` result. When the daemon is not reachable yet, the

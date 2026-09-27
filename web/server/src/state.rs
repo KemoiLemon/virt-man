@@ -1,4 +1,5 @@
 use crate::api::uploads::Uploads;
+use crate::health::HealthMap;
 use crate::history::History;
 use crate::store::Store;
 use std::path::PathBuf;
@@ -15,6 +16,8 @@ pub struct AppState {
     pub uploads: Uploads,
     /// Two weeks of sampled metrics. See `history`.
     pub history: History,
+    /// Reachability of each connection's daemon. See `health`.
+    pub health: HealthMap,
 }
 
 impl AppState {
@@ -25,6 +28,7 @@ impl AppState {
             auth_disabled,
             uploads: Arc::new(RwLock::new(std::collections::HashMap::new())),
             history,
+            health: Default::default(),
         }
     }
 

@@ -122,7 +122,7 @@ async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>
 }
 
 /// Lowercase hex of a digest.
-fn to_hex(bytes: &[u8]) -> String {
+pub(super) fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -180,7 +180,7 @@ async fn hash(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>, 
 /// spooling an 8 GB ISO there would hold the whole thing in RAM. `/var/tmp` is
 /// disk-backed by convention. `VIRT_MAN_SPOOL_DIR` overrides it (the directory
 /// must already exist).
-fn spool_dir() -> PathBuf {
+pub(super) fn spool_dir() -> PathBuf {
     std::env::var_os("VIRT_MAN_SPOOL_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/tmp"))
@@ -348,7 +348,7 @@ where
 }
 
 /// Write `path` into `vol` and return the SHA-256 of what was written.
-fn upload_from_file(
+pub(super) fn upload_from_file(
     conn: &virt::connect::Connect,
     vol: &StorageVol,
     path: &std::path::Path,
@@ -379,7 +379,7 @@ fn upload_from_file(
     Ok(sha256)
 }
 
-fn volume_xml(name: &str, capacity: u64) -> String {
+pub(super) fn volume_xml(name: &str, capacity: u64) -> String {
     format!(
         "<volume><name>{name}</name><capacity>{capacity}</capacity><target><format type='raw'/></target></volume>"
     )

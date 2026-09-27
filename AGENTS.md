@@ -28,7 +28,8 @@ cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route,
 #   live-vmnet (needs sudo: checks tc and dnsmasq; boots its own guest),
 #   live-history (needs the server to have been sampling for ~30 s),
-#   live-empty (no args: runs its own server against a stub daemon with no resources)
+#   live-empty (no args: runs its own server against a stub daemon with no resources),
+#   live-ops (needs sudo: defines a SPICE guest, stops/starts the daemon)
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
@@ -337,6 +338,33 @@ viewer speaks) and the `.vv` endpoint prefers SPICE.
 
 **SPICE has no browser console.** Do not try to add one — the last attempt is
 documented in `DESIGN.md`. SPICE guests get a virt-viewer `.vv` file.
+
+**A `.vv` file names a one-shot relay, not the guest's display.** Guest
+displays listen on 127.0.0.1, so a file naming them only works on the
+hypervisor. `GET …/console/vv` opens a relay port (`[::]:0`) that accepts **one**
+connection, only from the address that asked, within 60 s, and splices it to
+the display (`console.rs` `relay_once`). The web proxy sets `client` from the
+browser's socket address and `host` to the name the viewer can reach, and
+strips any the browser sent: a client-chosen `client` would open the relay to
+anyone. The SPA fetches the file on click (`downloadVv`), never via a link,
+because the relay is gone a minute later. The host firewall must allow
+ephemeral TCP ports from viewers for this to work off-host.
+
+**Daemon reachability is probed server-side** (`web/server/src/health.rs`,
+every 3 s). Two failures in a row mark a server offline and one success brings
+it back, so a daemon restart does not flap. `GET /connections` carries
+`online`/`offline_since_ms`/`offline_error`. While a server is offline, every
+view of it shows one offline panel (`renderOffline`), the sidebar greys its
+last-known rows, and the 1 s poll does not call its daemon (it would only paint
+the raw transport error). Recovery re-renders the open view by itself.
+Transitions go to the activity log as `system`.
+
+**ISOs can be fetched from a URL by the daemon itself** (`daemon/src/api/fetch.rs`,
+`POST /pools/{pool}/fetch`, `GET /fetches`). The bytes never touch the web
+server. The download spools to `/var/tmp` and is written into a new volume
+only once complete: short of `Content-Length`, empty, or failing an optional
+SHA-256, it stores nothing, and a write that fails deletes the volume. Existing
+volumes are never overwritten (409). `/fetches` is `storage` scope in the proxy.
 
 **Console frames are long-polled.** `GET …/console/frame` parks in the daemon
 until pixels exist. Do not add a client-side fetch timeout, and do not
