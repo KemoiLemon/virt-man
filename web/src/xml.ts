@@ -130,6 +130,12 @@ export function domainXml(f: DomainForm): string {
 </domain>`;
 }
 
+export interface DhcpHost {
+  mac: string;
+  ip: string;
+  name?: string;
+}
+
 export interface NetworkForm {
   name: string;
   forward: "nat" | "bridge" | "none";
@@ -138,6 +144,7 @@ export interface NetworkForm {
   dhcp_start: string;
   dhcp_end: string;
   dns: string; // comma/space separated forwarders, NAT only
+  hosts: DhcpHost[]; // static DHCP allocations, MAC -> IP
 }
 
 /** Optional uuid from an existing definition, preserved so editing/renaming
@@ -166,10 +173,17 @@ export function networkXml(f: NetworkForm, uuid = ""): string {
   let ip = "";
   if (f.forward !== "bridge" && f.ip) {
     const address = f.ip.split("/")[0];
-    const range = f.dhcp_start && f.dhcp_end
-      ? `<dhcp><range start="${esc(f.dhcp_start)}" end="${esc(f.dhcp_end)}"/></dhcp>`
+    // A <dhcp> element carries both the dynamic range (when set) and any
+    // static host allocations.
+    const hostTags = (f.hosts ?? [])
+      .filter((h) => h.mac && h.ip)
+      .map((h) => `<host mac="${esc(h.mac)}" ip="${esc(h.ip)}"${h.name ? ` name="${esc(h.name)}"` : ""}/>`)
+      .join("");
+    const hasDhcp = (f.dhcp_start && f.dhcp_end) || hostTags;
+    const dhcp = hasDhcp
+      ? `<dhcp>${f.dhcp_start && f.dhcp_end ? `<range start="${esc(f.dhcp_start)}" end="${esc(f.dhcp_end)}"/>` : ""}${hostTags}</dhcp>`
       : "";
-    ip = `<ip address="${esc(address)}" netmask="${esc(netmask(f.ip))}">${range}</ip>`;
+    ip = `<ip address="${esc(address)}" netmask="${esc(netmask(f.ip))}">${dhcp}</ip>`;
   }
   return `<network>
   <name>${name}</name>
@@ -258,6 +272,13 @@ export function networkFormFromXml(xml: string): NetworkForm {
     .map((f) => attr(f, "addr"))
     .filter(Boolean)
     .join(", ");
+  const hosts = allElems(xml, "host")
+    .map((h) => ({
+      mac: attr(h, "mac"),
+      ip: attr(h, "ip"),
+      name: attr(h, "name"),
+    }))
+    .filter((h) => h.mac && h.ip);
   return {
     name: tag(xml, "name"),
     forward,
@@ -266,6 +287,7 @@ export function networkFormFromXml(xml: string): NetworkForm {
     dhcp_start: attr(range, "start"),
     dhcp_end: attr(range, "end"),
     dns,
+    hosts,
   };
 }
 

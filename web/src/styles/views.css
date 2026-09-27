@@ -13,13 +13,10 @@
 .tree-root { font-weight: 600; border-bottom: 1px solid var(--line); }
 .tree-group { padding-left: 10px; }
 .tree-vm { padding-left: 26px; }
-/* Networks and storage pools nest one level deeper than guests. */
-.tree-res { padding-left: 26px; }
-.tree-subhead {
-  padding: 10px 12px 4px 26px;
-  font-size: 10px; letter-spacing: 1.5px; color: var(--dim);
-}
-.tree-res-empty { padding-left: 26px; font-size: 10px; }
+/* Networks and storage pools nest one level deeper than guests, with no
+   section label — they simply continue the server's resource list. */
+.tree-res { padding-left: 34px; }
+.tree-res-empty { padding-left: 34px; font-size: 10px; }
 .tree-ic { width: 16px; height: 16px; flex: 0 0 16px; color: var(--dim); }
 .tree-ic.on { color: var(--ok); }
 .tree-row.sel .tree-ic { color: var(--accent); }

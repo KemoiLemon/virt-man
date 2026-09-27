@@ -108,6 +108,26 @@ test("a missing netmask still yields the bare address", () => {
   assert.equal(parsed.ip, "10.1.2.3/24");
 });
 
+test("DHCP host allocations round-trip through the network XML", () => {
+  const out = xml.networkXml(form({
+    ip: "192.168.100.1/24",
+    dhcp_start: "192.168.100.10",
+    dhcp_end: "192.168.100.200",
+    hosts: [
+      { mac: "52:54:00:aa:bb:cc", ip: "192.168.100.50", name: "worker" },
+      { mac: "52:54:00:dd:ee:ff", ip: "192.168.100.51" },
+    ],
+  }));
+  assert.match(out, /<host mac="52:54:00:aa:bb:cc" ip="192\.168\.100\.50" name="worker"\/>/);
+  assert.match(out, /<host mac="52:54:00:dd:ee:ff" ip="192\.168\.100\.51"\/>/);
+  const parsed = xml.networkFormFromXml(out);
+  assert.equal(parsed.hosts.length, 2);
+  assert.equal(parsed.hosts[0].mac, "52:54:00:aa:bb:cc");
+  assert.equal(parsed.hosts[0].ip, "192.168.100.50");
+  assert.equal(parsed.hosts[0].name, "worker");
+  assert.equal(parsed.hosts[1].name, "");
+});
+
 test("UEFI guests get the real OVMF loader and a templated nvram store", () => {
   const out = xml.domainXml({
     name: "box",

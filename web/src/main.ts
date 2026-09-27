@@ -12,7 +12,7 @@ import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRat
 import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { domainXml, esc, networkFormFromXml, networkUuid, networkXml, poolXml, volumeXml, withFirmware } from "./xml";
-import type { DomainForm, NetworkForm, PoolForm } from "./xml";
+import type { DomainForm, DhcpHost, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
 /// (the frontend compares against them), so capitalizing happens only here.
@@ -486,9 +486,7 @@ function renderTree() {
         <span class="tree-ic ${running > 0 ? "on" : ""}">${ic.server()}</span>
         <span class="tree-label">${esc(c.name)}</span>
         <span class="tree-state">${vms.length ? `${running}/${vms.length}` : ""}</span>
-      </button>${guestRows}
-      <div class="tree-subhead">Networks</div>${netRows}
-      <div class="tree-subhead">Storage</div>${poolRows}`;
+      </button>${guestRows}${netRows}${poolRows}`;
     })
     .join("");
 
@@ -1354,8 +1352,8 @@ function backToConn() {
   renderConn();
 }
 
-/// Dedicated network page: information, IPAM (DHCP range + DNS) and the
-/// basic lifecycle/edit actions, all for the network selected in the sidebar.
+/// Dedicated network page: card-based information, an IPAM allocation list
+/// (MAC -> IP DHCP hosts) and the lifecycle/edit actions.
 async function renderNetPage() {
   if (!selectedConn || !selectedNet) return;
   const content = $("#content");
@@ -1370,8 +1368,18 @@ async function renderNetPage() {
       setHtml(content, `<div class="empty">Network "${esc(name)}" no longer exists.</div>`);
       return;
     }
+    const uuid = networkUuid(xml.xml);
     const form = networkFormFromXml(xml.xml);
     const typeLabel = form.forward === "bridge" ? "Bridge" : form.forward === "nat" ? "NAT" : "Isolated";
+    const gateway = form.ip ? form.ip.split("/")[0] : "—";
+    const hosts = form.hosts ?? [];
+
+    // Persist the current host list back into the network definition.
+    const saveHosts = async (next: DhcpHost[]) => {
+      const rebuilt = networkXml({ ...form, hosts: next }, uuid);
+      await api.putXml(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/xml`, rebuilt);
+      await refreshTreeVms();
+    };
 
     setHtml(content, `
       <div class="dhead">
@@ -1379,7 +1387,6 @@ async function renderNetPage() {
         <span class="dtitle">${esc(name)}</span>
         <span class="badge ${net.active ? "on" : ""}">${net.active ? "Active" : "Inactive"}</span>
       </div>
-      <div class="dsub">${esc(typeLabel)} network</div>
       <div class="actions">
         <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
         <button class="btn ${net.autostart ? "on" : ""}" id="net-autostart">${ic.autostart(14)} Autostart ${net.autostart ? "on" : "off"}</button>
@@ -1387,20 +1394,58 @@ async function renderNetPage() {
         <button class="btn" id="net-fw">${ic.firewall(14)} Firewall</button>
         <button class="btn danger" id="net-del">${ic.trash(14)} Delete</button>
       </div>
-      <div class="specs">
-        <div class="spec"><b>Bridge</b><span>${esc(form.bridge || "—")}</span></div>
-        <div class="spec"><b>Subnet</b><span>${esc(form.ip || "—")}</span></div>
-        <div class="spec"><b>DHCP range</b><span>${form.dhcp_start && form.dhcp_end ? `${esc(form.dhcp_start)} – ${esc(form.dhcp_end)}` : "—"}</span></div>
-        <div class="spec"><b>DNS forwarders</b><span>${esc(form.dns || "—")}</span></div>
-        <div class="spec"><b>Persistent</b><span>${net.persistent ? "Persistent" : "Transient"}</span></div>
+      <div class="cards">
+        <div class="card"><span class="card-ic">${ic.network(20)}</span><div><b>${esc(typeLabel)}</b><i>TYPE</i></div></div>
+        <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${esc(form.bridge || "—")}</b><i>BRIDGE</i></div></div>
+        <div class="card"><span class="card-ic">${ic.circleDot(20)}</span><div><b>${esc(form.ip || "—")}</b><i>SUBNET</i></div></div>
+        <div class="card"><span class="card-ic">${ic.chevron(20)}</span><div><b>${esc(gateway)}</b><i>GATEWAY</i></div></div>
+        <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${form.dhcp_start && form.dhcp_end ? `${esc(form.dhcp_start)} – ${esc(form.dhcp_end)}` : "—"}</b><i>DHCP RANGE</i></div></div>
+        <div class="card"><span class="card-ic">${ic.options(20)}</span><div><b>${esc(form.dns || "—")}</b><i>DNS</i></div></div>
+        <div class="card"><span class="card-ic">${ic.autostart(20)}</span><div><b>${net.persistent ? "Persistent" : "Transient"}</b><i>PERSISTENCE</i></div></div>
       </div>
-      <div class="section-title fw-cat">IPAM</div>
-      <div class="specs">
-        <div class="spec"><b>Gateway</b><span>${esc(form.ip ? form.ip.split("/")[0] : "—")}</span></div>
-        <div class="spec"><b>DHCP start</b><span>${esc(form.dhcp_start || "—")}</span></div>
-        <div class="spec"><b>DHCP end</b><span>${esc(form.dhcp_end || "—")}</span></div>
-        <div class="spec"><b>DNS</b><span>${esc(form.dns || "—")}</span></div>
-      </div>`);
+
+      <div class="section-title fw-cat">IPAM Allocations</div>
+      <table class="grid">
+        <tr><th>Name</th><th>MAC address</th><th>IP address</th><th></th></tr>
+        ${hosts.map((h, i) => `
+          <tr>
+            <td>${esc(h.name || "—")}</td>
+            <td>${esc(h.mac)}</td>
+            <td>${esc(h.ip)}</td>
+            <td class="col-actions"><div class="row-actions">
+              <button class="btn icon" data-ipam-edit="${i}" title="Edit">${ic.edit()}</button>
+              <button class="btn danger icon" data-ipam-del="${i}" title="Delete">${ic.trash()}</button>
+            </div></td>
+          </tr>`).join("") || `<tr><td colspan="4" class="empty">No static allocations — guests use the DHCP range.</td></tr>`}
+      </table>
+      <div class="actions"><button class="btn" id="ipam-add">${ic.plus(14)} Add allocation</button></div>`);
+
+    const editHost = (idx: number | null) => {
+      const h = idx === null ? { mac: "", ip: "", name: "" } : hosts[idx];
+      const el = openModal(
+        idx === null ? "Add IPAM allocation" : "Edit IPAM allocation",
+        `<div class="grid2">
+          <label class="field"><span>Name (optional)</span><input id="ipam-name" value="${esc(h.name ?? "")}" placeholder="guest hostname"></label>
+          <label class="field"><span>IP address</span><input id="ipam-ip" value="${esc(h.ip)}" placeholder="192.168.100.50"></label>
+          <label class="field"><span>MAC address</span><input id="ipam-mac" value="${esc(h.mac)}" placeholder="52:54:00:aa:bb:cc"></label>
+        </div>`,
+        `<button class="btn primary" id="ipam-save">${idx === null ? "Add" : "Save"}</button>`,
+      );
+      $("#ipam-save", el).onclick = async () => {
+        const mac = $("#ipam-mac", el).value.trim();
+        const ip = $("#ipam-ip", el).value.trim();
+        if (!mac || !ip) return toast("MAC and IP are required", "bad");
+        const next = [...hosts];
+        if (idx === null) next.push({ mac, ip, name: $("#ipam-name", el).value.trim() });
+        else next[idx] = { mac, ip, name: $("#ipam-name", el).value.trim() };
+        el.remove();
+        try {
+          await saveHosts(next);
+          toast("Allocation saved");
+          void renderNetPage();
+        } catch (e) { toast((e as Error).message, "bad"); }
+      };
+    };
 
     $("#net-back", content).onclick = backToConn;
     $("#net-toggle", content).onclick = async () => {
@@ -1417,6 +1462,21 @@ async function renderNetPage() {
       await deleteNetwork(name);
       backToConn();
     };
+    $("#ipam-add", content).onclick = () => editHost(null);
+    content.querySelectorAll("[data-ipam-edit]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => editHost(+(b as HTMLElement).dataset.ipamEdit!);
+    });
+    content.querySelectorAll("[data-ipam-del]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = async () => {
+        const i = +(b as HTMLElement).dataset.ipamDel!;
+        const next = hosts.filter((_, j) => j !== i);
+        try {
+          await saveHosts(next);
+          toast("Allocation removed");
+          void renderNetPage();
+        } catch (e) { toast((e as Error).message, "bad"); }
+      };
+    });
   } catch (e) {
     setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
@@ -1466,7 +1526,7 @@ async function renderPoolPage() {
           <span>${fmtBytes(cap)} total</span>
         </div>
       </div>
-      <div class="section-title fw-cat">Volumes</div>
+      <div class="section-title fw-cat" style="margin-top:18px">Volumes</div>
       <table class="grid">
         <tr><th>Volume</th><th>Size</th><th>Allocated</th><th></th></tr>
         ${vols.map((v) => `
@@ -2050,7 +2110,7 @@ async function openEditNetwork(name: string) {
 
 function openCreateNetwork() {
   openNetworkForm(
-    { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "", dns: "" },
+    { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "", dns: "", hosts: [] },
     "",
   );
 }
@@ -2130,6 +2190,7 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
       dhcp_start: $("#net-dhcp-start", el).value,
       dhcp_end: $("#net-dhcp-end", el).value,
       dns: $("#net-dns", el).value,
+      hosts: initial.hosts ?? [],
     };
     if (!form.name) return toast("Name is required", "bad");
     if (form.forward === "bridge" && !form.bridge) {
