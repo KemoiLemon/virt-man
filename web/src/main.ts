@@ -3447,10 +3447,14 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
   };
   newDisk.pool = pools[0]?.name ?? "";
 
-  // New VMs start with an empty CD/DVD drive, so attaching an ISO (or leaving
-  // the drive empty) is one click away instead of buried in Add Hardware.
+  // New VMs start with an empty CD/DVD drive and a network NIC, so both a
+  // boot ISO and connectivity are one click away instead of buried in
+  // Add Hardware. The NIC defaults to the first network.
   if (!editing) {
     devices = [{ kind: "cdrom", fields: { pool: newDisk.pool, volume: "" } }];
+    if (nets.length) {
+      devices.push({ kind: "interface", fields: { network: nets[0].name, model: "virtio" } });
+    }
   }
 
   // Where the editor paints. Inline mode reuses the Hardware tab body; the
