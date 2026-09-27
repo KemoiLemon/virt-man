@@ -124,6 +124,10 @@ function leaveCurrentView() {
   if (vmTab === "console") closeConsole();
 }
 
+/// Never wrap a view that shows live statistics (CPU, memory, rates): a cached
+/// figure is a wrong figure, and a chart that jumps on page open looks broken.
+/// Those views wait on their skeleton for a fresh read.
+///
 /// Open a view fast: paint from the web server's last known answers, then
 /// re-read for real if any of them were cached. A remote daemon costs a round
 /// trip per read, so without this every page sat on its skeleton until the
@@ -627,7 +631,7 @@ function renderTree() {
       selectedPool = el.dataset.pool!;
       renderTree();
       showPageSkeleton();
-      void fastLoad(renderPoolPage);
+      void renderPoolPage();
     };
   });
 }
@@ -677,7 +681,7 @@ function selectPoolRow(conn: string, pool: string) {
   selectedPool = pool;
   renderTree();
   showPageSkeleton();
-  void fastLoad(renderPoolPage);
+  void renderPoolPage();
 }
 
 /// Run a lifecycle POST for a guest straight from the tree, without needing
@@ -1012,7 +1016,7 @@ function renderDc() {
   }
 setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
 
-  if (dcTab === "dashboard") void fastLoad(loadDcDashboard);
+  if (dcTab === "dashboard") void loadDcDashboard();
 
   $("#dc-add")?.addEventListener("click", () => openConnectionDialog());
   $("#dc-server-create")?.addEventListener("click", () => openConnectionDialog());
@@ -2047,7 +2051,7 @@ async function renderConnBody() {
   if (connTab === "dashboard") {
     setHtml(body, `<div id="dash">${skeleton("dashboard")}</div>`);
     $("#create-resource")?.addEventListener("click", () => openCreateResource());
-    await fastLoad(loadDashboard);
+    await loadDashboard();
   } else if (connTab === "vms") {
     setHtml(body, `<div id="vms-list" class="card-grid">${skeleton("cards")}</div>`);
     $("#create-vm")?.addEventListener("click", () => openCreateVm());
@@ -2060,7 +2064,7 @@ async function renderConnBody() {
     setHtml(body, `<div id="pools-list">${skeleton("cards")}</div>`);
     renderedPools = []; // fresh container: force a full render on first load
     $("#create-pool")?.addEventListener("click", () => openCreatePool());
-    await fastLoad(loadPools);
+    await loadPools();
   } else {
     setHtml(body, `<div id="filters-list">${skeleton("table")}</div>`);
     await fastLoad(loadFilters);
@@ -2875,10 +2879,10 @@ setHtml(content, `
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(refresh);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(refresh);
   $("#vm-delete").onclick = () => deleteVm(vm);
-  // Summary and XML are read-only, so painting a cached answer first and the
-  // fresh one after is safe. The editing tabs load once: a second paint would
-  // throw away whatever the user typed while the fresh read was in flight.
-  if (vmTab === "summary" || vmTab === "xml") await fastLoad(() => renderVmBody(vm));
+  // XML is read-only, so painting a cached answer first is safe. Summary shows
+  // live statistics, which must never be painted stale, and the editing tabs
+  // load once: a second paint would discard what the user typed meanwhile.
+  if (vmTab === "xml") await fastLoad(() => renderVmBody(vm));
   else await renderVmBody(vm);
 }
 

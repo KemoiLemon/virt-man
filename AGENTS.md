@@ -162,9 +162,13 @@ netem`):
 - Until either answers, the pane shows a `skeleton()` built from the real layout
   classes, so nothing jumps when content arrives.
 
-`fastLoad` is only for views that are safe to paint twice. **Never** use it on a
-view holding user input (hardware, options, firewall editors): the second paint
-would discard what they typed during the round trip. The stats series ignore a
+`fastLoad` is only for views that are safe to paint twice, and **never** for a
+view that shows statistics (dashboards, VM summary, pool usage): a cached CPU,
+memory or disk figure is a wrong figure, and a chart that jumps as the fresh one
+lands looks broken. Those wait on their skeleton. Nor for a view holding user
+input (hardware, options, firewall editors): the second paint would discard what
+they typed during the round trip. What remains is names and states — the tree,
+the VM/network lists, filters, and XML. The stats series ignore a
 repeated `sampled_at_ms` for the same reason a cached-then-fresh paint would
 otherwise push a false 0% point.
 
