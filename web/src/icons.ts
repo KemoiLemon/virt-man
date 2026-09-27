@@ -6,7 +6,6 @@ import ArrowDown from "@phosphor-icons/core/assets/fill/arrow-down-fill.svg?raw"
 import ArrowLeft from "@phosphor-icons/core/assets/fill/arrow-left-fill.svg?raw";
 import ArrowLeftRight from "@phosphor-icons/core/assets/fill/arrows-left-right-fill.svg?raw";
 import ArrowUp from "@phosphor-icons/core/assets/fill/arrow-up-fill.svg?raw";
-import Boxes from "@phosphor-icons/core/assets/fill/stack-fill.svg?raw";
 import Camera from "@phosphor-icons/core/assets/fill/camera-fill.svg?raw";
 import ChevronDown from "@phosphor-icons/core/assets/fill/caret-down-fill.svg?raw";
 import Circle from "@phosphor-icons/core/assets/fill/circle-fill.svg?raw";
@@ -106,7 +105,7 @@ export const ic = {
   datacenter: svg(LayoutDashboard),
   server: svg(Server),
   vm: svg(Monitor),
-  vms: svg(Boxes),
+  vms: svg(Monitor),
   network: svg(Network),
   storage: svg(Database),
   disk: svg(HardDrive),
