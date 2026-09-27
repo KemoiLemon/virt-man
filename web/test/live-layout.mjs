@@ -185,13 +185,16 @@ check("VM actions enable by state: stopped greys runtime buttons, running greys 
   const reset = actions.querySelector("#vm-reset");
   const destroy = actions.querySelector("#vm-destroy");
   const del = actions.querySelector("#vm-delete");
-  // The test VM is shut off: start + delete enabled, runtime actions greyed.
-  assert.ok(!start.disabled, "start enabled while stopped");
+  // The fixture reuses a guest the host already has, which may be running, so
+  // check against the state the tree reports rather than assuming shut-off.
+  const running = document.querySelector(".tree-row.tree-vm.sel .tree-ic")?.classList.contains("on")
+    ?? document.querySelector(".tree-row.tree-vm .tree-ic")?.classList.contains("on");
+  const state = running ? "running" : "stopped";
+  assert.equal(start.disabled, running, `start ${running ? "disabled" : "enabled"} while ${state}`);
   assert.ok(!del.disabled, "delete always enabled");
-  assert.ok(shutdown.disabled, "shutdown disabled while stopped");
-  assert.ok(reboot.disabled, "reboot disabled while stopped");
-  assert.ok(reset.disabled, "reset disabled while stopped");
-  assert.ok(destroy.disabled, "destroy disabled while stopped");
+  for (const [b, name] of [[shutdown, "shutdown"], [reboot, "reboot"], [reset, "reset"], [destroy, "destroy"]]) {
+    assert.equal(b.disabled, !running, `${name} ${running ? "enabled" : "disabled"} while ${state}`);
+  }
 });
 
 for (const [state, name] of results) {

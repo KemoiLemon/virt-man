@@ -5,6 +5,7 @@ pub mod firewall;
 pub mod health;
 pub mod host;
 pub mod networks;
+pub mod nics;
 pub mod pools;
 pub mod volumes;
 
@@ -56,6 +57,7 @@ impl IntoResponse for ApiError {
 }
 
 pub fn build(auth: Auth) -> Router {
+    let fw = firewall::FirewallState::new();
     let authed = Router::new()
         .merge(health::routes())
         .merge(host::routes())
@@ -64,7 +66,10 @@ pub fn build(auth: Auth) -> Router {
         .merge(filters::routes())
         .merge(pools::routes())
         .merge(volumes::routes())
-        .merge(firewall::routes(firewall::FirewallState::new()))
+        // One firewall state for both: a NIC change re-applies the ruleset,
+        // and must take the same lock as a rules PUT.
+        .merge(firewall::routes(fw.clone()))
+        .merge(nics::routes(fw))
         .layer(middleware::from_fn(crate::auth::require_token));
 
     // console authenticates via ?token= (browsers can't set WS headers), so it

@@ -85,7 +85,7 @@ await (async () => {
     const title = document.querySelector(".dtitle")?.textContent.trim();
     assert.equal(title, name, `VM view opened for ${name} (title: ${title})`);
     const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-    assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"], "VM tabs render");
+    assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Network", "XML"], "VM tabs render");
   });
 
   check("the sidebar marks that guest selected", () => {
@@ -160,7 +160,7 @@ check("clicking a guest in the Guests tab opens its VM view", () => {
   const title = document.querySelector(".dtitle")?.textContent.trim();
   assert.equal(title, name, `VM view for ${name} is open (title: ${title})`);
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"], "VM tabs render");
+  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Network", "XML"], "VM tabs render");
   assert.ok(document.querySelector(".tree-row.tree-vm.sel"), "sidebar marks the guest selected");
 });
 

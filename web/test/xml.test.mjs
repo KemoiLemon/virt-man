@@ -274,3 +274,18 @@ test("a name the user typed is never overwritten", () => {
   // custom name.
   assert.equal(xml.autoVolumeName("my custom name", "arch.iso", "debian.iso"), null);
 });
+
+// q35 gives each PCIe device its own root port and libvirt creates only as
+// many as the boot devices need, so without spares a running guest cannot
+// take a hot-added NIC ("No more available PCI slots", measured). Four spares
+// were not enough -- boot devices consumed three -- so the count is pinned.
+test("new guests carry spare PCIe root ports for hot-plug", () => {
+  const out = xml.domainXml({ name: "g", cpus: 1, memory_mb: 512, graphics: "vnc", network: "n", disks: [] });
+  const ports = out.match(/model="pcie-root-port"/g) ?? [];
+  assert.equal(ports.length, xml.HOTPLUG_PORT_COUNT);
+  assert.ok(xml.HOTPLUG_PORT_COUNT >= 8, "enough spares after the boot devices");
+  // Index 0 is q35's pcie-root; a port without an index is rejected as index 0.
+  assert.match(out, /<controller type="pci" index="0" model="pcie-root"\/>/);
+  const idx = [...out.matchAll(/index="(\d+)" model="pcie-root-port"/g)].map((m) => Number(m[1]));
+  assert.ok(idx.every((i) => i > 0) && new Set(idx).size === idx.length, "ports have distinct non-zero indices");
+});

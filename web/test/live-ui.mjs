@@ -398,7 +398,7 @@ await (async () => {
     const tabs = [...document.querySelectorAll(".tabbar .tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"],
+      ["Summary", "Console", "Hardware", "Options", "Network", "XML"],
       "all VM tabs render",
     );
     assert.equal(

@@ -303,11 +303,11 @@ await wait(1600);
 
 check("VM view exposes Options and Firewall tabs, and XML has an icon", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"],
+  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Network", "XML"],
     `tabs: ${tabs}`);
   assert.ok(tabNamed("XML").querySelector("svg"), "XML tab now carries an icon");
   assert.ok(tabNamed("Options").querySelector("svg"), "Options tab has an icon");
-  assert.ok(tabNamed("Firewall").querySelector("svg"), "Firewall tab has an icon");
+  assert.ok(tabNamed("Network").querySelector("svg"), "Network tab has an icon");
 });
 
 tabNamed("Options")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -333,11 +333,23 @@ check("Options tab shows editable metadata read from the guest", () => {
   assert.match(machineRow?.querySelector(".hwctl")?.textContent ?? "", /pc-|q35/, `real machine type`);
 });
 
-tabNamed("Firewall")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+tabNamed("Network")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1800);
 
-check("VM Firewall tab is a rules editor with add and apply", () => {
-  assert.equal(document.querySelector(".tabbar .tab.active")?.textContent.trim(), "Firewall");
+check("VM Network tab lists the guest's interfaces", () => {
+  assert.equal(document.querySelector(".tabbar .tab.active")?.textContent.trim(), "Network");
+  const rows = document.querySelectorAll("#vmnet-nics tr[data-nic]");
+  assert.ok(rows.length >= 1, "the fixture's NIC is listed");
+  for (const r of rows) {
+    assert.match(r.textContent, /([0-9a-f]{2}:){5}[0-9a-f]{2}/, "each row shows its MAC");
+    for (const a of ["data-nic-ipam", "data-nic-rate", "data-nic-del"]) {
+      assert.ok(r.querySelector(`[${a}]`), `${a} action`);
+    }
+  }
+  assert.ok(document.querySelector("#vmnet-add"), "add-interface action");
+});
+
+check("VM Network tab carries the firewall editor with add and apply", () => {
   assert.ok(document.querySelector("#vmfw-add"), "add-rule action");
   assert.ok(document.querySelector("#vmfw-apply"), "apply action");
   assert.ok(document.querySelector("#vmfw-add").querySelector("svg"), "add-rule has an icon");

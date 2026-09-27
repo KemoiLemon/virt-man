@@ -230,7 +230,7 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
 }
 
 /// Every `<mac address='...'/>` in a domain XML, in document order.
-fn domain_macs(xml: &str) -> Vec<String> {
+pub fn domain_macs(xml: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = xml;
     while let Some(i) = rest.find("<mac") {

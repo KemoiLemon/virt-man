@@ -5,7 +5,7 @@
 //   /<node>                        server dashboard
 //   /<node>/vms|networks|storage|firewall
 //   /<node>/vms/<vm>               guest summary
-//   /<node>/vms/<vm>/<tab>         console | hardware | options | firewall | xml
+//   /<node>/vms/<vm>/<tab>         console | hardware | options | network | xml
 //   /<node>/networks/<net>         network page
 //   /<node>/storage/<pool>         pool page
 //
@@ -16,7 +16,7 @@
 
 export type DcTab = "dashboard" | "servers" | "guests";
 export type ConnTab = "dashboard" | "vms" | "networks" | "storage" | "firewall";
-export type VmTab = "summary" | "hardware" | "options" | "firewall" | "console" | "xml";
+export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 
 export type Route =
   | { view: "dc"; tab: DcTab }
@@ -38,7 +38,7 @@ export const RESERVED = new Set([
 ]);
 
 const CONN_TABS: ConnTab[] = ["vms", "networks", "storage", "firewall"];
-const VM_TABS: VmTab[] = ["hardware", "options", "firewall", "console", "xml"];
+const VM_TABS: VmTab[] = ["hardware", "options", "network", "console", "xml"];
 
 /// The path segment for a node: its name when that is unambiguous, else its id.
 export function nodeSegment(id: string, nodes: NodeRef[]): string {
@@ -96,7 +96,9 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
   }
   if (!name) return { view: "conn", conn, tab: section as ConnTab };
   if (section === "vms") {
-    const vmTab = VM_TABS.includes(tab as VmTab) ? (tab as VmTab) : "summary";
+    // The Firewall tab became part of Network; keep old links working.
+    const t = tab === "firewall" ? "network" : tab;
+    const vmTab = VM_TABS.includes(t as VmTab) ? (t as VmTab) : "summary";
     return { view: "vm", conn, vm: name, tab: vmTab };
   }
   if (section === "networks") return { view: "net", conn, net: name };

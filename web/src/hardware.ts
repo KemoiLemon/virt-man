@@ -232,9 +232,12 @@ export function deviceXml(d: HwDevice, index = 1): string {
     }
     case "interface": {
       const mac = f("mac");
+      // Rate limits are set from the VM's Network tab, not this form. Carry
+      // them through verbatim, or saving hardware would silently lift them.
+      const bw = d.fields.bandwidth ?? "";
       return `<interface type="network">
       <source network="${esc(f("network"))}"/>
-      <model type="${esc(f("model") || "virtio")}"/>${mac ? `\n      <mac address="${esc(mac)}"/>` : ""}
+      <model type="${esc(f("model") || "virtio")}"/>${mac ? `\n      <mac address="${esc(mac)}"/>` : ""}${bw ? `\n      ${bw}` : ""}
     </interface>`;
     }
     case "hostdev":
@@ -339,6 +342,22 @@ export function withDevices(domainXml: string, devices: HwDevice[]): string {
   return `${domainXml.slice(0, close)}  ${frag}\n  ${domainXml.slice(close)}`;
 }
 
+/// Keep only well-formed `<inbound|outbound average=N .../>` rate entries from
+/// a `<bandwidth>` block. The block comes from libvirt, but it is re-emitted
+/// into XML we define, so it is rebuilt from numbers rather than copied.
+function sanitizeBandwidth(block: string): string {
+  if (!block) return "";
+  const parts: string[] = [];
+  for (const dir of ["inbound", "outbound"]) {
+    const tag = block.match(new RegExp(`<${dir}\\b[^>]*>`))?.[0];
+    if (!tag) continue;
+    const nums = [...tag.matchAll(/\b(average|peak|burst|floor)=['"](\d+)['"]/g)]
+      .map((m) => `${m[1]}="${m[2]}"`);
+    if (nums.length) parts.push(`<${dir} ${nums.join(" ")}/>`);
+  }
+  return parts.length ? `<bandwidth>${parts.join("")}</bandwidth>` : "";
+}
+
 /** Parse the devices this editor manages back out of a domain XML. */
 export function devicesFromXml(xml: string): HwDevice[] {
   const out: HwDevice[] = [];
@@ -374,6 +393,7 @@ export function devicesFromXml(xml: string): HwDevice[] {
         network: attr(block.match(/<source\b[^>]*>/)?.[0] ?? "", "network"),
         model: attr(block.match(/<model\b[^>]*>/)?.[0] ?? "", "type"),
         mac: attr(block.match(/<mac\b[^>]*>/)?.[0] ?? "", "address"),
+        bandwidth: sanitizeBandwidth(block.match(/<bandwidth\b[\s\S]*?<\/bandwidth>/)?.[0] ?? ""),
       },
     });
   }

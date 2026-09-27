@@ -73,7 +73,7 @@ let volumesOpen: string | null = null;
 /// Pool names last rendered, so the poll can diff and skip a full rebuild.
 let renderedPools: string[] = [];
 let selectedVm: string | null = null;
-let vmTab: "summary" | "hardware" | "options" | "firewall" | "console" | "xml" = "summary";
+let vmTab: "summary" | "hardware" | "options" | "network" | "console" | "xml" = "summary";
 /// Which disk the summary's Disks card is graphing, per VM, so the 1s poll
 /// does not reset the user's selection back to the first disk.
 let summaryDiskSel: Record<string, string> = {};
@@ -212,6 +212,13 @@ window.addEventListener("popstate", () => {
   renderCurrent();
 });
 
+/// Whether the given guest's tab is still what the pane shows. A tab body that
+/// awaits must check before painting, or a late answer overwrites the view the
+/// user switched to (same rule as `stillCurrent` for whole-pane renders).
+function stillCurrentVm(conn: string, vm: string, tab: typeof vmTab): boolean {
+  return selectedConn === conn && selectedVm === vm && vmTab === tab && !!$("#vm-body");
+}
+
 /// Replace the pane with a placeholder while a resource page's first read is
 /// in flight, so a click answers at once instead of leaving the previous page
 /// up until the daemon replies.
@@ -333,7 +340,7 @@ function openCommandPalette() {
     ["console", "Console", ic.vm()],
     ["hardware", "Hardware", ic.cpu()],
     ["options", "Options", ic.options()],
-    ["firewall", "Firewall", ic.firewall()],
+    ["network", "Network", ic.network()],
     ["xml", "XML", ic.xml()],
   ];
   for (const c of connections) {
@@ -827,7 +834,7 @@ function vmMenu(connId: string, vmName: string): CtxItem[] {
     { label: "Console", icon: ic.vm(), separator: true, run: () => selectVmRow(connId, vmName, "console") },
     { label: "Hardware", icon: ic.cpu(), run: () => selectVmRow(connId, vmName, "hardware") },
     { label: "Options", icon: ic.options(), run: () => selectVmRow(connId, vmName, "options") },
-    { label: "Firewall", icon: ic.firewall(), run: () => selectVmRow(connId, vmName, "firewall") },
+    { label: "Network", icon: ic.network(), run: () => selectVmRow(connId, vmName, "network") },
     { label: "XML", icon: ic.xml(), run: () => selectVmRow(connId, vmName, "xml") },
     {
       // Renaming is libvirt-only for shut-off guests; offer it only then.
@@ -3047,7 +3054,7 @@ setHtml(content, `
       <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
       <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
       <button class="tab ${vmTab === "options" ? "active" : ""}" data-vmtab="options">${ic.options(14)} Options</button>
-      <button class="tab ${vmTab === "firewall" ? "active" : ""}" data-vmtab="firewall">${ic.firewall(14)} Firewall</button>
+      <button class="tab ${vmTab === "network" ? "active" : ""}" data-vmtab="network">${ic.network(14)} Network</button>
       <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">${ic.xml(14)} XML</button>
       <div class="tabbar-actions row-actions">
         <button class="btn icon" id="vm-start" title="Start" ${running ? "disabled" : ""}>${ic.start()}</button>
@@ -3350,9 +3357,196 @@ async function renderVmBody(vm: string) {
     return;
   }
 
-  if (vmTab === "firewall") {
-    // Inline rules editor, scoped to this guest by its interface MACs.
-    const rulesBody = body;
+  if (vmTab === "network") {
+    // Everything about this guest's networking on one page: its interfaces
+    // (hot-added and removed, live), their DHCP reservations and rate limits,
+    // and its firewall. Interfaces are read from the live guest each render,
+    // so a NIC added from the Hardware tab or Create VM simply appears here.
+    const encVm = encodeURIComponent(vm);
+    type Nic = {
+      dev: string | null; mac: string | null; model: string | null; network: string | null;
+      rx_mbps: number | null; tx_mbps: number | null;
+    };
+    let nics: Nic[] = [];
+    let nets: NetworkSummary[] = [];
+    let running = false;
+    // Network name -> its form (subnet, DHCP range, reservations).
+    const netForms = new Map<string, ReturnType<typeof networkFormFromXml>>();
+    try {
+      const [ifs, ns, info] = await Promise.all([
+        api.get<{ interfaces: Nic[] }>(`/proxy/${conn}/domains/${encVm}/interfaces`),
+        api.get<NetworkSummary[]>(`/proxy/${conn}/networks`),
+        api.get<{ active: boolean }>(`/proxy/${conn}/domains/${encVm}`),
+      ]);
+      nics = ifs.interfaces ?? [];
+      nets = ns;
+      running = info.active === true;
+      const used = [...new Set(nics.map((n) => n.network).filter(Boolean) as string[])];
+      await Promise.all(used.map(async (name) => {
+        const { xml } = await api.get<{ xml: string }>(`/proxy/${conn}/networks/${encodeURIComponent(name)}/xml`)
+          .catch(() => ({ xml: "" }));
+        if (xml) netForms.set(name, networkFormFromXml(xml));
+      }));
+    } catch (e) {
+      setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
+      return;
+    }
+    if (!stillCurrentVm(conn, vm, "network")) return;
+
+    const reservation = (n: Nic) => {
+      const f = n.network ? netForms.get(n.network) : undefined;
+      return f?.hosts?.find((h) => h.mac.toLowerCase() === (n.mac ?? "").toLowerCase());
+    };
+    const fmtRateCell = (v: number | null) => (v ? `${v} Mbps` : "Unlimited");
+    const liveNote = running
+      ? "Changes apply to the running guest immediately and are kept for its next boot."
+      : "The guest is shut off: changes are saved to its definition.";
+
+    setHtml(body, `
+      <div class="section-title fw-cat">Interfaces</div>
+      <div class="dsub" style="margin-bottom:8px">${liveNote}</div>
+      <table class="grid" id="vmnet-nics">
+        <tr><th>Device</th><th>MAC</th><th>Network</th><th>Model</th><th>IPAM address</th><th>RX limit</th><th>TX limit</th><th class="col-actions"></th></tr>
+        ${nics.map((n, i) => {
+          const r = reservation(n);
+          const hasDhcp = !!(n.network && netForms.get(n.network)?.ip);
+          return `<tr data-nic="${i}">
+            <td>${esc(n.dev ?? "—")}</td>
+            <td><code>${esc(n.mac ?? "—")}</code></td>
+            <td>${esc(n.network ?? "—")}</td>
+            <td>${esc(n.model ?? "—")}</td>
+            <td>${r ? esc(r.ip) : `<span class="state">${hasDhcp ? "Dynamic" : "No DHCP"}</span>`}</td>
+            <td>${fmtRateCell(n.rx_mbps)}</td>
+            <td>${fmtRateCell(n.tx_mbps)}</td>
+            <td class="col-actions">
+              <button class="btn icon" data-nic-ipam="${i}" title="IPAM address" ${hasDhcp ? "" : "disabled"}>${ic.edit()}</button>
+              <button class="btn icon" data-nic-rate="${i}" title="Rate limit">${ic.autostart()}</button>
+              <button class="btn danger icon" data-nic-del="${i}" title="Remove interface">${ic.trash()}</button>
+            </td></tr>`;
+        }).join("") || `<tr><td colspan="8" class="empty">No network interfaces.</td></tr>`}
+      </table>
+      <div class="actions"><button class="btn" id="vmnet-add">${ic.plus(14)} Add interface</button></div>
+      <div class="section-title fw-cat" style="margin-top:22px">Firewall</div>
+      <div id="vmnet-fw">${skeleton("table")}</div>`);
+
+    const reload = () => { if (stillCurrentVm(conn, vm, "network")) void renderVmBody(vm); };
+
+    $("#vmnet-add", body).onclick = () => {
+      const el = openModal("Add interface", `
+        <label class="field"><span>Network</span><select id="nic-net">
+          ${nets.map((n) => `<option value="${esc(n.name)}">${esc(n.name)}${n.active ? "" : " (inactive)"}</option>`).join("")}
+        </select></label>
+        <label class="field"><span>Model</span><select id="nic-model">
+          <option value="virtio">virtio</option><option value="e1000e">e1000e</option><option value="rtl8139">rtl8139</option>
+        </select></label>
+        <label class="field"><span>MAC address (optional)</span><input id="nic-mac" placeholder="generated if blank"></label>
+        <div class="dsub">${running ? "Hot-added to the running guest." : "Added to the guest's definition."}</div>`,
+        `<button class="btn primary" id="nic-ok">${ic.plus(14)} Add</button>`);
+      $("#nic-ok", el).onclick = async () => {
+        try {
+          const r = await api.post<{ mac: string; warning?: string }>(`/proxy/${conn}/domains/${encVm}/interfaces`, {
+            network: ($("#nic-net", el) as HTMLSelectElement).value,
+            model: ($("#nic-model", el) as HTMLSelectElement).value,
+            mac: ($("#nic-mac", el) as HTMLInputElement).value.trim() || undefined,
+          });
+          el.remove();
+          toast(r.warning ?? `Interface ${r.mac} added`, r.warning ? "bad" : "ok");
+          reload();
+        } catch (e) { toast((e as Error).message, "bad"); }
+      };
+    };
+
+    body.querySelectorAll("[data-nic-del]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = async () => {
+        const n = nics[Number((b as HTMLElement).dataset.nicDel)];
+        if (!n?.mac) return;
+        const ok = await askConfirm("Remove interface",
+          `Remove ${n.mac} (${n.network ?? "no network"})${running ? " from the running guest" : ""}?`, "Remove", true);
+        if (!ok) return;
+        try {
+          const r = await api.del<{ pending: boolean; warning?: string }>(
+            `/proxy/${conn}/domains/${encVm}/interfaces/${encodeURIComponent(n.mac)}`);
+          // An unplug is a request to the guest OS; say so when it is still
+          // holding the device, instead of claiming it is gone.
+          toast(r.pending
+            ? "Removed from the definition; the running guest has not released it yet"
+            : r.warning ?? "Interface removed", r.pending || r.warning ? "bad" : "ok");
+          reload();
+        } catch (e) { toast((e as Error).message, "bad"); }
+      };
+    });
+
+    body.querySelectorAll("[data-nic-rate]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => {
+        const n = nics[Number((b as HTMLElement).dataset.nicRate)];
+        if (!n?.mac) return;
+        const el = openModal(`Rate limit — ${n.mac}`, `
+          <label class="field"><span>RX limit, Mbps (to the guest; blank = unlimited)</span>
+            <input id="rate-rx" type="number" min="0" step="any" value="${n.rx_mbps ?? ""}"></label>
+          <label class="field"><span>TX limit, Mbps (from the guest; blank = unlimited)</span>
+            <input id="rate-tx" type="number" min="0" step="any" value="${n.tx_mbps ?? ""}"></label>
+          <div class="dsub">${running ? "Applied to the running guest immediately." : "Applied when the guest next starts."}</div>`,
+          `<button class="btn primary" id="rate-ok">Apply</button>`);
+        const num = (id: string) => {
+          const v = ($(id, el) as HTMLInputElement).value.trim();
+          return v === "" ? undefined : Number(v);
+        };
+        $("#rate-ok", el).onclick = async () => {
+          try {
+            await api.put(`/proxy/${conn}/domains/${encVm}/interfaces/${encodeURIComponent(n.mac!)}/bandwidth`,
+              { rx_mbps: num("#rate-rx"), tx_mbps: num("#rate-tx") });
+            el.remove();
+            toast("Rate limit applied");
+            reload();
+          } catch (e) { toast((e as Error).message, "bad"); }
+        };
+      };
+    });
+
+    body.querySelectorAll("[data-nic-ipam]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => {
+        const n = nics[Number((b as HTMLElement).dataset.nicIpam)];
+        const form = n?.network ? netForms.get(n.network) : undefined;
+        if (!n?.mac || !n.network || !form?.ip) return;
+        const current = reservation(n);
+        const range = form.dhcp_start && form.dhcp_end
+          ? { start: form.dhcp_start, end: form.dhcp_end } : undefined;
+        const suggested = current?.ip
+          ?? nextFreeIp(form.ip, (form.hosts ?? []).map((h) => h.ip), range) ?? "";
+        const el = openModal(`IPAM address — ${n.mac}`, `
+          <label class="field"><span>IP address on ${esc(n.network)} (${esc(form.ip)})</span>
+            <input id="ipam-ip" value="${esc(suggested)}" placeholder="blank = dynamic"></label>
+          <label class="field"><span>Hostname (optional)</span>
+            <input id="ipam-name" value="${esc(current?.name ?? vm)}"></label>
+          <div class="dsub">Takes effect at once for new leases, without restarting the network.
+            A running guest picks it up when it renews its lease.</div>`,
+          `${current ? `<button class="btn danger" id="ipam-clear">Make dynamic</button>` : ""}
+           <button class="btn primary" id="ipam-ok">Save</button>`);
+        const hostUrl = `/proxy/${conn}/networks/${encodeURIComponent(n.network)}/hosts`;
+        $("#ipam-ok", el).onclick = async () => {
+          const ip = ($("#ipam-ip", el) as HTMLInputElement).value.trim();
+          try {
+            if (!ip) await api.del(`${hostUrl}/${encodeURIComponent(n.mac!)}`);
+            else await api.put(hostUrl, { mac: n.mac, ip, name: ($("#ipam-name", el) as HTMLInputElement).value.trim() || undefined });
+            el.remove();
+            toast(ip ? `Reserved ${ip}` : "Address is dynamic");
+            reload();
+          } catch (e) { toast((e as Error).message, "bad"); }
+        };
+        const clear = $("#ipam-clear", el);
+        if (clear) clear.onclick = async () => {
+          try {
+            await api.del(`${hostUrl}/${encodeURIComponent(n.mac!)}`);
+            el.remove();
+            toast("Address is dynamic");
+            reload();
+          } catch (e) { toast((e as Error).message, "bad"); }
+        };
+      };
+    });
+
+    // Firewall: rules scoped to this guest by its interface MACs.
+    const rulesBody = $("#vmnet-fw", body) as HTMLElement;
     let vmRules: FirewallRule[] = [];
     let vmPolicy: FirewallPolicy = blankPolicy();
     try {

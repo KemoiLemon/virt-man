@@ -18,6 +18,11 @@ pub fn routes() -> Router {
         .route("/networks/{name}/start", post(start))
         .route("/networks/{name}/stop", post(stop))
         .route("/networks/{name}/autostart", post(set_autostart))
+        .route("/networks/{name}/hosts", axum::routing::put(put_host))
+        .route(
+            "/networks/{name}/hosts/{mac}",
+            axum::routing::delete(delete_host),
+        )
 }
 
 async fn list() -> Result<Json<Value>, ApiError> {
@@ -254,8 +259,170 @@ async fn set_autostart(
     Ok(Json(v))
 }
 
+/// A DHCP reservation, as the VM Network tab edits it.
+#[derive(Deserialize)]
+struct HostReq {
+    mac: String,
+    ip: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `<host .../>` for a reservation. Values are validated before this, so the
+/// quoting cannot be broken out of.
+fn host_xml(mac: &str, ip: &str, name: Option<&str>) -> String {
+    match name {
+        Some(n) => format!("<host mac='{mac}' name='{n}' ip='{ip}'/>"),
+        None => format!("<host mac='{mac}' ip='{ip}'/>"),
+    }
+}
+
+/// Every `<host>` in a network's DHCP section, as (mac, ip).
+fn dhcp_hosts(xml: &str) -> Vec<(String, String)> {
+    let attr = |tag: &str, name: &str| -> Option<String> {
+        let a = &tag[tag.find(&format!(" {name}="))? + name.len() + 2..];
+        let q = a.chars().next()?;
+        let a = &a[1..];
+        Some(a[..a.find(q)?].to_ascii_lowercase())
+    };
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("<host ") {
+        let t = &rest[i..];
+        let end = t.find('>').unwrap_or(t.len());
+        let tag = &t[..end];
+        if let (Some(m), Some(ip)) = (attr(tag, "mac"), attr(tag, "ip")) {
+            out.push((m, ip));
+        }
+        rest = &t[end..];
+    }
+    out
+}
+
+/// Flags for a network change: the persistent definition always, and the
+/// running dnsmasq too when the network is up -- so a reservation applies at
+/// once without restarting the network (which would drop every guest on it).
+fn net_affect(n: &Network) -> u32 {
+    let live = n.is_active().unwrap_or(false);
+    virt::sys::VIR_NETWORK_UPDATE_AFFECT_CONFIG
+        | if live {
+            virt::sys::VIR_NETWORK_UPDATE_AFFECT_LIVE
+        } else {
+            0
+        }
+}
+
+/// Add or change the reservation for one MAC, live.
+async fn put_host(
+    Path(name): Path<String>,
+    Json(req): Json<HostReq>,
+) -> Result<Json<Value>, ApiError> {
+    let mac = super::nics::normalize_mac(&req.mac).map_err(ApiError::bad_request)?;
+    let ip: std::net::Ipv4Addr = req
+        .ip
+        .trim()
+        .parse()
+        .map_err(|_| ApiError::bad_request(format!("'{}' is not an IPv4 address", req.ip)))?;
+    let host = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    if let Some(h) = host
+        && !h
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err(ApiError::bad_request(
+            "a hostname may only contain letters, digits, '-' and '.'",
+        ));
+    }
+    let host = host.map(str::to_string);
+    let v = with_conn(move |c| {
+        let n = Network::lookup_by_name(c, &name)?;
+        let xml = n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE)?;
+        let existing = dhcp_hosts(&xml);
+        let ip = ip.to_string();
+        if let Some((other, _)) = existing.iter().find(|(m, i)| *i == ip && *m != mac) {
+            return Err(format!("{ip} is already reserved for {other}").into());
+        }
+        let entry = host_xml(&mac, &ip, host.as_deref());
+        let flags = net_affect(&n);
+        let section = virt::sys::VIR_NETWORK_SECTION_IP_DHCP_HOST;
+        if existing.iter().any(|(m, _)| *m == mac) {
+            // MODIFY matches by MAC, so the old IP is replaced in place.
+            n.update(
+                virt::sys::VIR_NETWORK_UPDATE_COMMAND_MODIFY,
+                section,
+                -1,
+                &entry,
+                flags,
+            )?;
+        } else {
+            n.update(
+                virt::sys::VIR_NETWORK_UPDATE_COMMAND_ADD_LAST,
+                section,
+                -1,
+                &entry,
+                flags,
+            )?;
+        }
+        Ok(json!({"network": name, "mac": mac, "ip": ip}))
+    })
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(v))
+}
+
+/// Drop the reservation for one MAC, live.
+async fn delete_host(Path((name, mac)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
+    let mac = super::nics::normalize_mac(&mac).map_err(ApiError::bad_request)?;
+    let v = with_conn(move |c| {
+        let n = Network::lookup_by_name(c, &name)?;
+        let xml = n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE)?;
+        let Some((_, ip)) = dhcp_hosts(&xml).into_iter().find(|(m, _)| *m == mac) else {
+            return Ok(json!({"network": name, "mac": mac, "removed": false}));
+        };
+        // DELETE matches the entry; give it the same mac and ip it has.
+        n.update(
+            virt::sys::VIR_NETWORK_UPDATE_COMMAND_DELETE,
+            virt::sys::VIR_NETWORK_SECTION_IP_DHCP_HOST,
+            -1,
+            &host_xml(&mac, &ip, None),
+            net_affect(&n),
+        )?;
+        Ok(json!({"network": name, "mac": mac, "removed": true}))
+    })
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(v))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dhcp_hosts_are_read_with_either_quote_and_any_attribute_order() {
+        let xml = "<network><ip><dhcp>
+          <range start='10.0.0.2' end='10.0.0.254'/>
+          <host mac='52:54:00:AA:00:01' name='web' ip='10.0.0.10'/>
+          <host ip=\"10.0.0.11\" mac=\"52:54:00:aa:00:02\"/>
+        </dhcp></ip></network>";
+        assert_eq!(
+            super::dhcp_hosts(xml),
+            vec![
+                ("52:54:00:aa:00:01".to_string(), "10.0.0.10".to_string()),
+                ("52:54:00:aa:00:02".to_string(), "10.0.0.11".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_xml_includes_the_name_only_when_given() {
+        assert_eq!(
+            super::host_xml("52:54:00:aa:00:01", "10.0.0.5", None),
+            "<host mac='52:54:00:aa:00:01' ip='10.0.0.5'/>"
+        );
+        assert!(
+            super::host_xml("52:54:00:aa:00:01", "10.0.0.5", Some("web")).contains("name='web'")
+        );
+    }
+
     use super::*;
 
     #[test]

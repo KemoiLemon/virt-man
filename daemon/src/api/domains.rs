@@ -292,6 +292,16 @@ fn interface_info(frag: &str) -> (Option<String>, Option<String>, Option<String>
 /// Point-in-time per-interface byte counters, so the client can graph
 /// tx/rx rates. `interface_stats` needs the guest's `target dev` name (not
 /// the MAC), which is read from the domain XML first.
+/// `<source network='...'/>` of an interface block, if it is on a network.
+fn source_network(frag: &str) -> Option<String> {
+    let s = &frag[frag.find("<source")?..];
+    let s = &s[..s.find('>')?];
+    let a = &s[s.find("network=")? + "network=".len()..];
+    let q = a.chars().next()?;
+    let a = &a[1..];
+    Some(a[..a.find(q)?].to_string())
+}
+
 async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
         let d = Domain::lookup_by_name(c, &name)?;
@@ -307,6 +317,8 @@ async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiErro
                 break;
             };
             let (dev, mac, model) = interface_info(&block[..end]);
+            let network = source_network(&block[..end]);
+            let (inbound, outbound) = super::nics::bandwidth_of(&block[..end]);
             let (rx_bytes, tx_bytes) = match dev.as_deref() {
                 Some(target) => d
                     .interface_stats(target)
@@ -318,6 +330,10 @@ async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiErro
                 "dev": dev,
                 "mac": mac,
                 "model": model,
+                "network": network,
+                // Limits as the guest sees them: inbound is its RX.
+                "rx_mbps": inbound.map(super::nics::kib_to_mbps),
+                "tx_mbps": outbound.map(super::nics::kib_to_mbps),
                 "rx_bytes": rx_bytes,
                 "tx_bytes": tx_bytes,
             }));

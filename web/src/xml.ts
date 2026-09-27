@@ -126,9 +126,28 @@ export function domainXml(f: DomainForm): string {
     <video><model type="virtio"/></video>
     <serial type="pty"><target port="0"/></serial>
     <console type="pty"><target type="serial" port="0"/></console>
+    ${HOTPLUG_PORTS}
   </devices>
 </domain>`;
 }
+
+/// PCIe root ports, so a running guest can take hot-plugged devices.
+///
+/// On q35 every PCIe device sits on a root port of its own, and libvirt only
+/// creates as many as the devices defined at boot need -- so a fresh guest had
+/// no free slot and hot-adding a NIC failed with "No more available PCI slots"
+/// (measured). Declared ports are used by the boot devices first, so a handful
+/// is not enough: with four, the boot devices took three and one hot-add fit.
+/// Fourteen is what virt-manager defines, and leaves spares after a typical
+/// guest's disks, NIC, video, balloon and RNG. A controller with no index is
+/// read as index 0, which q35 reserves for pcie-root, so the root is declared
+/// first and the ports numbered after it.
+export const HOTPLUG_PORT_COUNT = 14;
+export const HOTPLUG_PORTS = [
+  `<controller type="pci" index="0" model="pcie-root"/>`,
+  ...Array.from({ length: HOTPLUG_PORT_COUNT }, (_, i) =>
+    `<controller type="pci" index="${i + 1}" model="pcie-root-port"/>`),
+].join("\n    ");
 
 export interface DhcpHost {
   mac: string;

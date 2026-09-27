@@ -213,3 +213,39 @@ test("watchdog and memballoon models survive a round trip", () => {
   assert.equal(bal.fields.model, "virtio", "balloon model is captured");
   assert.match(hw.deviceXml(bal, 1), /<memballoon model="virtio"\/>/, "balloon re-serialises");
 });
+
+// Rate limits are set from the VM's Network tab. The hardware editor rebuilds
+// every <interface> it manages, so it must carry the <bandwidth> through, or a
+// hardware save would silently lift a guest's limits.
+test("an interface's rate limit survives a hardware-editor round trip", () => {
+  const xml = `<domain><devices>
+    <interface type='network'>
+      <mac address='52:54:00:aa:bb:01'/>
+      <source network='internet'/>
+      <model type='virtio'/>
+      <bandwidth>
+        <inbound average='1221'/>
+        <outbound average='2441' peak='5000' burst='1024'/>
+      </bandwidth>
+    </interface></devices></domain>`;
+  const [nic] = hw.devicesFromXml(xml).filter((d) => d.kind === "interface");
+  const out = hw.deviceXml(nic);
+  assert.match(out, /<inbound average="1221"\/>/);
+  assert.match(out, /<outbound average="2441" peak="5000" burst="1024"\/>/);
+  assert.equal((out.match(/<bandwidth>/g) ?? []).length, 1);
+});
+
+test("a NIC with no limit gains no <bandwidth> element", () => {
+  const out = hw.deviceXml({ kind: "interface", fields: { network: "n", model: "virtio" } });
+  assert.doesNotMatch(out, /bandwidth/);
+});
+
+test("a bandwidth block is rebuilt from numbers, not copied", () => {
+  const xml = `<domain><devices><interface type='network'><source network='n'/>
+    <bandwidth><inbound average='10' onload='x'/><outbound average='"><script>'/></bandwidth>
+  </interface></devices></domain>`;
+  const [nic] = hw.devicesFromXml(xml).filter((d) => d.kind === "interface");
+  const out = hw.deviceXml(nic);
+  assert.match(out, /<bandwidth><inbound average="10"\/><\/bandwidth>/);
+  assert.doesNotMatch(out, /onload|script/);
+});

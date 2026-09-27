@@ -25,7 +25,8 @@ cd web/server && cargo clippy && cargo test
 # live suites — drive the real app in jsdom against a running backend
 #   arg is the base URL; defaults to http://127.0.0.1:8799
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
-#   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route
+#   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route,
+#   live-vmnet (needs sudo: checks tc and dnsmasq; boots its own guest)
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
@@ -280,6 +281,28 @@ it to the token file instead of generating one.
 **libvirt `Connect` has no `Drop`.** `with_conn` must call `close()` on both
 the ok and error paths, or event fds leak and every call fails with "Too many
 open files" after a few hundred requests (`daemon/src/libvirt.rs:45`).
+
+**A VM's networking lives on its Network tab, and applies live.** Interfaces,
+their IPAM reservations and rate limits, and the guest firewall are one tab
+(`/<node>/vms/<vm>/network`; the old `/firewall` path redirects). The daemon
+applies every change to the running guest *and* its definition
+(`daemon/src/api/nics.rs`, `networks.rs` `put_host`/`delete_host`):
+
+- Rate limits are `update_device_flags(AFFECT_LIVE|CONFIG)` with `<bandwidth>`
+  in KiB/s (taken as Mbit/s). They are enforced at once — libvirt installs an
+  htb class and an ingress policer on the host tap; `live-vmnet` reads them
+  back with `tc`, not from the XML.
+- IPAM uses `virNetworkUpdate` on the DHCP host section, **never** a network
+  redefine: `PUT /networks/{name}/xml` destroys and restarts a running network,
+  dropping every guest on it. `live-vmnet` checks dnsmasq's pids are unchanged.
+- Hot-add needs a free PCIe root port. q35 gives each device its own and libvirt
+  only creates as many as boot needs, so new guests are defined with
+  `HOTPLUG_PORTS` (14, as virt-manager does; four were measured to be used up
+  by boot devices). Older guests without spares get an explanatory error.
+- Hot-remove is a *request* to the guest OS (ACPI eject). The API reports
+  `pending` while the guest still holds the device; never claim it is gone.
+- The hardware editor rebuilds every `<interface>`, so it carries `<bandwidth>`
+  through (`devicesFromXml`/`deviceXml`), or a hardware save would lift limits.
 
 **Read `VIR_DOMAIN_XML_INACTIVE` for firewall/filterref work.** A running
 guest's live XML omits filterrefs added since boot, so reading live XML loses

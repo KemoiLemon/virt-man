@@ -32,7 +32,7 @@ test("every view round-trips through its path", () => {
     { view: "vm", conn: "c1", vm: "web1", tab: "console" },
     { view: "vm", conn: "c1", vm: "web1", tab: "hardware" },
     { view: "vm", conn: "c1", vm: "web1", tab: "options" },
-    { view: "vm", conn: "c1", vm: "web1", tab: "firewall" },
+    { view: "vm", conn: "c1", vm: "web1", tab: "network" },
     { view: "vm", conn: "c1", vm: "web1", tab: "xml" },
     { view: "net", conn: "c2", net: "default" },
     { view: "pool", conn: "c2", pool: "ISOs" },
@@ -101,4 +101,11 @@ test("every top-level server route is reserved", () => {
   }
   assert.ok(tops.size >= 5, `found server routes: ${[...tops]}`);
   for (const top of tops) assert.ok(r.RESERVED.has(top), `/${top} is a server route but not reserved`);
+});
+
+// The VM Firewall tab became part of the Network tab; a bookmark to the old
+// path must still land on the tab that now holds the firewall.
+test("an old /vms/<vm>/firewall link opens the Network tab", () => {
+  assert.deepEqual(r.parsePath("/Main/vms/web1/firewall", nodes), { view: "vm", conn: "c1", vm: "web1", tab: "network" });
+  assert.equal(r.routeToPath({ view: "vm", conn: "c1", vm: "web1", tab: "network" }, nodes), "/Main/vms/web1/network");
 });

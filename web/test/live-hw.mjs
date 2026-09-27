@@ -164,7 +164,7 @@ document.querySelector(".tree-row.tree-vm")?.dispatchEvent(new window.MouseEvent
 await wait(1200);
 check("VM view offers a Hardware tab", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Firewall", "XML"]);
+  assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Network", "XML"]);
 });
 
 // Open the inline hardware editor embedded in the Hardware tab.
