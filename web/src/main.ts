@@ -1056,6 +1056,7 @@ async function refreshTreeVms() {
   // Only re-render when something actually moved, so the tree does not
   // flicker or fight the user's clicks on every poll.
   if (changed) {
+    syncVmActions();
     renderTree();
     // The Datacenter view lists the same guests, so keep it in step; without
     // this its Guests table stays empty until another action redraws it.
@@ -3085,6 +3086,24 @@ setHtml(target, `<div class="empty">${esc((e as Error).message)}</div>`);
 }
 
 // ---------------------------------------------------------------- VM detail
+
+/// Enable the VM header's power actions for the guest's current state.
+///
+/// The header is painted once per view, and on a fresh load that happens
+/// before the guest list has arrived, so it painted every guest as stopped and
+/// nothing corrected it: the poll refreshes the list, not the header. This
+/// runs whenever the list changes, which also covers a guest that changes
+/// state on its own (shut down from inside, crashed).
+function syncVmActions() {
+  if (!selectedConn || !selectedVm) return;
+  const running = treeVms[selectedConn]?.find((x) => x.name === selectedVm)?.active === true;
+  const set = (id: string, on: boolean) => {
+    const b = document.getElementById(id) as HTMLButtonElement | null;
+    if (b) b.disabled = !on;
+  };
+  set("vm-start", !running);
+  for (const id of ["vm-shutdown", "vm-reboot", "vm-reset", "vm-destroy"]) set(id, running);
+}
 
 async function renderVm() {
   if (!selectedConn || !selectedVm) return;

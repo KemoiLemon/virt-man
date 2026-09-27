@@ -166,6 +166,12 @@ check("the start/stop toggle highlights the running state", () => {
 document.querySelector(".tree-row.tree-vm")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1500);
+// The guest that opened, and its state as libvirt reports it -- not as the
+// page's guest list does: the header once painted from a list that had not
+// loaded yet, and a check reading the same list agreed with it.
+const vmName = document.querySelector(".tree-row.tree-vm.sel")?.dataset.vm ?? fixture.name;
+const vmConn = document.querySelector(".tree-row.tree-vm.sel")?.dataset.vmConn ?? fixture.conn;
+const fixtureRunning = (await (await fetch(`${base}/proxy/${vmConn}/domains/${encodeURIComponent(vmName)}`)).json()).active;
 
 check("VM detail actions live on the tab bar as icon buttons", () => {
   const actions = document.querySelector(".tabbar .tabbar-actions");
@@ -185,10 +191,8 @@ check("VM actions enable by state: stopped greys runtime buttons, running greys 
   const reset = actions.querySelector("#vm-reset");
   const destroy = actions.querySelector("#vm-destroy");
   const del = actions.querySelector("#vm-delete");
-  // The fixture reuses a guest the host already has, which may be running, so
-  // check against the state the tree reports rather than assuming shut-off.
-  const running = document.querySelector(".tree-row.tree-vm.sel .tree-ic")?.classList.contains("on")
-    ?? document.querySelector(".tree-row.tree-vm .tree-ic")?.classList.contains("on");
+  // The fixture reuses a guest the host already has, which may be running.
+  const running = fixtureRunning;
   const state = running ? "running" : "stopped";
   assert.equal(start.disabled, running, `start ${running ? "disabled" : "enabled"} while ${state}`);
   assert.ok(!del.disabled, "delete always enabled");
@@ -196,6 +200,28 @@ check("VM actions enable by state: stopped greys runtime buttons, running greys 
     assert.equal(b.disabled, !running, `${name} ${running ? "enabled" : "disabled"} while ${state}`);
   }
 });
+
+// A reload lands straight on the VM's URL: the header is painted before the
+// guest list arrives, so it must correct itself once the list is in.
+{
+  const conns = await (await fetch(`${base}/connections`)).json();
+  const cname = conns.find((c) => c.id === vmConn)?.name ?? vmConn;
+  const fresh = new JSDOM(`<!doctype html><html><body><div id="app"></div></body></html>`, {
+    url: `${base}/${encodeURIComponent(cname)}/vms/${encodeURIComponent(vmName)}`,
+    runScripts: "dangerously", pretendToBeVisual: true, virtualConsole,
+  });
+  fresh.window.fetch = window.fetch;
+  fresh.window.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+  fresh.window.eval(code);
+  await new Promise((r) => setTimeout(r, 2500));
+  check(`a reload shows the actions for the guest's real state (${fixtureRunning ? "running" : "stopped"})`, () => {
+    const doc = fresh.window.document;
+    assert.equal(doc.getElementById("vm-start")?.disabled, fixtureRunning, "start");
+    assert.equal(doc.getElementById("vm-shutdown")?.disabled, !fixtureRunning, "shutdown");
+    assert.equal(doc.getElementById("vm-destroy")?.disabled, !fixtureRunning, "force stop");
+  });
+  fresh.window.close();
+}
 
 for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
