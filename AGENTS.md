@@ -27,7 +27,8 @@ cd web/server && cargo clippy && cargo test
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route,
 #   live-vmnet (needs sudo: checks tc and dnsmasq; boots its own guest),
-#   live-history (needs the server to have been sampling for ~30 s)
+#   live-history (needs the server to have been sampling for ~30 s),
+#   live-empty (no args: runs its own server against a stub daemon with no resources)
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \

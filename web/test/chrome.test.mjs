@@ -76,8 +76,6 @@ test("create-card icons idle neutral and follow the hover highlight", () => {
   assert.doesNotMatch(css, /\.create-resource-card \.metric-ic\s*\{[^}]*color/,
     "create-resource icon is not coloured while idle");
   assert.match(css, /\.create-resource-card:hover \.metric-ic\s*\{[^}]*color:\s*var\(--accent\)/);
-  assert.match(css, /\.create-card:hover \.storage-card-icon[^{]*\{[^}]*color:\s*var\(--accent\)/);
-  assert.match(css, /\.net-create-card:hover \.storage-card-icon[^{]*\{[^}]*color:\s*var\(--accent\)/);
 });
 
 

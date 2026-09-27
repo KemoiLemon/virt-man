@@ -53,8 +53,7 @@ check("choosing 1h redraws from stored history",
 check("…with the axis labelled -1h", d.querySelector("#dash .chart-axis")?.textContent.includes("-1h"));
 check("…read from /history for this server", requests.some((u) => u.includes("/history") && u.includes("kind=host") && u.includes(`conn=${conn.id}`)));
 const v = values(cpuChart());
-check("the stored hour has samples and gaps before collection began",
-  v.some((x) => x !== "") && v[0] === "", `${v.filter((x) => x !== "").length} non-empty of ${v.length}`);
+check("the stored hour has samples", v.some((x) => x !== ""), `${v.filter((x) => x !== "").length} non-empty of ${v.length}`);
 check("the choice survives the 1s poll", await wait(2500).then(() => d.querySelector("#dash [data-range='1h'].on") && values(cpuChart()).length > 60));
 check("…and is remembered", w.localStorage.getItem("virt-man.range") === "1h");
 
@@ -72,9 +71,18 @@ const expect = `${Number(vals[last]).toFixed(Number(vals[last]) >= 10 ? 0 : 1)}%
 check("hovering a point shows its time and value", tip && /^\d\d:\d\d(:\d\d)? · /.test(tip.textContent) && tip.textContent.endsWith(expect),
   `${tip?.textContent} (expected …${expect})`);
 check("…with a marker on that point", Math.abs(parseFloat(d.querySelector(".spark-mark")?.style.left) - clientX) < 0.01);
-const gap = vals.findIndex((x) => x === "");
-svg.dispatchEvent(new w.PointerEvent("pointermove", { bubbles: true, clientX: box.left + (gap / (vals.length - 1)) * box.width, clientY: 230 }));
+// A gap: the 14-day range starts before this server ever sampled (a full
+// hour may have no gap at all once collection is an hour old).
+d.querySelector("#dash [data-range='14d']").click();
+await until(() => d.querySelector("#dash [data-range='14d'].on") && cpuChart()?.dataset.v);
+const long = cpuChart();
+long.getBoundingClientRect = () => box;
+const lv = values(long);
+const gap = lv.findIndex((x) => x === "");
+check("the 14-day range has gaps where nothing was sampled", gap >= 0 && lv.some((x) => x !== ""));
+long.dispatchEvent(new w.PointerEvent("pointermove", { bubbles: true, clientX: box.left + (gap / (lv.length - 1)) * box.width, clientY: 230 }));
 check("a gap reads as no data, not zero", d.querySelector(".spark-tip")?.textContent.endsWith("no data"), d.querySelector(".spark-tip")?.textContent);
+check("…and a long range names the date", /^\d+\/\d+ /.test(d.querySelector(".spark-tip")?.textContent ?? ""), d.querySelector(".spark-tip")?.textContent);
 d.body.dispatchEvent(new w.PointerEvent("pointermove", { bubbles: true, clientX: 5, clientY: 5 }));
 check("moving off the chart hides the readout", !d.querySelector(".spark-tip") && !d.querySelector(".spark-mark"));
 

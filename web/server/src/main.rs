@@ -26,6 +26,13 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    // reqwest is built without a bundled TLS provider, and rustls only picks
+    // one on its own when exactly one is compiled in. A pinned https client
+    // names its provider through its config, but every other client (a plain
+    // http daemon, the cert probe) falls back to the process default, and with
+    // none installed building it panicked with "No provider set", which the
+    // proxy reported as an empty reply.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cfg = config::Config::load()?;
     std::fs::create_dir_all(&cfg.data_dir)
         .map_err(|e| format!("create {}: {e}", cfg.data_dir.display()))?;

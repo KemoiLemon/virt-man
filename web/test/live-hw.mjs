@@ -93,10 +93,10 @@ check("server rows expose an edit button, not a test button", () => {
   assert.ok(document.querySelector("[data-del]"), "delete button still present");
 });
 
-check("server cards expose edit and delete icon buttons", () => {
-  const card = document.querySelector("[data-open-conn-row]");
-  assert.ok(card, "server card present");
-  const actions = card.querySelector(".net-actions");
+check("server rows expose edit and delete icon buttons", () => {
+  const card = document.querySelector("tr[data-open-conn-row]");
+  assert.ok(card, "servers are a list, one row each");
+  const actions = card.querySelector(".row-actions");
   assert.ok(actions, "buttons share a flex row");
   assert.equal(
     actions.querySelectorAll(".btn").length, 2,

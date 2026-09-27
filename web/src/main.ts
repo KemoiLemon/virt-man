@@ -62,6 +62,13 @@ function setHtml(el: Element, html: string) {
   enhanceSelects(el);
 }
 
+/// What an empty list shows: a line saying so, and a small button to create
+/// the first one. `id` names the button so the caller can bind it.
+function emptyState(what: string, label: string, id: string): string {
+  return `<div class="empty empty-create">No ${what} available.
+    <button class="btn" id="${id}">${ic.plus(14)} ${label}</button></div>`;
+}
+
 // ---------------------------------------------------------------- state
 
 let user: User | null = null;
@@ -73,7 +80,10 @@ let connTab: "dashboard" | "vms" | "networks" | "storage" | "firewall" = "dashbo
 /// table is re-rendered in place instead of vanishing every second.
 let volumesOpen: string | null = null;
 /// Pool names last rendered, so the poll can diff and skip a full rebuild.
-let renderedPools: string[] = [];
+// null = nothing painted yet. An empty array would mean "painted an empty
+// list", and the two used to be the same value: a server with no pools
+// compared equal to the fresh container and stayed on its skeleton forever.
+let renderedPools: string[] | null = null;
 let selectedVm: string | null = null;
 let vmTab: "summary" | "hardware" | "options" | "network" | "console" | "xml" = "summary";
 /// Which disk the summary's Disks card is graphing, per VM, so the 1s poll
@@ -968,7 +978,7 @@ function contentMenuItems(target: Element): CtxItem[] | null {
   const el = target.closest<HTMLElement>(
     "[data-vm-open], [data-dc-vm], [data-net-open], [data-dash-net], [data-pool-open], " +
     "[data-dash-pool], [data-open-conn-row], [data-dc-dash-conn], .tab[data-tab], .tab[data-vmtab], " +
-    ".tab[data-dctab], .create-card, .net-create-card, .dhead",
+    ".tab[data-dctab], .dhead",
   );
   if (!el) return null;
   const d = el.dataset;
@@ -980,12 +990,12 @@ function contentMenuItems(target: Element): CtxItem[] | null {
   if (d.dashPool && d.dashConn) return poolMenu(d.dashConn, d.dashPool);
   if (d.openConnRow) return serverMenu(d.openConnRow);
   if (d.dcDashConn) return serverMenu(d.dcDashConn);
-  // A server tab, or a create card: the same server-level actions.
-  if ((d.tab || el.matches(".create-card, .net-create-card")) && selectedConn && !selectedVm) {
+  // A server tab: the server-level actions.
+  if (d.tab && selectedConn && !selectedVm) {
     return serverMenu(selectedConn);
   }
   if (d.vmtab && selectedConn && selectedVm) return vmMenu(selectedConn, selectedVm);
-  if (d.dctab || el.matches(".create-card")) return rootMenu();
+  if (d.dctab) return rootMenu();
   // The page header stands for the page's own resource.
   if (el.matches(".dhead")) {
     if (!selectedConn) return rootMenu();
@@ -1136,44 +1146,30 @@ function renderDc() {
         </div>
       </div>`).join("");
 
-  const serverCards = connections.map((c) => `
-      <div class="storage-card" data-open tabindex="0" data-open-conn-row="${c.id}">
-        <div class="storage-card-head">
-          <span class="storage-card-icon">${ic.server()}</span>
-          <span class="storage-card-title">${esc(c.name)}</span>
-          <span class="badge">${esc(c.url)}</span>
-        </div>
-        <div class="specs">
-          <div class="spec"><b>URL</b><span>${esc(c.url)}</span></div>
-          <div class="spec"><b>Cert</b><span>${c.fingerprint ? esc(c.fingerprint) : "—"}</span></div>
-        </div>
-        <div class="storage-card-actions net-actions">
-          <button class="btn icon" data-edit="${c.id}" title="Edit server">${ic.edit()}</button>
-          <button class="btn danger icon" data-del="${c.id}" title="Remove server">${ic.trash()}</button>
-        </div>
-      </div>`).join("");
 
   let body: string;
   if (dcTab === "dashboard") {
     body = `<div id="dc-dash">${skeleton("dashboard")}</div>`;
   } else if (dcTab === "servers") {
     body = `${cards}<div class="section-title">Servers</div>
-       <div class="card-grid">
-         ${serverCards}
-         <button class="storage-card create-card" id="dc-server-create">
-           <span class="storage-card-icon">${ic.plus()}</span>
-           <span class="storage-card-title">Add Server</span>
-         </button>
-       </div>`;
+       ${connections.length ? `<table class="grid">
+         <tr><th>Name</th><th>URL</th><th>Cert</th><th class="col-actions"></th></tr>
+         ${connections.map((c) => `
+           <tr class="row-open" tabindex="0" data-open-conn-row="${c.id}">
+             <td class="tname">${esc(c.name)}</td>
+             <td>${esc(c.url)}</td>
+             <td>${c.fingerprint ? `${esc(c.fingerprint.slice(0, 17))}…` : "—"}</td>
+             <td class="col-actions">
+               <div class="row-actions">
+                 <button class="btn icon" data-edit="${c.id}" title="Edit server">${ic.edit()}</button>
+                 <button class="btn danger icon" data-del="${c.id}" title="Remove server">${ic.trash()}</button>
+               </div>
+             </td>
+           </tr>`).join("")}
+       </table>` : emptyState("servers", "Add Server", "dc-server-create")}`;
   } else if (dcTab === "guests") {
     body = `${cards}<div class="section-title">Guests</div>
-       <div class="card-grid">
-         ${guestCards}
-         <button class="storage-card create-card" id="dc-guest-create">
-           <span class="storage-card-icon">${ic.plus()}</span>
-           <span class="storage-card-title">Create Guest</span>
-         </button>
-       </div>`;
+       ${guestCards ? `<div class="card-grid">${guestCards}</div>` : emptyState("guests", "Create Guest", "dc-guest-create")}`;
   } else {
     body = `<div id="users-area">${skeleton("table")}</div>`;
   }
@@ -2279,7 +2275,7 @@ async function renderConnBody() {
     await fastLoad(loadNetworks);
   } else if (connTab === "storage") {
     setHtml(body, `<div id="pools-list">${skeleton("cards")}</div>`);
-    renderedPools = []; // fresh container: force a full render on first load
+    renderedPools = null; // fresh container: force a full render on first load
     $("#create-pool")?.addEventListener("click", () => openCreatePool());
     await loadPools();
   } else {
@@ -2689,11 +2685,6 @@ async function loadVms() {
     const vms = await api.get<DomainSummary[]>(`/proxy/${selectedConn}/domains`);
     const list = $("#vms-list");
     if (!list) return;
-    const createCard = `
-      <button class="storage-card create-card" id="vm-create-card">
-        <span class="storage-card-icon">${ic.plus()}</span>
-        <span class="storage-card-title">Create VM</span>
-      </button>`;
     setHtml(list, vms.map((v) => `
       <div class="storage-card ${v.active ? "ok" : ""}" data-open tabindex="0" data-vm-open="${esc(v.name)}">
         <div class="storage-card-head">
@@ -2711,8 +2702,8 @@ async function loadVms() {
           <button class="btn icon" data-vm-edit="${esc(v.name)}" title="Edit hardware">${ic.edit()}</button>
           <button class="btn danger icon" data-vm-del="${esc(v.name)}" title="Delete">${ic.trash()}</button>
         </div>
-      </div>`).join("") + createCard);
-    const createBtn = $("#vm-create-card");
+      </div>`).join("") || emptyState("VMs", "Create VM", "vm-create-empty"));
+    const createBtn = $("#vm-create-empty");
     if (createBtn) createBtn.onclick = () => openCreateVm();
     // The whole card opens the guest; action buttons stop propagation.
     list.querySelectorAll("[data-vm-open]").forEach((card: Element) => {
@@ -2771,11 +2762,6 @@ async function loadNetworks() {
       if (n.forward === "nat") return "NAT";
       return "Isolated";
     };
-    const createCard = `
-      <button class="storage-card net-card net-create-card" id="net-create-card">
-        <span class="storage-card-icon">${ic.plus()}</span>
-        <span class="storage-card-title">Create Network</span>
-      </button>`;
     setHtml(list, nets.map((n) => `
       <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open tabindex="0" data-net-open="${esc(n.name)}">
         <div class="storage-card-head">
@@ -2794,8 +2780,8 @@ async function loadNetworks() {
           <button class="btn icon" data-net-edit="${esc(n.name)}" title="Edit">${ic.edit()}</button>
           <button class="btn danger icon" data-delnet="${esc(n.name)}" title="Delete">${ic.trash()}</button>
         </div>
-      </div>`).join("") + createCard);
-    const createBtn = $("#net-create-card");
+      </div>`).join("") || emptyState("networks", "Create Network", "net-create-empty"));
+    const createBtn = $("#net-create-empty");
     if (createBtn) createBtn.onclick = () => openCreateNetwork();
     // The whole card opens the network's page; its buttons stop propagation.
     list.querySelectorAll("[data-net-open]").forEach((card: Element) => {
@@ -2968,7 +2954,7 @@ async function loadPools() {
     const list = $("#pools-list");
     if (!list) return;
     const names = pools.map((p) => p.name);
-    const shapeChanged = renderedPools.join("|") !== names.join("|");
+    const shapeChanged = renderedPools?.join("|") !== names.join("|");
     if (shapeChanged) {
       renderedPools = names;
       setHtml(list, pools.map((p) => {
@@ -2996,7 +2982,8 @@ async function loadPools() {
         </div>
       </div>
       <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`;
-      }).join("") || `<div class="empty">No pools.</div>`);
+      }).join("") || emptyState("storage pools", "Create Pool", "pool-create-empty"));
+      $("#pool-create-empty")?.addEventListener("click", () => openCreatePool());
       // The whole card opens the pool's page; its buttons keep their own jobs.
       list.querySelectorAll("[data-pool-open]").forEach((card: Element) => {
         (card as HTMLElement).onclick = (e) => {

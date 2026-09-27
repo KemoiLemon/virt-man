@@ -200,9 +200,9 @@ await wait(1200);
   .find((t) => t.textContent.trim() === "Servers")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(800);
-check("server cards are selectable", () => {
-  const card = document.querySelector("[data-open-conn-row]");
-  assert.ok(card, "server card is clickable");
+check("server rows are selectable", () => {
+  const card = document.querySelector("tr[data-open-conn-row]");
+  assert.ok(card, "server row is clickable");
   card.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 });
 await wait(1400);

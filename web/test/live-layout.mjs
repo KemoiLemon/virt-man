@@ -113,12 +113,13 @@ check("tabs have clearance above the content", () => {
     `tab bar reserves space below it (${px(bar, "marginBottom")}px)`);
 });
 
-check("datacenter servers render as cards with icon action buttons", () => {
-  const cards = [...document.querySelectorAll("#content .card-grid .storage-card")];
-  assert.ok(cards.length > 0, `${cards.length} server card(s)`);
-  const first = cards[0];
-  const actions = first.querySelector(".net-actions");
-  assert.ok(actions, "card actions share a row");
+check("datacenter servers render as a list with icon action buttons", () => {
+  const rows = [...document.querySelectorAll("#content table.grid tr[data-open-conn-row]")];
+  assert.ok(rows.length > 0, `${rows.length} server row(s)`);
+  assert.equal(document.querySelectorAll("#content .storage-card[data-open-conn-row]").length, 0, "no server cards");
+  const first = rows[0];
+  const actions = first.querySelector(".row-actions");
+  assert.ok(actions, "row actions share a row");
   const buttons = [...actions.querySelectorAll(".btn")];
   assert.ok(buttons.every((b) => b.classList.contains("icon")), "all server actions are icon buttons");
   assert.ok(first.querySelector("[data-edit]"), "edit action present");
@@ -135,9 +136,9 @@ await wait(1500);
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(800);
 
-check("VM cards mirror the server cards' action layout", () => {
+check("VM cards carry icon action buttons", () => {
   const card = document.querySelector("#vms-list [data-vm-open]");
-  assert.ok(card, "VM cards use the same card style as servers");
+  assert.ok(card, "VM cards render");
   const actions = card.querySelector(".net-actions");
   assert.ok(actions, "VM buttons share a row");
   const buttons = [...actions.querySelectorAll(".btn")];

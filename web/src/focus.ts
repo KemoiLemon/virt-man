@@ -121,7 +121,7 @@ export const ARROW_GROUPS: ArrowGroup[] = [
   { root: "#tree", item: ".tree-row", axis: "v" },
   { root: ".tabbar", item: ".tab", axis: "both" },
   { root: ".hw-side", item: ".hw-item", axis: "v" },
-  { root: ".card-grid", item: "[data-open], .create-card, .net-create-card", axis: "both" },
+  { root: ".card-grid", item: "[data-open]", axis: "both" },
   { root: ".create-resource-grid", item: ".create-resource-card", axis: "both" },
 ];
 
