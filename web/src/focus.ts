@@ -97,3 +97,85 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
   el.click();
 });
+
+// ---------------------------------------------------------------- arrow keys
+//
+// Tab moves between groups; arrows move within one. Each group below is a list
+// of like items: the right-click menu, the sidebar tree, a tab bar, the
+// hardware list, a grid of resource cards. Up/Down (and Left/Right on a
+// horizontal tab bar) step through it, Home/End jump to the ends, and it wraps.
+// Fields keep their arrows: a caret in an input, a value in a <select>, and the
+// guest console, which owns every key.
+
+interface ArrowGroup {
+  /** Container holding the group's items. */
+  root: string;
+  /** The items, relative to the root. */
+  item: string;
+  /** Which arrows step: vertical lists use Up/Down, tab bars Left/Right. */
+  axis: "v" | "h" | "both";
+}
+
+export const ARROW_GROUPS: ArrowGroup[] = [
+  { root: ".ctxmenu", item: ".ctxmenu-item", axis: "v" },
+  { root: "#tree", item: ".tree-row", axis: "v" },
+  { root: ".tabbar", item: ".tab", axis: "both" },
+  { root: ".hw-side", item: ".hw-item", axis: "v" },
+  { root: ".card-grid", item: "[data-open], .create-card, .net-create-card", axis: "both" },
+  { root: ".create-resource-grid", item: ".create-resource-card", axis: "both" },
+];
+
+const STEP: Record<string, { axis: "v" | "h"; d: number }> = {
+  ArrowDown: { axis: "v", d: 1 },
+  ArrowUp: { axis: "v", d: -1 },
+  ArrowRight: { axis: "h", d: 1 },
+  ArrowLeft: { axis: "h", d: -1 },
+};
+
+/// The element to focus for an arrow/Home/End key pressed on `active`, or null
+/// when the key is not ours (not in a group, or the wrong axis for it).
+export function arrowTarget(active: Element | null, key: string): HTMLElement | null {
+  if (!active) return null;
+  for (const g of ARROW_GROUPS) {
+    const root = active.closest(g.root);
+    if (!root || !active.matches(g.item)) continue;
+    const items = [...root.querySelectorAll<HTMLElement>(g.item)].filter(
+      (el) => !(el as HTMLButtonElement).disabled && !el.closest("[hidden]"),
+    );
+    const i = items.indexOf(active as HTMLElement);
+    if (i < 0 || !items.length) return null;
+    if (key === "Home") return items[0];
+    if (key === "End") return items[items.length - 1];
+    const step = STEP[key];
+    if (!step || (g.axis !== "both" && g.axis !== step.axis)) return null;
+    return items[(i + step.d + items.length) % items.length];
+  }
+  return null;
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+  if (!(e.key in STEP) && e.key !== "Home" && e.key !== "End") return;
+  const active = document.activeElement;
+  if (active?.closest?.("input, textarea, select, .console-stage, [contenteditable='true']")) return;
+  const next = arrowTarget(active, e.key);
+  if (next) {
+    e.preventDefault();
+    next.focus();
+  }
+});
+
+/// Keep keyboard focus on a list that is about to re-render. Selecting a tree
+/// row or a tab rebuilds that list, which destroys the focused element and
+/// drops focus on <body> -- so the next arrow press did nothing. Call before
+/// the rebuild; the returned function, called after it, moves focus to the
+/// list's new selected item. It does nothing unless focus was inside the list,
+/// so a poll-driven re-render never steals focus from somewhere else.
+export function holdFocus(root: Element | null, selected: string): () => void {
+  if (!root || !root.contains(document.activeElement)) return () => {};
+  return () => {
+    const now = document.activeElement;
+    if (now && now !== document.body && now.isConnected) return;
+    root.querySelector<HTMLElement>(selected)?.focus();
+  };
+}

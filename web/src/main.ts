@@ -6,7 +6,7 @@ import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
 import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
-import { enterLayer } from "./focus";
+import { enterLayer, holdFocus } from "./focus";
 import { parsePath, routeToPath, type Route } from "./route";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
@@ -657,6 +657,7 @@ function renderTree() {
     })
     .join("");
 
+  const restoreTreeFocus = holdFocus(tree, ".tree-row.sel");
   setHtml(tree, `
     <button class="tree-row tree-root ${selectedConn === null ? "sel" : ""}" id="dc-row">
       <span class="tree-ic">${ic.datacenter()}</span>
@@ -664,6 +665,7 @@ function renderTree() {
     </button>
     ${serverRows || `<div class="tree-empty">No servers yet — add one below.</div>`}`);
 
+  restoreTreeFocus();
   $("#dc-row").onclick = () => {
     leaveCurrentView();
     selectedConn = null;
@@ -1153,7 +1155,9 @@ function renderDc() {
   } else {
     body = `<div id="users-area">${skeleton("table")}</div>`;
   }
+  const restoreTabFocus = holdFocus(content, ".tab.active");
 setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
+  restoreTabFocus();
 
   if (dcTab === "dashboard") void loadDcDashboard();
 
@@ -2178,6 +2182,7 @@ async function renderConn() {
   beginRender();
   syncUrl();
   const content = $("#content");
+  const restoreTabFocus = holdFocus(content, ".tab.active");
 setHtml(content, `
     <div class="dhead"><span class="dtitle">${esc(conn.name)}</span>
       <span class="badge">daemon</span>
@@ -2197,6 +2202,7 @@ setHtml(content, `
       </div>
     </div>
     <div id="conn-body"></div>`);
+  restoreTabFocus();
   content.querySelectorAll("[data-tab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
       connTab = (b as HTMLElement).dataset.tab as typeof connTab;
@@ -3033,6 +3039,7 @@ async function renderVm() {
   const vm = selectedVm;
   const title = treeVms[selectedConn]?.find((x) => x.name === vm)?.title || vm;
   const running = treeVms[selectedConn]?.find((x) => x.name === vm)?.active === true;
+  const restoreTabFocus = holdFocus(content, ".tab.active");
 setHtml(content, `
     <div class="dhead"><span class="dhead-ic">${ic.vm(20)}</span><span class="dtitle">${esc(title)}</span></div>
     <div class="tabbar">
@@ -3052,6 +3059,7 @@ setHtml(content, `
       </div>
     </div>
     <div id="vm-body">${vmTab === "console" ? "" : skeleton("page")}</div>`);
+  restoreTabFocus();
   content.querySelectorAll("[data-vmtab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
       const next = (b as HTMLElement).dataset.vmtab as typeof vmTab;

@@ -132,3 +132,77 @@ test("Enter opens a focused card like a click", () => {
   card.dispatchEvent(new win.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
   assert.equal(clicked, 2);
 });
+
+// ---- arrow keys: Tab moves between groups, arrows move within one.
+const press = (el, key) => {
+  const e = new win.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+  el.dispatchEvent(e);
+  return e.defaultPrevented;
+};
+
+test("Up/Down step through a menu and wrap; Home/End jump", () => {
+  doc.body.innerHTML = `<div class="ctxmenu">
+    <button class="ctxmenu-item" id="i1">1</button>
+    <button class="ctxmenu-item" id="i2" disabled>2</button>
+    <button class="ctxmenu-item" id="i3">3</button></div>`;
+  doc.getElementById("i1").focus();
+  assert.ok(press(doc.activeElement, "ArrowDown"));
+  assert.equal(doc.activeElement.id, "i3", "disabled item skipped");
+  press(doc.activeElement, "ArrowDown");
+  assert.equal(doc.activeElement.id, "i1", "wraps to the top");
+  press(doc.activeElement, "ArrowUp");
+  assert.equal(doc.activeElement.id, "i3", "wraps to the bottom");
+  press(doc.activeElement, "Home");
+  assert.equal(doc.activeElement.id, "i1");
+  press(doc.activeElement, "End");
+  assert.equal(doc.activeElement.id, "i3");
+});
+
+test("the sidebar tree is a vertical list: Left/Right are left alone", () => {
+  doc.body.innerHTML = `<div id="tree"><button class="tree-row" id="r1"></button><button class="tree-row" id="r2"></button></div>`;
+  doc.getElementById("r1").focus();
+  assert.equal(press(doc.activeElement, "ArrowRight"), false);
+  assert.ok(press(doc.activeElement, "ArrowDown"));
+  assert.equal(doc.activeElement.id, "r2");
+});
+
+test("a tab bar takes Left/Right as well as Up/Down", () => {
+  doc.body.innerHTML = `<div class="tabbar"><button class="tab" id="t1"></button><button class="tab" id="t2"></button>
+    <div class="tabbar-actions"><button class="btn" id="act"></button></div></div>`;
+  doc.getElementById("t1").focus();
+  press(doc.activeElement, "ArrowRight");
+  assert.equal(doc.activeElement.id, "t2");
+  press(doc.activeElement, "ArrowRight");
+  assert.equal(doc.activeElement.id, "t1", "wraps past the action buttons, which are not tabs");
+});
+
+test("fields keep their own arrow keys", () => {
+  doc.body.innerHTML = `<div class="ctxmenu"><input class="ctxmenu-item" id="f"><button class="ctxmenu-item" id="b"></button></div>`;
+  doc.getElementById("f").focus();
+  assert.equal(press(doc.activeElement, "ArrowDown"), false, "caret movement is not hijacked");
+  assert.equal(doc.activeElement.id, "f");
+});
+
+test("arrows outside any group do nothing", () => {
+  doc.body.innerHTML = `<button id="lone"></button>`;
+  doc.getElementById("lone").focus();
+  assert.equal(press(doc.activeElement, "ArrowDown"), false);
+});
+
+test("holdFocus puts focus back on the rebuilt list's selected item", () => {
+  doc.body.innerHTML = `<div id="tree"><button class="tree-row" id="old"></button></div>`;
+  const tree = doc.getElementById("tree");
+  doc.getElementById("old").focus();
+  const restore = f.holdFocus(tree, ".tree-row.sel");
+  tree.innerHTML = `<button class="tree-row" id="a"></button><button class="tree-row sel" id="b"></button>`;
+  restore();
+  assert.equal(doc.activeElement.id, "b");
+});
+
+test("holdFocus never steals focus it did not have", () => {
+  doc.body.innerHTML = `<input id="elsewhere"><div id="tree"><button class="tree-row sel"></button></div>`;
+  doc.getElementById("elsewhere").focus();
+  const restore = f.holdFocus(doc.getElementById("tree"), ".tree-row.sel");
+  restore();
+  assert.equal(doc.activeElement.id, "elsewhere", "a poll re-render leaves the user's field alone");
+});

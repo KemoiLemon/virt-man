@@ -85,6 +85,13 @@ close. So a new dialog needs no focus code: build it with `openModal`. A widget
 that handles Tab itself (the palette) calls `preventDefault`, and the trap then
 leaves it alone; the console stage keeps Tab for the guest. Clickable cards and
 rows that are not buttons carry `tabindex="0"` and open on Enter/Space.
+Tab moves between groups; arrows move within one (`ARROW_GROUPS`: context menu,
+sidebar tree, tab bars, hardware list, card grids), wrapping, with Home/End.
+Fields, `<select>` and the console keep their own arrows. A list that rebuilds
+when an item is chosen (the tree, tab bars) wraps its `setHtml` in
+`holdFocus(root, selected)`, or focus drops to `<body>` and the next arrow does
+nothing; it only acts when focus was already in that list, so the poll never
+steals focus.
 
 **No inline event handlers.** `onclick="..."` in an HTML string is blocked by
 the CSP. Assign handlers in JS after rendering.
