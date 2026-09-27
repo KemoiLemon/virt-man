@@ -134,7 +134,11 @@ fn sha256_file(path: &str) -> Result<(String, u64), LvError> {
         hasher.update(&buf[..n]);
         total += n as u64;
     }
-    let hex = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let hex = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     Ok((hex, total))
 }
 
@@ -178,7 +182,10 @@ fn spool_dir() -> PathBuf {
 fn spool_path(pool: &str, vol: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    spool_dir().join(format!("virtman-{pool}-{vol}-{}-{n}.upload", std::process::id()))
+    spool_dir().join(format!(
+        "virtman-{pool}-{vol}-{}-{n}.upload",
+        std::process::id()
+    ))
 }
 
 /// Spool the request body to `tmp`, returning the byte count.

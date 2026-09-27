@@ -135,8 +135,15 @@ async fn record(
         _ => (user.id.clone(), user.username.clone()),
     };
 
-    let entry = append(&state, &user_id, &username, label, &req.status, &req.message)
-        .map_err(ApiError::internal)?;
+    let entry = append(
+        &state,
+        &user_id,
+        &username,
+        label,
+        &req.status,
+        &req.message,
+    )
+    .map_err(ApiError::internal)?;
     Ok(Json(entry_json(&entry)))
 }
 

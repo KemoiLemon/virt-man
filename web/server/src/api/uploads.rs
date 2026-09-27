@@ -346,7 +346,8 @@ async fn push(
             (j.user_id.clone(), j.username.clone())
         };
         let status = if result.is_ok() { "done" } else { "failed" };
-        if let Err(e) = super::activity::append(&bg, &user_id, &username, &label, status, &message) {
+        if let Err(e) = super::activity::append(&bg, &user_id, &username, &label, status, &message)
+        {
             tracing::warn!("could not record upload activity: {e}");
         }
     });
@@ -480,13 +481,19 @@ fn sha256_file(path: &std::path::Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 256 * 1024];
     loop {
-        let n = f.read(&mut buf).map_err(|e| format!("read for hash: {e}"))?;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("read for hash: {e}"))?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Ask the daemon for the stored volume's hash.
@@ -556,7 +563,10 @@ mod tests {
         // went wrong, and it says the staged copy was kept.
         assert!(err.contains("aaaa"), "local hash missing: {err}");
         assert!(err.contains("bbbb"), "remote hash missing: {err}");
-        assert!(err.contains("kept"), "must say the staged copy was kept: {err}");
+        assert!(
+            err.contains("kept"),
+            "must say the staged copy was kept: {err}"
+        );
     }
 
     /// A truncated transfer is the exact failure the daemon used to report as
