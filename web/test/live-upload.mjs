@@ -120,6 +120,26 @@ await check("the finished transfer's speed is recorded in the activity log", asy
   assert.match(mine.message, /(KiB|MiB)\/s/, `no rate in the log message: ${mine.message}`);
 });
 
+await check("a transfer finishes with no client watching it", async () => {
+  // The daemon leg must not depend on the browser: closing the tab or reloading
+  // mid-transfer cannot strand a multi-GB upload. Between starting the push and
+  // reading the result, nothing here polls it.
+  const solo = `vmtest-solo-${Date.now()}.iso`;
+  const st = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(solo)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: bytes,
+  });
+  await json(`/uploads/${st.id}/push`, { method: "POST" });
+  await new Promise((r) => setTimeout(r, 4000));
+  const job = await json(`/uploads/${st.id}`);
+  assert.equal(job.phase, "done", `stranded without a client: ${job.phase} ${job.error ?? ""}`);
+  assert.equal(job.sha256, want, "and still verified");
+  await fetch(new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(solo)}`, base),
+    { method: "DELETE" }).catch(() => undefined);
+  await fetch(new URL(`/uploads/${st.id}`, base), { method: "DELETE" }).catch(() => undefined);
+});
+
 await check("the daemon really holds those exact bytes", async () => {
   const remote = await json(
     `/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(name)}/hash`,
@@ -225,27 +245,36 @@ execFileSync("npx", ["vite", "build", "--logLevel", "error", "--outDir", "test/_
 const code = readFileSync("test/_live/app.iife.js", "utf8");
 const css = readFileSync(
   `dist/assets/${readdirSync("dist/assets").find((f) => f.endsWith(".css"))}`, "utf8");
-const virtualConsole = new VirtualConsole();
-virtualConsole.on("jsdomError", (e) => {
-  if (!/not implemented|canvas|WebSocket|XMLHttpRequest/i.test(String(e.message))) {
-    console.error("jsdom error:", e.message);
-  }
-});
-const dom = new JSDOM(
-  `<!doctype html><html data-theme="dark"><head><style>${css}</style></head>` +
-  `<body><div id="app"></div></body></html>`,
-  { url: `${base}/`, runScripts: "dangerously", pretendToBeVisual: true, virtualConsole },
-);
-const { window } = dom;
-const { document } = window;
-window.fetch = (input, init) => {
-  const url = typeof input === "string" ? new URL(input, base).toString() : input;
-  return fetch(url, init);
+
+/// Boot a fresh SPA instance. Calling this twice is how a browser reload is
+/// simulated: the second page starts with no client-side memory of the first,
+/// so anything it knows must have come from the server.
+const newPage = async () => {
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("jsdomError", (e) => {
+    if (!/not implemented|canvas|WebSocket|XMLHttpRequest/i.test(String(e.message))) {
+      console.error("jsdom error:", e.message);
+    }
+  });
+  const dom = new JSDOM(
+    `<!doctype html><html data-theme="dark"><head><style>${css}</style></head>` +
+    `<body><div id="app"></div></body></html>`,
+    { url: `${base}/`, runScripts: "dangerously", pretendToBeVisual: true, virtualConsole },
+  );
+  const { window } = dom;
+  window.fetch = (input, init) => {
+    const url = typeof input === "string" ? new URL(input, base).toString() : input;
+    return fetch(url, init);
+  };
+  window.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+  window.eval(code);
+  const waitFor = (ms) => new Promise((r) => window.setTimeout(r, ms));
+  await waitFor(3000);
+  return { window, document: window.document, wait: waitFor };
 };
-window.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
-window.eval(code);
-const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
-await wait(3000);
+
+const page = await newPage();
+const { window, document, wait } = page;
 
 // Open a storage pool page and check the prompt carries a progress bar.
 const uiName = `vmtest-ui-${Date.now()}.iso`;
@@ -320,6 +349,34 @@ await check("the bar tracks the transfer through to verified", async () => {
   assert.ok(section, "transfers section still present");
   assert.match(section.textContent, /Verified/, `expected Verified, saw: ${section.textContent}`);
   assert.match(section.textContent, /sha256/, "shows the verified checksum");
+});
+
+await check("a freshly loaded page rediscovers work already in progress", async () => {
+  // A reload starts a new SPA with no memory of the first, so anything it knows
+  // must come from the server. This is what makes a mid-transfer reload safe:
+  // the job is listed because the server still holds it, not because the old
+  // page remembered it.
+  const pending = `vmtest-pending-${Date.now()}.iso`;
+  const st = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(pending)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: bytes,
+  });
+
+  const fresh = await newPage();
+  fresh.document
+    .querySelector(".tree-pool")
+    ?.dispatchEvent(new fresh.window.MouseEvent("click", { bubbles: true }));
+  await fresh.wait(1800);
+  const section = fresh.document.querySelector("#pool-uploads");
+  assert.ok(section, "transfers section present on the reloaded page");
+  assert.ok(
+    section.textContent.includes(pending),
+    `in-flight transfer not rediscovered: ${section.textContent.slice(0, 160)}`,
+  );
+  fresh.window.close();
+
+  await fetch(new URL(`/uploads/${st.id}`, base), { method: "DELETE" }).catch(() => undefined);
 });
 
 window.close();

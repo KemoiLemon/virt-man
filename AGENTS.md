@@ -103,6 +103,22 @@ rather than inventing new styling.
 auth-disabled loopback mode (used by the live suites and as a dev mode);
 TLS-pinned daemon connections.
 
+**ISO uploads stage on the web server before reaching the daemon**, in two
+visible legs: browser → server (progress in the prompt) then server → daemon
+(progress on the storage-pool window). The second leg runs as a detached
+server-side task reading a local file, so it is **independent of the browser**:
+a reload, or closing the tab, neither interrupts it nor loses track of it — a
+freshly loaded page re-lists in-flight transfers from `GET /uploads`, because
+the job lives on the server and not in the page. Keep it that way; making the
+transfer depend on the client, or tracking progress client-side, breaks it.
+
+A **web server restart does lose an in-flight transfer**: jobs are in memory
+and the startup sweep deletes staged bodies (they are orphaned by definition
+once the job map is gone). That is a lost transfer, not a corrupt one: the
+daemon rejects a short body because the server sends `Content-Length`, so a
+partial upload cannot be stored as if it were complete. Retrying means
+re-uploading from the browser, since the staged copy is gone.
+
 **Activity is server-side and per-user.** Long operations report their outcome
 to `POST /activity`, stored in `store.json` so it survives restarts. A
 non-admin sees only their own rows; an admin sees all, and the attribution
