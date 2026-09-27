@@ -2071,11 +2071,18 @@ setHtml(content, `
       void renderVm();
     };
   });
-  $("#vm-start").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/start`, "POST").then(renderVm);
-  $("#vm-shutdown").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/shutdown`, "POST").then(renderVm);
-  $("#vm-reset").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reset`, "POST").then(renderVm);
-  $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(renderVm);
-  $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(renderVm);
+  // Re-read the guest states so the action buttons and sidebar reflect the
+  // change immediately, rather than waiting for the 1s poll.
+  const refresh = async () => {
+    await refreshTreeVms();
+    renderTree();
+    await renderVm();
+  };
+  $("#vm-start").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/start`, "POST").then(refresh);
+  $("#vm-shutdown").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/shutdown`, "POST").then(refresh);
+  $("#vm-reset").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reset`, "POST").then(refresh);
+  $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(refresh);
+  $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(refresh);
   $("#vm-delete").onclick = () => deleteVm(vm);
   await renderVmBody(vm);
 }
