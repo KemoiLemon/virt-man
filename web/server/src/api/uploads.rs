@@ -65,6 +65,15 @@ pub struct UploadJob {
     pub sha256: Option<String>,
     pub error: Option<String>,
     pub at_ms: u64,
+    /// When the daemon leg started, or 0 before it does.
+    pub started_ms: u64,
+    /// Average bytes/second of the daemon leg, recomputed as bytes leave.
+    /// Average rather than instantaneous: a per-chunk rate jitters far too much
+    /// to read, and this is what "how fast is this going" actually means.
+    pub speed_bps: f64,
+    /// The daemon's own measurements, known once it has answered.
+    pub daemon_recv_bps: f64,
+    pub daemon_write_bps: f64,
     /// Who started it. The transfer outlives the browser request, so the
     /// activity entry is written from the background task.
     pub user_id: String,
@@ -96,6 +105,9 @@ fn view(j: &UploadJob) -> Value {
         "sha256": j.sha256,
         "error": j.error,
         "at_ms": j.at_ms,
+        "speed_bps": j.speed_bps,
+        "daemon_recv_bps": j.daemon_recv_bps,
+        "daemon_write_bps": j.daemon_write_bps,
     })
 }
 
@@ -194,6 +206,10 @@ async fn stage(
         sha256: None,
         error: None,
         at_ms: now_ms(),
+        started_ms: 0,
+        speed_bps: 0.0,
+        daemon_recv_bps: 0.0,
+        daemon_write_bps: 0.0,
         user_id: user.id.clone(),
         username: user.username.clone(),
     };
@@ -320,7 +336,11 @@ async fn push(
         // Clear a previous failure so the UI shows the retry honestly.
         j.phase = Phase::Uploading;
         j.sent = 0;
+        j.speed_bps = 0.0;
+        j.daemon_recv_bps = 0.0;
+        j.daemon_write_bps = 0.0;
         j.error = None;
+        j.started_ms = now_ms();
     }
 
     let bg = state.clone();
@@ -328,10 +348,17 @@ async fn push(
     tokio::spawn(async move {
         let result = transfer(&bg, &job_id, job.clone()).await;
         let (label, message) = match &result {
-            Ok(hash) => (
-                format!("Upload {}", job.lock().expect("job lock poisoned").name),
-                format!("verified sha256 {}", &hash[..hash.len().min(16)]),
-            ),
+            Ok(hash) => {
+                let j = job.lock().expect("job lock poisoned");
+                (
+                    format!("Upload {}", j.name),
+                    format!(
+                        "verified sha256 {} — {} to daemon",
+                        &hash[..hash.len().min(16)],
+                        fmt_bps(j.speed_bps)
+                    ),
+                )
+            }
             Err(e) => {
                 let mut j = job.lock().expect("job lock poisoned");
                 j.phase = Phase::Failed;
@@ -386,6 +413,13 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
         if let Ok(bytes) = chunk {
             if let Ok(mut j) = progress.lock() {
                 j.sent += bytes.len() as u64;
+                // Average rate over the whole push. Computed here rather than
+                // in the UI so the figure is a measurement, not a guess made
+                // from however often the browser happened to poll.
+                let elapsed = now_ms().saturating_sub(j.started_ms) as f64 / 1000.0;
+                if elapsed > 0.0 {
+                    j.speed_bps = j.sent as f64 / elapsed;
+                }
             }
         }
     });
@@ -410,6 +444,14 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(format!("daemon refused the upload: HTTP {status} {body}"));
+    }
+    // The daemon times its own receive and write separately, which is the only
+    // way to tell a slow network from slow storage. Its response is the last
+    // thing to arrive, so this only fills in the final figures.
+    if let Ok(v) = serde_json::from_str::<Value>(&body) {
+        let mut j = job.lock().expect("job lock poisoned");
+        j.daemon_recv_bps = v.get("recv_bps").and_then(Value::as_f64).unwrap_or(0.0);
+        j.daemon_write_bps = v.get("write_bps").and_then(Value::as_f64).unwrap_or(0.0);
     }
 
     // --- verify ------------------------------------------------------------
@@ -448,6 +490,25 @@ fn verify(local: &str, remote: &str) -> Result<(), String> {
         "hash mismatch — the daemon stored {remote}, the staged file is {local}; \
          the staged copy was kept"
     ))
+}
+
+/// Human-readable transfer rate. Kept in step with the SPA's `fmtRate` (KiB/s
+/// up to 1024, then MiB/s) so a speed recorded in the activity log reads the
+/// same way as the same speed shown live in the UI.
+fn fmt_bps(bps: f64) -> String {
+    const KIB: f64 = 1024.0;
+    if !bps.is_finite() || bps <= 0.0 {
+        return "0 KiB/s".to_string();
+    }
+    let kib = bps / KIB;
+    if kib < KIB {
+        return if kib >= 10.0 {
+            format!("{kib:.0} KiB/s")
+        } else {
+            format!("{kib:.1} KiB/s")
+        };
+    }
+    format!("{:.1} MiB/s", kib / KIB)
 }
 
 /// Is a volume of this name already in the pool?
@@ -576,6 +637,21 @@ mod tests {
         let full = "7d67c7f89862c3379b178f5efa34a0c1c4bb9beaa289cfada29037a387882d6b";
         assert!(verify(full, &full[..32]).is_err());
         assert!(verify(full, "").is_err());
+    }
+
+    /// The thresholds must match the SPA's `fmtRate`, or the same transfer
+    /// would read as "1.0 MiB/s" in the log and "1024 KiB/s" in the UI.
+    #[test]
+    fn fmt_bps_agrees_with_the_ui_unit_boundaries() {
+        assert_eq!(fmt_bps(0.0), "0 KiB/s");
+        assert_eq!(fmt_bps(-5.0), "0 KiB/s");
+        assert_eq!(fmt_bps(f64::NAN), "0 KiB/s");
+        assert_eq!(fmt_bps(512.0), "0.5 KiB/s");
+        // Just below the boundary stays in KiB...
+        assert_eq!(fmt_bps(1023.0 * 1024.0), "1023 KiB/s");
+        // ...and exactly 1 MiB/s switches over.
+        assert_eq!(fmt_bps(1024.0 * 1024.0), "1.0 MiB/s");
+        assert_eq!(fmt_bps(45.6 * 1024.0 * 1024.0), "45.6 MiB/s");
     }
 
     #[test]

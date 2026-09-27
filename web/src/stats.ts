@@ -253,6 +253,31 @@ export function fmtRate(kibPerSec: number): string {
   return `${(kibPerSec / 1024).toFixed(1)} MiB/s`;
 }
 
+/// Shortest window over which a transfer rate is considered meaningful. The
+/// first progress event arrives only milliseconds into a transfer, so a rate
+/// computed from it is a spike rather than a measurement.
+const MIN_RATE_MS = 250;
+
+/// Average transfer rate in KiB/s, or null while the figure is meaningless.
+///
+/// Averaged over the whole transfer on purpose: a per-tick rate swings with
+/// buffer sizes and poll timing, so it reads as noise. Null is returned rather
+/// than 0 for a transfer too young to measure, and nothing is reported under
+/// `MIN_RATE_MS` — the first progress event arrives a few milliseconds in, so a
+/// rate computed from it is a meaningless spike (megabytes sent in 20 ms reads
+/// as gigabytes per second). A transfer that finishes inside that window is
+/// over before a speed would have been useful anyway.
+export function avgRateKib(
+  bytes: number,
+  startedMs: number,
+  nowMs: number,
+  minMs = MIN_RATE_MS,
+): number | null {
+  const secs = (nowMs - startedMs) / 1000;
+  if (!(secs > 0) || !(bytes > 0) || nowMs - startedMs < minMs) return null;
+  return bytes / 1024 / secs;
+}
+
 /** Human-readable bytes; KiB-valued inputs should be scaled by the caller. */
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null) return "—";

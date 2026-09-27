@@ -102,6 +102,24 @@ await check("the staged copy is deleted once both hashes match", () => {
   assert.ok(!existsSync(join(uploadsDir, `${staged.id}.part`)), "staged file removed");
 });
 
+await check("both legs report a measured speed", async () => {
+  // The daemon leg's rate comes from the server's own byte counter...
+  assert.ok(staged.speed_bps > 0, `no push rate reported: ${staged.speed_bps}`);
+  // ...and the daemon reports its receive and write rates independently.
+  assert.ok(staged.daemon_recv_bps > 0, `no daemon receive rate: ${staged.daemon_recv_bps}`);
+  assert.ok(staged.daemon_write_bps > 0, `no daemon write rate: ${staged.daemon_write_bps}`);
+  // A local transfer cannot exceed a generous ceiling; a unit slip (bytes as
+  // KiB, or per-millisecond) would show up as an absurd number here.
+  assert.ok(staged.speed_bps < 10e9, `implausible rate: ${staged.speed_bps} B/s`);
+});
+
+await check("the finished transfer's speed is recorded in the activity log", async () => {
+  const log = await json("/activity");
+  const mine = log.entries.find((e) => e.label === `Upload ${name}`);
+  assert.ok(mine, "activity entry exists");
+  assert.match(mine.message, /(KiB|MiB)\/s/, `no rate in the log message: ${mine.message}`);
+});
+
 await check("the daemon really holds those exact bytes", async () => {
   const remote = await json(
     `/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(name)}/hash`,
@@ -217,8 +235,23 @@ await check("the pool window shows a background progress bar for the transfer", 
   assert.match(section.textContent, /Ready/, "and its phase");
 });
 
+await check("the pool window shows the daemon leg's speed", async () => {
+  // Push it, then read the card while the transfer is still in flight: the
+  // speed has to appear live, not only in the final state.
+  const push = await json(`/uploads/${uiStaged.id}/push`, { method: "POST" });
+  assert.equal(push.phase, "uploading");
+  let sawSpeed = false;
+  for (let i = 0; i < 60; i++) {
+    await wait(100);
+    const section = document.querySelector("#pool-uploads");
+    if (section && /(KiB|MiB)\/s/.test(section.textContent)) { sawSpeed = true; break; }
+  }
+  assert.ok(sawSpeed, "no speed rendered on the transfer card");
+});
+
 await check("the bar tracks the transfer through to verified", async () => {
-  await json(`/uploads/${uiStaged.id}/push`, { method: "POST" });
+  // The push was already started by the speed check above; pushing again is a
+  // 409 once it has completed.
   let phase = "";
   for (let i = 0; i < 100; i++) {
     const job = await json(`/uploads/${uiStaged.id}`);

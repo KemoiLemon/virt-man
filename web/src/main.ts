@@ -8,7 +8,7 @@ import { closeSvg, ic } from "./icons";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
-import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
+import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
@@ -4537,6 +4537,14 @@ function uploadsSection(pool: string): string {
       const p = j.size > 0 ? Math.min(100, (j.sent / j.size) * 100) : 0;
       // A finished transfer reads as full even if the byte count ran short.
       const width = live ? p : 100;
+      // `speed_bps` is bytes/s; fmtRate speaks KiB/s.
+      const speed = j.speed_bps > 0 ? fmtRate(j.speed_bps / 1024) : "";
+      // The daemon times its receive and its write separately, so when the two
+      // disagree the slower one names the bottleneck. Only known at the end,
+      // since that is when its response arrives.
+      const daemonRates = j.daemon_recv_bps > 0 || j.daemon_write_bps > 0
+        ? `daemon recv ${fmtRate(j.daemon_recv_bps / 1024)} · write ${fmtRate(j.daemon_write_bps / 1024)}`
+        : "";
       return `<div class="metric">
         <div class="metric-head">
           <span class="metric-ic">${ic.upload()}</span>
@@ -4546,10 +4554,12 @@ function uploadsSection(pool: string): string {
         <div class="meter"><div class="meter-fill ${failed ? "hot" : ""}" style="width:${width.toFixed(1)}%"></div></div>
         <div class="metric-foot">
           <span>${fmtBytes(j.sent)} of ${fmtBytes(j.size)}</span>
+          <span>${speed}</span>
           <span>${done && j.sha256 ? `sha256 ${esc(j.sha256.slice(0, 12))}…` : ""}</span>
           <button class="btn icon" data-up-${live ? "cancel" : "clear"}="${esc(j.id)}"
             title="${live ? "Cancel and discard the staged copy" : "Dismiss"}">${ic.close()}</button>
         </div>
+        ${done && daemonRates ? `<p class="hint">${daemonRates}</p>` : ""}
         ${failed ? `<p class="hint">${esc(j.error ?? "transfer failed")}</p>` : ""}
       </div>`;
     }).join("")}`;
@@ -4635,13 +4645,19 @@ function openUpload(pool: string) {
     cancelBtn.hidden = false;
     status.textContent = "Preparing…";
 
+    // Timed from the moment the body starts leaving the browser, so the rate
+    // reflects this hop only (the browser -> server leg).
+    const startedAt = Date.now();
     const { promise, cancel } = uploadWithProgress(
       `/uploads?conn=${encodeURIComponent(conn)}&pool=${encodeURIComponent(pool)}&name=${encodeURIComponent(name)}`,
       file,
       (sent, total) => {
         const p = total > 0 ? (sent / total) * 100 : 0;
         fill.style.width = `${p.toFixed(1)}%`;
-        status.textContent = `Uploading to server — ${fmtBytes(sent)} of ${fmtBytes(total)} (${p.toFixed(0)}%)`;
+        // Null until it is worth showing, rather than a misleading 0 KiB/s.
+        const rate = avgRateKib(sent, startedAt, Date.now());
+        const speed = rate === null ? "" : ` \u2014 ${fmtRate(rate)}`;
+        status.textContent = `Uploading to server \u2014 ${fmtBytes(sent)} of ${fmtBytes(total)} (${p.toFixed(0)}%)${speed}`;
       },
     );
     cancelBtn.onclick = () => cancel();

@@ -142,3 +142,26 @@ test("fmtBytes renders human-readable sizes", () => {
   assert.equal(stats.fmtBytes(1024), "1.0 KiB");
   assert.equal(stats.fmtBytes(1024 ** 3), "1.0 GiB");
 });
+
+test("avgRateKib averages over the whole transfer", () => {
+  // 2 MiB in 2s = 1 MiB/s = 1024 KiB/s.
+  assert.equal(stats.avgRateKib(2 * 1024 * 1024, 0, 2000), 1024);
+  assert.equal(stats.avgRateKib(512 * 1024, 1000, 2000), 512);
+});
+
+test("avgRateKib reports nothing until a rate is meaningful", () => {
+  // Zero elapsed time would otherwise read as Infinity, and no bytes yet as a
+  // misleadingly authoritative 0 KiB/s.
+  assert.equal(stats.avgRateKib(1000, 500, 500), null);
+  assert.equal(stats.avgRateKib(1000, 500, 400), null);
+  assert.equal(stats.avgRateKib(0, 0, 1000), null);
+});
+
+test("avgRateKib withholds a rate from the first, spiky progress event", () => {
+  // Measured in jsdom: the first progress event lands within milliseconds of
+  // the send, so 1 MiB "in 10ms" would display as ~100 GiB/s.
+  const spike = stats.avgRateKib(1024 * 1024, 0, 10);
+  assert.equal(spike, null, "a 10ms window must not produce a rate");
+  // Past the minimum window it reports again.
+  assert.equal(stats.avgRateKib(1024 * 1024, 0, 1000), 1024);
+});

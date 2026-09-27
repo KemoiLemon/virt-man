@@ -193,6 +193,15 @@ fn spool_path(pool: &str, vol: &str) -> PathBuf {
 /// The file is removed if the body fails part-way: an interrupted upload must
 /// not leave a multi-GB file behind. The success path removes it once the
 /// volume has been written.
+/// Bytes per second, guarding the divide. A transfer fast enough to register
+/// zero elapsed time would otherwise report an infinite or NaN rate.
+fn bps(bytes: u64, secs: f64) -> f64 {
+    if !secs.is_finite() || secs <= 0.0 {
+        return 0.0;
+    }
+    bytes as f64 / secs
+}
+
 async fn spool_body(body: Body, tmp: &std::path::Path) -> Result<u64, ApiError> {
     let mut file = tokio::fs::File::create(tmp)
         .await
@@ -229,7 +238,12 @@ async fn upload(
     let create_name = q.get("name").cloned();
 
     let tmp = spool_path(&pool, &vol);
+    // Measured separately because they fail differently: a slow receive means
+    // the network, a slow write means the storage. Reporting one number would
+    // hide which end is the bottleneck.
+    let recv_start = std::time::Instant::now();
     let total = spool_body(body, &tmp).await?;
+    let recv_secs = recv_start.elapsed().as_secs_f64();
 
     let tmp_path = tmp.clone();
     let v = with_conn(move |c| {
@@ -238,10 +252,14 @@ async fn upload(
             Some(name) => StorageVol::create_xml(&p, &volume_xml(name, total), 0)?,
             None => StorageVol::lookup_by_name(&p, &vol)?,
         };
+        let write_start = std::time::Instant::now();
         upload_from_file(c, &vol, &tmp_path, total)?;
+        let write_secs = write_start.elapsed().as_secs_f64();
         Ok(json!({
             "name": vol.get_name().unwrap_or_default(),
             "uploaded": total,
+            "recv_bps": bps(total, recv_secs),
+            "write_bps": bps(total, write_secs),
         }))
     })
     .await
@@ -331,7 +349,22 @@ fn volume_xml(name: &str, capacity: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{send_all_with, sha256_file};
+    use super::{bps, send_all_with, sha256_file};
+
+    /// A fast local transfer can measure zero elapsed time; reporting an
+    /// infinite rate, or NaN, would render as garbage in the UI.
+    #[test]
+    fn bps_never_divides_by_zero() {
+        assert_eq!(bps(1000, 0.0), 0.0);
+        assert_eq!(bps(1000, -1.0), 0.0);
+        assert_eq!(bps(1000, f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn bps_is_bytes_per_second() {
+        assert_eq!(bps(1000, 2.0), 500.0);
+        assert_eq!(bps(0, 3.0), 0.0);
+    }
 
     /// Reproduce libvirt's partial-send behaviour: `virStreamSend` accepts only
     /// what fits in its buffer and reports the short count. Before the retry
