@@ -1,7 +1,7 @@
 // Icon-handling checks (task-3 / criterion 3).
 //
 // Asserts against the SHIPPED stylesheet and the real icon renderer:
-//  - icons carry no inline stroke attributes (one .ico > svg rule owns them)
+//  - icons carry no inline paint attributes (one .ico > svg rule owns them)
 //
 // Run: pnpm test
 
@@ -27,22 +27,20 @@ before(async () => {
 /** Collapse whitespace so rule matching is layout-insensitive. */
 const flat = () => css.replace(/\s+/g, " ");
 
-test("stroke weight is defined once in CSS, not per icon", () => {
+test("icon colour is defined once in CSS, not per icon", () => {
   const rule = flat().match(/\.ico\s*>\s*svg\s*\{([^}]*)\}/);
   assert.ok(rule, ".ico > svg rule exists");
-  assert.match(rule[1], /stroke:\s*currentColor/);
-  assert.match(rule[1], /stroke-width:\s*2/);
-  assert.match(rule[1], /stroke-linecap:\s*round/);
-  assert.match(rule[1], /stroke-linejoin:\s*round/);
+  assert.match(rule[1], /fill:\s*currentColor/, "filled glyphs take the text colour");
+  assert.match(rule[1], /stroke:\s*none/, "no outline on a filled glyph");
 });
 
-test("rendered icons carry no inline stroke attributes", () => {
+test("rendered icons are bare Phosphor fill paths", () => {
   for (const name of ["close", "theme", "trash", "admin", "logout"]) {
     const html = icons.ic[name]();
     assert.match(html, /class="ico"/, `${name} is wrapped in .ico`);
-    assert.match(html, /<svg viewBox="0 0 24 24">/, `${name} svg is attribute-free`);
-    assert.doesNotMatch(html, /stroke-width=/, `${name} has no inline stroke-width`);
-    assert.doesNotMatch(html, /stroke="currentColor"/, `${name} has no inline stroke`);
+    assert.match(html, /<svg viewBox="0 0 256 256"><path d="M[^"]{20,}"><\/path><\/svg>/,
+      `${name} is one attribute-free path on Phosphor's 256 grid`);
+    assert.doesNotMatch(html, /stroke|fill=/, `${name} carries no inline paint`);
   }
 });
 

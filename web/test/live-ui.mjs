@@ -206,7 +206,7 @@ check("sidebar renders a nested resource tree", () => {
   const root = document.querySelector(".tree-row.tree-root");
   assert.ok(root, ".tree-root Datacenter node");
   assert.match(root.textContent, /Datacenter/);
-  assert.ok(root.querySelector(".tree-ic svg"), "root has a Lucide icon");
+  assert.ok(root.querySelector(".tree-ic svg"), "root has an icon");
 
   const servers = [...document.querySelectorAll(".tree-row.tree-group")];
   assert.ok(servers.length > 0, `${servers.length} .tree-group server node(s)`);
@@ -296,7 +296,7 @@ await (async () => {
     const running = guests.filter((g) => g.querySelector(".tree-ic.on"));
     results.push((["info", `guests: ${guests.length}, running: ${running.length}`]));
     for (const g of guests) {
-      assert.ok(g.querySelector(".tree-ic svg"), "guest has a Lucide icon");
+      assert.ok(g.querySelector(".tree-ic svg"), "guest has an icon");
       assert.ok(g.querySelector(".tree-state"), "guest shows its state");
     }
   });
@@ -382,7 +382,7 @@ await (async () => {
     for (const label of ["CPU", "Memory", "Disks"]) {
       const m = [...top.querySelectorAll(".metric")].find((x) => x.querySelector("b")?.textContent.trim() === label);
       assert.ok(m, `${label} metric`);
-      assert.ok(m.querySelector(".metric-ic svg"), "metric has a Lucide icon");
+      assert.ok(m.querySelector(".metric-ic svg"), "metric has an icon");
       assert.ok(m.querySelector(".metric-value"), "metric shows a headline value");
       assert.ok(m.querySelector(".meter .meter-fill"), "metric has a meter");
       assert.ok(m.querySelector("svg.spark"), "metric has a sparkline");
@@ -464,7 +464,7 @@ await (async () => {
       assert.ok(labels.includes(want), `${want} card present (${labels})`);
     }
     for (const c of cards) {
-      assert.ok(c.querySelector(".card-ic svg"), "card has a Lucide icon");
+      assert.ok(c.querySelector(".card-ic svg"), "card has an icon");
       assert.match(c.querySelector("b")?.textContent ?? "", /^\d+$/, "card shows a count");
     }
     const servers = cards.find((c) => c.querySelector("i")?.textContent.trim() === "SERVERS");

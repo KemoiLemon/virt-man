@@ -182,8 +182,8 @@ machinery than the thing it manages. The bundle is ~111 kB.
 
 The theme is ported from vm-man: square, monospace, every colour resolved from
 CSS variables on `html[data-theme=...]` so dark/light is one attribute flip.
-Icons are inline Lucide SVGs using `currentColor`, imported by name — the whole
-set costs 670 kB against 81 kB for named imports.
+Icons are inline Phosphor *fill* SVGs using `currentColor`, imported one file
+per glyph so only the icons in use reach the bundle.
 
 Native OS chrome is avoided throughout (custom listbox, no `window.prompt`)
 so the controls match the square, monospace theme instead of the host OS.

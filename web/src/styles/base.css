@@ -83,13 +83,12 @@ body {
 [hidden] { display: none !important; }
 
 /* ------------------------------------------------------------------ icons
-   One rule styles every Lucide icon: the pack ships path data only, so the
-   stroke weight and joins are defined here and never vary per icon. */
+   Icons are Phosphor "fill" glyphs: solid paths coloured from the text colour.
+   One rule owns that, so no icon carries its own fill. */
 .ico { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 auto; }
 .ico > svg {
   width: 100%; height: 100%; display: block;
-  fill: none; stroke: currentColor;
-  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  fill: currentColor; stroke: none;
 }
 /* Context sizes override the 16px default without touching the svg itself. */
 .tab .ico { width: 14px; height: 14px; }

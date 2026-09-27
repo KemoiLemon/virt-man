@@ -10,8 +10,8 @@
     "test": "vite build --ssr src/listbox.ts --outDir test/_build --logLevel error && vite build --ssr src/icons.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/stats.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/hardware.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/console.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/tayne.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/crop.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/suggest.ts --outDir test/_build --logLevel error --emptyOutDir false && vite build --ssr src/xml.ts --outDir test/_build --logLevel error --emptyOutDir false && node --test test/*.test.mjs"
   },
   "dependencies": {
-    "dompurify": "^3.4.16",
-    "lucide": "^1.48.0"
+    "@phosphor-icons/core": "^2.1.1",
+    "dompurify": "^3.4.16"
   },
   "devDependencies": {
     "jsdom": "^30.1.1",

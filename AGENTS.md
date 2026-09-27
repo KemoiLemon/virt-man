@@ -87,8 +87,10 @@ returned"). Every path that leaves a resource page must also run
 runs `DOMPurify.sanitize` *and* `enhanceSelects`. Assigning `innerHTML`
 directly skips both, so the listbox silently stops working.
 
-**Icons: named imports only** (`web/src/icons.ts`). Importing the whole Lucide
-set takes the bundle from 81 kB to 670 kB. Stroke is defined once in `.ico >
+**Icons: one file per glyph** (`web/src/icons.ts`). Icons are Phosphor *fill*,
+each imported as `@phosphor-icons/core/assets/fill/<name>-fill.svg?raw`; the
+package's JS entry carries every icon in every weight, so importing from it
+would pull all of them into the bundle. Fill colour is defined once in `.ico >
 svg`; never set it per icon.
 
 **Every colour comes from a CSS variable** on `html[data-theme=...]`. No
