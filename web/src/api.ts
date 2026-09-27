@@ -172,11 +172,16 @@ export interface VolumeSummary {
   allocation: number;
 }
 
-export interface Task {
-  id: number;
+/// One row of the server's persistent, per-user activity log.
+export interface ActivityEntry {
+  id: string;
+  user_id: string;
+  username: string;
   label: string;
-  status: "running" | "done" | "failed";
+  status: string;
   message: string;
+  /// Unix milliseconds.
+  at_ms: number;
 }
 
 // Daemon calls go through the proxy.

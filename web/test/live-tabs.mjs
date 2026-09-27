@@ -192,7 +192,7 @@ document.querySelector(".tree-net")?.dispatchEvent(new window.MouseEvent("click"
 await wait(1500);
 
 check("a network page shows card info and an IPAM table", () => {
-  assert.ok(document.querySelector("#net-back"), "network page opened (back button)");
+  assert.ok(document.querySelector("#net-edit"), "network page opened");
   const cards = [...document.querySelectorAll(".cards .card")];
   assert.ok(cards.length > 0, `${cards.length} info card(s)`);
   const labels = cards.map((c) => c.querySelector("i")?.textContent.trim());
@@ -206,6 +206,60 @@ check("a network page shows card info and an IPAM table", () => {
   assert.ok(document.querySelector("#ipam-add"), "add-allocation action present");
   results.push(["info", `network cards: ${labels.join(", ")}`]);
 });
+
+// Switching away from a resource page must stick: a stale selection lets the
+// 1s poll keep re-rendering the network page over whatever the user moved to,
+// which is the reported "the network page just returns".
+//
+// Navigation has to go through the sidebar: a resource page has no tab bar of
+// its own (it replaces the server view entirely), so the only way out is
+// clicking the server or a guest in the tree — exactly what the user does.
+{
+  document.querySelector(".tree-net")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1300);
+  assert.ok(document.querySelector("#net-edit"), "precondition: network page open");
+
+  // Switch to the server, then to one of its guests.
+  document.querySelector(".tree-row.tree-group")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1200);
+  check("switching to a server from a resource page leaves it behind", () => {
+    assert.equal(document.querySelector("#net-edit"), null, "network page gone");
+    assert.equal(document.querySelector("#pool-newvol"), null, "no pool page either");
+    assert.ok(document.querySelector(".tabbar .tab"), "server view is showing");
+  });
+
+  // The resurrection only happened once the poll ticked, so wait past one.
+  await wait(1600);
+  check("…and it stays gone across a poll tick", () => {
+    assert.equal(document.querySelector("#net-edit"), null, "poll did not resurrect it");
+    assert.equal(document.querySelector("#pool-newvol"), null, "nor the pool page");
+  });
+
+  // Same for a pool page, and for switching straight to a guest.
+  document.querySelector(".tree-pool")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1300);
+  assert.ok(document.querySelector("#pool-newvol"), "precondition: pool page open");
+  document.querySelector(".tree-row.tree-vm")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1600);
+  check("switching to a guest from a pool page leaves it behind", () => {
+    assert.equal(document.querySelector("#pool-newvol"), null, "pool page gone");
+    assert.equal(document.querySelector("#net-edit"), null, "no network page either");
+  });
+}
+
+// A slow resource fetch must not paint over a newer view: the poll can start
+// a network render and the user then click a guest before it resolves.
+{
+  document.querySelector(".tree-net")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  // Immediately switch, without waiting for that fetch.
+  document.querySelector(".tree-row.tree-vm")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1800);
+  check("an in-flight resource fetch cannot overwrite a newer view", () => {
+    assert.equal(document.querySelector("#net-edit"), null, "network page did not win the race");
+    assert.ok(document.querySelector(".tabbar .tab"), "VM view is intact");
+    assert.ok(document.querySelector(".dhead-ic"), "VM title carries its kind icon");
+  });
+}
 
 // ---- VM tabs ---------------------------------------------------------------
 document.querySelector(".tree-row.tree-vm")

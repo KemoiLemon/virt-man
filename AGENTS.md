@@ -75,6 +75,14 @@ still works in the XML and log panes.
 **No inline event handlers.** `onclick="..."` in an HTML string is blocked by
 the CSP. Assign handlers in JS after rendering.
 
+**A pane render that awaits must check it still owns the pane.** Bump
+`beginRender()` at the top of any renderer, and `if (!stillCurrent(gen)) return;`
+just before painting. The 1s poll can start a network/pool render and the user
+can then click elsewhere before it resolves; without the guard the stale
+response paints over the view they switched to ("the network page just
+returned"). Every path that leaves a resource page must also run
+`clearResourceSelection()`, or the poll re-renders the page they left.
+
 **`setHtml()` is the only way HTML enters the DOM** (`web/src/main.ts:18`). It
 runs `DOMPurify.sanitize` *and* `enhanceSelects`. Assigning `innerHTML`
 directly skips both, so the listbox silently stops working.
@@ -94,6 +102,13 @@ rather than inventing new styling.
 **Preserve these or the product regresses**: auth + RBAC on the remote web UI;
 auth-disabled loopback mode (used by the live suites and as a dev mode);
 TLS-pinned daemon connections.
+
+**Activity is server-side and per-user.** Long operations report their outcome
+to `POST /activity`, stored in `store.json` so it survives restarts. A
+non-admin sees only their own rows; an admin sees all, and the attribution
+cannot be forged without the `users` scope. Progress during an operation is
+still hand-rolled per call site (`runTask`'s `set`); there is intentionally no
+client-side task list to keep in sync.
 
 ## Testing rules
 

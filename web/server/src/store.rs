@@ -141,6 +141,27 @@ pub struct ApiKey {
     pub scopes: Scopes,
 }
 
+/// One recorded action by one user, kept so the admin panel can show who did
+/// what and when. Persisted in the store, so the log survives restarts — the
+/// client-side task tracker it replaces lost everything on reload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    pub id: String,
+    /// Owning account. Entries are filtered by this unless the caller is an
+    /// admin, so a non-admin only ever sees their own history.
+    pub user_id: String,
+    /// Snapshot of the name at the time of the action: the account can be
+    /// renamed or removed later, and the log should still be readable.
+    pub username: String,
+    pub label: String,
+    /// "done" or "failed".
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+    /// Unix milliseconds, so the browser can format in local time.
+    pub at_ms: u64,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
     pub users: Vec<User>,
@@ -151,6 +172,10 @@ pub struct Store {
     pub avatar_seq: u64,
     #[serde(default)]
     pub roles: Vec<RoleDef>,
+    /// Newest-last append-only action log. `#[serde(default)]` so a store
+    /// written before this existed still loads.
+    #[serde(default)]
+    pub activity: Vec<ActivityEntry>,
 }
 
 impl Store {
@@ -331,6 +356,43 @@ mod tests {
         s.seed_builtin_roles();
         s.users = users;
         s
+    }
+
+    #[test]
+    fn a_store_written_before_activity_existed_still_loads() {
+        // The activity log was added later, so an existing store.json has no
+        // `activity` key at all. Without the serde default that fails to
+        // parse and the whole install refuses to start.
+        let json = r#"{
+            "users": [],
+            "sessions": {},
+            "connections": [],
+            "api_keys": [],
+            "avatar_seq": 0
+        }"#;
+        let parsed: Store = serde_json::from_str(json).expect("old store parses");
+        assert!(parsed.activity.is_empty());
+        assert!(parsed.roles.is_empty(), "roles also default");
+    }
+
+    #[test]
+    fn activity_entries_round_trip_through_the_store() {
+        let mut s = Store::default();
+        s.activity.push(ActivityEntry {
+            id: "a1".into(),
+            user_id: "u1".into(),
+            username: "alice".into(),
+            label: "Create VM box".into(),
+            status: "failed".into(),
+            message: "disk full".into(),
+            at_ms: 1_700_000_000_000,
+        });
+        let text = serde_json::to_string(&s).expect("serializes");
+        let back: Store = serde_json::from_str(&text).expect("parses");
+        assert_eq!(back.activity.len(), 1);
+        assert_eq!(back.activity[0].username, "alice");
+        assert_eq!(back.activity[0].status, "failed");
+        assert_eq!(back.activity[0].at_ms, 1_700_000_000_000);
     }
 
     fn key(scopes: &[(&str, Permission)]) -> ApiKey {

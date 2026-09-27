@@ -57,7 +57,8 @@ window.fetch = (input, init) => {
 // whatever happens to be on this machine.
 const fixture = await ensureTestVm(base);
 window.eval(code);
-await new Promise((r) => window.setTimeout(r, 2000));
+const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
+await wait(2000);
 
 const results = [];
 const check = (name, fn) => {
@@ -151,6 +152,54 @@ check("themed dialog opens instead of native window.prompt", () => {
   assert.match(conn.querySelector(".modal-head").textContent, /Server/i, "Add Server dialog");
   conn.remove();
 });
+
+// Admin panel: the activity log lives there now, and the old bottom-right
+// task dock is gone.
+{
+  document.querySelector("#admin-btn")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(900);
+  const modal = document.querySelector(".modal-back.open");
+  check("admin panel offers an Activity tab", () => {
+    assert.ok(modal, "admin panel opened");
+    const tabs = [...modal.querySelectorAll("[data-admintab]")].map((b) => b.dataset.admintab);
+    assert.ok(tabs.includes("activity"), `activity tab present (${tabs})`);
+    assert.equal(document.querySelector("#tasks"), null, "the old task dock is gone");
+  });
+
+  modal?.querySelector('[data-admintab="activity"]')
+    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(900);
+  check("Activity tab renders the server log with a clear action", () => {
+    const area = modal.querySelector("#admin-area");
+    assert.ok(area, "admin area rendered");
+    // Either recorded rows, or the explicit empty state — never a blank pane.
+    assert.ok(area.querySelector("table.grid"), "activity table rendered");
+    assert.ok(area.querySelector("#act-clear"), "clear action present");
+  });
+
+  // An action recorded through the real API must show up in the log, which is
+  // what makes the panel a log rather than a placeholder.
+  await window.fetch(new URL("/activity", base).toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "live-suite probe", status: "done", message: "recorded" }),
+  });
+  modal.querySelector('[data-admintab="activity"]')
+    .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(900);
+  check("a recorded action appears in the Activity log", () => {
+    const area = modal.querySelector("#admin-area");
+    assert.match(area.textContent, /live-suite probe/, "recorded entry listed");
+  });
+
+  // Leave the backend as we found it: clear the log entry this suite added.
+  modal.querySelector("#act-clear")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(500);
+  // askConfirm raises its own modal; accept it ("Clear") to actually delete.
+  document.querySelector("#ask-yes")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(700);
+  document.querySelectorAll(".modal-back.open").forEach((m) => m.remove());
+}
 
 check("sidebar renders a nested resource tree", () => {
   assert.ok(document.querySelector(".restree"), ".restree container");

@@ -37,4 +37,4 @@ input, select, textarea { font-size: 13px; padding: 7px 9px; }
 .metric-value { font-size: 20px; }
 .fact span { font-size: 14px; }
 table.grid th, table.grid td { font-size: 13px; padding: 8px 10px; }
-.tasks-body, .task-row { font-size: 12px; }
+.task-row { font-size: 12px; }

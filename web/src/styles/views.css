@@ -134,18 +134,9 @@ select { display: none !important; }
 .ctxmenu-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ctxmenu-sep { height: 1px; background: var(--line); margin: 3px 0; }
 
-/* ----------------------------------------------------------- task dock */
-.tasks {
-  position: fixed; right: 0; bottom: 0; width: 380px; max-width: 94vw;
-  background: var(--panel); border: 1px solid var(--line2); border-bottom: none;
-  z-index: 40; display: flex; flex-direction: column; max-height: 60vh;
-}
-.tasks-head {
-  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-  border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: 1.5px;
-}
-.tasks-head .btn { margin-left: auto; }
-.tasks-body { overflow-y: auto; padding: 6px 12px; font-size: 11px; }
+/* Task/activity rows. The dock that used to own these is gone (activity now
+   lives in the admin panel), but the API-key list still reuses the row
+   layout, so the generic pieces stay. */
 .task-row {
   display: grid; grid-template-columns: 12px 1fr auto; gap: 8px;
   padding: 5px 0; border-bottom: 1px solid var(--line); align-items: center;

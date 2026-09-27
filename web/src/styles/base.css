@@ -142,6 +142,8 @@ body {
 /* ---------------------------------------------------------------- detail */
 .detail { overflow-y: auto; flex: 1; padding: 16px; }
 .dhead { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+/* Kind glyph beside a detail-pane title, matching the sidebar's .tree-ic. */
+.dhead-ic { width: 20px; height: 20px; color: var(--dim); }
 .dtitle { font-size: 19px; font-weight: 700; }
 .badge {
   font-size: 10px; letter-spacing: 1px; padding: 3px 7px;

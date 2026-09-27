@@ -1,6 +1,6 @@
 import { openCropDialog } from "./crop";
 import { api } from "./api";
-import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
+import type { ActivityEntry, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, Permission, PoolSummary, RoleDef, User, VolumeSummary } from "./api";
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -10,7 +10,7 @@ import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { DomainStats, HostStats } from "./stats";
-import { allTasks, clearTask, onTasks, runTask } from "./task";
+import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
 import { domainXml, defaultDhcpRange, dhcpRemaining, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeXml, withFirmware } from "./xml";
@@ -26,6 +26,24 @@ function capLabel(s: string): string {
     shutdown: "Shutdown",
   };
   return pretty[s] ?? s[0].toUpperCase() + s.slice(1);
+}
+
+/// Recent-first timestamp for the activity log: relative while it is recent,
+/// a clock time for today, and a dated time for anything older. Absolute
+/// timestamps on every row would be noise; "just now" is what matters for an
+/// action you just ran.
+function relTime(ms: number): string {
+  const now = Date.now();
+  const delta = now - ms;
+  if (delta < 0) return "just now"; // clock skew between host and browser
+  if (delta < 45_000) return "just now";
+  if (delta < 3_600_000) return `${Math.max(1, Math.round(delta / 60_000))}m ago`;
+  const then = new Date(ms);
+  const time = then.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // Same calendar day reads as a clock time; anything older needs the date.
+  return then.toDateString() === new Date(now).toDateString()
+    ? time
+    : `${then.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }
 
 /// Single HTML injection point. Every template's dynamic parts are escaped via
@@ -60,7 +78,7 @@ let summaryDiskSel: Record<string, string> = {};
 let summaryNetSel: Record<string, string> = {};
 let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
 /// Which section of the admin panel modal is showing.
-let adminTab: "users" | "roles" | "keys" = "users";
+let adminTab: "users" | "roles" | "keys" | "activity" = "users";
 /// Scope vocabulary and roles, fetched with the admin panel. The backend is
 /// the source of truth for scope names, so the editor can never offer one
 /// that nothing enforces.
@@ -81,6 +99,12 @@ const treePools: Record<string, PoolSummary[]> = {};
 /// with selectedVm, like the server tabs).
 let selectedNet: string | null = null;
 let selectedPool: string | null = null;
+/// Bumped by every full-pane render. A renderer that has to await a request
+/// captures this first and bails if it has moved, so a slow response cannot
+/// paint over the view the user has since switched to. Without it the 1s poll
+/// races the user: an in-flight network fetch resolves after they clicked a
+/// VM and replaces it, which is why the page "just came back".
+let renderGen = 0;
 /// Console view settings, kept across tab switches and reconnects.
 let consoleZoom = 0; // 0 = fit to the stage
 let consoleResizeObserver: ResizeObserver | null = null;
@@ -97,6 +121,27 @@ function closeConsole() {
 /// left streaming in the background.
 function leaveCurrentView() {
   if (vmTab === "console") closeConsole();
+}
+
+/// Claim ownership of the content pane. Call at the top of anything that
+/// paints it after an await, then check `stillCurrent(gen)` just before the
+/// paint.
+function beginRender(): number {
+  return ++renderGen;
+}
+
+function stillCurrent(gen: number): boolean {
+  return gen === renderGen;
+}
+
+/// Clear whichever resource the content pane is showing. Every path that
+/// leaves a resource page must run this: the poll re-renders whichever of
+/// selectedVm/selectedNet/selectedPool is still set, so a stale selection
+/// resurrects that page about a second after the user navigates away.
+function clearResourceSelection() {
+  selectedVm = null;
+  selectedNet = null;
+  selectedPool = null;
 }
 
 const $ = (sel: string, root: ParentNode = document): any =>
@@ -396,19 +441,13 @@ setHtml(app, `
       <div class="pane">
         <div class="detail" id="content"></div>
       </div>
-    </div>
-    <div class="tasks hidden" id="tasks">
-      <div class="tasks-head"><span>Task Log</span><button class="btn icon" id="tasks-close">${ic.close()}</button></div>
-      <div class="tasks-body" id="tasks-body"></div>
     </div>`);
 
   $("#theme-btn").onclick = toggleTheme;
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
   if ($("#admin-btn")) $("#admin-btn").onclick = openAdmin;
   $("#add-resource").onclick = () => openAddResource();
-  $("#tasks-close").onclick = () => $("#tasks").classList.add("hidden");
 
-  onTasks(renderTasks);
   renderTree();
   renderProfileBtn();
   if (!selectedConn) renderDc();
@@ -508,9 +547,7 @@ function renderTree() {
   $("#dc-row").onclick = () => {
     leaveCurrentView();
     selectedConn = null;
-    selectedVm = null;
-    selectedNet = null;
-    selectedPool = null;
+    clearResourceSelection();
     dcTab = "dashboard";
     renderTree();
     renderDc();
@@ -519,9 +556,7 @@ function renderTree() {
     (row as HTMLElement).onclick = () => {
       leaveCurrentView();
       selectedConn = (row as HTMLElement).dataset.conn!;
-      selectedVm = null;
-      selectedNet = null;
-      selectedPool = null;
+      clearResourceSelection();
       connTab = "dashboard";
       renderTree();
       renderConn();
@@ -536,9 +571,8 @@ function renderTree() {
       // Datacenter view or a different server's branch.
       leaveCurrentView();
       selectedConn = el.dataset.vmConn!;
+      clearResourceSelection();
       selectedVm = el.dataset.vm!;
-      selectedNet = null;
-      selectedPool = null;
       vmTab = "summary";
       renderTree();
       void renderVm();
@@ -549,9 +583,8 @@ function renderTree() {
     el.onclick = () => {
       leaveCurrentView();
       selectedConn = el.dataset.netConn!;
-      selectedVm = null;
+      clearResourceSelection();
       selectedNet = el.dataset.net!;
-      selectedPool = null;
       renderTree();
       void renderNetPage();
     };
@@ -561,8 +594,7 @@ function renderTree() {
     el.onclick = () => {
       leaveCurrentView();
       selectedConn = el.dataset.poolConn!;
-      selectedVm = null;
-      selectedNet = null;
+      clearResourceSelection();
       selectedPool = el.dataset.pool!;
       renderTree();
       void renderPoolPage();
@@ -848,6 +880,7 @@ function renderProfileBtn() {
 // ---------------------------------------------------------------- datacenter
 
 function renderDc() {
+  beginRender();
   const content = $("#content");
   // Real tabbar; the Users tab is hidden when the local app disables auth.
   // Actions live on the tab bar itself, right-aligned after the tabs.
@@ -1229,6 +1262,7 @@ function openAdmin() {
        <button class="tab" data-admintab="users">${ic.users(14)} Users</button>
        <button class="tab" data-admintab="roles">${ic.admin(14)} Roles</button>
        <button class="tab" data-admintab="keys">${ic.key(14)} API Keys</button>
+       <button class="tab" data-admintab="activity">${ic.autostart(14)} Activity</button>
      </div>
      <div id="admin-area">loading…</div>`,
     `<button class="btn" id="ad-close">Close</button>`,
@@ -1276,6 +1310,38 @@ async function loadAdmin(root: Element) {
     const meta = await api.get<{ roles: RoleDef[]; scopes: string[] }>("/roles");
     adminRoles = meta.roles;
     adminScopes = meta.scopes;
+
+    if (adminTab === "activity") {
+      const res = await api.get<{ entries: ActivityEntry[]; all_users: boolean }>("/activity");
+      // Admins see every user's history, so the User column only earns its
+      // place for them; a non-admin's rows already belong to one account.
+      const cols = res.all_users ? 5 : 4;
+      setHtml(area, `
+        <table class="grid">
+          <tr><th>When</th>${res.all_users ? "<th>User</th>" : ""}<th>Action</th><th>Result</th><th>Detail</th></tr>
+          ${res.entries.map((e) => `
+            <tr>
+              <td class="host">${esc(relTime(e.at_ms))}</td>
+              ${res.all_users ? `<td>${esc(e.username)}</td>` : ""}
+              <td class="tname">${esc(e.label)}</td>
+              <td><span class="state ${e.status === "done" ? "on" : ""}">${esc(capLabel(e.status))}</span></td>
+              <td class="task-msg">${esc(e.message || "—")}</td>
+            </tr>`).join("") || `<tr><td colspan="${cols}" class="empty">No activity recorded yet.</td></tr>`}
+        </table>
+        <div class="actions">
+          <button class="btn danger" id="act-clear">${ic.trash(14)} Clear ${res.all_users ? "all activity" : "my activity"}</button>
+        </div>`);
+      $("#act-clear", area).onclick = async () => {
+        const what = res.all_users ? "every user's activity history" : "your activity history";
+        if (!await askConfirm("Clear activity log", `Delete ${what}?`, "Clear", true)) return;
+        try {
+          await api.del("/activity");
+          toast("Activity log cleared");
+          void loadAdmin(root);
+        } catch (e) { toast((e as Error).message, "bad"); }
+      };
+      return;
+    }
 
     if (adminTab === "keys") {
       const [keys, users] = await Promise.all([
@@ -1581,6 +1647,7 @@ function backToConn() {
 /// (MAC -> IP DHCP hosts) and the lifecycle/edit actions.
 async function renderNetPage() {
   if (!selectedConn || !selectedNet) return;
+  const gen = beginRender();
   const conn = selectedConn; // narrowed copy for nested closures
   const content = $("#content");
   const name = selectedNet;
@@ -1589,6 +1656,9 @@ async function renderNetPage() {
       api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`),
       api.get<{ xml: string }>(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/xml`),
     ]);
+    // The poll may have started this render and the user then switched panes;
+    // painting now would yank their view back to the network page.
+    if (!stillCurrent(gen)) return;
     const net = summary.find((n) => n.name === name);
     if (!net) {
       setHtml(content, `<div class="empty">Network "${esc(name)}" no longer exists.</div>`);
@@ -1620,7 +1690,7 @@ async function renderNetPage() {
 
     setHtml(content, `
       <div class="dhead">
-        <button class="btn icon" id="net-back" title="Back">${ic.back()}</button>
+        <span class="dhead-ic">${ic.network(20)}</span>
         <span class="dtitle">${esc(name)}</span>
         <span class="badge ${net.active ? "on" : ""}">${net.active ? "Active" : "Inactive"}</span>
       </div>
@@ -1733,7 +1803,6 @@ async function renderNetPage() {
       };
     };
 
-    $("#net-back", content).onclick = backToConn;
     $("#net-toggle", content).onclick = async () => {
       await netAction(net.active ? "stop" : "start", name);
       void renderNetPage();
@@ -1764,6 +1833,7 @@ async function renderNetPage() {
       };
     });
   } catch (e) {
+    if (!stillCurrent(gen)) return;
     setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
@@ -1820,6 +1890,7 @@ async function autoAllocateIpam(conn: string, vmName: string) {
 /// Dedicated storage page: one pool's capacity plus full volume management.
 async function renderPoolPage() {
   if (!selectedConn || !selectedPool) return;
+  const gen = beginRender();
   const content = $("#content");
   const name = selectedPool;
   try {
@@ -1827,6 +1898,8 @@ async function renderPoolPage() {
       api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`),
       api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}/volumes`),
     ]);
+    // Same guard as the network page: never paint over a newer view.
+    if (!stillCurrent(gen)) return;
     const p = pool.find((x) => x.name === name);
     if (!p) {
       setHtml(content, `<div class="empty">Pool "${esc(name)}" no longer exists.</div>`);
@@ -1838,7 +1911,7 @@ async function renderPoolPage() {
 
     setHtml(content, `
       <div class="dhead">
-        <button class="btn icon" id="pool-back" title="Back">${ic.back()}</button>
+        <span class="dhead-ic">${ic.storage(20)}</span>
         <span class="dtitle">${esc(name)}</span>
         <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
       </div>
@@ -1869,7 +1942,6 @@ async function renderPoolPage() {
           <td><button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
       </table>`);
 
-    $("#pool-back", content).onclick = backToConn;
     $("#pool-upload", content).onclick = () => openUpload(name);
     $("#pool-newvol", content).onclick = () => openCreateVolume(name);
     $("#pool-del", content).onclick = async () => {
@@ -1882,6 +1954,7 @@ async function renderPoolPage() {
       };
     });
   } catch (e) {
+    if (!stillCurrent(gen)) return;
     setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
@@ -1892,6 +1965,8 @@ async function renderConn() {
   if (!selectedConn) return;
   const conn = connections.find((c) => c.id === selectedConn);
   if (!conn) return;
+  // Server view owns the pane: invalidates any in-flight resource render.
+  beginRender();
   const content = $("#content");
 setHtml(content, `
     <div class="dhead"><span class="dtitle">${esc(conn.name)}</span>
@@ -1915,7 +1990,10 @@ setHtml(content, `
   content.querySelectorAll("[data-tab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
       connTab = (b as HTMLElement).dataset.tab as typeof connTab;
-      selectedVm = null;
+      // Clear the whole resource selection, not just selectedVm: leaving
+      // selectedNet/selectedPool set made the 1s poll re-render that network
+      // or pool page about a second after the user switched to a server tab.
+      clearResourceSelection();
       renderConn();
     };
   });
@@ -2710,12 +2788,14 @@ setHtml(target, `<div class="empty">${esc((e as Error).message)}</div>`);
 
 async function renderVm() {
   if (!selectedConn || !selectedVm) return;
+  // VM view owns the pane: invalidates any in-flight resource render.
+  beginRender();
   const content = $("#content");
   const vm = selectedVm;
   const title = treeVms[selectedConn]?.find((x) => x.name === vm)?.title || vm;
   const running = treeVms[selectedConn]?.find((x) => x.name === vm)?.active === true;
 setHtml(content, `
-    <div class="dhead"><span class="dtitle">${esc(title)}</span></div>
+    <div class="dhead"><span class="dhead-ic">${ic.vm(20)}</span><span class="dtitle">${esc(title)}</span></div>
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
       <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
@@ -2763,6 +2843,10 @@ async function renderVmBody(vm: string) {
   if (!selectedConn) return;
   const conn = selectedConn; // narrowed copy for the nested closures below
   const body = $("#vm-body");
+  // The pane can be gone: the poll may fire this just as a different view
+  // replaces the content (or the user navigates mid-render). Bail rather than
+  // dereference null — the previous `.parentElement?.` guarded the wrong hop.
+  if (!body) return;
   // Only the Hardware tab stretches to fill the pane; every other tab scrolls
   // normally. Drop the class here and let the hardware branch re-add it.
   body.parentElement?.classList.remove("vm-fill");
@@ -4137,12 +4221,15 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
       // Create any additional "new volume" disks before defining the domain.
       await createPendingVolumes(conn, form.name, devices, set);
       set("defining domain");
-      await api.postXml(`/proxy/${conn}/domains?start=true`, withDevices(domainXml(form), devices));
+      // Defined shut off: creating a guest must not also boot it, so a
+      // mis-sized or mis-configured VM cannot start eating resources before
+      // it has been reviewed. Start it deliberately from the VM view.
+      await api.postXml(`/proxy/${conn}/domains?start=false`, withDevices(domainXml(form), devices));
       // Give each of the new guest's NICs a static DHCP allocation in its
       // network, so it keeps a stable IP.
       await autoAllocateIpam(conn, form.name);
     });
-    toast("VM creation started");
+    toast("VM created");
     renderConn();
   };
 
@@ -4535,24 +4622,6 @@ async function changeAvatar(card?: Element) {
 }
 
 // ---------------------------------------------------------------- tasks
-
-function renderTasks() {
-  const tasks = allTasks();
-  const box = $("#tasks-body");
-  const dock = $("#tasks");
-  if (!box || !dock) return;
-  dock.classList.toggle("hidden", tasks.length === 0);
-setHtml(box, tasks.map((t) => `
-    <div class="task-row">
-      <span class="task-dot ${t.status}"></span>
-      <span><b>${esc(t.label)}</b><br><span class="task-msg">${esc(t.message)}</span></span>
-      <button class="btn icon" data-clear="${t.id}">${ic.close()}</button>
-    </div>`).join(""));
-  box.querySelectorAll("[data-clear]").forEach((b: Element) => {
-    (b as HTMLElement).onclick = () => clearTask(+(b as HTMLElement).dataset.clear!);
-  });
-}
-
 // ---------------------------------------------------------------- polling
 
 function startPolling() {
@@ -4564,6 +4633,8 @@ function startPolling() {
     if (!selectedConn && !selectedVm && dcTab === "dashboard") {
       loadDcDashboard();
     } else if (selectedConn && !selectedVm) {
+      // Resource pages poll their own data; only repaint when they are the
+      // view actually on screen.
       if (selectedNet) renderNetPage();
       else if (selectedPool) renderPoolPage();
       else if (connTab === "dashboard") loadDashboard();
