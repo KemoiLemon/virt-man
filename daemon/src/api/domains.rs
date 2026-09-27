@@ -5,8 +5,11 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use virt::domain::Domain;
+use virt::storage_pool::StoragePool;
+use virt::storage_vol::StorageVol;
 
 use super::ApiError;
+use crate::disks;
 use crate::libvirt::{domain_state_name, parse_graphics, with_conn};
 
 pub fn routes() -> Router {
@@ -136,102 +139,55 @@ async fn delete(
     let v = with_conn(move |c| {
         let d = Domain::lookup_by_name(c, &name)?;
         let xml = d.get_xml_desc(0)?;
+        // Decide the cleanup BEFORE undefining: the disk list comes from this
+        // definition, and the in-use check must still be able to see every
+        // other guest. Only the guest's own disks are candidates — an attached
+        // ISO, a read-only disk, or anything another guest references is kept.
+        let plan = if remove_storage {
+            disks::plan_cleanup(&xml, &disks::sources_used_elsewhere(c, Some(&name)))
+        } else {
+            disks::Cleanup::default()
+        };
         let flags = virt::sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
             | virt::sys::VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
             | virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM;
         d.undefine_flags(flags)?;
-        if remove_storage {
-            for src in disk_sources(&xml) {
-                // Best effort: a disk may live outside any pool, or the pool
-                // may be inactive. The VM is already gone either way.
-                match src {
-                    DiskSource::Path(path) => {
-                        let _ = virt::storage_vol::StorageVol::lookup_by_path(c, &path)
-                            .and_then(|vol| vol.delete(0));
-                    }
-                    DiskSource::Volume { pool, volume } => {
-                        let _ = virt::storage_pool::StoragePool::lookup_by_name(c, &pool)
-                            .and_then(|p| {
-                                virt::storage_vol::StorageVol::lookup_by_name(&p, &volume)
-                            })
-                            .and_then(|vol| vol.delete(0));
-                    }
+
+        let mut removed = Vec::new();
+        let mut failed = Vec::new();
+        for src in &plan.removable {
+            // Best effort: a disk may live outside any pool, or the pool may be
+            // inactive. The VM is already gone either way, so a failure is
+            // reported rather than fatal.
+            let outcome = match src {
+                disks::DiskSource::Path(path) => {
+                    StorageVol::lookup_by_path(c, path).and_then(|vol| vol.delete(0))
                 }
+                disks::DiskSource::Volume { pool, volume } => StoragePool::lookup_by_name(c, pool)
+                    .and_then(|p| StorageVol::lookup_by_name(&p, volume))
+                    .and_then(|vol| vol.delete(0)),
+            };
+            match outcome {
+                Ok(()) => removed.push(src.describe()),
+                Err(e) => failed.push(json!({"disk": src.describe(), "error": e.to_string()})),
             }
         }
-        Ok(json!({ "name": name, "undefined": true, "storage_removed": remove_storage }))
+        Ok(json!({
+            "name": name,
+            "undefined": true,
+            "storage_removed": remove_storage,
+            // What went, what was deliberately kept and why, and what could
+            // not be removed — so the UI can tell the whole truth.
+            "removed": removed,
+            "kept": plan.kept.iter()
+                .map(|(disk, reason)| json!({"disk": disk, "reason": reason.as_str()}))
+                .collect::<Vec<_>>(),
+            "failed": failed,
+        }))
     })
     .await
     .map_err(ApiError::internal)?;
     Ok(Json(v))
-}
-
-/// A disk's backing store, from the domain XML.
-#[derive(Debug, PartialEq)]
-enum DiskSource {
-    /// File-backed disk: delete by absolute path.
-    Path(String),
-    /// Volume-backed disk: delete by pool + volume name.
-    Volume { pool: String, volume: String },
-}
-
-/// Extract every disk's backing store. Handles the volume-backed disks this
-/// UI creates (`<source pool=… volume=…/>`) as well as file-backed ones; the
-/// old path-only parser searched for `<source>` (with no attributes) and so
-/// matched nothing, leaving disks behind on delete.
-fn disk_sources(xml: &str) -> Vec<DiskSource> {
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(i) = rest.find("<disk") {
-        let block = &rest[i..];
-        let Some(end) = block.find("</disk>") else {
-            break;
-        };
-        let disk = &block[..end];
-        if let Some(si) = disk.find("<source") {
-            let source = &disk[si..];
-            // Up to the closing '>' of the <source …/> element, so attr()
-            // reads attributes from the right tag even when self-closing.
-            let src_end = source.find('>').map(|e| &source[..=e]).unwrap_or(source);
-            if let Some(path) = attr(src_end, "file") {
-                out.push(DiskSource::Path(path.to_string()));
-            } else if let (Some(pool), Some(volume)) =
-                (attr(src_end, "pool"), attr(src_end, "volume"))
-            {
-                out.push(DiskSource::Volume {
-                    pool: pool.to_string(),
-                    volume: volume.to_string(),
-                });
-            }
-        }
-        rest = &block[end + 7..];
-    }
-    out
-}
-
-fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    // Match the attribute name as a whole token, not a substring: a volume
-    // named "some-file.iso" must not satisfy a search for "file".
-    let mut start = 0;
-    while let Some(rel) = tag[start..].find(name) {
-        let i = start + rel;
-        let before_ok = tag[..i]
-            .chars()
-            .next_back()
-            .is_some_and(|ch| ch.is_whitespace());
-        if before_ok {
-            let rest = tag[i + name.len()..].trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                let rest = rest.trim_start();
-                let quote = rest.chars().next()?;
-                let inner = rest.strip_prefix(quote)?;
-                let j = inner.find(quote)?;
-                return Some(&inner[..j]);
-            }
-        }
-        start = i + name.len();
-    }
-    None
 }
 
 async fn get_state(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -568,52 +524,5 @@ mod tests {
         // A shut-off guest's inactive XML has no <target dev>.
         let no_target = "<interface type='network'>\n      <mac address='52:54:00:12:34:56'/>\n      <model type='virtio'/>\n    </interface>";
         assert_eq!(interface_info(no_target).0, None);
-    }
-
-    #[test]
-    fn disk_sources_reads_volume_and_file_backed_disks() {
-        let xml = r#"<domain><devices>
-            <disk type='volume' device='disk'>
-              <source pool='default' volume='Alpine.qcow2'/>
-              <target dev='vda' bus='virtio'/>
-            </disk>
-            <disk type='file' device='disk'>
-              <source file='/var/lib/libvirt/images/extra.raw'/>
-              <target dev='vdb' bus='virtio'/>
-            </disk>
-            <disk type='file' device='cdrom'>
-              <target dev='sda' bus='sata'/>
-              <readonly/>
-            </disk>
-        </devices></domain>"#;
-        assert_eq!(
-            disk_sources(xml),
-            vec![
-                DiskSource::Volume {
-                    pool: "default".into(),
-                    volume: "Alpine.qcow2".into()
-                },
-                DiskSource::Path("/var/lib/libvirt/images/extra.raw".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn disk_sources_never_matches_an_attribute_name_inside_a_value() {
-        // A volume literally named "some-file.iso" must not register as a
-        // file-backed disk.
-        let xml = r#"<domain><devices>
-            <disk type='volume' device='cdrom'>
-              <source pool='ISOs' volume='some-file.iso'/>
-              <target dev='sda' bus='sata'/>
-            </disk>
-        </devices></domain>"#;
-        assert_eq!(
-            disk_sources(xml),
-            vec![DiskSource::Volume {
-                pool: "ISOs".into(),
-                volume: "some-file.iso".into()
-            }]
-        );
     }
 }

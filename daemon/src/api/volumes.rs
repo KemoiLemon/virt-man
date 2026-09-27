@@ -13,6 +13,7 @@ use virt::storage_vol::StorageVol;
 use virt::stream::Stream;
 
 use super::ApiError;
+use crate::disks::{self, DiskSource};
 use crate::libvirt::{LvError, with_conn};
 
 pub fn routes() -> Router {
@@ -81,6 +82,27 @@ async fn create(
 }
 
 async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
+    // Refuse while any guest still has this disk attached: deleting it would
+    // corrupt that guest's next boot, and the guest would look fine until it
+    // was restarted. Checked in its own connection so the refusal can be a
+    // 409 with the offending guest names rather than a blanket 500.
+    let target = DiskSource::Volume {
+        pool: pool.clone(),
+        volume: vol.clone(),
+    };
+    let holders = {
+        let target = target.clone();
+        with_conn(move |c| Ok(disks::referencing_domains(c, &target)))
+            .await
+            .map_err(ApiError::internal)?
+    };
+    if !holders.is_empty() {
+        return Err(ApiError::conflict(format!(
+            "'{vol}' is in use by {} — detach it first",
+            holders.join(", ")
+        )));
+    }
+
     let v = with_conn(move |c| {
         let p = StoragePool::lookup_by_name(c, &pool)?;
         let v = StorageVol::lookup_by_name(&p, &vol)?;

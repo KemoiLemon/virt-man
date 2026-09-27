@@ -37,6 +37,13 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, message)
     }
 
+    /// The request is well-formed but refused because of current state — e.g.
+    /// deleting a disk a guest still has attached. Distinct from a bad request
+    /// so the UI can tell "you asked something wrong" from "that is in use".
+    pub fn conflict(message: impl std::fmt::Display) -> Self {
+        Self::new(StatusCode::CONFLICT, message)
+    }
+
     pub fn internal(message: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }

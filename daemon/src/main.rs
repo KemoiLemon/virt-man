@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod disks;
 mod firewall;
 mod libvirt;
 mod rfb;

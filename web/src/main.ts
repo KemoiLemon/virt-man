@@ -3418,20 +3418,55 @@ async function act(url: string, method: "POST" | "DELETE" = "POST") {
   }
 }
 
+/// Result of `DELETE /domains/{name}`: which backing stores went, which were
+/// deliberately kept (with a reason), and which could not be removed.
+interface DomainDeleteResult {
+  removed?: string[];
+  kept?: { disk: string; reason: string }[];
+  failed?: { disk: string; error: string }[];
+}
+
+/// Plain-language reason for a disk the daemon kept, so the user is never left
+/// wondering why a "delete the disks" request left something behind.
+function keepReasonText(reason: string): string {
+  if (reason === "iso") return "ISO";
+  if (reason === "readonly") return "read-only";
+  if (reason === "in_use") return "in use by another guest";
+  return reason;
+}
+
 async function deleteVm(name: string) {
   if (!selectedConn) return;
   if (!(await askConfirm("Delete VM", `Delete VM "${name}"?`, "Delete", true))) return;
   const removeStorage = await askConfirm(
     "Remove storage",
-    `Also delete the disks belonging to "${name}"? This cannot be undone.`,
+    // Say what will NOT go: an ISO the guest boots from is shared media, and a
+    // disk another guest uses is not this VM's to delete.
+    `Also delete the disks belonging to "${name}"? ISOs and disks other guests use are kept.`,
     "Delete disks",
     true,
   );
   try {
-    await api.del(`/proxy/${selectedConn}/domains/${encodeURIComponent(name)}?remove_storage=${removeStorage}`);
-    toast("Deleted");
+    const res = await api.del<DomainDeleteResult>(
+      `/proxy/${selectedConn}/domains/${encodeURIComponent(name)}?remove_storage=${removeStorage}`);
     selectedVm = null;
+    const removed = res?.removed ?? [];
+    const kept = res?.kept ?? [];
+    const failed = res?.failed ?? [];
+
+    // Report the whole outcome, not just "Deleted": a partial cleanup that
+    // looks complete is how a stale disk gets forgotten about.
+    const lines: string[] = [];
+    if (removed.length) lines.push(`Deleted ${removed.length} disk(s)`);
+    if (kept.length) {
+      lines.push(`Kept ${kept.map((k) => `${k.disk} (${keepReasonText(k.reason)})`).join(", ")}`);
+    }
+    if (failed.length) lines.push(`Could not delete ${failed.map((f) => f.disk).join(", ")}`);
+    toast(lines.length ? lines.join("\n") : "Deleted", failed.length ? "bad" : "ok");
+
     renderConn();
+    // The kept disks are still on the host, so keep the sidebar counts honest.
+    void refreshTreeVms();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
