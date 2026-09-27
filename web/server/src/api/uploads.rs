@@ -406,11 +406,18 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
         .await
         .map_err(|e| format!("open staged file: {e}"))?;
     // Count bytes as they leave, so `sent` is real progress rather than a
-    // guess. ReaderStream keeps the transfer chunked: a multi-GB ISO is never
-    // held in memory.
+    // guess, and hash them in the same pass. ReaderStream keeps the transfer
+    // chunked: a multi-GB ISO is never held in memory. Hashing here rather
+    // than re-reading the staged file afterwards removes a second full pass
+    // over it, which on a multi-GB ISO is seconds of disk I/O for nothing.
     let progress = job.clone();
+    let hasher = Arc::new(Mutex::new(Sha256::new()));
+    let hashing = hasher.clone();
     let stream = tokio_util::io::ReaderStream::new(file).inspect(move |chunk| {
         if let Ok(bytes) = chunk {
+            if let Ok(mut h) = hashing.lock() {
+                h.update(bytes);
+            }
             if let Ok(mut j) = progress.lock() {
                 j.sent += bytes.len() as u64;
                 // Average rate over the whole push. Computed here rather than
@@ -445,13 +452,25 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     if !status.is_success() {
         return Err(format!("daemon refused the upload: HTTP {status} {body}"));
     }
-    // The daemon times its own receive and write separately, which is the only
-    // way to tell a slow network from slow storage. Its response is the last
-    // thing to arrive, so this only fills in the final figures.
+    // The daemon reports the SHA-256 it computed while writing, plus its own
+    // receive and write timings — the only way to tell a slow network from
+    // slow storage. Taking the digest from here is what avoids the daemon
+    // re-reading the volume: on a cold 7.1 GiB ISO that pass cost ~41 s.
+    let mut remote = String::new();
     if let Ok(v) = serde_json::from_str::<Value>(&body) {
         let mut j = job.lock().expect("job lock poisoned");
         j.daemon_recv_bps = v.get("recv_bps").and_then(Value::as_f64).unwrap_or(0.0);
         j.daemon_write_bps = v.get("write_bps").and_then(Value::as_f64).unwrap_or(0.0);
+        remote = v
+            .get("sha256")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+    }
+    if remote.is_empty() {
+        // Fail closed: without the daemon's digest there is nothing to verify
+        // against, and treating that as success would accept any bad copy.
+        return Err("the daemon did not report a hash for the uploaded volume".into());
     }
 
     // --- verify ------------------------------------------------------------
@@ -459,12 +478,12 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
         let mut j = job.lock().expect("job lock poisoned");
         j.phase = Phase::Verifying;
     }
-    let path_for_hash = path.clone();
-    let local = tokio::task::spawn_blocking(move || sha256_file(&path_for_hash))
-        .await
-        .map_err(|e| format!("hash task: {e}"))??;
-
-    let remote = daemon_hash(&client, &addr.base, &conn.token, &pool, &name).await?;
+    // Every byte has been streamed by now, so this is the complete digest of
+    // what we sent, computed without a second read.
+    let local = {
+        let mut h = hasher.lock().expect("hash lock poisoned");
+        to_hex(&h.finalize_reset())
+    };
     verify(&local, &remote)?;
 
     // --- clean up ----------------------------------------------------------
@@ -511,6 +530,11 @@ fn fmt_bps(bps: f64) -> String {
     format!("{:.1} MiB/s", kib / KIB)
 }
 
+/// Lowercase hex of a digest.
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Is a volume of this name already in the pool?
 ///
 async fn volume_exists(
@@ -533,60 +557,6 @@ async fn volume_exists(
         .await
         .map_err(|e| format!("daemon lookup: {e}"))?;
     Ok(resp.status().is_success())
-}
-
-/// SHA-256 of a file, streamed so a multi-GB ISO never enters memory.
-fn sha256_file(path: &std::path::Path) -> Result<String, String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).map_err(|e| format!("open for hash: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 256 * 1024];
-    loop {
-        let n = f
-            .read(&mut buf)
-            .map_err(|e| format!("read for hash: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
-}
-
-/// Ask the daemon for the stored volume's hash.
-async fn daemon_hash(
-    client: &reqwest::Client,
-    base: &str,
-    token: &str,
-    pool: &str,
-    name: &str,
-) -> Result<String, String> {
-    let url = format!(
-        "{}/pools/{}/volumes/{}/hash",
-        base,
-        urlencode(pool),
-        urlencode(name)
-    );
-    let resp = client
-        .get(&url)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .send()
-        .await
-        .map_err(|e| format!("daemon hash request: {e}"))?;
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    if !status.is_success() {
-        return Err(format!("daemon hash failed: HTTP {status} {v}"));
-    }
-    v.get("sha256")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| format!("daemon hash response had no sha256: {v}"))
 }
 
 /// Percent-encode a path segment.
@@ -686,11 +656,13 @@ mod tests {
             Err(_) => panic!("spool should succeed"),
         };
         assert_eq!(n, data.len() as u64);
-        let got = sha256_file(&path).unwrap();
+        // The same in-memory hash the push path computes, so this also pins the
+        // staged bytes to the digest that will later be compared.
         let mut h = Sha256::new();
         h.update(&data);
-        let want: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(got, want);
+        let want = to_hex(&h.finalize());
+        let got = to_hex(&Sha256::digest(std::fs::read(&path).unwrap()));
+        assert_eq!(got, want, "spooled bytes are exactly the body");
         let _ = std::fs::remove_file(&path);
     }
 

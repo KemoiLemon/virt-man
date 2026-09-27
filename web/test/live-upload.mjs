@@ -128,18 +128,22 @@ await check("the daemon really holds those exact bytes", async () => {
   assert.equal(remote.size, size, "and the full length");
 });
 
+const stagedParts = () => new Set(readdirSync(uploadsDir).filter((f) => f.endsWith(".part")));
+
 await check("a name that already exists is refused before the body is sent", async () => {
   // Re-uploading under an existing name must fail fast with a readable message
   // rather than after streaming gigabytes into a raw libvirt error.
+  const before = stagedParts();
   const res = await stageUpload(name);
   assert.equal(res.status, 409, `expected 409, got ${res.status}`);
   assert.match(res.body.error, /already exists/, `unhelpful message: ${res.body.error}`);
-});
 
-await check("a refused upload leaves nothing staged behind", () => {
-  // A 409 must not leave a multi-GB body in the uploads directory.
-  const leftovers = readdirSync(uploadsDir).filter((f) => f.endsWith(".part"));
-  assert.deepEqual(leftovers, [], `unexpected staged files: ${leftovers.join(", ")}`);
+  // A 409 must not stage anything. Compared against a snapshot rather than
+  // asserting an empty directory: a transfer that genuinely fails keeps its
+  // staged copy on purpose (it is the evidence, and the retry needs it), so
+  // leftovers from elsewhere are not this check's business.
+  const added = [...stagedParts()].filter((f) => !before.has(f));
+  assert.deepEqual(added, [], `the refused upload staged: ${added.join(", ")}`);
 });
 
 await check("the transfer is recorded in the activity log", async () => {

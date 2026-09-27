@@ -117,8 +117,18 @@ async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>
     Ok(Json(v))
 }
 
+/// Lowercase hex of a digest.
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// SHA-256 of a file, streamed in chunks so a multi-GB ISO is never held in
-/// memory. Used to confirm a staged upload arrived on the daemon intact.
+/// memory. Used by `GET .../hash` to verify a volume that already exists —
+/// the upload path does *not* use this, since it hashes while it writes.
+///
+/// The digest is of the volume's stored bytes, so for a non-raw format it is
+/// the digest of that container (a qcow2 header and all), not of the guest's
+/// view of the disk. Uploads create raw volumes, where the two coincide.
 fn sha256_file(path: &str) -> Result<(String, u64), LvError> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -134,12 +144,7 @@ fn sha256_file(path: &str) -> Result<(String, u64), LvError> {
         hasher.update(&buf[..n]);
         total += n as u64;
     }
-    let hex = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    Ok((hex, total))
+    Ok((to_hex(&hasher.finalize()), total))
 }
 
 /// Content hash and size of a stored volume, so a client that staged the same
@@ -253,11 +258,12 @@ async fn upload(
             None => StorageVol::lookup_by_name(&p, &vol)?,
         };
         let write_start = std::time::Instant::now();
-        upload_from_file(c, &vol, &tmp_path, total)?;
+        let sha256 = upload_from_file(c, &vol, &tmp_path, total)?;
         let write_secs = write_start.elapsed().as_secs_f64();
         Ok(json!({
             "name": vol.get_name().unwrap_or_default(),
             "uploaded": total,
+            "sha256": sha256,
             "recv_bps": bps(total, recv_secs),
             "write_bps": bps(total, write_secs),
         }))
@@ -269,21 +275,17 @@ async fn upload(
     Ok(Json(v?))
 }
 
-/// Push a whole buffer into a libvirt stream.
+/// Push a whole buffer, retrying until every byte has been accepted.
 ///
 /// `Stream::send` maps to a single `virStreamSend`, which is allowed to accept
 /// fewer bytes than it was offered once libvirt's internal buffer fills up (the
 /// buffer is 64 KiB, so this shows up as whole-chunk losses on a large ISO).
-/// Ignoring the returned count drops the tail of that chunk, and because
-/// `finish()` then reports a clean EOF, `virStorageVolUpload` still *succeeds* —
-/// leaving a truncated volume that looks like a completed upload. Retry until
-/// every byte has been accepted.
-fn send_all(stream: &Stream, data: &[u8]) -> Result<(), LvError> {
-    send_all_with(data, |chunk| stream.send(chunk).map_err(LvError::from))
-}
-
-/// The retry loop behind [`send_all`], generic over the send call so the
-/// partial-write behaviour can be tested without a live libvirt connection.
+/// Ignoring the returned count dropped the tail of that chunk, and because
+/// `finish()` then reports a clean EOF, `virStorageVolUpload` still *succeeded*
+/// — leaving a truncated volume that looked like a completed upload.
+///
+/// Generic over the send call so the partial-write behaviour can be tested
+/// without a live libvirt connection.
 fn send_all_with<F>(mut data: &[u8], mut send: F) -> Result<(), LvError>
 where
     F: FnMut(&[u8]) -> Result<usize, LvError>,
@@ -308,12 +310,46 @@ where
     Ok(())
 }
 
+/// Copy `reader` into `send`, hashing each chunk as it is accepted, and return
+/// `(bytes sent, hex digest)`.
+///
+/// The hash is taken in the same pass that performs the write, so verifying an
+/// upload costs no second read of the volume. That read is not cheap: a cold
+/// 7.1 GiB ISO takes ~41 s to hash on this host.
+///
+/// The digest covers the bytes handed to libvirt, which for a raw volume is
+/// exactly what lands in the file.
+fn send_hashed<R, F>(reader: &mut R, mut send: F) -> Result<(u64, String), LvError>
+where
+    R: std::io::Read,
+    F: FnMut(&[u8]) -> Result<usize, LvError>,
+{
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n];
+        // `send_all_with` retries until the whole chunk is accepted, so the
+        // digest can never cover less than the chunk.
+        send_all_with(chunk, &mut send)?;
+        hasher.update(chunk);
+        total += n as u64;
+    }
+    Ok((total, to_hex(&hasher.finalize())))
+}
+
+/// Write `path` into `vol` and return the SHA-256 of what was written.
 fn upload_from_file(
     conn: &virt::connect::Connect,
     vol: &StorageVol,
     path: &std::path::Path,
     length: u64,
-) -> Result<(), LvError> {
+) -> Result<String, LvError> {
     let stream = Stream::new(conn, 0)?;
 
     // `virStorageVolUpload` only *starts* the transfer: it returns as soon as
@@ -328,17 +364,15 @@ fn upload_from_file(
     vol.upload(&stream, 0, length, 0)?;
 
     let mut file = std::fs::File::open(path)?;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        use std::io::Read;
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        send_all(&stream, &buf[..n])?;
+    let (sent, sha256) = send_hashed(&mut file, |chunk| stream.send(chunk).map_err(LvError::from))?;
+    // A short write must not be reported as a clean upload.
+    if sent != length {
+        return Err(LvError::Msg(format!(
+            "wrote {sent} bytes but was given {length}"
+        )));
     }
     stream.finish()?;
-    Ok(())
+    Ok(sha256)
 }
 
 fn volume_xml(name: &str, capacity: u64) -> String {
@@ -349,7 +383,66 @@ fn volume_xml(name: &str, capacity: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bps, send_all_with, sha256_file};
+    use super::{bps, send_all_with, send_hashed, sha256_file};
+
+    /// Known-answer test for the write-time hash. Pins it to real SHA-256
+    /// rather than to "consistent with the other side", which would pass even
+    /// if both sides were wrong.
+    #[test]
+    fn the_write_hash_is_a_real_sha256() {
+        let mut data = &b"abc"[..];
+        let (sent, hex) = send_hashed(&mut data, |chunk| Ok(chunk.len())).unwrap();
+        assert_eq!(sent, 3);
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// Partial sends must not change the digest: the hash has to cover every
+    /// byte written, not just the ones each `virStreamSend` happened to take.
+    /// This is the bug class that once truncated volumes silently, so the
+    /// hash is asserted to be byte-identical under both send behaviours.
+    #[test]
+    fn the_write_hash_covers_a_partially_sent_buffer_in_full() {
+        let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7) as u8).collect();
+
+        let mut whole = &data[..];
+        let (n1, h1) = send_hashed(&mut whole, |chunk| Ok(chunk.len())).unwrap();
+
+        let mut partial = &data[..];
+        let (n2, h2) = send_hashed(&mut partial, |chunk| Ok(chunk.len().min(64 * 1024))).unwrap();
+
+        assert_eq!(n1, data.len() as u64, "all bytes counted");
+        assert_eq!(
+            n2,
+            data.len() as u64,
+            "all bytes counted despite short sends"
+        );
+        assert_eq!(
+            h1, h2,
+            "the digest is independent of how the send was split"
+        );
+    }
+
+    /// The digest must match a full read of the file it was copied from,
+    /// which is what makes it usable in place of re-reading the volume.
+    #[test]
+    fn the_write_hash_matches_hashing_the_source_file() {
+        let dir = std::env::temp_dir().join("virtman-write-hash-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.bin");
+        let data: Vec<u8> = (0..150_000u32).map(|i| (i * 11) as u8).collect();
+        std::fs::write(&path, &data).unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let (sent, streamed) = send_hashed(&mut file, |chunk| Ok(chunk.len())).unwrap();
+        let (whole, size) = sha256_file(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(sent, size, "same amount of data");
+        assert_eq!(streamed, whole, "write-time hash equals a full re-read");
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// A fast local transfer can measure zero elapsed time; reporting an
     /// infinite rate, or NaN, would render as garbage in the UI.
