@@ -29,6 +29,10 @@ pub fn routes() -> Router {
 async fn list(Path(pool): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
         let p = StoragePool::lookup_by_name(c, &pool)?;
+        // Report the filesystem as it is, not as libvirt last cached it, so a
+        // file that appeared outside the volume API is listed. See
+        // `pools::refresh_for_read`.
+        super::pools::refresh_for_read(&p);
         let vols = p.list_all_volumes(0)?;
         let mut arr = Vec::with_capacity(vols.len());
         for vol in &vols {

@@ -129,7 +129,21 @@ recorded one, or a sidecar naming a different id, are all deleted rather than
 resumed. A restart is still fatal to a transfer **mid-body** (nothing complete
 to resume), and to nothing else.
 
-**Destructive daemon calls are logged by the proxy, not the SPA.** Long operations report their outcome
+**A pool read refreshes the pool first.** `GET /pools/{name}` and
+`GET /pools/{name}/volumes` call `virStoragePoolRefresh` before answering
+(`daemon/src/api/pools.rs`, `pools::refresh_for_read`). libvirt caches a pool's
+volume list and its space figures, and only re-reads them when the *volume API*
+changed something — a file that arrives any other way (aria2, `cp`, `scp`) stays
+invisible, and the space figures stay stale, until something refreshes. That is
+the normal case here, not an edge case: the ISO pool directory is inside a
+Nextcloud sync folder, so files appear and vanish without this daemon being
+involved at all. Measured: a pool with 24 volumes and one with none both answer
+in ~44 ms, because that time is the libvirt connection rather than the directory
+scan — so it is cheaper to be accurate than to cache. The pool page polls every
+second and would otherwise repeat the same wrong answer forever. The all-pools
+list deliberately does not refresh every pool, keeping the sidebar's poll cheap.
+
+**Activity is server-side and per-user.** Long operations report their outcome
 to `POST /activity`, stored in `store.json` so it survives restarts. A
 non-admin sees only their own rows; an admin sees all, and the attribution
 cannot be forged without the `users` scope. Progress during an operation is

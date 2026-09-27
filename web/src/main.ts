@@ -1897,13 +1897,15 @@ async function renderPoolPage() {
   const content = $("#content");
   const name = selectedPool;
   try {
-    const [pool, vols] = await Promise.all([
-      api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`),
+    // The single-pool read refreshes the pool before answering, so these
+    // figures follow the filesystem; the all-pools list is served from
+    // libvirt's cache and would show what was true when the page opened.
+    const [p, vols] = await Promise.all([
+      api.get<PoolSummary>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}`),
       api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}/volumes`),
     ]);
     // Same guard as the network page: never paint over a newer view.
     if (!stillCurrent(gen)) return;
-    const p = pool.find((x) => x.name === name);
     if (!p) {
       setHtml(content, `<div class="empty">Pool "${esc(name)}" no longer exists.</div>`);
       return;
@@ -4545,7 +4547,7 @@ function uploadsSection(pool: string): string {
       const daemonRates = j.daemon_recv_bps > 0 || j.daemon_write_bps > 0
         ? `daemon recv ${fmtRate(j.daemon_recv_bps / 1024)} · write ${fmtRate(j.daemon_write_bps / 1024)}`
         : "";
-      return `<div class="metric">
+      return `<div class="metric" data-up-id="${esc(j.id)}">
         <div class="metric-head">
           <span class="metric-ic">${ic.upload()}</span>
           <b>${esc(j.name)}</b>

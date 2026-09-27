@@ -44,9 +44,36 @@ fn pool_json(p: &StoragePool) -> Value {
     })
 }
 
+/// Bring a pool's cached state up to date before reporting it.
+///
+/// libvirt caches a pool's volume list and its space figures, and re-reads them
+/// when the volume API changes something — `virStorageVolCreateXML` or
+/// `StorageVol::delete` already leave the pool correct. What it cannot see is a
+/// file that arrives any other way, which is the common case here: an ISO
+/// dropped in by aria2, `cp` or `scp`, or one removed with `rm`. Those stay
+/// invisible, and the space figures stay stale, until something refreshes the
+/// pool — so a pool page would poll every second and show the same wrong answer
+/// forever.
+///
+/// Measured on this host, the refresh itself is free next to the request that
+/// carries it: a pool with 24 volumes and one with none both answer in ~44 ms,
+/// because that time is the libvirt connection, not the directory scan. So it is
+/// cheaper to be accurate than to cache.
+///
+/// Best effort on purpose: a pool that cannot be refreshed (inactive,
+/// unreadable) should still be reported, from whatever state it has.
+///
+/// ponytail: rescans the pool's directory on every read, so a pool holding a
+/// very large number of files pays a stat per file per poll. Rate-limit against
+/// the pool's own refresh interval if that ever shows up in a profile.
+pub(crate) fn refresh_for_read(p: &StoragePool) {
+    let _ = p.refresh(0);
+}
+
 async fn get_one(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
         let p = StoragePool::lookup_by_name(c, &name)?;
+        refresh_for_read(&p);
         Ok(pool_json(&p))
     })
     .await

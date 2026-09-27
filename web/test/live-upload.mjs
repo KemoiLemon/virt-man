@@ -22,6 +22,19 @@ const dataDir = process.argv[3] ?? process.env.VM_DATA_DIR ?? "/home/kemoi/.loca
 const uploadsDir = join(dataDir, "uploads");
 
 const results = [];
+// Everything this run creates, so teardown can remove all of it. Tracking the
+// volume names matters as much as the jobs: a check that fails part-way through
+// must not leave a stray ISO in the pool for the next run to trip over.
+const completedJobIds = [];
+const createdVolumes = [];
+const trackJob = (id) => {
+  completedJobIds.push(id);
+  return id;
+};
+const trackVolume = (vol) => {
+  createdVolumes.push(vol);
+  return vol;
+};
 const check = async (name, fn) => {
   try {
     await fn();
@@ -61,6 +74,7 @@ writeFileSync(join(dir, "e2e.iso"), bytes);
 const want = createHash("sha256").update(bytes).digest("hex");
 
 const name = `vmtest-upload-${Date.now()}.iso`;
+trackVolume(name);
 const body = { bytes, headers: { "Content-Type": "application/octet-stream" } };
 
 async function stageUpload(target) {
@@ -78,6 +92,7 @@ await check("phase 1 stages the body on the web server", async () => {
   const res = await stageUpload(name);
   assert.equal(res.status, 200, `stage failed: ${JSON.stringify(res.body)}`);
   staged = res.body;
+  trackJob(staged.id);
   assert.equal(staged.size, size, "server recorded the full size");
   assert.equal(staged.phase, "staged", "not yet pushed");
   assert.ok(existsSync(join(uploadsDir, `${staged.id}.part`)), "body is on disk");
@@ -125,11 +140,13 @@ await check("a transfer finishes with no client watching it", async () => {
   // mid-transfer cannot strand a multi-GB upload. Between starting the push and
   // reading the result, nothing here polls it.
   const solo = `vmtest-solo-${Date.now()}.iso`;
+trackVolume(solo);
   const st = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(solo)}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: bytes,
   });
+  trackJob(st.id);
   await json(`/uploads/${st.id}/push`, { method: "POST" });
   await new Promise((r) => setTimeout(r, 4000));
   const job = await json(`/uploads/${st.id}`);
@@ -273,13 +290,24 @@ const newPage = async () => {
   return { window, document: window.document, wait: waitFor };
 };
 
+/// Click the pool row for the pool this suite uses.
+///
+/// Deliberately not `document.querySelector(".tree-pool")`: that returns
+/// whichever pool sorts first, so a scratch or test pool appearing ahead of
+/// "default" sends this suite's UI checks to the wrong page. Clicking the row by
+/// name makes the suite independent of what else is on the host.
+const openPoolPage = (doc, win) =>
+  doc.querySelector(`.tree-pool[data-pool="${pool}"]`)
+    ?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+
 const page = await newPage();
 const { window, document, wait } = page;
 
 // Open a storage pool page and check the prompt carries a progress bar.
 const uiName = `vmtest-ui-${Date.now()}.iso`;
+trackVolume(uiName);
 let uiStaged = null;
-document.querySelector(".tree-pool")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+openPoolPage(document, window);
 await wait(1500);
 
 await check("the pool page offers an Upload ISO action", () => {
@@ -305,9 +333,10 @@ uiStaged = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURICompon
   headers: { "Content-Type": "application/octet-stream" },
   body: bytes,
 });
+trackJob(uiStaged.id);
 document.querySelector(".tree-vm")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(600);
-document.querySelector(".tree-pool")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+openPoolPage(document, window);
 await wait(1500);
 
 await check("the pool window shows a background progress bar for the transfer", () => {
@@ -322,7 +351,10 @@ await check("a staged upload offers to send itself, not just cancel", () => {
   // This is the resume path. A transfer recovered after a restart comes back in
   // exactly this state, so the button under test is the same one that makes a
   // recovered upload recoverable without re-sending the bytes.
-  const send = document.querySelector("#pool-uploads [data-up-push]");
+  //
+  // Scoped to this suite's own job: the section lists every job the server
+  // holds, and an earlier run's leftover is what a bare `[data-up-push]` finds.
+  const send = document.querySelector(`#pool-uploads [data-up-id="${uiStaged.id}"] [data-up-push]`);
   assert.ok(send, "staged transfer has a Send action");
   assert.match(send.textContent, /Send to daemon/, `unhelpful label: ${send.textContent}`);
 });
@@ -331,7 +363,7 @@ await check("the pool window shows the daemon leg's speed", async () => {
   // Started by clicking Send, which is the path a recovered transfer takes; the
   // card is then read while the transfer is still in flight, since the speed
   // has to appear live and not only in the final state.
-  const send = document.querySelector("#pool-uploads [data-up-push]");
+  const send = document.querySelector(`#pool-uploads [data-up-id="${uiStaged.id}"] [data-up-push]`);
   assert.ok(send, "Send button present");
   send.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await wait(500);
@@ -342,8 +374,8 @@ await check("the pool window shows the daemon leg's speed", async () => {
   let sawSpeed = false;
   for (let i = 0; i < 60; i++) {
     await wait(100);
-    const section = document.querySelector("#pool-uploads");
-    if (section && /(KiB|MiB)\/s/.test(section.textContent)) { sawSpeed = true; break; }
+    const card = document.querySelector(`#pool-uploads [data-up-id="${uiStaged.id}"]`);
+    if (card && /(KiB|MiB)\/s/.test(card.textContent)) { sawSpeed = true; break; }
   }
   assert.ok(sawSpeed, "no speed rendered on the transfer card");
 });
@@ -361,10 +393,10 @@ await check("the bar tracks the transfer through to verified", async () => {
   assert.equal(phase, "done", `daemon leg did not finish: ${phase}`);
   // Let the page's own poller pick it up, then read what the user would see.
   await wait(1200);
-  const section = document.querySelector("#pool-uploads");
-  assert.ok(section, "transfers section still present");
-  assert.match(section.textContent, /Verified/, `expected Verified, saw: ${section.textContent}`);
-  assert.match(section.textContent, /sha256/, "shows the verified checksum");
+  const card = document.querySelector(`#pool-uploads [data-up-id="${uiStaged.id}"]`);
+  assert.ok(card, "this transfer's card is still present");
+  assert.match(card.textContent, /Verified/, `expected Verified, saw: ${card.textContent}`);
+  assert.match(card.textContent, /sha256/, "shows the verified checksum");
 });
 
 await check("a freshly loaded page rediscovers work already in progress", async () => {
@@ -373,22 +405,22 @@ await check("a freshly loaded page rediscovers work already in progress", async 
   // the job is listed because the server still holds it, not because the old
   // page remembered it.
   const pending = `vmtest-pending-${Date.now()}.iso`;
+trackVolume(pending);
   const st = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(pending)}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: bytes,
   });
 
+  trackJob(st.id);
   const fresh = await newPage();
-  fresh.document
-    .querySelector(".tree-pool")
-    ?.dispatchEvent(new fresh.window.MouseEvent("click", { bubbles: true }));
+  openPoolPage(fresh.document, fresh.window);
   await fresh.wait(1800);
-  const section = fresh.document.querySelector("#pool-uploads");
-  assert.ok(section, "transfers section present on the reloaded page");
+  const card = fresh.document.querySelector(`#pool-uploads [data-up-id="${st.id}"]`);
+  assert.ok(card, "the in-flight transfer's card is present on the reloaded page");
   assert.ok(
-    section.textContent.includes(pending),
-    `in-flight transfer not rediscovered: ${section.textContent.slice(0, 160)}`,
+    card.textContent.includes(pending),
+    `in-flight transfer not rediscovered: ${card.textContent.slice(0, 160)}`,
   );
   fresh.window.close();
 
@@ -400,6 +432,23 @@ await fetch(
   new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(uiName)}`, base),
   { method: "DELETE" },
 ).catch(() => undefined);
+
+// Remove the volumes this run created, then its transfer jobs. The pool page
+// lists every job the server holds, so leftovers from the API-side checks would
+// accumulate there run after run.
+for (const vol of createdVolumes) {
+  await fetch(
+    new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(vol)}`, base),
+    { method: "DELETE" },
+  ).catch(() => undefined);
+}
+
+// Discard the transfer jobs this run created. They live in the server's memory
+// and the pool page lists every job it holds, so leftovers from the API-side
+// checks would accumulate there run after run.
+for (const id of completedJobIds) {
+  await fetch(new URL(`/uploads/${id}`, base), { method: "DELETE" }).catch(() => undefined);
+}
 
 for (const [status, name] of results) {
   console.log(`${status === "pass" ? "\u2714" : "\u2716"} ${name}`);
