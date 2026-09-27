@@ -441,3 +441,25 @@ export function volumeXml(f: VolumeForm): string {
   <target><format type="${f.format}"/></target>
 </volume>`;
 }
+
+/// Volume name to use for a picked upload file. Browsers supply the leaf name
+/// only, and libvirt accepts spaces in a volume name, so it is taken verbatim
+/// rather than mangled.
+export function volumeNameFromFile(fileName: string): string {
+  return fileName.trim();
+}
+
+/// The name an upload field should show after a file was picked, or `null` to
+/// leave the field alone.
+///
+/// A blank field, or one still holding the previous auto-filled name, follows
+/// the file; anything else is a name the user typed, and re-picking a file
+/// must not discard it.
+export function autoVolumeName(
+  current: string,
+  previousAutoName: string,
+  fileName: string,
+): string | null {
+  if (current.trim() !== "" && current !== previousAutoName) return null;
+  return volumeNameFromFile(fileName);
+}

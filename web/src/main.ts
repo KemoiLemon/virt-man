@@ -13,7 +13,7 @@ import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
-import { domainXml, defaultDhcpRange, dhcpRemaining, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeXml, withFirmware } from "./xml";
+import { autoVolumeName, domainXml, defaultDhcpRange, dhcpRemaining, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, DhcpHost, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
@@ -4454,15 +4454,33 @@ function openUpload(pool: string) {
   if (!selectedConn) return;
   const el = openModal(
     `Upload ISO to ${pool}`,
-    `<label class="field"><span>Volume Name</span><input id="up-name" placeholder="arch.iso"></label>
+    `<label class="field"><span>Volume Name</span>
+       <input id="up-name" placeholder="Leave blank to use the file name"></label>
      <label class="field"><span>File</span><input id="up-file" type="file"></label>
      <p class="hint" id="up-progress"></p>`,
     `<button class="btn primary" id="up-go">Upload</button>`,
   );
+
+  const nameInput = $("#up-name", el) as HTMLInputElement;
+  const fileInput = $("#up-file", el) as HTMLInputElement;
+  // The name we filled in from a file, so we can tell an untouched field from
+  // one the user typed in: re-picking a file must not clobber a custom name.
+  let autoName = "";
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    const next = autoVolumeName(nameInput.value, autoName, file.name);
+    if (next === null) return; // the user typed a name: leave it alone
+    nameInput.value = next;
+    autoName = next;
+  });
+
   $("#up-go", el).onclick = async () => {
-    const file = ($("#up-file", el) as HTMLInputElement).files?.[0];
-    const name = $("#up-name", el).value;
-    if (!file || !name) return toast("Name and file required", "bad");
+    const file = fileInput.files?.[0];
+    if (!file) return toast("Pick a file to upload", "bad");
+    // Blank means "name it after the file", so the field is optional.
+    const name = nameInput.value.trim() || volumeNameFromFile(file.name);
+    if (!name) return toast("Name is required", "bad");
     el.remove();
     runTask(`Upload ${name}`, async (set) => {
       set("uploading…");

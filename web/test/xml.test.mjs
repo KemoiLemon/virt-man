@@ -252,3 +252,25 @@ test("withFirmware leaves no dangling close tags on libvirt single-quoted XML", 
   assert.match(bios, /<os>\s*<type/, "os block intact");
   assert.match(bios, /<boot dev='hd'\/>/, "boot device survives");
 });
+
+test("an upload defaults its volume name to the picked file's name", () => {
+  assert.equal(xml.volumeNameFromFile("debian-13.2.0-amd64-netinst.iso"), "debian-13.2.0-amd64-netinst.iso");
+  // Surrounding whitespace would make a confusing volume name.
+  assert.equal(xml.volumeNameFromFile("  arch.iso "), "arch.iso");
+});
+
+test("picking a file fills a blank name field", () => {
+  assert.equal(xml.autoVolumeName("", "", "arch.iso"), "arch.iso");
+  assert.equal(xml.autoVolumeName("   ", "", "arch.iso"), "arch.iso");
+});
+
+test("picking another file replaces our own previous auto-name", () => {
+  // The field still holds what we filled in, so it is ours to update.
+  assert.equal(xml.autoVolumeName("arch.iso", "arch.iso", "debian.iso"), "debian.iso");
+});
+
+test("a name the user typed is never overwritten", () => {
+  // The whole point of the null return: re-picking a file must not discard a
+  // custom name.
+  assert.equal(xml.autoVolumeName("my custom name", "arch.iso", "debian.iso"), null);
+});

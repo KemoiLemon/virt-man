@@ -247,6 +247,41 @@ check("a network page shows card info and an IPAM table", () => {
   });
 }
 
+// Uploading an ISO names the volume after the file unless told otherwise.
+{
+  document.querySelector(".tree-pool")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1400);
+  document.querySelector("#pool-upload")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(600);
+  const modal = document.querySelector(".modal-back.open");
+  const nameInput = modal?.querySelector("#up-name");
+  const fileInput = modal?.querySelector("#up-file");
+
+  // jsdom has no DataTransfer, so `files` is stubbed and `change` fired —
+  // which is exactly what a real picker does.
+  const pick = (filename) => {
+    Object.defineProperty(fileInput, "files", {
+      value: [{ name: filename }],
+      configurable: true,
+    });
+    fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+  };
+
+  check("picking a file names the upload volume", () => {
+    assert.ok(nameInput && fileInput, "upload dialog has name and file fields");
+    pick("debian-13.2.0-amd64-netinst.iso");
+    assert.equal(nameInput.value, "debian-13.2.0-amd64-netinst.iso");
+    // Re-picking replaces the name we filled in, but never a typed one.
+    pick("archlinux-2026.03.01-x86_64.iso");
+    assert.equal(nameInput.value, "archlinux-2026.03.01-x86_64.iso", "our auto-name is replaced");
+    nameInput.value = "my custom iso";
+    pick("ubuntu-26.04.iso");
+    assert.equal(nameInput.value, "my custom iso", "a typed name is preserved");
+  });
+  modal?.remove();
+  await wait(300);
+}
+
 // A slow resource fetch must not paint over a newer view: the poll can start
 // a network render and the user then click a guest before it resolves.
 {
