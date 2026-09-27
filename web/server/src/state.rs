@@ -1,3 +1,4 @@
+use crate::api::uploads::Uploads;
 use crate::store::Store;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -9,6 +10,8 @@ pub struct AppState {
     /// True when running as the desktop app's loopback sidecar: no auth,
     /// every request is a synthetic local admin.
     pub auth_disabled: bool,
+    /// In-flight staged uploads, keyed by id. See `api::uploads`.
+    pub uploads: Uploads,
 }
 
 impl AppState {
@@ -17,6 +20,7 @@ impl AppState {
             store: Arc::new(RwLock::new(store)),
             data_dir,
             auth_disabled,
+            uploads: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 

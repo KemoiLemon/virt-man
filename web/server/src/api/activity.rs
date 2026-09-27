@@ -135,22 +135,39 @@ async fn record(
         _ => (user.id.clone(), user.username.clone()),
     };
 
+    let entry = append(&state, &user_id, &username, label, &req.status, &req.message)
+        .map_err(ApiError::internal)?;
+    Ok(Json(entry_json(&entry)))
+}
+
+/// Append an entry attributed to a user, trimming and persisting the store.
+///
+/// Shared with the upload pipeline, which finishes long after the browser that
+/// started it may be gone: the outcome has to be recorded server-side or a
+/// failed transfer leaves no trace at all. Errors are strings because callers
+/// report the failure rather than propagate it.
+pub fn append(
+    state: &AppState,
+    user_id: &str,
+    username: &str,
+    label: &str,
+    status: &str,
+    message: &str,
+) -> Result<ActivityEntry, String> {
     let entry = ActivityEntry {
         id: random_hex(8),
-        user_id,
-        username,
+        user_id: user_id.to_string(),
+        username: username.to_string(),
         label: label.to_string(),
-        status: req.status,
-        message: req.message,
+        status: status.to_string(),
+        message: message.to_string(),
         at_ms: now_ms(),
     };
-    {
-        let mut store = state.write();
-        store.activity.push(entry.clone());
-        trim(&mut store.activity);
-        store.save(&state.data_dir).map_err(ApiError::internal)?;
-    }
-    Ok(Json(entry_json(&entry)))
+    let mut store = state.write();
+    store.activity.push(entry.clone());
+    trim(&mut store.activity);
+    store.save(&state.data_dir)?;
+    Ok(entry)
 }
 
 /// Clear the caller's own history, or everyone's for an admin. Returns how

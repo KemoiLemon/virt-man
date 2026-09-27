@@ -45,7 +45,53 @@ export const api = {
   // JSON-stringifying would wrap the XML in quotes and libvirt rejects it.
   postXml: <T = unknown>(url: string, xml: string) => sendXml<T>("POST", url, xml),
   putXml: <T = unknown>(url: string, xml: string) => sendXml<T>("PUT", url, xml),
+  uploads: () => request<StagedUpload[]>("GET", "/uploads"),
+  upload: (id: string) => request<StagedUpload>("GET", `/uploads/${encodeURIComponent(id)}`),
+  pushUpload: (id: string) => request<StagedUpload>("POST", `/uploads/${encodeURIComponent(id)}/push`),
+  discardUpload: (id: string) => request<StagedUpload>("DELETE", `/uploads/${encodeURIComponent(id)}`),
 };
+
+/// Upload a file with progress.
+///
+/// `fetch` cannot report upload progress, so this is the one place that uses
+/// XMLHttpRequest: without byte-level feedback a multi-GB ISO looks hung.
+/// Returns the in-flight promise plus an abort handle for a Cancel button.
+export function uploadWithProgress(
+  url: string,
+  file: Blob,
+  onProgress: (sent: number, total: number) => void,
+): { promise: Promise<StagedUpload>; cancel: () => void } {
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise<StagedUpload>((resolve, reject) => {
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as StagedUpload);
+        } catch {
+          reject(new ApiError(xhr.status, "malformed response from server"));
+        }
+        return;
+      }
+      let message = xhr.statusText || `HTTP ${xhr.status}`;
+      try {
+        message = (JSON.parse(xhr.responseText) as { error?: string }).error ?? message;
+      } catch {
+        // Non-JSON error body; the status text is the best we have.
+      }
+      reject(new ApiError(xhr.status, message));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network error during upload"));
+    xhr.onabort = () => reject(new ApiError(0, "upload cancelled"));
+    xhr.send(file);
+  });
+  return { promise, cancel: () => xhr.abort() };
+}
 
 function sendXml<T>(method: string, url: string, xml: string): Promise<T> {
   return fetch(url, {
@@ -181,6 +227,25 @@ export interface ActivityEntry {
   status: string;
   message: string;
   /// Unix milliseconds.
+  at_ms: number;
+}
+
+/// Where a two-phase upload is. Mirrors the backend's `Phase`.
+export type UploadPhase = "staged" | "uploading" | "verifying" | "done" | "failed";
+
+/// A file staged on the web server, on its way to the daemon.
+export interface StagedUpload {
+  id: string;
+  conn: string;
+  pool: string;
+  name: string;
+  /// Total bytes staged.
+  size: number;
+  /// Bytes handed to the daemon so far.
+  sent: number;
+  phase: UploadPhase;
+  sha256: string | null;
+  error: string | null;
   at_ms: number;
 }
 

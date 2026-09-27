@@ -6,6 +6,7 @@ pub mod keys;
 pub mod profile;
 pub mod proxy;
 pub mod roles;
+pub mod uploads;
 pub mod users;
 
 use axum::http::StatusCode;
@@ -83,6 +84,7 @@ pub fn build(state: AppState) -> axum::Router<AppState> {
         .merge(profile::routes(&state))
         .merge(keys::routes(&state))
         .merge(activity::routes(&state))
+        .merge(uploads::routes(&state))
         .merge(connections::routes(&state))
         .merge(proxy::routes(&state))
 }

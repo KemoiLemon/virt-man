@@ -14,6 +14,8 @@ rcgen = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
+# Streaming a staged file to the daemon without buffering it in memory.
+tokio-util = { version = "0.7", features = ["io"] }
 libc = "0.2"
 
 # auth
