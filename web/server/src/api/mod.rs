@@ -2,6 +2,7 @@ pub mod activity;
 pub mod auth;
 pub mod connections;
 pub mod health;
+pub mod history;
 pub mod keys;
 pub mod profile;
 pub mod proxy;
@@ -84,6 +85,7 @@ pub fn build(state: AppState) -> axum::Router<AppState> {
         .merge(profile::routes(&state))
         .merge(keys::routes(&state))
         .merge(activity::routes(&state))
+        .merge(history::routes(&state))
         .merge(uploads::routes(&state))
         .merge(connections::routes(&state))
         .merge(proxy::routes(&state))

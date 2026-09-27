@@ -256,7 +256,7 @@ async fn get_stats(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 /// Parse one `<interface>…</interface>` fragment's target dev, MAC and model.
 /// These are child elements, so reading them off the opening tag (as the old
 /// handler did) returned None for everything but the network name.
-fn interface_info(frag: &str) -> (Option<String>, Option<String>, Option<String>) {
+pub(super) fn interface_info(frag: &str) -> (Option<String>, Option<String>, Option<String>) {
     let child = |tag: &str, name: &str| -> Option<String> {
         let open = frag.find(&format!("<{tag}"))?;
         let tag_frag = &frag[open..];

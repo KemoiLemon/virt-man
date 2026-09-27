@@ -231,30 +231,98 @@ export function peekSeries(name: string): { cpu: number[]; mem: number[] } {
 const W = 240;
 const H = 74;
 
+/// When a chart's points were sampled: the first point's time and the gap
+/// between points. Carried on the SVG so the hover readout can name a time.
+export interface Timing { t0: number; step: number }
+
 /**
  * Sparkline as inline SVG on a 0..max scale (default 0..100), with
- * gridlines, a filled area, the trace, and a marker on the newest value at
- * the right edge. `viewBox` + `preserveAspectRatio=none` lets it stretch to
- * the panel width while the stroke stays 1px via `vector-effect` in CSS.
+ * gridlines, a filled area and the trace. `viewBox` +
+ * `preserveAspectRatio=none` lets it stretch to the panel width while the
+ * stroke stays 1px via `vector-effect` in CSS.
+ *
+ * A `null` value is a gap (no sample: host unreachable, web server down), and
+ * breaks the line rather than drawing a false zero. The values, their timing
+ * and unit ride along as data attributes for the hover readout.
  */
-export function sparkline(values: number[], variant = "", max = 100): string {
+export function sparkline(values: (number | null)[], variant = "", max = 100, timing?: Timing): string {
   const pts = values.length ? values : Array.from({ length: SERIES_LEN }, () => 0);
   const ceil = Math.max(1, max);
   const step = W / Math.max(1, pts.length - 1);
   const y = (v: number) => H - (Math.max(0, Math.min(ceil, v)) / ceil) * H;
-  const coords = pts.map((v, i) => `${(i * step).toFixed(2)},${y(v).toFixed(2)}`);
-  const line = `M${coords.join(" L")}`;
-  const area = `${line} L${W},${H} L0,${H} Z`;
+  let line = "";
+  let area = "";
+  let run: string[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    const first = run[0].split(",")[0];
+    const last = run[run.length - 1].split(",")[0];
+    line += `M${run.join(" L")}`;
+    area += `M${first},${H} L${run.join(" L")} L${last},${H} Z`;
+    run = [];
+  };
+  pts.forEach((v, i) => {
+    if (v == null) flush();
+    else run.push(`${(i * step).toFixed(2)},${y(v).toFixed(2)}`);
+  });
+  flush();
 
   const grid = [0.25, 0.5, 0.75]
     .map((f) => `<line class="spark-grid" x1="0" y1="${(H * f).toFixed(1)}" x2="${W}" y2="${(H * f).toFixed(1)}"/>`)
     .join("");
+  const unit = variant === "rx" || variant === "tx" ? "rate" : "pct";
+  // Live series are one poll apart and end now.
+  const when = timing ?? { t0: Date.now() - (pts.length - 1) * 1000, step: 1000 };
+  const data = pts.map((v) => (v == null ? "" : +v.toFixed(2))).join(",");
 
-  return `<svg class="spark${variant ? ` ${variant}` : ""}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+  return `<svg class="spark${variant ? ` ${variant}` : ""}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"
+    data-v="${data}" data-t0="${Math.round(when.t0)}" data-step="${Math.round(when.step)}" data-unit="${unit}">
     ${grid}
-    <path class="spark-fill" d="${area}"/>
-    <path class="spark-line" d="${line}"/>
+    ${area ? `<path class="spark-fill" d="${area}"/>` : ""}
+    ${line ? `<path class="spark-line" d="${line}"/>` : ""}
   </svg>`;
+}
+
+/// The point under a pointer `fraction` (0..1) of the way across a chart of
+/// `n` points: the nearest one, since points sit on the edges, not in cells.
+export function pointAt(n: number, fraction: number): number {
+  if (n <= 1) return 0;
+  return Math.max(0, Math.min(n - 1, Math.round(fraction * (n - 1))));
+}
+
+/// Hover readout for one point: "14:32:05 · 23.4%", or "no data" in a gap.
+export function readout(value: number | null, unit: string, t: number, spanMs: number): string {
+  const d = new Date(t);
+  const two = (n: number) => String(n).padStart(2, "0");
+  const clock = `${two(d.getHours())}:${two(d.getMinutes())}${spanMs < 6 * 3600_000 ? `:${two(d.getSeconds())}` : ""}`;
+  // Past a day the time of day alone is ambiguous.
+  const when = spanMs > 24 * 3600_000 ? `${d.getMonth() + 1}/${d.getDate()} ${clock}` : clock;
+  if (value == null) return `${when} · no data`;
+  return `${when} · ${unit === "rate" ? fmtRate(value) : pct(value)}`;
+}
+
+/// Lay history buckets onto a complete time grid, so the x axis is time and a
+/// bucket with no samples is a gap rather than being silently skipped (which
+/// would stitch the hours either side of an outage together).
+///
+/// The server stamps each bucket at its middle, aligned to multiples of
+/// `step` since the epoch; the grid uses the same alignment.
+export function gridSeries(
+  rows: [number, number | null, number | null][],
+  sinceMs: number,
+  nowMs: number,
+  step: number,
+): { a: (number | null)[]; b: (number | null)[]; t0: number } {
+  const byT = new Map(rows.map((r) => [r[0], r] as const));
+  const start = Math.floor(sinceMs / step) * step + step / 2;
+  const a: (number | null)[] = [];
+  const b: (number | null)[] = [];
+  for (let t = start; t <= nowMs; t += step) {
+    const r = byT.get(t);
+    a.push(r?.[1] ?? null);
+    b.push(r?.[2] ?? null);
+  }
+  return { a, b, t0: start };
 }
 
 /** Percentage formatted for a metric headline. */

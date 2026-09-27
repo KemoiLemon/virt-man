@@ -201,12 +201,26 @@ async fn remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut store = state.write();
-    let Some(pos) = store.connections.iter().position(|c| c.id == id) else {
-        return Err(ApiError::not_found("no such connection"));
-    };
-    store.connections.remove(pos);
-    store.save(&state.data_dir)?;
+    {
+        let mut store = state.write();
+        let Some(pos) = store.connections.iter().position(|c| c.id == id) else {
+            return Err(ApiError::not_found("no such connection"));
+        };
+        store.connections.remove(pos);
+        store.save(&state.data_dir)?;
+    }
+    // A removed server takes its graphs with it. The collector would also do
+    // this on its next tick; doing it here means the answer is already true.
+    let live: Vec<String> = state
+        .read()
+        .connections
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    let history = state.history.clone();
+    tokio::task::spawn_blocking(move || history.keep_only(&live))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
     Ok(Json(json!({"deleted": id})))
 }
 

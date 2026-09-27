@@ -26,7 +26,8 @@ cd web/server && cargo clippy && cargo test
 #   arg is the base URL; defaults to http://127.0.0.1:8799
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route,
-#   live-vmnet (needs sudo: checks tc and dnsmasq; boots its own guest)
+#   live-vmnet (needs sudo: checks tc and dnsmasq; boots its own guest),
+#   live-history (needs the server to have been sampling for ~30 s)
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
@@ -223,6 +224,27 @@ non-admin sees only their own rows; an admin sees all, and the attribution
 cannot be forged without the `users` scope. Progress during an operation is
 still hand-rolled per call site (`runTask`'s `set`); there is intentionally no
 client-side task list to keep in sync.
+
+**Chart history is sampled server-side and deleted with its subject.**
+`web/server/src/history.rs` polls every connection's daemon `GET /metrics`
+(one call: host, pools, and every guest with its NICs and disks) every 10 s,
+whether or not a browser is open, into `history.db` (SQLite, WAL) in the data
+dir. Two weeks are kept; `GET /history` serves one series averaged into ~240
+buckets. The range bar (Live/1h/6h/1d/7d/14d) sits on the datacenter and host
+dashboards and the VM summary; Live stays the page's own 1 s poll.
+
+- Rows are keyed by libvirt **UUID**, so a renamed guest keeps its history and
+  a new guest reusing a deleted one's name starts empty.
+- Deletion is **by absence**: a tick that no longer lists a guest, NIC or disk
+  deletes its history (samples cascade), and removing a connection deletes all
+  of its rows at once. So `/metrics` must fail rather than answer partially: a
+  guest listed without its devices would erase their history. An unreachable
+  daemon answers nothing and so deletes nothing.
+- A missing bucket is a **gap**, never a zero: the chart breaks its line and
+  the hover readout says "no data". Stitching an outage shut draws a lie.
+- Hover is one document-level handler (`bindChartHover`); the chart's values,
+  first timestamp and step ride on the SVG's data attributes, so it survives
+  the 1 s re-render.
 
 **Destructive daemon calls are logged by the proxy, not the SPA.** Every
 `DELETE` proxied to the daemon is recorded with a human label, its outcome, and

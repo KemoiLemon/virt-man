@@ -237,3 +237,20 @@ table.grid tr.row-open:hover td:first-child { color: var(--accent); }
 .skeleton .dhead { gap: 10px; }
 @keyframes sk-pulse { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
+
+/* ---------------------------------------------------------- chart range */
+.range-bar { display: flex; gap: 4px; justify-content: flex-end; margin-bottom: 10px; }
+.range-btn { padding: 3px 9px; font-size: 11px; }
+.spark { cursor: crosshair; }
+/* Hover readout: fixed, so it floats over the pane and survives the poll's
+   re-render of the chart underneath it. */
+.spark-tip {
+  position: fixed; z-index: 60; pointer-events: none; white-space: nowrap;
+  padding: 3px 7px; font-size: 11px;
+  background: var(--panel2); color: var(--fg); border: 1px solid var(--line2);
+  box-shadow: 0 2px 8px var(--shade);
+}
+.spark-mark {
+  position: fixed; z-index: 59; pointer-events: none; width: 1px;
+  background: var(--fg); opacity: .5;
+}

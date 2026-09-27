@@ -4,6 +4,7 @@ pub mod filters;
 pub mod firewall;
 pub mod health;
 pub mod host;
+pub mod metrics;
 pub mod networks;
 pub mod nics;
 pub mod pools;
@@ -61,6 +62,7 @@ pub fn build(auth: Auth) -> Router {
     let authed = Router::new()
         .merge(health::routes())
         .merge(host::routes())
+        .merge(metrics::routes())
         .merge(domains::routes())
         .merge(networks::routes())
         .merge(filters::routes())

@@ -12,6 +12,8 @@ import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateD
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
+import type { Timing } from "./stats";
+import { bindChartHover, isLive, loadHistory, range, rangeBar, setRange } from "./history";
 import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
@@ -205,6 +207,18 @@ function renderView() {
   else if (selectedPool) { showPageSkeleton(); void renderPoolPage(); }
   else renderConn();
 }
+
+// Chart range buttons: one delegated handler, since the dashboards re-render
+// every second. Only the charts' own views carry the bar, so re-running the
+// current view's poll body repaints exactly them.
+document.addEventListener("click", (e) => {
+  const b = (e.target as Element | null)?.closest?.("[data-range]") as HTMLElement | null;
+  if (!b || !setRange(b.dataset.range!)) return;
+  if (!selectedConn) void loadDcDashboard();
+  else if (selectedVm) void renderVmBody(selectedVm);
+  else void loadDashboard();
+});
+bindChartHover();
 
 window.addEventListener("popstate", () => {
   if (!user) return;
@@ -1294,17 +1308,39 @@ async function loadDcDashboard() {
     for (const p of ps) pools.push({ c, p });
   }
 
-  const { cpu, mem, cpuNow, memNow } = addHostSample("datacenter", agg);
+  const live1 = addHostSample("datacenter", agg);
   const memUsedKib = agg.mem_total_kib - agg.mem_available_kib;
   const diskTotal = pools.reduce((a, { p }) => a + (p.capacity ?? 0), 0);
   const diskUsed = pools.reduce((a, { p }) => a + (p.allocation ?? 0), 0);
-  const diskNow = diskTotal > 0 ? Math.max(0, Math.min(100, (diskUsed / diskTotal) * 100)) : 0;
-  const disk = addDiskSample("datacenter", diskNow);
+  const diskLive = diskTotal > 0 ? Math.max(0, Math.min(100, (diskUsed / diskTotal) * 100)) : 0;
+  const diskHist1 = addDiskSample("datacenter", diskLive);
+  // A stored range replaces the live minute; the headline figures stay live.
+  let cpu: (number | null)[] = live1.cpu;
+  let mem: (number | null)[] = live1.mem;
+  let disk: (number | null)[] = diskHist1;
+  let timing: Timing | undefined;
+  let diskTiming: Timing | undefined;
+  if (!isLive()) {
+    const shown = range().key;
+    try {
+      const [h, d] = await Promise.all([
+        loadHistory(api.get, { kind: "dc" }),
+        loadHistory(api.get, { kind: "dcdisk" }),
+      ]);
+      ({ a: cpu, b: mem, timing } = h);
+      ({ a: disk, timing: diskTiming } = d);
+    } catch { /* keep the live minute */ }
+    // The range or the view changed while the history was in flight.
+    if (range().key !== shown || !$("#dc-dash")) return;
+  }
+  const { cpuNow, memNow } = live1;
+  const diskNow = diskLive;
   const activeNets = nets.filter(({ n }) => n.active).length;
   const activePools = pools.filter(({ p }) => p.active).length;
   const byId = new Map(live.map(({ c, h, pools: ps }) => [c.id, { h, pools: ps }] as const));
 
   setHtml(body, `
+    ${rangeBar()}
     <div class="cards">
       <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${connections.length}</b><i>SERVERS</i></div></div>
       <div class="card"><span class="card-ic">${ic.vms(20)}</span><div><b>${vms.length}</b><i>GUESTS</i></div></div>
@@ -1322,8 +1358,8 @@ async function loadDcDashboard() {
         </div>
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(cpu)}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(cpu, "", 100, timing)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot"><span>${agg.cpus} cores</span><span>${live.length} servers</span></div>
       </div>
@@ -1336,8 +1372,8 @@ async function loadDcDashboard() {
         </div>
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(mem, "mem")}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(mem, "mem", 100, timing)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(memUsedKib * 1024)} used</span>
@@ -1353,8 +1389,8 @@ async function loadDcDashboard() {
         </div>
         <div class="meter"><div class="meter-fill ${diskNow > 85 ? "hot" : ""}" style="width:${diskNow.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(disk)}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(disk, "", 100, diskTiming)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(diskUsed)} used</span>
@@ -2265,12 +2301,25 @@ async function loadDashboard() {
     ]);
     const vms = treeVms[selectedConn] ?? [];
     const running = vms.filter((v) => v.active).length;
-    const { cpu, mem, cpuNow, memNow } = addHostSample(`host:${selectedConn}`, h);
+    const conn = selectedConn;
+    const live1 = addHostSample(`host:${conn}`, h);
+    const { cpuNow, memNow } = live1;
+    let cpu: (number | null)[] = live1.cpu;
+    let mem: (number | null)[] = live1.mem;
+    let timing: Timing | undefined;
+    if (!isLive()) {
+      const shown = range().key;
+      try {
+        ({ a: cpu, b: mem, timing } = await loadHistory(api.get, { kind: "host", conn }));
+      } catch { /* keep the live minute */ }
+      if (range().key !== shown || selectedConn !== conn || !$("#dash")) return;
+    }
     const memUsedKib = h.mem_total_kib - h.mem_available_kib;
     const activeNets = nets.filter((n) => n.active).length;
     const activePools = pools.filter((p) => p.active).length;
 
     setHtml(body, `
+    ${rangeBar()}
     <div class="cards">
       <div class="card"><span class="card-ic">${ic.vms(20)}</span><div><b>${vms.length}</b><i>VMS</i></div></div>
       <div class="card ${running > 0 ? "ok" : ""}"><span class="card-ic">${ic.start(20)}</span><div><b>${running}</b><i>RUNNING</i></div></div>
@@ -2287,8 +2336,8 @@ async function loadDashboard() {
         </div>
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(cpu)}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(cpu, "", 100, timing)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot"><span>${h.cpus} CPU</span><span>host load</span></div>
       </div>
@@ -2301,8 +2350,8 @@ async function loadDashboard() {
         </div>
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(mem, "mem")}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(mem, "mem", 100, timing)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(memUsedKib * 1024)} used</span>
@@ -3638,7 +3687,11 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     ]);
     const xml = xr.xml;
 
-    const { cpu, mem, cpuNow, memNow } = addSample(s);
+    const live1 = addSample(s);
+    const { cpuNow, memNow } = live1;
+    let cpu: (number | null)[] = live1.cpu;
+    let mem: (number | null)[] = live1.mem;
+    let timing: Timing | undefined;
     const running = s.state === "running";
     const usedKib = s.usable_kib != null
       ? Math.max(0, s.memory_kib - s.usable_kib)
@@ -3699,7 +3752,8 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     const selCap = selUsage?.capacity ?? 0;
     const selPct = selCap > 0 ? Math.max(0, Math.min(100, (selAlloc / selCap) * 100)) : 0;
     const selDiskKey = `${vm}:${selDisk?.dev ?? "disk"}`;
-    const diskHist = addDiskSample(selDiskKey, selPct);
+    let diskHist: (number | null)[] = addDiskSample(selDiskKey, selPct);
+    let diskTiming: Timing | undefined;
 
     // The NIC list: live counters from the daemon when present, otherwise
     // the XML inventory (a shut-off guest has no counters, but still shows).
@@ -3715,9 +3769,29 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       : nicList[0]?.key;
     const selNic = nicList.find((x) => x.key === netSel);
     const netKey = `${vm}:${selNic?.key ?? "net"}`;
-    const { rx, tx, rxNow, txNow } = addNetSample(
-      netKey, selNic?.rx ?? 0, selNic?.tx ?? 0, s.sampled_at_ms);
-    const netMax = Math.max(1, ...rx, ...tx);
+    const liveNet = addNetSample(netKey, selNic?.rx ?? 0, selNic?.tx ?? 0, s.sampled_at_ms);
+    const { rxNow, txNow } = liveNet;
+    let rx: (number | null)[] = liveNet.rx;
+    let tx: (number | null)[] = liveNet.tx;
+    let netTiming: Timing | undefined;
+    if (!isLive()) {
+      const shown = range().key;
+      const nicMac = (nic.interfaces ?? []).find((x, i) => (x.dev || x.mac || `nic${i}`) === selNic?.key)?.mac;
+      const q = { conn, name: vm };
+      const none = Promise.resolve(null);
+      try {
+        const [hv, hd, hn] = await Promise.all([
+          loadHistory(api.get, { ...q, kind: "vm" }),
+          selDisk ? loadHistory(api.get, { ...q, kind: "disk", sub: selDisk.dev }) : none,
+          nicMac ? loadHistory(api.get, { ...q, kind: "nic", sub: nicMac }) : none,
+        ]);
+        ({ a: cpu, b: mem, timing } = hv);
+        if (hd) ({ a: diskHist, timing: diskTiming } = hd);
+        if (hn) ({ a: rx, b: tx, timing: netTiming } = hn);
+      } catch { /* keep the live minute */ }
+      if (range().key !== shown || !stillCurrentVm(conn, vm, "summary")) return;
+    }
+    const netMax = Math.max(1, ...rx.map((v) => v ?? 0), ...tx.map((v) => v ?? 0));
 
     // Every hardware device in one full-width strip, in domain order.
     const hwStrip = [
@@ -3731,6 +3805,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     ];
 
     setHtml(body, `
+    ${rangeBar()}
     <div class="sumgrid vm-sumgrid vm-top">
       <div class="metric ${running ? "ok" : ""}">
         <div class="metric-head">
@@ -3740,8 +3815,8 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         </div>
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(cpu)}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(cpu, "", 100, timing)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot"><span>${s.vcpus} vCPU</span><span>${esc(capLabel(d.state))}</span></div>
       </div>
@@ -3754,8 +3829,8 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         </div>
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(mem, "mem")}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(mem, "mem", 100, timing)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(usedKib * 1024)} used</span>
@@ -3774,8 +3849,8 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         </div>
         <div class="meter"><div class="meter-fill ${selPct > 85 ? "hot" : ""}" style="width:${selPct.toFixed(1)}%"></div></div>
         <div class="chart">
-          ${sparkline(diskHist, "disk")}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(diskHist, "disk", 100, diskTiming)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${selCap > 0 ? `${fmtBytes(selAlloc)} used` : "usage unknown"}</span>
@@ -3796,9 +3871,9 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         </div>
         <div class="chart net-chart">
           <div class="net-legend"><span class="rx">▼ RX ${fmtRate(rxNow)}</span><span class="tx">▲ TX ${fmtRate(txNow)}</span></div>
-          ${sparkline(rx, "rx", netMax)}
-          ${sparkline(tx, "tx", netMax)}
-          <div class="chart-axis"><span>-1m</span><span>now</span></div>
+          ${sparkline(rx, "rx", netMax, netTiming)}
+          ${sparkline(tx, "tx", netMax, netTiming)}
+          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${selNic?.dev ?? "—"}</span>

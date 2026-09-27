@@ -194,3 +194,58 @@ test("a repeated NIC sample does not push a point", () => {
   assert.deepEqual(again.rx, a.rx);
   assert.equal(again.rxNow, 2, "2 KiB over 1 s");
 });
+
+// ------------------------------------------------------------ range charts
+
+test("a gap in a series breaks the line instead of drawing zero", () => {
+  const svg = stats.sparkline([10, 20, null, null, 30, 40]);
+  const line = svg.match(/class="spark-line" d="([^"]+)"/)[1];
+  assert.equal((line.match(/M/g) ?? []).length, 2, "two separate runs");
+  assert.ok(!/,74\.00/.test(line), "no point drawn at zero for the gap");
+  const fill = svg.match(/class="spark-fill" d="([^"]+)"/)[1];
+  assert.equal((fill.match(/Z/g) ?? []).length, 2, "each run fills on its own");
+});
+
+test("an empty range draws no line at all", () => {
+  const svg = stats.sparkline([null, null, null]);
+  assert.ok(!svg.includes("spark-line"), svg);
+});
+
+test("a chart carries its values and timing for the hover readout", () => {
+  const svg = stats.sparkline([1.234, null, 3], "rx", 10, { t0: 1000, step: 500 });
+  assert.match(svg, /data-v="1\.23,,3"/);
+  assert.match(svg, /data-t0="1000"/);
+  assert.match(svg, /data-step="500"/);
+  assert.match(svg, /data-unit="rate"/);
+  assert.match(stats.sparkline([1]), /data-unit="pct"/);
+});
+
+test("the pointer picks the nearest point", () => {
+  assert.equal(stats.pointAt(5, 0), 0);
+  assert.equal(stats.pointAt(5, 1), 4);
+  assert.equal(stats.pointAt(5, 0.49), 2);
+  assert.equal(stats.pointAt(5, 0.12), 0);
+  assert.equal(stats.pointAt(5, 0.13), 1);
+  assert.equal(stats.pointAt(5, -1), 0, "clamped left");
+  assert.equal(stats.pointAt(5, 7), 4, "clamped right");
+  assert.equal(stats.pointAt(1, 0.5), 0);
+});
+
+test("the readout names the time and the value in its unit", () => {
+  const t = new Date(2026, 4, 3, 14, 5, 9).getTime();
+  assert.equal(stats.readout(23.44, "pct", t, 60_000), "14:05:09 · 23%");
+  assert.equal(stats.readout(2048, "rate", t, 60_000), "14:05:09 · 2.0 MiB/s");
+  assert.equal(stats.readout(null, "pct", t, 60_000), "14:05:09 · no data");
+  assert.equal(stats.readout(5, "pct", t, 24 * 3600_000), "14:05 · 5.0%", "no seconds on long ranges");
+  assert.equal(stats.readout(5, "pct", t, 7 * 24 * 3600_000), "5/3 14:05 · 5.0%", "a date past a day");
+});
+
+test("history buckets land on a full time grid, with gaps for missing ones", () => {
+  // Server buckets are stamped at their middle: floor(ts/step)*step + step/2.
+  const step = 100;
+  const rows = [[150, 1, 2], [350, 3, null]];
+  const g = stats.gridSeries(rows, 120, 460, step);
+  assert.equal(g.t0, 150, "grid aligned to the server's buckets");
+  assert.deepEqual(g.a, [1, null, 3, null], "a missing bucket is a gap");
+  assert.deepEqual(g.b, [2, null, null, null]);
+});

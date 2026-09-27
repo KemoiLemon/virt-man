@@ -46,7 +46,7 @@ async fn stats() -> Result<Json<Value>, ApiError> {
 ///
 /// `idle` includes iowait: from the host's perspective that time is not
 /// spendable by anyone else, so it belongs in the "not busy" bucket.
-fn cpu_counters(stat: &str) -> Option<(u64, u64)> {
+pub(super) fn cpu_counters(stat: &str) -> Option<(u64, u64)> {
     let line = stat.lines().find(|l| l.starts_with("cpu "))?;
     let vals: Vec<u64> = line
         .split_whitespace()
@@ -59,7 +59,7 @@ fn cpu_counters(stat: &str) -> Option<(u64, u64)> {
 }
 
 /// A `MemTotal:`-style line's value in kibibytes, matched case-insensitively.
-fn meminfo_kib(meminfo: &str, key: &str) -> Option<u64> {
+pub(super) fn meminfo_kib(meminfo: &str, key: &str) -> Option<u64> {
     meminfo.lines().find_map(|l| {
         let (k, v) = l.split_once(':')?;
         if !k.trim().eq_ignore_ascii_case(key) {

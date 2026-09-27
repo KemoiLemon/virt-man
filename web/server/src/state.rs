@@ -1,4 +1,5 @@
 use crate::api::uploads::Uploads;
+use crate::history::History;
 use crate::store::Store;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -12,15 +13,18 @@ pub struct AppState {
     pub auth_disabled: bool,
     /// In-flight staged uploads, keyed by id. See `api::uploads`.
     pub uploads: Uploads,
+    /// Two weeks of sampled metrics. See `history`.
+    pub history: History,
 }
 
 impl AppState {
-    pub fn new(store: Store, data_dir: PathBuf, auth_disabled: bool) -> Self {
+    pub fn new(store: Store, data_dir: PathBuf, auth_disabled: bool, history: History) -> Self {
         Self {
             store: Arc::new(RwLock::new(store)),
             data_dir,
             auth_disabled,
             uploads: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            history,
         }
     }
 
