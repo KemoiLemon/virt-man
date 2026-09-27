@@ -11,7 +11,7 @@ import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
-import { domainXml, esc, networkFormFromXml, networkUuid, networkXml, poolXml, volumeXml, withFirmware } from "./xml";
+import { domainXml, defaultDhcpRange, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, DhcpHost, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
@@ -1356,6 +1356,7 @@ function backToConn() {
 /// (MAC -> IP DHCP hosts) and the lifecycle/edit actions.
 async function renderNetPage() {
   if (!selectedConn || !selectedNet) return;
+  const conn = selectedConn; // narrowed copy for nested closures
   const content = $("#content");
   const name = selectedNet;
   try {
@@ -1373,6 +1374,14 @@ async function renderNetPage() {
     const typeLabel = form.forward === "bridge" ? "Bridge" : form.forward === "nat" ? "NAT" : "Isolated";
     const gateway = form.ip ? form.ip.split("/")[0] : "—";
     const hosts = form.hosts ?? [];
+    // libvirt enables DHCP for any network with an <ip>; an absent <range>
+    // means the default range (gateway+1 .. broadcast-1), not "no DHCP".
+    const dhcpRange = form.dhcp_start && form.dhcp_end
+      ? { start: form.dhcp_start, end: form.dhcp_end }
+      : defaultDhcpRange(form.ip);
+    const dhcpLabel = dhcpRange ? `${dhcpRange.start} – ${dhcpRange.end}` : "—";
+    // No explicit forwarders means dnsmasq answers on the gateway itself.
+    const dnsLabel = form.dns || (form.forward === "nat" && form.ip ? gateway : "—");
 
     // Persist the current host list back into the network definition.
     const saveHosts = async (next: DhcpHost[]) => {
@@ -1387,7 +1396,7 @@ async function renderNetPage() {
         <span class="dtitle">${esc(name)}</span>
         <span class="badge ${net.active ? "on" : ""}">${net.active ? "Active" : "Inactive"}</span>
       </div>
-      <div class="actions">
+      <div class="actions" style="margin-top:12px">
         <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
         <button class="btn ${net.autostart ? "on" : ""}" id="net-autostart">${ic.autostart(14)} Autostart ${net.autostart ? "on" : "off"}</button>
         <button class="btn primary" id="net-edit">${ic.edit(14)} Edit</button>
@@ -1399,8 +1408,8 @@ async function renderNetPage() {
         <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${esc(form.bridge || "—")}</b><i>BRIDGE</i></div></div>
         <div class="card"><span class="card-ic">${ic.circleDot(20)}</span><div><b>${esc(form.ip || "—")}</b><i>SUBNET</i></div></div>
         <div class="card"><span class="card-ic">${ic.chevron(20)}</span><div><b>${esc(gateway)}</b><i>GATEWAY</i></div></div>
-        <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${form.dhcp_start && form.dhcp_end ? `${esc(form.dhcp_start)} – ${esc(form.dhcp_end)}` : "—"}</b><i>DHCP RANGE</i></div></div>
-        <div class="card"><span class="card-ic">${ic.options(20)}</span><div><b>${esc(form.dns || "—")}</b><i>DNS</i></div></div>
+        <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${esc(dhcpLabel)}</b><i>DHCP RANGE</i></div></div>
+        <div class="card"><span class="card-ic">${ic.options(20)}</span><div><b>${esc(dnsLabel)}</b><i>DNS</i></div></div>
         <div class="card"><span class="card-ic">${ic.autostart(20)}</span><div><b>${net.persistent ? "Persistent" : "Transient"}</b><i>PERSISTENCE</i></div></div>
       </div>
 
@@ -1422,22 +1431,71 @@ async function renderNetPage() {
 
     const editHost = (idx: number | null) => {
       const h = idx === null ? { mac: "", ip: "", name: "" } : hosts[idx];
+      const vms = treeVms[conn] ?? [];
       const el = openModal(
         idx === null ? "Add IPAM allocation" : "Edit IPAM allocation",
         `<div class="grid2">
+          <label class="field"><span>VM (optional)</span>
+            <select id="ipam-vm">
+              <option value="">Manual entry</option>
+              ${vms.map((v) => `<option value="${esc(v.name)}" ${v.name === h.name ? "selected" : ""}>${esc(v.title || v.name)}</option>`).join("")}
+            </select></label>
+          <label class="field" id="ipam-nic-wrap" hidden><span>Interface</span><select id="ipam-nic"><option value="">Select an interface…</option></select></label>
           <label class="field"><span>Name (optional)</span><input id="ipam-name" value="${esc(h.name ?? "")}" placeholder="guest hostname"></label>
           <label class="field"><span>IP address</span><input id="ipam-ip" value="${esc(h.ip)}" placeholder="192.168.100.50"></label>
           <label class="field"><span>MAC address</span><input id="ipam-mac" value="${esc(h.mac)}" placeholder="52:54:00:aa:bb:cc"></label>
         </div>`,
         `<button class="btn primary" id="ipam-save">${idx === null ? "Add" : "Save"}</button>`,
       );
+
+      const vmSel = $("#ipam-vm", el) as HTMLSelectElement;
+      const nicSel = $("#ipam-nic", el) as HTMLSelectElement;
+      const nicWrap = $("#ipam-nic-wrap", el) as HTMLElement;
+      const nameInp = $("#ipam-name", el) as HTMLInputElement;
+      const ipInp = $("#ipam-ip", el) as HTMLInputElement;
+      const macInp = $("#ipam-mac", el) as HTMLInputElement;
+
+      // Picking a VM offers its NIC MACs; picking one fills MAC, name and a
+      // free IP from the DHCP range. Manual entry still works by hand-typing
+      // the MAC.
+      const pickVm = async (vmName: string) => {
+        if (!vmName) {
+          nicWrap.hidden = true;
+          return;
+        }
+        try {
+          const res = await api.get<{ interfaces: { mac: string | null }[] }>(
+            `/proxy/${selectedConn}/domains/${encodeURIComponent(vmName)}/interfaces`);
+          const macs = (res.interfaces ?? []).map((x) => x.mac).filter(Boolean) as string[];
+          setHtml(nicSel, macs.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("") || `<option value="">No NIC</option>`);
+          nicWrap.hidden = false;
+          if (macs.length === 1) {
+            nicSel.value = macs[0];
+            macInp.value = macs[0];
+            if (!nameInp.value) nameInp.value = vmName;
+            if (!ipInp.value) {
+              ipInp.value = nextFreeIp(form.ip, hosts.map((x) => x.ip), dhcpRange ?? undefined) ?? "";
+            }
+          }
+        } catch {
+          nicWrap.hidden = true;
+        }
+      };
+      vmSel.addEventListener("change", () => void pickVm(vmSel.value));
+      nicSel.addEventListener("change", () => {
+        macInp.value = nicSel.value;
+        if (!ipInp.value) {
+          ipInp.value = nextFreeIp(form.ip, hosts.map((x) => x.ip), dhcpRange ?? undefined) ?? "";
+        }
+      });
+
       $("#ipam-save", el).onclick = async () => {
-        const mac = $("#ipam-mac", el).value.trim();
-        const ip = $("#ipam-ip", el).value.trim();
+        const mac = macInp.value.trim();
+        const ip = ipInp.value.trim();
         if (!mac || !ip) return toast("MAC and IP are required", "bad");
         const next = [...hosts];
-        if (idx === null) next.push({ mac, ip, name: $("#ipam-name", el).value.trim() });
-        else next[idx] = { mac, ip, name: $("#ipam-name", el).value.trim() };
+        if (idx === null) next.push({ mac, ip, name: nameInp.value.trim() });
+        else next[idx] = { mac, ip, name: nameInp.value.trim() };
         el.remove();
         try {
           await saveHosts(next);
@@ -1479,6 +1537,55 @@ async function renderNetPage() {
     });
   } catch (e) {
     setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
+  }
+}
+
+/// Read a domain's network interfaces (network + MAC) from its XML.
+function domainInterfaces(xml: string): { network: string; mac: string }[] {
+  const out: { network: string; mac: string }[] = [];
+  const attr = (tag: string, name: string) =>
+    tag.match(new RegExp(`${name}\\s*=\\s*['"]([^'"]*)['"]`))?.[1] ?? "";
+  for (const m of xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)) {
+    const block = m[0];
+    const network = attr(block.match(/<source\b[^>]*>/)?.[0] ?? "", "network");
+    const mac = attr(block.match(/<mac\b[^>]*>/)?.[0] ?? "", "address");
+    if (network && mac) out.push({ network, mac });
+  }
+  return out;
+}
+
+/// After a VM is defined, add a static DHCP allocation for each of its NICs:
+/// pick the first free address in that network's DHCP range and write a
+/// <host mac=… ip=…/> entry. Best effort — a NIC on a bridge (no <ip>) or a
+/// network with a full range is skipped rather than failing VM creation.
+async function autoAllocateIpam(conn: string, vmName: string) {
+  try {
+    const { xml } = await api.get<{ xml: string }>(
+      `/proxy/${conn}/domains/${encodeURIComponent(vmName)}/xml`);
+    for (const nic of domainInterfaces(xml)) {
+      try {
+        const { xml: netXml } = await api.get<{ xml: string }>(
+          `/proxy/${conn}/networks/${encodeURIComponent(nic.network)}/xml`);
+        const form = networkFormFromXml(netXml);
+        if (!form.ip) continue; // bridge networks have no DHCP
+        const uuid = networkUuid(netXml);
+        const existing = form.hosts ?? [];
+        if (existing.some((h) => h.mac === nic.mac)) continue;
+        const range = form.dhcp_start && form.dhcp_end
+          ? { start: form.dhcp_start, end: form.dhcp_end }
+          : defaultDhcpRange(form.ip);
+        const ip = nextFreeIp(form.ip, existing.map((h) => h.ip), range ?? undefined);
+        if (!ip) continue;
+        const hosts = [...existing, { mac: nic.mac, ip, name: vmName }];
+        await api.putXml(
+          `/proxy/${conn}/networks/${encodeURIComponent(nic.network)}/xml`,
+          networkXml({ ...form, hosts }, uuid));
+      } catch {
+        // Skip this NIC's network; the VM is already defined.
+      }
+    }
+  } catch {
+    // No interfaces, or the domain vanished — nothing to allocate.
   }
 }
 
@@ -3749,6 +3856,9 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
       await createPendingVolumes(conn, form.name, devices, set);
       set("defining domain");
       await api.postXml(`/proxy/${conn}/domains?start=true`, withDevices(domainXml(form), devices));
+      // Give each of the new guest's NICs a static DHCP allocation in its
+      // network, so it keeps a stable IP.
+      await autoAllocateIpam(conn, form.name);
     });
     toast("VM creation started");
     renderConn();

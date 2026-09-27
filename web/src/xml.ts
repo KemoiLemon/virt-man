@@ -295,6 +295,65 @@ export function networkUuid(xml: string): string {
   return tag(xml, "uuid");
 }
 
+// ---------------------------------------------------------- IPv4 helpers
+
+function ipv4(s: string): number | null {
+  const parts = s.split(".");
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    const v = parseInt(p, 10);
+    if (!Number.isFinite(v) || v < 0 || v > 255) return null;
+    n = (n << 8) | v;
+  }
+  return n >>> 0;
+}
+
+function ipv4str(n: number): string {
+  return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff].join(".");
+}
+
+/// libvirt's default DHCP range for a CIDR when no explicit <range> is set:
+/// gateway + 1 through broadcast - 1 (e.g. 192.168.167.2 – 192.168.167.254).
+/// DHCP is on by default whenever a network has an <ip>, so an absent range
+/// is not an empty pool — the page should show this derived range instead.
+export function defaultDhcpRange(ipCidr: string): { start: string; end: string } | null {
+  const [addr, bits] = ipCidr.split("/");
+  const ip = ipv4(addr);
+  const prefix = parseInt(bits ?? "", 10);
+  if (ip == null || !Number.isFinite(prefix) || prefix < 1 || prefix > 30) return null;
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  const network = (ip & mask) >>> 0;
+  const broadcast = (network | (~mask >>> 0)) >>> 0;
+  const start = network + 2; // network address +1 is the gateway
+  const end = broadcast - 1;
+  if (start > end) return null;
+  return { start: ipv4str(start), end: ipv4str(end) };
+}
+
+/// First unallocated address in a network's DHCP range (explicit, else the
+/// derived default), skipping the gateway and any IPs already handed out.
+/// Returns null when the subnet or range is missing/exhausted.
+export function nextFreeIp(
+  ipCidr: string,
+  used: string[],
+  range?: { start: string; end: string },
+): string | null {
+  const r = range ?? defaultDhcpRange(ipCidr);
+  if (!r) return null;
+  const start = ipv4(r.start);
+  const end = ipv4(r.end);
+  if (start == null || end == null || start > end) return null;
+  const usedSet = new Set(used.filter(Boolean).map((x) => x.trim()));
+  const gw = ipCidr.split("/")[0];
+  if (gw) usedSet.add(gw);
+  for (let n = start; n <= end; n++) {
+    const s = ipv4str(n);
+    if (!usedSet.has(s)) return s;
+  }
+  return null;
+}
+
 function netmaskBits(mask: string): number {
   return mask.split(".").reduce((bits, octet) => {
     const n = parseInt(octet, 10);

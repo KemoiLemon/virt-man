@@ -128,6 +128,24 @@ test("DHCP host allocations round-trip through the network XML", () => {
   assert.equal(parsed.hosts[1].name, "");
 });
 
+test("a network with an ip but no range derives libvirt's default DHCP range", () => {
+  assert.deepEqual(
+    xml.defaultDhcpRange("192.168.167.1/24"),
+    { start: "192.168.167.2", end: "192.168.167.254" },
+  );
+  assert.equal(xml.defaultDhcpRange("10.0.0.1/8")?.start, "10.0.0.2");
+  assert.equal(xml.defaultDhcpRange(""), null);
+});
+
+test("nextFreeIp skips the gateway and allocated addresses", () => {
+  const used = ["192.168.167.1", "192.168.167.2", "192.168.167.3"];
+  assert.equal(xml.nextFreeIp("192.168.167.1/24", used), "192.168.167.4");
+  assert.equal(
+    xml.nextFreeIp("192.168.167.1/24", [], { start: "192.168.167.50", end: "192.168.167.50" }),
+    "192.168.167.50",
+  );
+});
+
 test("UEFI guests get the real OVMF loader and a templated nvram store", () => {
   const out = xml.domainXml({
     name: "box",
