@@ -66,3 +66,17 @@ test("dashboard sections are spaced apart", () => {
   assert.match(flat(), /\.dash-section\s+\.storage-card\s*\{[^}]*margin-bottom:\s*18px/,
     "dashboard storage cards are separated by 18px");
 });
+
+// Create cards highlight on hover. Their icon wrappers pin a colour of their
+// own, so without an explicit hover rule the icon stayed grey while the card
+// turned red; and an icon that is red while idle stands out from every other
+// icon, which idle at the dim colour.
+test("create-card icons idle neutral and follow the hover highlight", () => {
+  const css = flat();
+  assert.doesNotMatch(css, /\.create-resource-card \.metric-ic\s*\{[^}]*color/,
+    "create-resource icon is not coloured while idle");
+  assert.match(css, /\.create-resource-card:hover \.metric-ic\s*\{[^}]*color:\s*var\(--accent\)/);
+  assert.match(css, /\.create-card:hover \.storage-card-icon[^{]*\{[^}]*color:\s*var\(--accent\)/);
+  assert.match(css, /\.net-create-card:hover \.storage-card-icon[^{]*\{[^}]*color:\s*var\(--accent\)/);
+});
+
