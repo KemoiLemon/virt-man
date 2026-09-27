@@ -143,6 +143,14 @@ scan — so it is cheaper to be accurate than to cache. The pool page polls ever
 second and would otherwise repeat the same wrong answer forever. The all-pools
 list deliberately does not refresh every pool, keeping the sidebar's poll cheap.
 
+**Finished transfers are forgotten, not kept.** A completed or failed upload
+stays listed for 15 minutes (`FINISHED_TTL_MS`) and is then dropped, pruned when
+`GET /uploads` is served. The activity log is the durable record of what
+happened, so the transfer card is transient progress and dropping it loses
+nothing — without the prune both the job map and the pool page grow for the life
+of the process, and a page that lists every transfer ever run is worse than one
+that lists current work.
+
 **Activity is server-side and per-user.** Long operations report their outcome
 to `POST /activity`, stored in `store.json` so it survives restarts. A
 non-admin sees only their own rows; an admin sees all, and the attribution

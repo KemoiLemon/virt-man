@@ -65,6 +65,10 @@ pub struct UploadJob {
     pub sha256: Option<String>,
     pub error: Option<String>,
     pub at_ms: u64,
+    /// When the job reached a terminal phase, or 0 while it has not. Used to
+    /// expire finished transfers (see [`expired`]); `at_ms` is when the job was
+    /// staged, which for a long upload is a poor guide to when it finished.
+    pub finished_ms: u64,
     /// When the daemon leg started, or 0 before it does.
     pub started_ms: u64,
     /// Average bytes/second of the daemon leg, recomputed as bytes leave.
@@ -224,6 +228,9 @@ fn job_from_files(body: &std::path::Path, meta: &std::path::Path, id: &str) -> O
         sha256: None,
         error: None,
         at_ms: if m.at_ms == 0 { now } else { m.at_ms },
+        // Not finished: it has not run yet in this process, so it must never be
+        // treated as expired and silently dropped.
+        finished_ms: 0,
         started_ms: 0,
         speed_bps: 0.0,
         daemon_recv_bps: 0.0,
@@ -326,6 +333,7 @@ async fn stage(
         sha256: None,
         error: None,
         at_ms: now_ms(),
+        finished_ms: 0,
         started_ms: 0,
         speed_bps: 0.0,
         daemon_recv_bps: 0.0,
@@ -420,6 +428,15 @@ async fn list(
     State(state): State<AppState>,
     axum::extract::Extension(_user): axum::extract::Extension<User>,
 ) -> Result<Json<Value>, ApiError> {
+    // Forget finished transfers that have been on screen long enough. Done on
+    // this path rather than a timer: the pool page polls it every second while
+    // it is open, which is exactly when the clutter would be visible, and a
+    // server nobody is watching has no one to show it to.
+    let now = now_ms();
+    {
+        let mut map = state.uploads.write().expect("uploads lock poisoned");
+        prune(&mut map, now);
+    }
     let jobs: Vec<JobRef> = state
         .uploads
         .read()
@@ -508,6 +525,7 @@ async fn push(
                 let mut j = job.lock().expect("job lock poisoned");
                 j.phase = Phase::Failed;
                 j.error = Some(e.clone());
+                j.finished_ms = now_ms();
                 (format!("Upload {}", j.name), e.clone())
             }
         };
@@ -640,6 +658,7 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     let _ = tokio::fs::remove_file(staged_meta_path(&state.data_dir, id)).await;
     let mut j = job.lock().expect("job lock poisoned");
     j.phase = Phase::Done;
+    j.finished_ms = now_ms();
     j.sha256 = Some(local.clone());
     Ok(local)
 }
@@ -681,6 +700,33 @@ fn fmt_bps(bps: f64) -> String {
 /// Lowercase hex of a digest.
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// How long a finished transfer stays listed. Long enough to read the result of
+/// a multi-GB upload, short enough that the pool page shows current work rather
+/// than a growing wall of old transfers.
+const FINISHED_TTL_MS: u64 = 15 * 60 * 1000;
+
+/// Whether a finished job is old enough to forget.
+///
+/// The activity log is the durable record of what happened, so a completed card
+/// is transient progress: dropping it loses nothing that matters, and without
+/// this the map and the pool page grow for the life of the process (fourteen
+/// jobs piled up during a single session of testing). A job with no finish time
+/// is never expired, which keeps this safe for jobs restored from disk — those
+/// come back staged, not finished.
+fn expired(job: &UploadJob, now: u64) -> bool {
+    matches!(job.phase, Phase::Done | Phase::Failed)
+        && job.finished_ms > 0
+        && now.saturating_sub(job.finished_ms) > FINISHED_TTL_MS
+}
+
+/// Forget finished transfers that are past their TTL.
+///
+/// Separate from the handler so the behaviour can be tested against a real map
+/// rather than only through the predicate it uses.
+fn prune(map: &mut HashMap<String, JobRef>, now: u64) {
+    map.retain(|_, job| !expired(&job.lock().expect("job lock poisoned"), now));
 }
 
 /// Is a volume of this name already in the pool?
@@ -746,6 +792,120 @@ mod tests {
     fn write_pair(d: &std::path::Path, id: &str, body_len: usize, meta_size: u64) {
         std::fs::write(d.join(format!("{id}.part")), vec![7u8; body_len]).unwrap();
         std::fs::write(d.join(format!("{id}.json")), meta_json(id, meta_size)).unwrap();
+    }
+
+    fn job_in(phase: Phase, finished_ms: u64) -> UploadJob {
+        UploadJob {
+            id: "j1".into(),
+            conn: "c1".into(),
+            pool: "default".into(),
+            name: "x.iso".into(),
+            size: 10,
+            sent: 0,
+            phase,
+            sha256: None,
+            error: None,
+            at_ms: 1,
+            finished_ms,
+            started_ms: 0,
+            speed_bps: 0.0,
+            daemon_recv_bps: 0.0,
+            daemon_write_bps: 0.0,
+            user_id: "u1".into(),
+            username: "alice".into(),
+        }
+    }
+
+    /// A finished job is kept long enough to read, then forgotten. Without this
+    /// the map and the pool page grow for the life of the process.
+    #[test]
+    fn finished_jobs_expire_after_the_ttl() {
+        let now = 1_000_000_000;
+        let done = job_in(Phase::Done, now - FINISHED_TTL_MS - 1);
+        assert!(expired(&done, now), "an old finished job should expire");
+        let fresh = job_in(Phase::Done, now - 5_000);
+        assert!(
+            !expired(&fresh, now),
+            "a just-finished job must stay readable"
+        );
+    }
+
+    /// A failure is the thing someone most needs to see, so it is held exactly
+    /// as long as a success.
+    #[test]
+    fn failed_jobs_expire_on_the_same_schedule() {
+        let now = 1_000_000_000;
+        assert!(expired(
+            &job_in(Phase::Failed, now - FINISHED_TTL_MS - 1),
+            now
+        ));
+        assert!(!expired(&job_in(Phase::Failed, now - 1_000), now));
+    }
+
+    /// Work in progress must never be expired, whatever its timestamps: that
+    /// would drop a transfer out of the UI while it is still running.
+    #[test]
+    fn unfinished_jobs_never_expire() {
+        let now = 1_000_000_000;
+        let ancient = now - FINISHED_TTL_MS * 100;
+        for phase in [Phase::Staged, Phase::Uploading, Phase::Verifying] {
+            assert!(
+                !expired(&job_in(phase, ancient), now),
+                "{phase:?} must not expire"
+            );
+        }
+    }
+
+    /// A zero finish time means "not recorded", which must not be read as
+    /// "finished at the epoch" -- that would expire everything immediately.
+    #[test]
+    fn a_missing_finish_time_never_expires() {
+        let now = 1_000_000_000;
+        assert!(!expired(&job_in(Phase::Done, 0), now));
+    }
+
+    /// A clock that has not advanced past the finish time (or has gone
+    /// backwards) must not expire a job; saturating arithmetic keeps this from
+    /// wrapping into a huge age.
+    #[test]
+    fn a_finish_time_in_the_future_does_not_expire() {
+        let now = 1_000_000_000;
+        assert!(!expired(&job_in(Phase::Done, now + 60_000), now));
+        assert!(!expired(&job_in(Phase::Done, now), now));
+    }
+
+    /// The prune the handler actually runs, against a real map: it must drop the
+    /// stale finished job and keep everything else, including work in progress.
+    /// A predicate-only test would not catch the map being locked or filtered
+    /// wrongly, which is where this could quietly go wrong.
+    #[test]
+    fn prune_forgets_only_stale_finished_jobs() {
+        let now = 1_000_000_000;
+        let mut map: HashMap<String, JobRef> = HashMap::new();
+        let mut insert = |name: &str, job: UploadJob| {
+            map.insert(name.to_string(), Arc::new(Mutex::new(job)));
+        };
+        let mut stale = job_in(Phase::Done, now - FINISHED_TTL_MS - 1);
+        stale.id = "stale".into();
+        insert("stale", stale);
+        let mut fresh = job_in(Phase::Done, now - 1_000);
+        fresh.id = "fresh".into();
+        insert("fresh", fresh);
+        let mut running = job_in(Phase::Uploading, 0);
+        running.id = "running".into();
+        insert("running", running);
+        let mut failed = job_in(Phase::Failed, now - FINISHED_TTL_MS - 1);
+        failed.id = "failed".into();
+        insert("failed", failed);
+
+        prune(&mut map, now);
+
+        let left: Vec<&String> = {
+            let mut v: Vec<&String> = map.keys().collect();
+            v.sort();
+            v
+        };
+        assert_eq!(left, ["fresh", "running"], "only the stale done job goes");
     }
 
     /// The decision the whole staging design exists to make. Tested directly
