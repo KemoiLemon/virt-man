@@ -19,3 +19,5 @@ subtle = "2"
 libc = "0.2"
 # Frame pixels are base64'd into JSON for the viewer.
 base64 = "0.22"
+# Volume hashing, so a staged upload can be verified after transfer.
+sha2 = "0.10"

@@ -7,6 +7,8 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
@@ -21,6 +23,7 @@ pub fn routes() -> Router {
         .route("/pools/{pool}/volumes", get(list).post(create))
         .route("/pools/{pool}/volumes/{vol}", get(get_one).delete(delete))
         .route("/pools/{pool}/volumes/{vol}/upload", post(upload))
+        .route("/pools/{pool}/volumes/{vol}/hash", get(hash))
 }
 
 async fn list(Path(pool): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -114,6 +117,43 @@ async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>
     Ok(Json(v))
 }
 
+/// SHA-256 of a file, streamed in chunks so a multi-GB ISO is never held in
+/// memory. Used to confirm a staged upload arrived on the daemon intact.
+fn sha256_file(path: &str) -> Result<(String, u64), LvError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    let hex = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((hex, total))
+}
+
+/// Content hash and size of a stored volume, so a client that staged the same
+/// bytes elsewhere can prove the transfer completed.
+async fn hash(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
+    let v = with_conn(move |c| {
+        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let vol = StorageVol::lookup_by_name(&p, &vol)?;
+        let name = vol.get_name().unwrap_or_default();
+        let path = vol.get_path().unwrap_or_default();
+        let (sha256, size) = sha256_file(&path)?;
+        Ok(json!({"name": name, "sha256": sha256, "size": size}))
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(v))
+}
+
 /// Stream a raw body into a volume. `?name=` creates a new volume in the
 /// pool first; otherwise the body overwrites the named existing volume.
 ///
@@ -121,6 +161,59 @@ async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>
 /// blocking virStream from a second thread — avoids holding a multi-GB ISO in
 /// RAM. Streaming straight into virStream needs a channel + two libvirt
 /// threads; add if the extra disk write becomes a problem.
+/// Scratch space for a spooled upload body.
+///
+/// Deliberately **not** `std::env::temp_dir()`: `/tmp` is tmpfs on this host, so
+/// spooling an 8 GB ISO there would hold the whole thing in RAM. `/var/tmp` is
+/// disk-backed by convention. `VIRT_MAN_SPOOL_DIR` overrides it (the directory
+/// must already exist).
+fn spool_dir() -> PathBuf {
+    std::env::var_os("VIRT_MAN_SPOOL_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/tmp"))
+}
+
+/// A spool path unique to this request. Two uploads naming the same volume used
+/// to share one file, so concurrent uploads corrupted each other.
+fn spool_path(pool: &str, vol: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    spool_dir().join(format!("virtman-{pool}-{vol}-{}-{n}.upload", std::process::id()))
+}
+
+/// Spool the request body to `tmp`, returning the byte count.
+///
+/// The file is removed if the body fails part-way: an interrupted upload must
+/// not leave a multi-GB file behind. The success path removes it once the
+/// volume has been written.
+async fn spool_body(body: Body, tmp: &std::path::Path) -> Result<u64, ApiError> {
+    let mut file = tokio::fs::File::create(tmp)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut stream = body.into_data_stream();
+    let mut total = 0u64;
+    loop {
+        let chunk = match stream.next().await {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
+                let _ = std::fs::remove_file(tmp);
+                return Err(ApiError::bad_request(e));
+            }
+            None => break,
+        };
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = std::fs::remove_file(tmp);
+            return Err(ApiError::internal(e));
+        }
+        total += chunk.len() as u64;
+    }
+    if let Err(e) = file.flush().await {
+        let _ = std::fs::remove_file(tmp);
+        return Err(ApiError::internal(e));
+    }
+    Ok(total)
+}
+
 async fn upload(
     Path((pool, vol)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
@@ -128,19 +221,8 @@ async fn upload(
 ) -> Result<Json<Value>, ApiError> {
     let create_name = q.get("name").cloned();
 
-    let tmp = std::env::temp_dir().join(format!("virtman-{pool}-{vol}.upload"));
-    let mut file = tokio::fs::File::create(&tmp)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut stream = body.into_data_stream();
-    let mut total = 0u64;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(ApiError::bad_request)?;
-        file.write_all(&chunk).await.map_err(ApiError::internal)?;
-        total += chunk.len() as u64;
-    }
-    file.flush().await.map_err(ApiError::internal)?;
-    drop(file);
+    let tmp = spool_path(&pool, &vol);
+    let total = spool_body(body, &tmp).await?;
 
     let tmp_path = tmp.clone();
     let v = with_conn(move |c| {
@@ -162,6 +244,45 @@ async fn upload(
     Ok(Json(v?))
 }
 
+/// Push a whole buffer into a libvirt stream.
+///
+/// `Stream::send` maps to a single `virStreamSend`, which is allowed to accept
+/// fewer bytes than it was offered once libvirt's internal buffer fills up (the
+/// buffer is 64 KiB, so this shows up as whole-chunk losses on a large ISO).
+/// Ignoring the returned count drops the tail of that chunk, and because
+/// `finish()` then reports a clean EOF, `virStorageVolUpload` still *succeeds* —
+/// leaving a truncated volume that looks like a completed upload. Retry until
+/// every byte has been accepted.
+fn send_all(stream: &Stream, data: &[u8]) -> Result<(), LvError> {
+    send_all_with(data, |chunk| stream.send(chunk).map_err(LvError::from))
+}
+
+/// The retry loop behind [`send_all`], generic over the send call so the
+/// partial-write behaviour can be tested without a live libvirt connection.
+fn send_all_with<F>(mut data: &[u8], mut send: F) -> Result<(), LvError>
+where
+    F: FnMut(&[u8]) -> Result<usize, LvError>,
+{
+    while !data.is_empty() {
+        let sent = send(data)?;
+        if sent == 0 {
+            // Retrying forever would hang the upload; failing loudly beats
+            // silently truncating the volume.
+            return Err(LvError::Msg(
+                "libvirt stream accepted no bytes; refusing to drop data".into(),
+            ));
+        }
+        if sent > data.len() {
+            return Err(LvError::Msg(format!(
+                "libvirt stream claimed {sent} bytes from a {}-byte chunk",
+                data.len()
+            )));
+        }
+        data = &data[sent..];
+    }
+    Ok(())
+}
+
 fn upload_from_file(
     conn: &virt::connect::Connect,
     vol: &StorageVol,
@@ -169,38 +290,158 @@ fn upload_from_file(
     length: u64,
 ) -> Result<(), LvError> {
     let stream = Stream::new(conn, 0)?;
-    let feeder_stream = stream.clone();
-    let feeder_path = path.to_path_buf();
 
-    // virStorageVolUpload blocks until the stream finishes, so feed it from
-    // a second thread.
-    let feeder = std::thread::spawn(move || -> Result<(), LvError> {
-        let mut f = std::fs::File::open(&feeder_path)?;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            use std::io::Read;
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            feeder_stream.send(&buf[..n])?;
+    // `virStorageVolUpload` only *starts* the transfer: it returns as soon as
+    // the stream is attached (measured against libvirt 11.10.0 on a dir pool),
+    // and the data is consumed as it is sent, with `finish()` completing it.
+    //
+    // This used to send from a second thread on the belief that this call
+    // blocks. It does not, and racing a sender against it intermittently drops
+    // a whole 64 KiB chunk while still reporting success — a silently
+    // truncated volume. One thread, in this order, is both correct and
+    // simpler. Do not "optimise" this back into a thread.
+    vol.upload(&stream, 0, length, 0)?;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        use std::io::Read;
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
         }
-        feeder_stream.finish()?;
-        Ok(())
-    });
-
-    let upload_result = vol.upload(&stream, 0, length, 0);
-    let feed_result = feeder.join();
-    upload_result?;
-    match feed_result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(LvError::Msg("upload feeder thread panicked".into())),
+        send_all(&stream, &buf[..n])?;
     }
+    stream.finish()?;
+    Ok(())
 }
 
 fn volume_xml(name: &str, capacity: u64) -> String {
     format!(
         "<volume><name>{name}</name><capacity>{capacity}</capacity><target><format type='raw'/></target></volume>"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{send_all_with, sha256_file};
+
+    /// Reproduce libvirt's partial-send behaviour: `virStreamSend` accepts only
+    /// what fits in its buffer and reports the short count. Before the retry
+    /// loop this returned early with the chunk's tail silently dropped, which
+    /// truncated the volume while the upload still reported success.
+    #[test]
+    fn a_partial_send_loses_no_bytes() {
+        let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7) as u8).collect();
+        let mut accepted: Vec<u8> = Vec::new();
+        // Accept at most 64 KiB at a time, like libvirt's stream buffer.
+        let result = send_all_with(&data, |chunk| {
+            let take = chunk.len().min(64 * 1024);
+            accepted.extend_from_slice(&chunk[..take]);
+            Ok(take)
+        });
+        assert!(result.is_ok());
+        assert_eq!(accepted.len(), data.len(), "every byte was accepted");
+        assert_eq!(accepted, data, "and in the original order");
+    }
+
+    /// The nastiest shape: one byte per call, so the loop must run a great many
+    /// times. A loop that gave up after the first short send would still look
+    /// fine on the test above if the buffer happened to be small.
+    #[test]
+    fn a_byte_at_a_time_send_loses_no_bytes() {
+        let data: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
+        let mut accepted: Vec<u8> = Vec::new();
+        let result = send_all_with(&data, |chunk| {
+            accepted.push(chunk[0]);
+            Ok(1)
+        });
+        assert!(result.is_ok());
+        assert_eq!(accepted, data);
+    }
+
+    /// A stream that accepts nothing is a real libvirt outcome when the peer
+    /// goes away. Retrying forever would hang the upload, so it must fail
+    /// loudly rather than silently truncate the volume.
+    #[test]
+    fn a_stalled_stream_fails_instead_of_truncating() {
+        let data = [1u8, 2, 3];
+        let result = send_all_with(&data, |_| Ok(0));
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("accepted no bytes"),
+                "unexpected error: {e}"
+            ),
+            Ok(()) => panic!("a stream accepting nothing must not report success"),
+        }
+    }
+
+    /// libvirt can never legitimately claim more than it was offered; treating
+    /// it as success would slice out of bounds.
+    #[test]
+    fn a_stream_claiming_more_than_offered_is_rejected() {
+        let data = [1u8, 2, 3];
+        let result = send_all_with(&data, |chunk| Ok(chunk.len() + 1));
+        assert!(result.is_err(), "over-reporting must not be accepted");
+    }
+
+    /// An empty buffer is already fully sent and must not call the stream.
+    #[test]
+    fn an_empty_buffer_sends_nothing() {
+        let mut calls = 0;
+        let result = send_all_with(&[], |_| {
+            calls += 1;
+            Ok(1)
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 0);
+    }
+
+    /// Known-answer test: the SHA-256 of "abc". Pins the hasher to real
+    /// SHA-256 rather than merely "consistent with itself", which would pass
+    /// even if the digest were wrong on both sides of a comparison.
+    #[test]
+    fn sha256_file_matches_a_known_digest() {
+        let dir = std::env::temp_dir().join("virtman-hash-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("abc.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let (hex, size) = sha256_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(size, 3);
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sha256_file_streams_past_one_buffer() {
+        // Larger than the 64 KiB read buffer, so the chunk loop runs twice and
+        // the accumulated size proves nothing is dropped between reads.
+        let dir = std::env::temp_dir().join("virtman-hash-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.bin");
+        let data = vec![7u8; 200 * 1024];
+        std::fs::write(&path, &data).unwrap();
+        let (hex, size) = sha256_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(size, 200 * 1024);
+        assert_eq!(hex.len(), 64, "full width hex digest");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_empty_file_hashes_to_the_empty_digest() {
+        let dir = std::env::temp_dir().join("virtman-hash-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+        let (hex, size) = sha256_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }
