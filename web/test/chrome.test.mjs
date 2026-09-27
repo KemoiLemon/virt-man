@@ -104,3 +104,10 @@ test("keyboard focus is visible on buttons, rows and cards", () => {
   assert.match(flat(), /button:focus-visible[^{]*\{[^}]*outline:\s*1px solid var\(--accent\)/);
   assert.match(flat(), /\[tabindex\]:focus-visible/);
 });
+
+// The access-logs button sits on the far side of Add rule / Apply: right of
+// the rules table, not among the editing actions.
+test("the access-logs button is pushed to the right of its action row", () => {
+  const css = flat();
+  assert.match(css, /\.actions\s*>\s*\.al-open\s*\{[^}]*margin-left:\s*auto/);
+});

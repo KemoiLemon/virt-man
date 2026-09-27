@@ -14,6 +14,8 @@ import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
 import { bindChartHover, isLive, loadHistory, range, rangeBar, setRange } from "./history";
+import { GROUP_LABEL, PAGE, defaultFilter, drillDown, fmtDuration, fmtWhen, logQuery, sortMark, toggleSort, withGroup } from "./access";
+import type { Group, LogFilter } from "./access";
 import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
@@ -2533,7 +2535,10 @@ async function loadFilters() {
               </div>
             </td>
           </tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
-      </table>`);
+      </table>
+      <div class="actions"><button class="btn al-open" id="fw-tab-logs">${ic.logs(14)} Access logs</button></div>`);
+    const conn = selectedConn;
+    $("#fw-tab-logs", list).onclick = () => openAccessLogs(conn);
     list.querySelectorAll("[data-fwedit]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => openFirewallEditor((b as HTMLElement).dataset.fwedit!);
     });
@@ -2541,6 +2546,137 @@ async function loadFilters() {
     setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
+
+/// Access log: every connection this server's guests made, two weeks back.
+/// `vm` pre-selects one guest (the VM Network tab); from the Firewall page it
+/// starts on every VM with a filter to pick one.
+function openAccessLogs(conn: string, vm = "") {
+  let f: LogFilter = defaultFilter(vm);
+  let vms: string[] = [];
+  const el = openModal(`Access logs${vm ? ` — ${esc(vm)}` : ""}`, `<div id="al-body">${skeleton("table")}</div>`, "");
+  el.querySelector(".modal")?.classList.add("wide", "al-modal");
+  void api.get<{ vms: string[] }>(`/access-logs/vms?conn=${encodeURIComponent(conn)}`)
+    .then((r) => { vms = r.vms; paint(null); }).catch(() => {});
+  let data: { total: number; rows?: AccessRow[]; groups?: AccessGroup[] } | null = null;
+  let gen = 0;
+
+  const load = async () => {
+    const mine = ++gen;
+    try {
+      const r = await api.get<typeof data>(`/access-logs?${logQuery(conn, f, Date.now())}`);
+      if (mine !== gen) return; // a newer filter won
+      data = r;
+    } catch (e) {
+      if (mine !== gen) return;
+      data = null;
+      return paint((e as Error).message);
+    }
+    paint(null);
+  };
+
+  const opt = (list: [string, string][], sel: string) =>
+    list.map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(l)}</option>`).join("");
+  const th = (col: string, label: string) =>
+    `<th class="al-sort" data-al-sort="${col}" tabindex="0">${label}${sortMark(f, col)}</th>`;
+
+  function paint(error: string | null) {
+    const body = $("#al-body", el) as HTMLElement | null;
+    if (!body) return;
+    const vmList = [...new Set([...vms, ...(f.vm ? [f.vm] : [])])];
+    const total = data?.total ?? 0;
+    const pages = Math.max(1, Math.ceil(total / PAGE));
+    let table = "";
+    if (error) {
+      table = `<div class="empty">${esc(error)}</div>`;
+    } else if (!data) {
+      table = skeleton("table");
+    } else if (f.group) {
+      table = `<table class="grid al-table">
+        <tr>${th("key", esc(GROUP_LABEL[f.group].replace(/^(Most accessed |Most used |Busiest )/, "")))}${th("count", "Connections")}${th("bytes", "Traffic")}<th>VMs</th>${th("time", "Last")}</tr>
+        ${(data.groups ?? []).map((g) => `
+          <tr class="row-open" tabindex="0" data-al-drill="${esc(g.key)}">
+            <td>${esc(g.key || "(no name)")}</td><td>${g.count}</td><td>${fmtBytes(g.bytes)}</td>
+            <td>${g.vms}</td><td>${fmtWhen(g.last_ms)}</td></tr>`).join("")
+          || `<tr><td colspan="5" class="empty">Nothing logged for this filter.</td></tr>`}
+      </table>`;
+    } else {
+      const now = Date.now();
+      table = `<table class="grid al-table">
+        <tr>${th("time", "Time")}${f.vm ? "" : th("vm", "VM")}${th("proto", "Proto")}${th("domain", "Domain")}${th("ip", "Destination")}${th("port", "Port")}${th("bytes", "Traffic")}<th>Duration</th></tr>
+        ${(data.rows ?? []).map((r) => `
+          <tr>
+            <td>${fmtWhen(r.opened_ms)}</td>
+            ${f.vm ? "" : `<td>${esc(r.vm ?? "—")}</td>`}
+            <td>${r.kind === "dns" ? "dns" : esc(r.proto)}</td>
+            <td>${esc(r.domain ?? "—")}</td>
+            <td><code>${esc(r.dst)}</code></td>
+            <td>${r.dport || "—"}</td>
+            <td>${r.kind === "dns" ? "—" : r.closed_ms ? `↑${fmtBytes(r.bytes_out)} ↓${fmtBytes(r.bytes_in)}` : "…"}</td>
+            <td>${r.kind === "dns" ? "lookup" : fmtDuration(r.opened_ms, r.closed_ms, now)}</td>
+          </tr>`).join("")
+          || `<tr><td colspan="8" class="empty">Nothing logged for this filter.</td></tr>`}
+      </table>`;
+    }
+    const restore = holdFocus(body, "[data-al-sort], [data-al-drill], select, input");
+    setHtml(body, `
+      <div class="al-filters">
+        <label class="field"><span>VM</span><select id="al-vm">${opt([["", "All VMs"], ...vmList.map((v): [string, string] => [v, v])], f.vm)}</select></label>
+        <label class="field"><span>Show</span><select id="al-group">${opt(Object.entries(GROUP_LABEL) as [string, string][], f.group)}</select></label>
+        <label class="field"><span>Protocol</span><select id="al-proto">${opt([["", "Any"], ["tcp", "TCP"], ["udp", "UDP"], ["icmp", "ICMP"]], f.proto)}</select></label>
+        <label class="field"><span>Port</span><input id="al-port" value="${esc(f.port)}" placeholder="any" inputmode="numeric"></label>
+        <label class="field al-grow"><span>Domain or IP</span><input id="al-q" value="${esc(f.q)}" placeholder="github.com, 140.82."></label>
+        <label class="field"><span>Period</span><select id="al-range">${opt([["1h", "Last hour"], ["24h", "Last 24 h"], ["7d", "Last 7 days"], ["14d", "Last 14 days"]], f.range)}</select></label>
+        <label class="field al-check"><input type="checkbox" id="al-dns" ${f.dns ? "checked" : ""}><span>DNS lookups</span></label>
+      </div>
+      ${table}
+      <div class="al-foot">
+        <span class="dsub">${total} ${f.group ? "groups" : "entries"} · kept 14 days; oldest removed first if disk space runs low</span>
+        <span class="al-pager">
+          <button class="btn icon" id="al-prev" ${f.page ? "" : "disabled"} title="Newer page">${ic.back()}</button>
+          <span>${f.page + 1} / ${pages}</span>
+          <button class="btn icon" id="al-next" ${f.page + 1 < pages ? "" : "disabled"} title="Older page">${ic.chevron()}</button>
+          <button class="btn icon" id="al-reload" title="Refresh">${ic.reboot()}</button>
+        </span>
+      </div>`);
+    restore();
+
+    const set = (next: LogFilter) => { f = next; void load(); };
+    const sel = (id: string, fn: (v: string) => LogFilter) =>
+      ($(id, body) as HTMLSelectElement).addEventListener("change", (e) => set(fn((e.target as HTMLSelectElement).value)));
+    sel("#al-vm", (v) => ({ ...f, vm: v, page: 0 }));
+    sel("#al-group", (v) => withGroup(f, v as Group));
+    sel("#al-proto", (v) => ({ ...f, proto: v, page: 0 }));
+    sel("#al-range", (v) => ({ ...f, range: v, page: 0 }));
+    ($("#al-dns", body) as HTMLInputElement).onchange = (e) => set({ ...f, dns: (e.target as HTMLInputElement).checked, page: 0 });
+    // Typing filters as you go, after a pause, instead of on every key.
+    let timer = 0;
+    for (const [id, key] of [["#al-q", "q"], ["#al-port", "port"]] as const) {
+      ($(id, body) as HTMLInputElement).oninput = (e) => {
+        window.clearTimeout(timer);
+        const v = (e.target as HTMLInputElement).value;
+        timer = window.setTimeout(() => set({ ...f, [key]: v, page: 0 }), 350);
+      };
+    }
+    body.querySelectorAll<HTMLElement>("[data-al-sort]").forEach((h) => {
+      h.onclick = () => set(toggleSort(f, h.dataset.alSort!));
+      h.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); h.click(); } };
+    });
+    body.querySelectorAll<HTMLElement>("[data-al-drill]").forEach((r) => {
+      r.onclick = () => set(drillDown(f, r.dataset.alDrill!));
+    });
+    ($("#al-prev", body) as HTMLButtonElement).onclick = () => set({ ...f, page: Math.max(0, f.page - 1) });
+    ($("#al-next", body) as HTMLButtonElement).onclick = () => set({ ...f, page: f.page + 1 });
+    ($("#al-reload", body) as HTMLButtonElement).onclick = () => void load();
+  }
+  paint(null);
+  void load();
+}
+
+interface AccessRow {
+  opened_ms: number; closed_ms: number; vm: string | null; proto: string; dst: string; dport: number;
+  domain: string | null; bytes_out: number; bytes_in: number; kind: "dns" | "connection";
+}
+interface AccessGroup { key: string; count: number; bytes: number; vms: number; last_ms: number }
 
 /// Rules + port-forward editor for one network.
 /// Shared firewall-editor helpers: option lists, row templates, and reading
@@ -2707,7 +2843,10 @@ function openFirewallEditor(netName: string) {
         <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source Port</th><th>Dest Port</th><th></th></tr>
         ${rules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
       </table>
-      <div class="actions"><button class="btn" id="fw-add-rule">${ic.plus(14)} Add rule</button></div>
+      <div class="actions">
+        <button class="btn" id="fw-add-rule">${ic.plus(14)} Add rule</button>
+        <button class="btn al-open" id="fw-logs">${ic.logs(14)} Access logs</button>
+      </div>
 
       <div class="section-title fw-cat" style="margin-top:18px">NAT Port Forwards</div>
       <table class="grid">
@@ -2719,6 +2858,7 @@ function openFirewallEditor(netName: string) {
     // Re-attached every render: render() rebuilds these inputs from scratch.
     attachRuleIpSuggest(el, () => ipCandidates);
 
+    $("#fw-logs", el).onclick = () => openAccessLogs(conn);
     $("#fw-add-rule", el).onclick = () => {
       read();
       rules.push(blankRule());
@@ -3754,7 +3894,9 @@ async function renderVmBody(vm: string) {
         <div class="actions">
           <button class="btn" id="vmfw-add">${ic.plus(14)} Add rule</button>
           <button class="btn primary" id="vmfw-apply">${ic.firewall(14)} Apply</button>
+          <button class="btn al-open" id="vmfw-logs">${ic.logs(14)} Access logs</button>
         </div>`);
+      $("#vmfw-logs", rulesBody).onclick = () => openAccessLogs(conn, vm);
       attachRuleIpSuggest(rulesBody, () => ipCandidates);
       $("#vmfw-add", rulesBody).onclick = () => {
         readRules();

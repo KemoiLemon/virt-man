@@ -207,6 +207,55 @@ pub fn servfail(query: &[u8]) -> Option<Vec<u8>> {
     Some(b)
 }
 
+/// The IPv4 addresses a response gives for its question, following the
+/// CNAME chain as a resolver does (every A in the answer section counts).
+/// Empty for anything malformed.
+pub fn a_records(b: &[u8]) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    if b.len() < 12 {
+        return out;
+    }
+    let qd = u16::from_be_bytes([b[4], b[5]]);
+    let an = u16::from_be_bytes([b[6], b[7]]);
+    let mut i = 12;
+    for _ in 0..qd {
+        let Some(n) = skip_name(b, i) else { return out };
+        i = n + 4;
+    }
+    for _ in 0..an {
+        let Some(n) = skip_name(b, i) else { return out };
+        let Some(h) = b.get(n..n + 10) else {
+            return out;
+        };
+        let ty = u16::from_be_bytes([h[0], h[1]]);
+        let len = u16::from_be_bytes([h[8], h[9]]) as usize;
+        let Some(rd) = b.get(n + 10..n + 10 + len) else {
+            return out;
+        };
+        if ty == TYPE_A && len == 4 {
+            out.push(Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]));
+        }
+        i = n + 10 + len;
+    }
+    out
+}
+
+/// Offset just past a (possibly compressed) name at `i`.
+fn skip_name(b: &[u8], mut i: usize) -> Option<usize> {
+    for _ in 0..128 {
+        let len = *b.get(i)?;
+        if len == 0 {
+            return Some(i + 1);
+        }
+        if len & 0xc0 == 0xc0 {
+            b.get(i + 1)?;
+            return Some(i + 2);
+        }
+        i += 1 + len as usize;
+    }
+    None
+}
+
 /// Upstream resolvers for a network: its own forwarders, else the host's.
 pub fn upstreams(net: &Net) -> Vec<std::net::SocketAddr> {
     let list: Vec<Ipv4Addr> = if net.dns_forwarders.is_empty() {
@@ -335,6 +384,23 @@ mod tests {
             &Local::Ptr("web.lab".into()),
         );
         assert!(p.ends_with(&[3, b'w', b'e', b'b', 3, b'l', b'a', b'b', 0]));
+    }
+
+    #[test]
+    fn answers_are_read_back_out_of_a_response() {
+        let qb = query("web.lab", TYPE_A);
+        let q = question(&qb).unwrap();
+        let ips = vec!["10.9.0.7".parse().unwrap(), "10.9.0.8".parse().unwrap()];
+        assert_eq!(a_records(&respond(&qb, &q, &Local::A(ips.clone()))), ips);
+        assert!(a_records(&respond(&qb, &q, &Local::NxDomain)).is_empty());
+        assert!(a_records(&[0; 11]).is_empty());
+        let mut cut = respond(&qb, &q, &Local::A(ips));
+        cut.truncate(cut.len() - 3);
+        assert_eq!(
+            a_records(&cut).len(),
+            1,
+            "a truncated record is dropped, the rest kept"
+        );
     }
 
     #[test]

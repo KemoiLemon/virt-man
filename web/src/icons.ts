@@ -21,6 +21,7 @@ import HardDrive from "@phosphor-icons/core/assets/fill/hard-drive-fill.svg?raw"
 import KeyRound from "@phosphor-icons/core/assets/fill/key-fill.svg?raw";
 import Keyboard from "@phosphor-icons/core/assets/fill/keyboard-fill.svg?raw";
 import LayoutDashboard from "@phosphor-icons/core/assets/fill/squares-four-fill.svg?raw";
+import ListSearch from "@phosphor-icons/core/assets/fill/list-magnifying-glass-fill.svg?raw";
 import Lock from "@phosphor-icons/core/assets/fill/lock-fill.svg?raw";
 import LogOut from "@phosphor-icons/core/assets/fill/sign-out-fill.svg?raw";
 import Maximize from "@phosphor-icons/core/assets/fill/arrows-out-fill.svg?raw";
@@ -105,6 +106,7 @@ export const ic = {
   // Resource tree + dashboard
   datacenter: svg(LayoutDashboard),
   server: svg(Server),
+  logs: svg(ListSearch),
   offline: svg(Plugs),
   vm: svg(Monitor),
   vms: svg(Monitor),

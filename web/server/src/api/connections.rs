@@ -229,9 +229,14 @@ async fn remove(
         .map(|c| c.id.clone())
         .collect();
     let history = state.history.clone();
-    tokio::task::spawn_blocking(move || history.keep_only(&live))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
+    let access = state.access.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        history.keep_only(&live)?;
+        access.keep_only(&live)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
     Ok(Json(json!({"deleted": id})))
 }
 

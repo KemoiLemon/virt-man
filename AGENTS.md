@@ -27,7 +27,8 @@ cd web/server && cargo clippy && cargo test
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route,
 #   live-vmnet (needs sudo: checks tc and the IPAM store; boots its own guest),
-#   live-ipam (needs sudo + the Alpine live ISO: a real udhcpc against our DHCP),
+#   live-ipam (needs sudo + the Alpine live ISO: a real udhcpc against our DHCP,
+#   and the access log of what that guest then fetched),
 #   live-history (needs the server to have been sampling for ~30 s),
 #   live-empty (no args: runs its own server against a stub daemon with no resources),
 #   live-ops (needs sudo: defines a SPICE guest, stops/starts the daemon)
@@ -356,6 +357,27 @@ DNS (gateway `:53`, UDP+TCP) for each active managed network, and prunes.
   (measured). Every restart path calls `networks::reattach_taps`. That missing
   step is why "delete a reservation, then restore it" left a guest with no
   address: the delete redefined the network.
+
+**Access logs record every guest connection, cheaply.** (`daemon/src/ipam/flows.rs`,
+`web/server/src/access.rs`.) The daemon subscribes to conntrack NEW/DESTROY
+netlink events (one message per *connection*, not per packet; NAT already makes
+the kernel track them) and turns on `nf_conntrack_acct` for byte counts. Its
+DNS server records each guest lookup and the A records it got, so a connection
+is shown by the name that led to it. Records sit in a bounded ring (50k) behind
+`GET /flows?after=<seq>`; the web server pulls every 5 s into `access.db` with a
+per-connection cursor (reset when a daemon restarts and its sequence drops).
+
+- A connection is sent at open (`closed_ms` 0) and again at close with the same
+  `ct_id` + `opened_ms`; the store upserts, so long sessions show from the start.
+- Kept 14 days; a removed server's rows go at once, a deleted VM's are kept
+  (that is when the log is wanted). The oldest 10% are purged, repeatedly, while
+  the DB exceeds 2 GiB or the disk has under max(5 GiB, 5%) free.
+- Not seen, by design: guest-to-guest traffic on one bridge, bridge-mode
+  networks, and names behind a guest's own encrypted DNS.
+- Measured: a 300-connection burst cost the daemon 80 ms of CPU in total.
+- UI: `openAccessLogs(conn, vm?)`, from the server Firewall tab, each network's
+  firewall editor and the VM Network tab; the button carries `.al-open`, which
+  pushes it to the right of its action row.
 
 **Read `VIR_DOMAIN_XML_INACTIVE` for firewall/filterref work.** A running
 guest's live XML omits filterrefs added since boot, so reading live XML loses

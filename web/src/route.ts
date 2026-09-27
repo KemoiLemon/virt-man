@@ -33,7 +33,7 @@ export interface NodeRef {
 /// Top-level paths the web server owns, plus the datacenter tabs.
 export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
-  "roles", "keys", "me", "health", "uploads", "history", "favicon.svg", "icons.svg",
+  "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
   "servers", "guests",
 ]);
 

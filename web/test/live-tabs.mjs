@@ -354,6 +354,10 @@ check("VM Network tab lists the guest's interfaces", () => {
 check("VM Network tab carries the firewall editor with add and apply", () => {
   assert.ok(document.querySelector("#vmfw-add"), "add-rule action");
   assert.ok(document.querySelector("#vmfw-apply"), "apply action");
+  const logs = document.querySelector("#vmfw-logs");
+  assert.ok(logs, "access-logs action");
+  assert.equal(logs.parentElement, document.querySelector("#vmfw-apply").parentElement, "in the same row as Add rule / Apply");
+  assert.ok(logs.classList.contains("al-open"), "pushed to the right-hand side");
   assert.ok(document.querySelector("#vmfw-add").querySelector("svg"), "add-rule has an icon");
 });
 

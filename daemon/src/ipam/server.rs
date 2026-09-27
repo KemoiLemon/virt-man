@@ -32,6 +32,8 @@ pub struct Ipam {
     /// by the supervisor; the DHCP server serves only MACs listed here.
     guests: Arc<Mutex<HashMap<String, (String, String)>>>,
     running: Arc<Mutex<HashMap<String, Listeners>>>,
+    /// What guests connect to, for the access log. See `flows`.
+    pub flows: super::flows::Flows,
 }
 
 struct Listeners {
@@ -55,6 +57,27 @@ impl Ipam {
             path,
             guests: Default::default(),
             running: Default::default(),
+            flows: Default::default(),
+        })
+    }
+
+    /// Whose guest an address is: the reservation holding it, on whichever
+    /// managed network it falls in. None for the host, gateways, and anything
+    /// not reserved (every guest address is, since reservations are permanent).
+    pub fn owner(&self, ip: Ipv4Addr) -> Option<super::flows::Owner> {
+        let s = self.lock();
+        let (name, net) = s
+            .networks
+            .iter()
+            .find(|(_, n)| n.contains_host(ip) && ip != n.gateway)?;
+        let r = net.reservation_for_ip(ip)?;
+        let guest = self.guest_of(&r.mac);
+        Some(super::flows::Owner {
+            network: name.clone(),
+            gateway: net.gateway,
+            mac: r.mac.clone(),
+            vm: r.vm.clone().or_else(|| guest.as_ref().map(|g| g.0.clone())),
+            vm_name: guest.map(|g| g.1),
         })
     }
 
@@ -437,7 +460,11 @@ async fn dns_udp_loop(ipam: Ipam, net: String, sock: UdpSocket) {
         // Forwarding waits on the network; one slow upstream must not hold
         // up every other guest's lookups.
         tokio::spawn(async move {
-            if let Some(resp) = resolve(&ipam, &net, &query, false).await {
+            let client = match from.ip() {
+                std::net::IpAddr::V4(v4) => Some(v4),
+                std::net::IpAddr::V6(_) => None,
+            };
+            if let Some(resp) = resolve(&ipam, &net, &query, false, client).await {
                 let _ = sock.send_to(&resp, from).await;
             }
         });
@@ -447,7 +474,7 @@ async fn dns_udp_loop(ipam: Ipam, net: String, sock: UdpSocket) {
 async fn dns_tcp_loop(ipam: Ipam, net: String, listener: tokio::net::TcpListener) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
-        let Ok((mut s, _)) = listener.accept().await else {
+        let Ok((mut s, peer)) = listener.accept().await else {
             continue;
         };
         let (ipam, net) = (ipam.clone(), net.clone());
@@ -459,7 +486,11 @@ async fn dns_tcp_loop(ipam: Ipam, net: String, listener: tokio::net::TcpListener
                 if tokio::time::timeout(t, s.read_exact(&mut q)).await.is_err() {
                     return;
                 }
-                let Some(resp) = resolve(&ipam, &net, &q, true).await else {
+                let client = match peer.ip() {
+                    std::net::IpAddr::V4(v4) => Some(v4),
+                    std::net::IpAddr::V6(_) => None,
+                };
+                let Some(resp) = resolve(&ipam, &net, &q, true, client).await else {
                     return;
                 };
                 let mut out = (resp.len() as u16).to_be_bytes().to_vec();
@@ -472,7 +503,31 @@ async fn dns_tcp_loop(ipam: Ipam, net: String, listener: tokio::net::TcpListener
     }
 }
 
-async fn resolve(ipam: &Ipam, net: &str, query: &[u8], tcp: bool) -> Option<Vec<u8>> {
+async fn resolve(
+    ipam: &Ipam,
+    net: &str,
+    query: &[u8],
+    tcp: bool,
+    client: Option<Ipv4Addr>,
+) -> Option<Vec<u8>> {
+    let resp = answer_query(ipam, net, query, tcp).await?;
+    // The access log: which name this guest asked for, and what it resolved
+    // to, so its connections that follow can be shown by name. Only the
+    // question and the A records are kept, never the full packet.
+    // AAAA asks go unlogged: guests send one beside every A lookup, and on
+    // these IPv4-only networks it would double every name with an empty row.
+    if let (Some(c), Some(q)) = (client, dns::question(query).filter(|q| q.qtype != 28)) {
+        let lookup = super::flows::Lookup {
+            client: c,
+            name: q.name,
+            answers: dns::a_records(&resp),
+        };
+        ipam.flows.record_lookup(&lookup, ipam.owner(c), now_ms());
+    }
+    Some(resp)
+}
+
+async fn answer_query(ipam: &Ipam, net: &str, query: &[u8], tcp: bool) -> Option<Vec<u8>> {
     let snapshot = ipam.lock().networks.get(net).cloned()?;
     if let Some(q) = dns::question(query) {
         match dns::local_answer(&q, &snapshot) {

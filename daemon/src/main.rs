@@ -56,6 +56,12 @@ async fn run() -> Result<(), String> {
     // IPAM: DHCP and DNS for guest networks, in place of libvirt's dnsmasq.
     let ipam = ipam::server::Ipam::load(ipam::store::IPAM_PATH.into())?;
     tokio::spawn(ipam::server::supervise(ipam.clone()));
+    // Access log: guest connections from the kernel's connection tracker.
+    ipam::flows::enable_accounting();
+    {
+        let owners = ipam.clone();
+        ipam::flows::listen(ipam.flows.clone(), move |ip| owners.owner(ip));
+    }
     let app = api::build(auth, ipam);
 
     // Unix socket listener.

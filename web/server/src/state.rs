@@ -1,3 +1,4 @@
+use crate::access::Access;
 use crate::api::uploads::Uploads;
 use crate::health::HealthMap;
 use crate::history::History;
@@ -18,10 +19,18 @@ pub struct AppState {
     pub history: History,
     /// Reachability of each connection's daemon. See `health`.
     pub health: HealthMap,
+    /// Two weeks of guest connections. See `access`.
+    pub access: Access,
 }
 
 impl AppState {
-    pub fn new(store: Store, data_dir: PathBuf, auth_disabled: bool, history: History) -> Self {
+    pub fn new(
+        store: Store,
+        data_dir: PathBuf,
+        auth_disabled: bool,
+        history: History,
+        access: Access,
+    ) -> Self {
         Self {
             store: Arc::new(RwLock::new(store)),
             data_dir,
@@ -29,6 +38,7 @@ impl AppState {
             uploads: Arc::new(RwLock::new(std::collections::HashMap::new())),
             history,
             health: Default::default(),
+            access,
         }
     }
 

@@ -1,3 +1,4 @@
+mod access;
 mod api;
 mod auth;
 mod config;
@@ -40,13 +41,21 @@ async fn run() -> Result<(), String> {
 
     let store = store::Store::load(&cfg.data_dir)?;
     let history = history::History::open(&cfg.data_dir.join("history.db"))?;
-    let state = AppState::new(store, cfg.data_dir.clone(), cfg.loopback_http, history);
+    let access = access::Access::open(&cfg.data_dir.join("access.db"))?;
+    let state = AppState::new(
+        store,
+        cfg.data_dir.clone(),
+        cfg.loopback_http,
+        history,
+        access,
+    );
     // Jobs live in memory, so a restart drops them. Recover the transfers whose
     // bodies arrived in full (they can be pushed without re-uploading) and
     // delete anything incomplete, which could never be resumed safely.
     api::uploads::restore(&state);
     tokio::spawn(history::collect(state.clone()));
     tokio::spawn(health::watch(state.clone()));
+    tokio::spawn(access::collect(state.clone()));
 
     let index = cfg.dist_dir.join("index.html");
     let app = api::build(state.clone())

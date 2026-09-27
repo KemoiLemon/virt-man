@@ -4,7 +4,8 @@
 //
 // Covers the reported bug (deleting a reservation, then restoring it, left the
 // guest with no address), permanent dynamic reservations, DNS for guest names
-// and forwarding, and a VM deletion taking its reservation with it.
+// and forwarding, a VM deletion taking its reservation with it, and the access
+// log recording the guest's connections with the names it looked up.
 //
 // Needs sudo, the Alpine live ISO in the ISOs pool (ISO env to override), and
 // a daemon-served network (NET, default "internet").
@@ -99,6 +100,21 @@ try {
   const fwd = Number(dns.match(/FWD=(\d+)/)?.[1] ?? 0);
   check("…and outside names are forwarded upstream", fwd >= 1, `FWD=${fwd}`);
   check("…with the gateway as its only nameserver", /nameserver 192\.168\.167\.1\s/.test(dns) && (dns.match(/^nameserver /gm) ?? []).length === 1);
+
+  // Access log: the connection and the lookup behind it, attributed to this
+  // VM, reached through the web server's store.
+  await consoleRun(["wget -q -O /dev/null -T 5 http://example.org; echo FETCHED"], 6000);
+  const logsFor = async (extra) => (await (await fetch(`${base}/access-logs?${new URLSearchParams({ conn: conn.id, vm: VM, since_ms: "0", ...extra })}`)).json());
+  let conns = null;
+  for (let i = 0; i < 20 && !conns?.rows?.some((r) => r.kind === "connection" && r.domain === "example.org"); i++) {
+    await wait(1000);
+    conns = await logsFor({ q: "example.org" });
+  }
+  const c = conns?.rows?.find((r) => r.kind === "connection" && r.domain === "example.org");
+  check("the access log has the guest's HTTP connection, named by its DNS lookup", c?.proto === "tcp" && c?.dport === 80, JSON.stringify(conns?.rows?.slice(0, 3)));
+  check("…and the lookup itself", conns?.rows?.some((r) => r.kind === "dns" && r.domain === "example.org"));
+  const byDomain = await logsFor({ group: "domain" });
+  check("grouping by domain counts what the guest reached", byDomain.groups?.some((g) => g.key === "example.org" && g.count >= 2), JSON.stringify(byDomain.groups));
 
   await api(`/domains/${VM}/destroy`, { method: "POST" });
   await api(`/domains/${VM}`, { method: "DELETE" });

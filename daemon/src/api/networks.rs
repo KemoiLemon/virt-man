@@ -32,6 +32,7 @@ pub fn ipam_routes(ipam: Ipam) -> Router {
             axum::routing::delete(delete_host),
         )
         .route("/networks/{name}/ipam", get(get_ipam).put(put_ipam))
+        .route("/flows", get(get_flows))
         .with_state(ipam)
 }
 
@@ -541,6 +542,28 @@ async fn delete_host(
     Ok(Json(
         json!({"network": name, "mac": mac, "removed": removed}),
     ))
+}
+
+#[derive(Deserialize)]
+struct FlowsQuery {
+    #[serde(default)]
+    after: u64,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Guest connections recorded since `after` (a sequence number), oldest
+/// first. The web server pulls these into its access log. `last` is the
+/// newest sequence here; `dropped` counts records that aged out of the ring
+/// before anyone pulled them.
+async fn get_flows(
+    State(ipam): State<Ipam>,
+    axum::extract::Query(q): axum::extract::Query<FlowsQuery>,
+) -> Json<Value> {
+    let (flows, last, dropped) = ipam
+        .flows
+        .since(q.after, q.limit.unwrap_or(5000).min(20_000));
+    Json(json!({"flows": flows, "last": last, "dropped": dropped}))
 }
 
 /// The network's IPAM settings, and whether this host is serving it now.

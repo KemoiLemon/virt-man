@@ -3,6 +3,7 @@
 
 pub mod dhcp;
 pub mod dns;
+pub mod flows;
 pub mod server;
 pub mod store;
 pub mod xml;

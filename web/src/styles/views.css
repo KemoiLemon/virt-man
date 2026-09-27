@@ -192,3 +192,19 @@ table.grid + .actions { margin-top: 12px; }
 .tree-stale { opacity: .45; }
 .tree-stale .tree-ic.on, .tree-stale .tree-state.on { color: var(--dim); }
 .state.bad { color: var(--bad); }
+
+/* ------------------------------------------------------------ access logs */
+/* The logs button sits on the far side of the add/apply buttons: right of the
+   table it belongs to. */
+.actions > .al-open { margin-left: auto; }
+.al-modal { width: 1100px; }
+.al-filters { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; }
+.al-filters .field { min-width: 120px; margin: 0; }
+.al-filters .al-grow { flex: 1; min-width: 180px; }
+.al-check { flex-direction: row; align-items: center; gap: 6px; min-width: 0 !important; }
+.al-table td { white-space: nowrap; }
+.al-table td:nth-child(4) { white-space: normal; word-break: break-all; }
+th.al-sort { cursor: pointer; user-select: none; }
+th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
+.al-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.al-pager { display: flex; align-items: center; gap: 6px; }
