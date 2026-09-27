@@ -25,7 +25,7 @@ cd web/server && cargo clippy && cargo test
 # live suites — drive the real app in jsdom against a running backend
 #   arg is the base URL; defaults to http://127.0.0.1:8799
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
-#   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console
+#   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
@@ -144,6 +144,21 @@ in ~44 ms, because that time is the libvirt connection rather than the directory
 scan — so it is cheaper to be accurate than to cache. The pool page polls every
 second and would otherwise repeat the same wrong answer forever. The all-pools
 list deliberately does not refresh every pool, keeping the sidebar's poll cheap.
+
+**The URL is the view.** `web/src/route.ts` maps views to paths (`/`,
+`/servers`, `/guests`, `/<node>`, `/<node>/vms|networks|storage|firewall`,
+`/<node>/vms/<vm>[/console|hardware|options|firewall|xml]`,
+`/<node>/networks/<net>`, `/<node>/storage/<pool>`) and is unit-tested. Every
+view renderer calls `syncUrl()` right after `beginRender()`, which is the one
+place all navigation passes through — so a new way to open a view needs no
+routing code of its own. `syncUrl` pushes only when the path changes, so the 1s
+poll never adds history. `renderCurrent()` (boot, Back/Forward) sets
+`restoringRoute`, making the write a `replaceState`: a stale link that
+normalises (a deleted node, pool or network) replaces the dead URL instead of
+stacking it. A node is addressed by name unless that name is ambiguous or is a
+top-level path the web server answers itself (`/users`, `/activity`, ...) —
+then by id, or a reload would get JSON instead of the app. **Keep `RESERVED` in
+`route.ts` in step with the server's top-level routes.**
 
 **Pages paint from cache, then from the daemon.** A remote daemon costs a
 round trip per read, so opening a view used to show nothing until it answered.

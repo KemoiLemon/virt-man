@@ -177,9 +177,16 @@
    share of the card). */
 .card-grid .net-actions, .card-grid .card-actions { flex-wrap: nowrap; gap: 4px; }
 .card-grid .net-actions .btn, .card-grid .card-actions .btn { flex: 1 1 0; padding-top: 7px; padding-bottom: 7px; }
-/* A card whose whole surface opens the detail view should look clickable. */
-.card-grid .storage-card[data-open] { cursor: pointer; }
-.card-grid .storage-card[data-open]:hover { border-color: var(--accent); background: var(--panel2); }
+/* A card whose whole surface opens the detail view should look clickable,
+   wherever it sits (card grids, pool lists, dashboard sections). The icon
+   follows the highlight like the create cards do. */
+.storage-card[data-open] { cursor: pointer; }
+.storage-card[data-open]:hover { border-color: var(--accent); background: var(--panel2); }
+.storage-card[data-open]:hover .storage-card-icon { color: var(--accent); }
+/* Table rows that open a page (dashboard networking tables). */
+table.grid tr.row-open { cursor: pointer; }
+table.grid tr.row-open:hover td { background: var(--hover); }
+table.grid tr.row-open:hover td:first-child { color: var(--accent); }
 
 /* The create card is a button in the same grid: a striped border marks it as
    an affordance rather than a real resource, and it stays present even when

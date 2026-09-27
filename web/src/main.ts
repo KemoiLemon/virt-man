@@ -6,6 +6,7 @@ import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
 import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
+import { parsePath, routeToPath, type Route } from "./route";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
@@ -143,6 +144,72 @@ async function fastLoad(load: () => Promise<unknown>) {
   }
   if (stale) await load();
 }
+
+/// The view on screen, as a route. Derived from the selection state rather
+/// than stored beside it, so the two cannot disagree.
+function currentRoute(): Route {
+  if (!selectedConn) return { view: "dc", tab: dcTab };
+  if (selectedVm) return { view: "vm", conn: selectedConn, vm: selectedVm, tab: vmTab };
+  if (selectedNet) return { view: "net", conn: selectedConn, net: selectedNet };
+  if (selectedPool) return { view: "pool", conn: selectedConn, pool: selectedPool };
+  return { view: "conn", conn: selectedConn, tab: connTab };
+}
+
+/// Put the current view in the address bar, so a reload returns to it. Called
+/// by every view renderer, which is the one place all navigation passes
+/// through: the tree, cards, tabs, the context menu and the palette included.
+/// A new view pushes a history entry (Back works); re-rendering the same view
+/// (the 1s poll) does not.
+let restoringRoute = false;
+function syncUrl() {
+  const path = routeToPath(currentRoute(), connections);
+  if (location.pathname === path) return;
+  // Restoring a URL (boot, Back/Forward) may normalise it -- a deleted node
+  // falls back to "/". That must replace the entry: pushing would add a
+  // duplicate at boot and discard the forward history on Back.
+  if (restoringRoute) history.replaceState(null, "", path);
+  else history.pushState(null, "", path);
+}
+
+/// Adopt the view named by the URL. Used at start-up and on Back/Forward.
+function applyRoute(r: Route) {
+  leaveCurrentView();
+  clearResourceSelection();
+  selectedConn = r.view === "dc" ? null : r.conn;
+  if (r.view === "dc") dcTab = r.tab;
+  else if (r.view === "conn") connTab = r.tab;
+  else if (r.view === "vm") { selectedVm = r.vm; vmTab = r.tab; }
+  else if (r.view === "net") selectedNet = r.net;
+  else selectedPool = r.pool;
+}
+
+/// Render whatever the selection state names. The view renderers do the
+/// actual work (and sync the URL).
+function renderCurrent() {
+  renderTree();
+  // The renderers call syncUrl synchronously, before their first await, so
+  // the flag covers exactly their URL write.
+  restoringRoute = true;
+  try {
+    renderView();
+  } finally {
+    restoringRoute = false;
+  }
+}
+
+function renderView() {
+  if (!selectedConn) renderDc();
+  else if (selectedVm) void renderVm();
+  else if (selectedNet) { showPageSkeleton(); void fastLoad(renderNetPage); }
+  else if (selectedPool) { showPageSkeleton(); void renderPoolPage(); }
+  else renderConn();
+}
+
+window.addEventListener("popstate", () => {
+  if (!user) return;
+  applyRoute(parsePath(location.pathname, connections));
+  renderCurrent();
+});
 
 /// Replace the pane with a placeholder while a resource page's first read is
 /// in flight, so a click answers at once instead of leaving the previous page
@@ -358,6 +425,7 @@ async function boot() {
     authDisabled = true;
     user = { id: "local", username: "local", role: "admin", nickname: "local", avatar: null, scopes: {} };
     await loadConnections();
+    applyRoute(parsePath(location.pathname, connections));
     renderApp();
     return;
   }
@@ -366,6 +434,7 @@ async function boot() {
     const me = await api.get<User>("/auth/me");
     user = me;
     await loadConnections();
+    applyRoute(parsePath(location.pathname, connections));
     renderApp();
   } catch {
     renderLogin();
@@ -431,6 +500,8 @@ function renderLogin() {
       // boot() loads connections before rendering; the login path must too, or
       // the sidebar tree and Datacenter table render empty until a refresh.
       await loadConnections();
+      // Land on the page they asked for before being sent to sign in.
+      applyRoute(parsePath(location.pathname, connections));
       renderApp();
     } catch (e) {
       toast((e as Error).message, "bad");
@@ -477,9 +548,8 @@ setHtml(app, `
   if ($("#admin-btn")) $("#admin-btn").onclick = openAdmin;
   $("#add-resource").onclick = () => openAddResource();
 
-  renderTree();
   renderProfileBtn();
-  if (!selectedConn) renderDc();
+  renderCurrent();
   // Populate the auto-expanded tree immediately rather than waiting for the
   // first poll tick or a server click.
   void fastLoad(refreshTreeVms);
@@ -917,6 +987,7 @@ function renderProfileBtn() {
 
 function renderDc() {
   beginRender();
+  syncUrl();
   const content = $("#content");
   // Real tabbar; the Users tab is hidden when the local app disables auth.
   // Actions live on the tab bar itself, right-aligned after the tabs.
@@ -1245,7 +1316,7 @@ async function loadDcDashboard() {
       <table class="grid">
         <tr><th>Name</th><th>Server</th><th>Bridge</th><th>State</th></tr>
         ${nets.map(({ c, n }) => `
-          <tr><td>${esc(n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" data-dash-net="${esc(n.name)}" data-dash-conn="${c.id}"><td>${esc(n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -1257,7 +1328,7 @@ async function loadDcDashboard() {
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
-        <div class="storage-card ${p.active ? "ok" : ""}">
+        <div class="storage-card ${p.active ? "ok" : ""}" data-open data-dash-pool="${esc(p.name)}" data-dash-conn="${c.id}">
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.name)}<span class="host" style="display:block;font-weight:400">${esc(c.name)}</span></span>
@@ -1274,6 +1345,7 @@ async function loadDcDashboard() {
     </div>
     `);
 
+  bindDashOpeners(body);
   body.querySelectorAll("[data-dc-dash-conn]").forEach((r: Element) => {
     (r as HTMLElement).onclick = () => {
       selectedConn = (r as HTMLElement).dataset.dcDashConn!;
@@ -1679,11 +1751,28 @@ function backToConn() {
   renderConn();
 }
 
+/// A network or pool page whose resource is gone (a stale link, or deleted
+/// elsewhere) falls back to the server's list of that kind, replacing the dead
+/// URL rather than stacking it in history, instead of a raw libvirt error.
+function leaveMissing(tab: "networks" | "storage", message: string) {
+  clearResourceSelection();
+  connTab = tab;
+  restoringRoute = true;
+  try {
+    renderTree();
+    renderConn();
+  } finally {
+    restoringRoute = false;
+  }
+  toast(message, "bad");
+}
+
 /// Dedicated network page: card-based information, an IPAM allocation list
 /// (MAC -> IP DHCP hosts) and the lifecycle/edit actions.
 async function renderNetPage() {
   if (!selectedConn || !selectedNet) return;
   const gen = beginRender();
+  syncUrl();
   const conn = selectedConn; // narrowed copy for nested closures
   const content = $("#content");
   const name = selectedNet;
@@ -1696,10 +1785,7 @@ async function renderNetPage() {
     // painting now would yank their view back to the network page.
     if (!stillCurrent(gen)) return;
     const net = summary.find((n) => n.name === name);
-    if (!net) {
-      setHtml(content, `<div class="empty">Network "${esc(name)}" no longer exists.</div>`);
-      return;
-    }
+    if (!net) return leaveMissing("networks", `Network "${name}" no longer exists`);
     const uuid = networkUuid(xml.xml);
     const form = networkFormFromXml(xml.xml);
     const typeLabel = form.forward === "bridge" ? "Bridge" : form.forward === "nat" ? "NAT" : "Isolated";
@@ -1870,6 +1956,13 @@ async function renderNetPage() {
     });
   } catch (e) {
     if (!stillCurrent(gen)) return;
+    // The XML read fails first when the network is gone (a bookmark, or it was
+    // deleted elsewhere), and the daemon reports that as a 500: ask the list.
+    const nets = await api.get<NetworkSummary[]>(`/proxy/${conn}/networks`).catch(() => null);
+    if (!stillCurrent(gen)) return;
+    if (nets && !nets.some((n) => n.name === name)) {
+      return leaveMissing("networks", `Network "${name}" no longer exists`);
+    }
     setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
@@ -1927,8 +2020,10 @@ async function autoAllocateIpam(conn: string, vmName: string) {
 async function renderPoolPage() {
   if (!selectedConn || !selectedPool) return;
   const gen = beginRender();
+  syncUrl();
   const content = $("#content");
   const name = selectedPool;
+  const conn = selectedConn;
   try {
     // The single-pool read refreshes the pool before answering, so these
     // figures follow the filesystem; the all-pools list is served from
@@ -1939,10 +2034,7 @@ async function renderPoolPage() {
     ]);
     // Same guard as the network page: never paint over a newer view.
     if (!stillCurrent(gen)) return;
-    if (!p) {
-      setHtml(content, `<div class="empty">Pool "${esc(name)}" no longer exists.</div>`);
-      return;
-    }
+    if (!p) return leaveMissing("storage", `Pool "${name}" no longer exists`);
     const used = p.allocation ?? 0;
     const cap = p.capacity ?? 0;
     const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
@@ -1998,6 +2090,12 @@ async function renderPoolPage() {
     void pollUploads();
   } catch (e) {
     if (!stillCurrent(gen)) return;
+    // Same as the network page: a missing pool reads as a 500 from the daemon.
+    const pools = await api.get<PoolSummary[]>(`/proxy/${conn}/pools`).catch(() => null);
+    if (!stillCurrent(gen)) return;
+    if (pools && !pools.some((x) => x.name === name)) {
+      return leaveMissing("storage", `Pool "${name}" no longer exists`);
+    }
     setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
@@ -2010,6 +2108,7 @@ async function renderConn() {
   if (!conn) return;
   // Server view owns the pane: invalidates any in-flight resource render.
   beginRender();
+  syncUrl();
   const content = $("#content");
 setHtml(content, `
     <div class="dhead"><span class="dtitle">${esc(conn.name)}</span>
@@ -2136,7 +2235,7 @@ async function loadDashboard() {
       <table class="grid">
         <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
         ${nets.map((n) => `
-          <tr><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -2148,7 +2247,7 @@ async function loadDashboard() {
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
-        <div class="storage-card ${p.active ? "ok" : ""}">
+        <div class="storage-card ${p.active ? "ok" : ""}" data-open data-dash-pool="${esc(p.name)}" data-dash-conn="${selectedConn}">
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.name)}</span>
@@ -2164,9 +2263,23 @@ async function loadDashboard() {
       }).join("") || `<div class="empty">No pools.</div>`}
     </div>
     `);
+    bindDashOpeners(body);
   } catch (e) {
     setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
+}
+
+/// Dashboard pool cards and network rows open their management page. Shared
+/// by the datacenter and server dashboards, which render the same widgets.
+function bindDashOpeners(root: HTMLElement) {
+  root.querySelectorAll("[data-dash-pool]").forEach((el: Element) => {
+    const d = (el as HTMLElement).dataset;
+    (el as HTMLElement).onclick = () => selectPoolRow(d.dashConn!, d.dashPool!);
+  });
+  root.querySelectorAll("[data-dash-net]").forEach((el: Element) => {
+    const d = (el as HTMLElement).dataset;
+    (el as HTMLElement).onclick = () => selectNetRow(d.dashConn!, d.dashNet!);
+  });
 }
 
 /// Per-network firewall editor: rules and NAT port forwards, enforced by the
@@ -2533,7 +2646,7 @@ async function loadNetworks() {
         <span class="storage-card-title">Create Network</span>
       </button>`;
     setHtml(list, nets.map((n) => `
-      <div class="storage-card net-card ${n.active ? "ok" : ""}">
+      <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open data-net-open="${esc(n.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.network()}</span>
           <span class="storage-card-title">${esc(n.name)}</span>
@@ -2553,6 +2666,13 @@ async function loadNetworks() {
       </div>`).join("") + createCard);
     const createBtn = $("#net-create-card");
     if (createBtn) createBtn.onclick = () => openCreateNetwork();
+    // The whole card opens the network's page; its buttons stop propagation.
+    list.querySelectorAll("[data-net-open]").forEach((card: Element) => {
+      (card as HTMLElement).onclick = (e) => {
+        if ((e.target as Element).closest?.("button")) return;
+        selectNetRow(selectedConn!, (card as HTMLElement).dataset.netOpen!);
+      };
+    });
     list.querySelectorAll("[data-net-toggle]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => netAction(
         (b as HTMLElement).dataset.netAction === "start" ? "start" : "stop",
@@ -2725,7 +2845,7 @@ async function loadPools() {
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
-      <div class="storage-card ${p.active ? "ok" : ""}" data-pool-card="${cssId(p.name)}">
+      <div class="storage-card ${p.active ? "ok" : ""}" data-open data-pool-open="${esc(p.name)}" data-pool-card="${cssId(p.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.storage()}</span>
           <span class="storage-card-title">${esc(p.name)}</span>
@@ -2746,6 +2866,13 @@ async function loadPools() {
       </div>
       <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`;
       }).join("") || `<div class="empty">No pools.</div>`);
+      // The whole card opens the pool's page; its buttons keep their own jobs.
+      list.querySelectorAll("[data-pool-open]").forEach((card: Element) => {
+        (card as HTMLElement).onclick = (e) => {
+          if ((e.target as Element).closest?.("button")) return;
+          selectPoolRow(selectedConn!, (card as HTMLElement).dataset.poolOpen!);
+        };
+      });
       list.querySelectorAll("[data-vols]").forEach((b: Element) => {
         (b as HTMLElement).onclick = () => {
           const pool = (b as HTMLElement).dataset.vols!;
@@ -2833,6 +2960,7 @@ async function renderVm() {
   if (!selectedConn || !selectedVm) return;
   // VM view owns the pane: invalidates any in-flight resource render.
   beginRender();
+  syncUrl();
   const content = $("#content");
   const vm = selectedVm;
   const title = treeVms[selectedConn]?.find((x) => x.name === vm)?.title || vm;
