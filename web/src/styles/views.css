@@ -111,6 +111,29 @@ select { display: none !important; }
 .select-option:hover, .select-option.active { background: var(--accent-bg); color: var(--accent-fg); }
 .select-option:disabled { color: var(--dim); cursor: default; }
 
+/* ------------------------------------------------------- context menu */
+/* Right-click actions for tree rows. Sized and spaced like the themed
+   listbox popover so the two dropdowns read as the same control. */
+.ctxmenu {
+  position: fixed; z-index: 210; min-width: 190px;
+  background: var(--panel); border: 1px solid var(--accent);
+  box-shadow: 0 12px 32px var(--shade);
+  padding: 3px; display: flex; flex-direction: column; gap: 2px;
+  max-height: min(420px, calc(100vh - 16px)); overflow-y: auto;
+}
+.ctxmenu-item {
+  width: 100%; display: flex; align-items: center; gap: 9px;
+  text-align: left; border: 0; background: transparent; color: var(--fg);
+  padding: 7px 10px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.ctxmenu-item:hover, .ctxmenu-item:focus-visible { background: var(--accent-bg); color: var(--accent-fg); outline: none; }
+.ctxmenu-item:disabled { color: var(--dim); cursor: not-allowed; background: transparent; }
+.ctxmenu-item.danger { color: var(--bad); }
+.ctxmenu-item.danger:hover, .ctxmenu-item.danger:focus-visible { background: var(--bad-bg); color: var(--bad-fg); }
+.ctxmenu-ic { width: 15px; height: 15px; }
+.ctxmenu-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ctxmenu-sep { height: 1px; background: var(--line); margin: 3px 0; }
+
 /* ----------------------------------------------------------- task dock */
 .tasks {
   position: fixed; right: 0; bottom: 0; width: 380px; max-width: 94vw;

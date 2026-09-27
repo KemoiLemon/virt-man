@@ -67,6 +67,10 @@ silently broken UI.
 **No native OS chrome.** `<select>` is `display:none` behind a themed
 `.select-trigger`/`.select-popover` listbox (`web/src/listbox.ts`). Never use
 `window.prompt`/`confirm`/`alert` — use `askText`/`askConfirm` in `main.ts`.
+The browser's right-click menu is suppressed inside the sidebar too: the
+resource tree opens its own `.ctxmenu` (`web/src/ctxmenu.ts`) with the row's
+actions. Outside the sidebar the native menu is left alone, so copy/paste
+still works in the XML and log panes.
 
 **No inline event handlers.** `onclick="..."` in an HTML string is blocked by
 the CSP. Assign handlers in JS after rendering.

@@ -133,12 +133,23 @@ check("no native select is visible; each has a themed trigger", () => {
 });
 
 check("themed dialog opens instead of native window.prompt", () => {
-  const addServer = document.querySelector("#add-conn-row");
-  assert.ok(addServer, "sidebar has an Add Server affordance");
-  addServer.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const addResource = document.querySelector("#add-resource");
+  assert.ok(addResource, "sidebar has an Add Resource affordance");
+  assert.match(addResource.textContent, /Add Resource/);
+  addResource.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   const modal = document.querySelector(".modal-back.open");
   assert.ok(modal, "a themed modal opened (not window.prompt)");
-  modal.remove();
+  // The chooser offers all four resource kinds, daemon included.
+  const kinds = [...modal.querySelectorAll("[data-create]")].map((b) => b.dataset.create);
+  for (const want of ["daemon", "vm", "network", "pool"]) {
+    assert.ok(kinds.includes(want), `${want} offered (${kinds})`);
+  }
+  // Choosing Daemon hands off to the server connection dialog.
+  modal.querySelector('[data-create="daemon"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const conn = document.querySelector(".modal-back.open");
+  assert.ok(conn, "Daemon opens a follow-up dialog");
+  assert.match(conn.querySelector(".modal-head").textContent, /Server/i, "Add Server dialog");
+  conn.remove();
 });
 
 check("sidebar renders a nested resource tree", () => {
@@ -154,8 +165,71 @@ check("sidebar renders a nested resource tree", () => {
     assert.ok(s.querySelector(".tree-ic svg"), "server node has an icon");
     assert.ok(s.querySelector(".tree-label"), "server node has a label");
   }
-  assert.ok(document.querySelector(".tree-add"), "Add Server pinned footer");
+  assert.ok(document.querySelector(".tree-add"), "Add Resource pinned footer");
 });
+
+await (async () => {
+  const rightClick = (el) => {
+    const e = new window.MouseEvent("contextmenu", {
+      bubbles: true, cancelable: true, clientX: 120, clientY: 200,
+    });
+    el.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  const labels = () =>
+    [...document.querySelectorAll(".ctxmenu .ctxmenu-label")].map((x) => x.textContent.trim());
+
+  const row = document.querySelector(".tree-row.tree-root");
+  const prevented = rightClick(row);
+  check("right-click replaces the browser menu with resource actions", () => {
+    assert.ok(prevented, "the native context menu is suppressed");
+    const menu = document.querySelector(".ctxmenu");
+    assert.ok(menu, ".ctxmenu opened");
+    const items = labels();
+    assert.ok(items.length > 0, `menu has actions (${items})`);
+    // Icons must land where `.ico > svg` can style them.
+    assert.ok(menu.querySelector(".ctxmenu-item .ico > svg"), "item icon is a direct svg child");
+    results.push(["info", `context actions: ${items.join(", ")}`]);
+  });
+
+  check("Escape dismisses the context menu", () => {
+    document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(document.querySelector(".ctxmenu"), null, "menu removed");
+  });
+
+  // Each row type offers its own actions.
+  const guest = document.querySelector(".tree-row.tree-vm");
+  if (guest) {
+    rightClick(guest);
+    check("a guest row offers its lifecycle and tab actions", () => {
+      const items = labels();
+      for (const want of ["Start", "Shutdown", "Console", "Hardware", "Delete"]) {
+        assert.ok(items.includes(want), `${want} offered (${items})`);
+      }
+      const del = [...document.querySelectorAll(".ctxmenu-item")]
+        .find((b) => b.textContent.trim() === "Delete");
+      assert.ok(del.classList.contains("danger"), "Delete is styled destructive");
+    });
+    document.querySelector(".ctxmenu")?.remove();
+  }
+
+  const server = document.querySelector(".tree-row.tree-group");
+  if (server) {
+    rightClick(server);
+    check("a server row offers its tabs and server actions", () => {
+      const items = labels();
+      for (const want of ["Dashboard", "VMs", "Networks", "Storage", "Remove server"]) {
+        assert.ok(items.includes(want), `${want} offered (${items})`);
+      }
+    });
+    document.querySelector(".ctxmenu")?.remove();
+  }
+
+  check("right-click outside the sidebar keeps the native menu", () => {
+    const pane = document.querySelector("#content");
+    assert.equal(rightClick(pane), false, "content pane is not hijacked");
+  });
+})();
 
 await (async () => {
   // Selecting a server must nest its guests beneath it and switch the pane.
