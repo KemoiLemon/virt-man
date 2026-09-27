@@ -77,6 +77,15 @@ keep the native menu, so copy/paste still works there. Add Resource lives in
 the Datacenter/sidebar-background menu and the Ctrl+K palette, not as a
 sidebar button.
 
+**Focus is handled once, in `web/src/focus.ts`.** One document-level Tab
+handler keeps Tab / Shift+Tab inside the top layer (context menu, else the
+topmost `.modal-back.open`), wraps at both ends, and pulls escaped focus back
+in; `openModal` focuses the first field and returns focus to the opener on
+close. So a new dialog needs no focus code: build it with `openModal`. A widget
+that handles Tab itself (the palette) calls `preventDefault`, and the trap then
+leaves it alone; the console stage keeps Tab for the guest. Clickable cards and
+rows that are not buttons carry `tabindex="0"` and open on Enter/Space.
+
 **No inline event handlers.** `onclick="..."` in an HTML string is blocked by
 the CSP. Assign handlers in JS after rendering.
 

@@ -80,3 +80,29 @@ test("create-card icons idle neutral and follow the hover highlight", () => {
   assert.match(css, /\.net-create-card:hover \.storage-card-icon[^{]*\{[^}]*color:\s*var\(--accent\)/);
 });
 
+
+// Networks and pools are siblings of the guests under a server, so they share
+// the guests' indent. The last rule wins (density.css overrides views.css), so
+// compare the shipped values rather than one source file.
+test("sidebar networks and pools align with the guests", () => {
+  // The minifier merges selectors (".tree-vm,.tree-res{...}"), so split each
+  // rule's selector list rather than matching one selector literally.
+  const last = (sel) => {
+    let v;
+    for (const m of flat().matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const sels = m[1].split(",").map((s) => s.trim());
+      const pad = m[2].match(/padding-left:\s*(\d+)px/);
+      if (pad && sels.includes(sel)) v = Number(pad[1]);
+    }
+    return v;
+  };
+  const vm = last(".tree-vm");
+  assert.ok(vm > 0, "guest indent found");
+  assert.equal(last(".tree-res"), vm, "network/pool rows");
+  assert.equal(last(".tree-res-empty"), vm, "'No networks.' / 'No pools.' placeholders");
+});
+
+test("keyboard focus is visible on buttons, rows and cards", () => {
+  assert.match(flat(), /button:focus-visible[^{]*\{[^}]*outline:\s*1px solid var\(--accent\)/);
+  assert.match(flat(), /\[tabindex\]:focus-visible/);
+});

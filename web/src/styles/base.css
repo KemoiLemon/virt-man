@@ -482,3 +482,12 @@ table.grid tr:hover td { background: var(--hover); }
   background: var(--accent); color: var(--accent-fg); display: flex; align-items: center; justify-content: center;
 }
 .pop-avatar .camera-badge .ico { width: 11px; height: 11px; }
+
+/* ------------------------------------------------------------- keyboard focus
+   Shown only for keyboard focus (:focus-visible), never on a mouse click. An
+   inset outline, so it stays inside rows and cards that sit edge to edge.
+   Inputs and the listbox trigger keep their own border-colour focus. */
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible, tr.row-open:focus-visible {
+  outline: 1px solid var(--accent); outline-offset: -2px;
+}
+.console-stage:focus-visible { outline: none; border-color: var(--accent); }

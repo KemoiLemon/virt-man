@@ -6,6 +6,7 @@ import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
 import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
+import { enterLayer } from "./focus";
 import { parsePath, routeToPath, type Route } from "./route";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
@@ -1093,7 +1094,7 @@ function renderDc() {
   const guestCards = connections
     .flatMap((c) => (treeVms[c.id] ?? []).map((v) => ({ conn: c, vm: v })))
     .map(({ conn, vm }) => `
-      <div class="storage-card ${vm.active ? "ok" : ""}" data-open data-dc-vm="${esc(vm.name)}" data-dc-vm-conn="${conn.id}">
+      <div class="storage-card ${vm.active ? "ok" : ""}" data-open tabindex="0" data-dc-vm="${esc(vm.name)}" data-dc-vm-conn="${conn.id}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.vm()}</span>
           <span class="storage-card-title">${esc(vm.title || vm.name)}</span>
@@ -1112,7 +1113,7 @@ function renderDc() {
       </div>`).join("");
 
   const serverCards = connections.map((c) => `
-      <div class="storage-card" data-open data-open-conn-row="${c.id}">
+      <div class="storage-card" data-open tabindex="0" data-open-conn-row="${c.id}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.server()}</span>
           <span class="storage-card-title">${esc(c.name)}</span>
@@ -1358,7 +1359,7 @@ async function loadDcDashboard() {
         ${connections.map((c) => {
           const row = byId.get(c.id);
           if (!row) {
-            return `<tr><td class="tname" style="cursor:pointer" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state">Unreachable</span></td><td>—</td><td>—</td><td>—</td></tr>`;
+            return `<tr><td class="tname" style="cursor:pointer" tabindex="0" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state">Unreachable</span></td><td>—</td><td>—</td><td>—</td></tr>`;
           }
           const { h, pools: ps } = row;
           const { cpuNow: sCpu } = addHostSample(`dc:${c.id}`, h);
@@ -1369,7 +1370,7 @@ async function loadDcDashboard() {
           const dPct = dTotal > 0 ? Math.max(0, Math.min(100, (dUsed / dTotal) * 100)) : 0;
           return `
           <tr>
-            <td class="tname" style="cursor:pointer" data-dc-dash-conn="${c.id}">${esc(c.name)}</td>
+            <td class="tname" style="cursor:pointer" tabindex="0" data-dc-dash-conn="${c.id}">${esc(c.name)}</td>
             <td>${pct(sCpu)}</td>
             <td>${mPct.toFixed(0)}% · ${fmtBytes(mUsed * 1024)}</td>
             <td>${dPct.toFixed(0)}% · ${fmtBytes(dUsed)}</td>
@@ -1383,7 +1384,7 @@ async function loadDcDashboard() {
       <table class="grid">
         <tr><th>Name</th><th>Server</th><th>Bridge</th><th>State</th></tr>
         ${nets.map(({ c, n }) => `
-          <tr class="row-open" data-dash-net="${esc(n.name)}" data-dash-conn="${c.id}"><td>${esc(n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${c.id}"><td>${esc(n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -1395,7 +1396,7 @@ async function loadDcDashboard() {
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
-        <div class="storage-card ${p.active ? "ok" : ""}" data-open data-dash-pool="${esc(p.name)}" data-dash-conn="${c.id}">
+        <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-dash-pool="${esc(p.name)}" data-dash-conn="${c.id}">
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.name)}<span class="host" style="display:block;font-weight:400">${esc(c.name)}</span></span>
@@ -2302,7 +2303,7 @@ async function loadDashboard() {
       <table class="grid">
         <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
         ${nets.map((n) => `
-          <tr class="row-open" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -2314,7 +2315,7 @@ async function loadDashboard() {
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
-        <div class="storage-card ${p.active ? "ok" : ""}" data-open data-dash-pool="${esc(p.name)}" data-dash-conn="${selectedConn}">
+        <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-dash-pool="${esc(p.name)}" data-dash-conn="${selectedConn}">
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.name)}</span>
@@ -2631,7 +2632,7 @@ async function loadVms() {
         <span class="storage-card-title">Create VM</span>
       </button>`;
     setHtml(list, vms.map((v) => `
-      <div class="storage-card ${v.active ? "ok" : ""}" data-open data-vm-open="${esc(v.name)}">
+      <div class="storage-card ${v.active ? "ok" : ""}" data-open tabindex="0" data-vm-open="${esc(v.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.vm()}</span>
           <span class="storage-card-title">${esc(v.title || v.name)}</span>
@@ -2713,7 +2714,7 @@ async function loadNetworks() {
         <span class="storage-card-title">Create Network</span>
       </button>`;
     setHtml(list, nets.map((n) => `
-      <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open data-net-open="${esc(n.name)}">
+      <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open tabindex="0" data-net-open="${esc(n.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.network()}</span>
           <span class="storage-card-title">${esc(n.name)}</span>
@@ -2912,7 +2913,7 @@ async function loadPools() {
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
-      <div class="storage-card ${p.active ? "ok" : ""}" data-open data-pool-open="${esc(p.name)}" data-pool-card="${cssId(p.name)}">
+      <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-pool-open="${esc(p.name)}" data-pool-card="${cssId(p.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.storage()}</span>
           <span class="storage-card-title">${esc(p.name)}</span>
@@ -3802,6 +3803,9 @@ setHtml(el, `
   // The global Escape handler dispatches this; askText/askConfirm add their
   // own listener to resolve their promise, which also removes the element.
   el.addEventListener("modal-escape", () => el.remove());
+  // Deferred: callers fill in fields and wire handlers after this returns.
+  const opener = document.activeElement as HTMLElement | null;
+  queueMicrotask(() => { if (el.isConnected) enterLayer(el, opener); });
   return el;
 }
 
