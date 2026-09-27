@@ -81,6 +81,12 @@ export function addSample(s: DomainStats): { cpu: number[]; mem: number[]; cpuNo
     series.set(key, entry);
   }
 
+  // A sample no newer than the last one is a repeat (a cached answer painted
+  // before the fresh read): folding it in would push a false 0% point.
+  if (entry.prev && s.sampled_at_ms <= entry.prev.sampled_at_ms) {
+    return { cpu: entry.cpu.slice(), mem: entry.mem.slice(), cpuNow: entry.cpu.at(-1) ?? 0, memNow: entry.mem.at(-1) ?? 0 };
+  }
+
   let cpuNow = 0;
   if (entry.prev) {
     const dtMs = s.sampled_at_ms - entry.prev.sampled_at_ms;
@@ -125,6 +131,11 @@ export function addHostSample(
   if (!entry) {
     entry = { cpu: blank().cpu, mem: blank().mem };
     hostSeries.set(key, entry);
+  }
+
+  // Same repeat guard as addSample.
+  if (entry.prev && s.sampled_at_ms <= entry.prev.sampled_at_ms) {
+    return { cpu: entry.cpu.slice(), mem: entry.mem.slice(), cpuNow: entry.cpu.at(-1) ?? 0, memNow: entry.mem.at(-1) ?? 0 };
   }
 
   let cpuNow = 0;
@@ -183,6 +194,10 @@ export function addNetSample(
   if (!entry) {
     entry = { rx: blank().cpu, tx: blank().mem };
     netSeries.set(key, entry);
+  }
+  // Same repeat guard as addSample.
+  if (entry.prev && sampledAtMs <= entry.prev.sampled_at_ms) {
+    return { rx: entry.rx.slice(), tx: entry.tx.slice(), rxNow: entry.rx.at(-1) ?? 0, txNow: entry.tx.at(-1) ?? 0 };
   }
   let rxNow = 0;
   let txNow = 0;

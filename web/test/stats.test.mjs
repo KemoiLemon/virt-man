@@ -165,3 +165,32 @@ test("avgRateKib withholds a rate from the first, spiky progress event", () => {
   // Past the minimum window it reports again.
   assert.equal(stats.avgRateKib(1024 * 1024, 0, 1000), 1024);
 });
+
+// A page painted from the web server's cache and then from a fresh read hands
+// the series the same sample twice. The repeat must not be folded in: a zero
+// time delta would push a false 0% point into the chart on every page open.
+test("a repeated sample does not push a point", () => {
+  stats.addSample(sample({ name: "rep", cpu_time_ns: 0, sampled_at_ms: 1000 }));
+  const a = stats.addSample(sample({ name: "rep", cpu_time_ns: 5e8, sampled_at_ms: 2000 }));
+  assert.ok(a.cpuNow > 0, "real delta gives real CPU");
+  const again = stats.addSample(sample({ name: "rep", cpu_time_ns: 5e8, sampled_at_ms: 2000 }));
+  assert.deepEqual(again.cpu, a.cpu, "series unchanged by the repeat");
+  assert.equal(again.cpuNow, a.cpuNow, "current value is the last real one");
+});
+
+test("a repeated host sample does not push a point", () => {
+  const h = (total, idle, at) => ({ cpu_total: total, cpu_idle: idle, mem_total_kib: 100, mem_available_kib: 50, cpus: 4, sampled_at_ms: at });
+  stats.addHostSample("rep-host", h(0, 0, 1000));
+  const a = stats.addHostSample("rep-host", h(100, 50, 2000));
+  const again = stats.addHostSample("rep-host", h(100, 50, 2000));
+  assert.deepEqual(again.cpu, a.cpu);
+  assert.equal(again.cpuNow, 50);
+});
+
+test("a repeated NIC sample does not push a point", () => {
+  stats.addNetSample("rep-nic", 0, 0, 1000);
+  const a = stats.addNetSample("rep-nic", 2048, 1024, 2000);
+  const again = stats.addNetSample("rep-nic", 2048, 1024, 2000);
+  assert.deepEqual(again.rx, a.rx);
+  assert.equal(again.rxNow, 2, "2 KiB over 1 s");
+});

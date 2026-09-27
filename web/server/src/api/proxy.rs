@@ -12,6 +12,65 @@ use crate::auth;
 use crate::daemon;
 use crate::state::AppState;
 use crate::store::User;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+/// Request header: the SPA would rather have the last known answer now than
+/// the current one a round trip later. It always follows up with a plain read.
+const PREFER_CACHE: &str = "x-virt-man-cache";
+/// Response header on an answer served from the cache: its age in ms.
+const CACHED_AGE: &str = "x-virt-man-cached";
+/// Only small JSON reads are worth keeping; console frames and the like are not.
+const MAX_CACHED_BODY: usize = 256 * 1024;
+/// ponytail: cleared wholesale when full; an LRU if many hosts ever matter.
+const MAX_CACHED_ENTRIES: usize = 1024;
+
+/// The last successful JSON read per (connection, path+query).
+///
+/// A remote daemon costs a network round trip per read, so opening a page used
+/// to show nothing until it answered. The SPA asks for this copy to paint at
+/// once and then re-reads for real, so a stale entry is on screen for one round
+/// trip at most. Reads are cached only after `enforce` has passed, and daemon
+/// answers do not vary by user, so serving an entry leaks nothing the caller
+/// could not have read directly.
+#[derive(Default)]
+struct ReadCache {
+    entries: HashMap<(String, String), (Instant, String, axum::body::Bytes)>,
+}
+
+impl ReadCache {
+    fn get(&self, conn: &str, path: &str) -> Option<(u128, String, axum::body::Bytes)> {
+        let (at, ct, body) = self.entries.get(&(conn.to_string(), path.to_string()))?;
+        Some((at.elapsed().as_millis(), ct.clone(), body.clone()))
+    }
+
+    fn put(&mut self, conn: &str, path: &str, content_type: &str, body: axum::body::Bytes) {
+        if !content_type.starts_with("application/json") || body.len() > MAX_CACHED_BODY {
+            return;
+        }
+        if self.entries.len() >= MAX_CACHED_ENTRIES {
+            self.entries.clear();
+        }
+        self.entries.insert(
+            (conn.to_string(), path.to_string()),
+            (Instant::now(), content_type.to_string(), body),
+        );
+    }
+
+    /// Any write can change any read (deleting a VM changes the domain list,
+    /// the pool's volumes, the host figures), so drop the whole connection
+    /// rather than guess which paths it touched. Otherwise a fast first paint
+    /// could briefly resurrect what the user just deleted.
+    fn invalidate(&mut self, conn: &str) {
+        self.entries.retain(|(c, _), _| c != conn);
+    }
+}
+
+fn read_cache() -> &'static Mutex<ReadCache> {
+    static CACHE: OnceLock<Mutex<ReadCache>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
 
 pub fn routes(state: &AppState) -> Router<AppState> {
     // The console is plain HTTP now (the RFB client lives in the daemon and
@@ -190,6 +249,20 @@ async fn proxy(
         .unwrap_or(path_and_query);
     let target = format!("{}{}", base, rest);
 
+    if !write && headers.contains_key(PREFER_CACHE) {
+        let hit = read_cache()
+            .lock()
+            .expect("read cache poisoned")
+            .get(&conn_id, rest);
+        if let Some((age_ms, content_type, bytes)) = hit {
+            return Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .header(CACHED_AGE, age_ms.to_string())
+                .body(Body::from(bytes))
+                .map_err(|e| ApiError::internal(format!("build response: {e}")));
+        }
+    }
+
     let client =
         daemon::http_client(&conn).map_err(|e| ApiError::internal(format!("client: {e}")))?;
     let mut builder = client
@@ -227,6 +300,19 @@ async fn proxy(
         .await
         .map_err(|e| ApiError::internal(format!("read daemon body: {e}")))?;
 
+    {
+        let mut cache = read_cache().lock().expect("read cache poisoned");
+        if write {
+            cache.invalidate(&conn_id);
+        } else if status.is_success() {
+            let content_type = resp_headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            cache.put(&conn_id, rest, content_type, bytes.clone());
+        }
+    }
+
     // Recorded in the backend rather than the SPA: this way every client is
     // covered, including an API key or a direct call, not just our buttons.
     if destructive {
@@ -251,7 +337,56 @@ async fn proxy(
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_activity, delete_label, summarize_cleanup};
+    use super::{delete_activity, delete_label, summarize_cleanup, ReadCache, MAX_CACHED_BODY};
+
+    #[test]
+    fn a_cached_read_is_returned_for_the_same_connection_and_path_only() {
+        let mut c = ReadCache::default();
+        c.put("a", "/domains", "application/json", "[1]".into());
+        let (_, ct, body) = c.get("a", "/domains").unwrap();
+        assert_eq!((ct.as_str(), &body[..]), ("application/json", &b"[1]"[..]));
+        assert!(c.get("b", "/domains").is_none(), "another host's answer");
+        assert!(c.get("a", "/networks").is_none(), "another path's answer");
+    }
+
+    /// A write must drop that host's reads, or the fast first paint after a
+    /// delete would show the deleted thing again.
+    #[test]
+    fn a_write_invalidates_only_that_connection() {
+        let mut c = ReadCache::default();
+        c.put("a", "/domains", "application/json", "[1]".into());
+        c.put("a", "/pools/x/volumes", "application/json", "[]".into());
+        c.put("b", "/domains", "application/json", "[2]".into());
+        c.invalidate("a");
+        assert!(c.get("a", "/domains").is_none());
+        assert!(c.get("a", "/pools/x/volumes").is_none());
+        assert!(
+            c.get("b", "/domains").is_some(),
+            "other hosts are untouched"
+        );
+    }
+
+    /// Console frames, .vv files and large bodies are not worth holding.
+    #[test]
+    fn only_small_json_is_cached() {
+        let mut c = ReadCache::default();
+        c.put("a", "/domains/x/console/frame", "image/png", "png".into());
+        c.put(
+            "a",
+            "/domains/x/console/vv",
+            "application/x-virt-viewer",
+            "vv".into(),
+        );
+        c.put(
+            "a",
+            "/big",
+            "application/json",
+            vec![b' '; MAX_CACHED_BODY + 1].into(),
+        );
+        assert!(c.get("a", "/domains/x/console/frame").is_none());
+        assert!(c.get("a", "/domains/x/console/vv").is_none());
+        assert!(c.get("a", "/big").is_none());
+    }
 
     #[test]
     fn every_destructive_route_gets_a_named_label() {

@@ -208,3 +208,25 @@
 /* .storage-card-icon pins its own colour (dim), so it would stay grey while the
    rest of the card turns to the highlight. Follow the card instead. */
 .create-card:hover .storage-card-icon, .net-create-card:hover .storage-card-icon { color: var(--accent); }
+
+/* -------------------------------------------------------------- skeletons
+   Placeholders shown until a page's first read answers. They sit inside the
+   real layout classes, so they take the space the content will take. */
+/* display:contents so the placeholders become items of the caller's grid. */
+.skeleton { display: contents; pointer-events: none; }
+.sk {
+  display: block; max-width: 100%;
+  background: var(--line);
+  animation: sk-pulse 1.2s ease-in-out infinite;
+}
+.sk-ic { width: 19px; height: 19px; flex: 0 0 19px; }
+.sk-col { display: flex; flex-direction: column; gap: 6px; }
+.sk-rows { border: 1px solid var(--line); }
+.sk-row {
+  display: flex; gap: 24px; align-items: center;
+  padding: 11px 13px; border-bottom: 1px solid var(--line);
+}
+.sk-row:last-child { border-bottom: none; }
+.skeleton .dhead { gap: 10px; }
+@keyframes sk-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .sk { animation: none; } }

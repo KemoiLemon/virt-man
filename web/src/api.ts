@@ -19,14 +19,47 @@ async function handle<T>(res: Response): Promise<T> {
   return data as T;
 }
 
+/// Set only for the synchronous span of `cacheFirst`: GETs issued while it is
+/// set ask the web server for its last known answer, and report back whether
+/// they got one.
+let cacheWindow: { stale: boolean } | null = null;
+
 function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   const hasBody = body !== undefined;
+  const headers: Record<string, string> = {};
+  if (hasBody) headers["Content-Type"] = "application/json";
+  const win = method === "GET" ? cacheWindow : null;
+  if (win) headers["X-Virt-Man-Cache"] = "1";
   return fetch(url, {
     method,
     credentials: "same-origin",
-    headers: hasBody ? { "Content-Type": "application/json" } : undefined,
+    headers,
     body: hasBody ? JSON.stringify(body) : undefined,
-  }).then(handle<T>);
+  }).then((res) => {
+    if (win && res.headers.has("X-Virt-Man-Cached")) win.stale = true;
+    return handle<T>(res);
+  });
+}
+
+/// Run `load` with its daemon reads answered from the web server's cache where
+/// it has one, and resolve to whether any answer was cached (so the caller
+/// knows to re-read for real). A remote daemon costs a round trip per read;
+/// this lets a page paint at once instead of after it.
+///
+/// The window only covers requests `load` issues synchronously, which is what
+/// every loader's leading `Promise.all` does. Reads issued after an await are
+/// ordinary reads, which is the safe direction to be wrong in.
+export async function cacheFirst(load: () => Promise<unknown>): Promise<boolean> {
+  const win = { stale: false };
+  cacheWindow = win;
+  let p: Promise<unknown>;
+  try {
+    p = load();
+  } finally {
+    cacheWindow = null;
+  }
+  await p;
+  return win.stale;
 }
 
 export const api = {

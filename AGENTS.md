@@ -145,6 +145,29 @@ scan — so it is cheaper to be accurate than to cache. The pool page polls ever
 second and would otherwise repeat the same wrong answer forever. The all-pools
 list deliberately does not refresh every pool, keeping the sidebar's poll cheap.
 
+**Pages paint from cache, then from the daemon.** A remote daemon costs a
+round trip per read, so opening a view used to show nothing until it answered.
+Three layers, each measured with 30 ms of RTT added to the daemon hop (`tc
+netem`):
+
+- The proxy keeps one `reqwest::Client` per connection (`daemon::http_client`).
+  Building one per request threw away keep-alive and paid TCP + TLS every time:
+  **164 ms → 33 ms** per call. The cache key includes the pinned cert, so
+  re-pinning builds a new client rather than trusting the old one.
+- The proxy remembers the last successful JSON read per (connection, path) and
+  serves it to a request carrying `X-Virt-Man-Cache` (**~1 ms**). Any write
+  through the proxy drops that connection's entries, so a delete cannot flash
+  back. The SPA's `fastLoad` paints from that and then re-reads for real; the
+  1 s poll never asks for the cache.
+- Until either answers, the pane shows a `skeleton()` built from the real layout
+  classes, so nothing jumps when content arrives.
+
+`fastLoad` is only for views that are safe to paint twice. **Never** use it on a
+view holding user input (hardware, options, firewall editors): the second paint
+would discard what they typed during the round trip. The stats series ignore a
+repeated `sampled_at_ms` for the same reason a cached-then-fresh paint would
+otherwise push a false 0% point.
+
 **Finished transfers are forgotten, not kept.** A completed or failed upload
 stays listed for 15 minutes (`FINISHED_TTL_MS`) and is then dropped, pruned when
 `GET /uploads` is served. The activity log is the durable record of what

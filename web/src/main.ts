@@ -1,10 +1,11 @@
 import { openCropDialog } from "./crop";
-import { api, uploadWithProgress } from "./api";
+import { api, cacheFirst, uploadWithProgress } from "./api";
 import type { ActivityEntry, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, Permission, PoolSummary, RoleDef, StagedUpload, User, VolumeSummary } from "./api";
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
 import { closeSvg, ic } from "./icons";
+import { skeleton } from "./skeleton";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
@@ -121,6 +122,30 @@ function closeConsole() {
 /// left streaming in the background.
 function leaveCurrentView() {
   if (vmTab === "console") closeConsole();
+}
+
+/// Open a view fast: paint from the web server's last known answers, then
+/// re-read for real if any of them were cached. A remote daemon costs a round
+/// trip per read, so without this every page sat on its skeleton until the
+/// daemon answered. Only for entering a view: the 1s poll wants fresh data,
+/// and a view that holds user input must not be painted twice (it would drop
+/// what they typed in between).
+async function fastLoad(load: () => Promise<unknown>) {
+  let stale = true;
+  try {
+    stale = await cacheFirst(load);
+  } catch {
+    // The cached pass failed; the real read below reports the error.
+  }
+  if (stale) await load();
+}
+
+/// Replace the pane with a placeholder while a resource page's first read is
+/// in flight, so a click answers at once instead of leaving the previous page
+/// up until the daemon replies.
+function showPageSkeleton() {
+  const content = $("#content");
+  if (content) setHtml(content, skeleton("page"));
 }
 
 /// Claim ownership of the content pane. Call at the top of anything that
@@ -453,7 +478,7 @@ setHtml(app, `
   if (!selectedConn) renderDc();
   // Populate the auto-expanded tree immediately rather than waiting for the
   // first poll tick or a server click.
-  void refreshTreeVms();
+  void fastLoad(refreshTreeVms);
   startPolling();
   // Pick up a transfer that was already running before this page loaded, so a
   // reload mid-upload still shows its progress instead of looking stalled.
@@ -589,7 +614,8 @@ function renderTree() {
       clearResourceSelection();
       selectedNet = el.dataset.net!;
       renderTree();
-      void renderNetPage();
+      showPageSkeleton();
+      void fastLoad(renderNetPage);
     };
   });
   tree.querySelectorAll("[data-pool]").forEach((row: Element) => {
@@ -600,7 +626,8 @@ function renderTree() {
       clearResourceSelection();
       selectedPool = el.dataset.pool!;
       renderTree();
-      void renderPoolPage();
+      showPageSkeleton();
+      void fastLoad(renderPoolPage);
     };
   });
 }
@@ -638,7 +665,8 @@ function selectNetRow(conn: string, net: string) {
   selectedNet = net;
   selectedPool = null;
   renderTree();
-  void renderNetPage();
+  showPageSkeleton();
+  void fastLoad(renderNetPage);
 }
 
 function selectPoolRow(conn: string, pool: string) {
@@ -648,7 +676,8 @@ function selectPoolRow(conn: string, pool: string) {
   selectedNet = null;
   selectedPool = pool;
   renderTree();
-  void renderPoolPage();
+  showPageSkeleton();
+  void fastLoad(renderPoolPage);
 }
 
 /// Run a lifecycle POST for a guest straight from the tree, without needing
@@ -959,7 +988,7 @@ function renderDc() {
 
   let body: string;
   if (dcTab === "dashboard") {
-    body = `<div id="dc-dash">loading…</div>`;
+    body = `<div id="dc-dash">${skeleton("dashboard")}</div>`;
   } else if (dcTab === "servers") {
     body = `${cards}<div class="section-title">Servers</div>
        <div class="card-grid">
@@ -979,11 +1008,11 @@ function renderDc() {
          </button>
        </div>`;
   } else {
-    body = `<div id="users-area">loading…</div>`;
+    body = `<div id="users-area">${skeleton("table")}</div>`;
   }
 setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
 
-  if (dcTab === "dashboard") void loadDcDashboard();
+  if (dcTab === "dashboard") void fastLoad(loadDcDashboard);
 
   $("#dc-add")?.addEventListener("click", () => openConnectionDialog());
   $("#dc-server-create")?.addEventListener("click", () => openConnectionDialog());
@@ -1267,7 +1296,7 @@ function openAdmin() {
        <button class="tab" data-admintab="keys">${ic.key(14)} API Keys</button>
        <button class="tab" data-admintab="activity">${ic.autostart(14)} Activity</button>
      </div>
-     <div id="admin-area">loading…</div>`,
+     <div id="admin-area">${skeleton("table")}</div>`,
     `<button class="btn" id="ad-close">Close</button>`,
   );
   (el.querySelector(".modal") as HTMLElement).classList.add("wide");
@@ -2016,25 +2045,25 @@ async function renderConnBody() {
   // The create buttons live on the tab bar (rendered by renderConn), so the
   // body only carries the list itself.
   if (connTab === "dashboard") {
-    setHtml(body, `<div id="dash">loading…</div>`);
+    setHtml(body, `<div id="dash">${skeleton("dashboard")}</div>`);
     $("#create-resource")?.addEventListener("click", () => openCreateResource());
-    await loadDashboard();
+    await fastLoad(loadDashboard);
   } else if (connTab === "vms") {
-    setHtml(body, `<div id="vms-list" class="card-grid">loading…</div>`);
+    setHtml(body, `<div id="vms-list" class="card-grid">${skeleton("cards")}</div>`);
     $("#create-vm")?.addEventListener("click", () => openCreateVm());
-    await loadVms();
+    await fastLoad(loadVms);
   } else if (connTab === "networks") {
-    setHtml(body, `<div id="nets-list" class="card-grid">loading…</div>`);
+    setHtml(body, `<div id="nets-list" class="card-grid">${skeleton("cards")}</div>`);
     $("#create-net")?.addEventListener("click", () => openCreateNetwork());
-    await loadNetworks();
+    await fastLoad(loadNetworks);
   } else if (connTab === "storage") {
-    setHtml(body, `<div id="pools-list">loading…</div>`);
+    setHtml(body, `<div id="pools-list">${skeleton("cards")}</div>`);
     renderedPools = []; // fresh container: force a full render on first load
     $("#create-pool")?.addEventListener("click", () => openCreatePool());
-    await loadPools();
+    await fastLoad(loadPools);
   } else {
-    setHtml(body, `<div id="filters-list">loading…</div>`);
-    await loadFilters();
+    setHtml(body, `<div id="filters-list">${skeleton("table")}</div>`);
+    await fastLoad(loadFilters);
   }
 }
 
@@ -2315,7 +2344,7 @@ function openFirewallEditor(netName: string) {
 
   const el = openModal(
     `Firewall — ${esc(netName)}`,
-    `<div id="fw-body">loading…</div>`,
+    `<div id="fw-body">${skeleton("table")}</div>`,
     `<button class="btn" id="fw-cancel">Cancel</button>
      <button class="btn primary" id="fw-save">Apply</button>`,
   );
@@ -2822,7 +2851,7 @@ setHtml(content, `
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
-    <div id="vm-body"></div>`);
+    <div id="vm-body">${vmTab === "console" ? "" : skeleton("page")}</div>`);
   content.querySelectorAll("[data-vmtab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
       const next = (b as HTMLElement).dataset.vmtab as typeof vmTab;
@@ -2846,7 +2875,11 @@ setHtml(content, `
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(refresh);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(refresh);
   $("#vm-delete").onclick = () => deleteVm(vm);
-  await renderVmBody(vm);
+  // Summary and XML are read-only, so painting a cached answer first and the
+  // fresh one after is safe. The editing tabs load once: a second paint would
+  // throw away whatever the user typed while the fresh read was in flight.
+  if (vmTab === "summary" || vmTab === "xml") await fastLoad(() => renderVmBody(vm));
+  else await renderVmBody(vm);
 }
 
 async function renderVmBody(vm: string) {
