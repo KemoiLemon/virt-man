@@ -110,6 +110,16 @@ cannot be forged without the `users` scope. Progress during an operation is
 still hand-rolled per call site (`runTask`'s `set`); there is intentionally no
 client-side task list to keep in sync.
 
+**Destructive daemon calls are logged by the proxy, not the SPA.** Every
+`DELETE` proxied to the daemon is recorded with a human label, its outcome, and
+a detail line — for a VM delete that includes what happened to its storage
+(`removed 1 disk(s); kept 1 (iso)`). It lives in `web/server/src/api/proxy.rs`
+so that *every* caller is covered, including a direct `curl` or an API key, not
+just the buttons we happen to render. A failed deletion keeps the daemon's own
+reason, so "who deleted this volume, and did it work" is answerable after the
+fact. Volume deletions previously left no trace at all, which made a missing
+ISO impossible to explain.
+
 ## Testing rules
 
 **Verify by measurement, not assumption.** This repo has a history of bugs that

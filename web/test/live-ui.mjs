@@ -192,12 +192,12 @@ check("themed dialog opens instead of native window.prompt", () => {
     assert.match(area.textContent, /live-suite probe/, "recorded entry listed");
   });
 
-  // Leave the backend as we found it: clear the log entry this suite added.
-  modal.querySelector("#act-clear")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await wait(500);
-  // askConfirm raises its own modal; accept it ("Clear") to actually delete.
-  document.querySelector("#ask-yes")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await wait(700);
+  // NOTE: deliberately does NOT click #act-clear. That action clears the
+  // *whole* log, not the entry this suite added, so running the suite wiped
+  // every user's audit trail — including the records needed to explain a
+  // missing volume. The cost of leaving one "live-suite probe" row behind is
+  // far smaller than destroying the log this panel exists to display, and the
+  // button's presence is already asserted above.
   document.querySelectorAll(".modal-back.open").forEach((m) => m.remove());
 }
 

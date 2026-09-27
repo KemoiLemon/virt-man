@@ -155,6 +155,56 @@ await check("the transfer is recorded in the activity log", async () => {
   assert.equal(mine.status, "done", `unexpected status ${mine.status}: ${mine.message}`);
 });
 
+// ------------------------------------------------- deletions are audited
+//
+// The proxy records every destructive daemon call, which is what answers "who
+// deleted this volume, and did it work". The label mapping is unit-tested;
+// what these checks cover is that the proxy actually calls it — deleting that
+// block would leave every unit test green while the audit trail went silent.
+const auditName = `vmtest-audit-${Date.now()}.raw`;
+
+await check("a volume deletion through the proxy is recorded", async () => {
+  await json(`/proxy/${conn}/pools/${pool}/volumes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      xml: `<volume><name>${auditName}</name><capacity>1048576</capacity>` +
+        `<target><format type="raw"/></target></volume>`,
+    }),
+  });
+  const del = await fetch(
+    new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(auditName)}`, base),
+    { method: "DELETE" },
+  );
+  assert.ok(del.ok, `delete failed: HTTP ${del.status}`);
+
+  const log = await json("/activity");
+  const mine = log.entries.find((e) => e.label.includes(auditName));
+  assert.ok(mine, `no audit entry mentioning ${auditName}`);
+  assert.equal(mine.status, "done", `unexpected status: ${mine.status}`);
+  // The label must name pool and volume: a bare volume name is ambiguous once
+  // several pools hold files with the same name.
+  assert.match(mine.label, /Delete volume/, `unhelpful label: ${mine.label}`);
+  assert.ok(mine.label.includes(pool), `pool missing from label: ${mine.label}`);
+});
+
+await check("a refused deletion is recorded as failed with the daemon's reason", async () => {
+  // A deletion that did *not* happen is the more important of the two to be
+  // able to find afterwards.
+  const missing = `vmtest-absent-${Date.now()}.raw`;
+  const res = await fetch(
+    new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(missing)}`, base),
+    { method: "DELETE" },
+  );
+  assert.ok(!res.ok, "deleting a missing volume should not succeed");
+
+  const log = await json("/activity");
+  const mine = log.entries.find((e) => e.label.includes(missing));
+  assert.ok(mine, `no audit entry for the refused delete of ${missing}`);
+  assert.equal(mine.status, "failed", "a refused delete must not read as done");
+  assert.match(mine.message, /not found|no storage vol/, `reason lost: ${mine.message}`);
+});
+
 // Leave the daemon as we found it.
 await fetch(
   new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(name)}`, base),
