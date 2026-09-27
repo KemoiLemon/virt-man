@@ -30,11 +30,11 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("create {}: {e}", cfg.data_dir.display()))?;
 
     let store = store::Store::load(&cfg.data_dir)?;
-    // Staged upload bodies outlive nothing: jobs are in memory only, so any
-    // file left here by a previous run is orphaned. Removing them at startup
-    // stops multi-GB leftovers accumulating across restarts.
-    api::uploads::sweep(&cfg.data_dir);
     let state = AppState::new(store, cfg.data_dir.clone(), cfg.loopback_http);
+    // Jobs live in memory, so a restart drops them. Recover the transfers whose
+    // bodies arrived in full (they can be pushed without re-uploading) and
+    // delete anything incomplete, which could never be resumed safely.
+    api::uploads::restore(&state);
 
     let index = cfg.dist_dir.join("index.html");
     let app = api::build(state.clone())

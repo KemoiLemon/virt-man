@@ -24,7 +24,7 @@ use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -123,16 +123,136 @@ fn staged_path(data_dir: &std::path::Path, id: &str) -> PathBuf {
     dir(data_dir).join(format!("{id}.part"))
 }
 
-/// Delete staged bodies left by a previous run. Jobs live only in memory, so
-/// anything on disk at startup is orphaned by definition and would otherwise
-/// accumulate multi-GB files forever.
-pub fn sweep(data_dir: &std::path::Path) {
-    let d = dir(data_dir);
-    let Ok(entries) = std::fs::read_dir(&d) else {
-        return;
+/// Sidecar describing a staged upload.
+///
+/// Its presence is also the **completeness marker**: it is written only once the
+/// body has arrived in full. That distinction matters because the hash check at
+/// the end of a transfer proves the bytes *travelled* intact, not that the
+/// staged file was ever complete — pushing a half-written file would send
+/// partial bytes, the daemon would store exactly those, and the two hashes
+/// would agree. So a `.part` with no sidecar is never resumable.
+#[derive(Serialize, Deserialize)]
+struct StagedMeta {
+    id: String,
+    conn: String,
+    pool: String,
+    name: String,
+    size: u64,
+    user_id: String,
+    username: String,
+    at_ms: u64,
+}
+
+fn staged_meta_path(data_dir: &std::path::Path, id: &str) -> PathBuf {
+    dir(data_dir).join(format!("{id}.json"))
+}
+
+/// Remove both files belonging to a staged upload.
+fn remove_staged(data_dir: &std::path::Path, id: &str) {
+    let _ = std::fs::remove_file(staged_path(data_dir, id));
+    let _ = std::fs::remove_file(staged_meta_path(data_dir, id));
+}
+
+/// Decide what to do with whatever is in the staging directory after a restart,
+/// without touching the filesystem: `(jobs to resume, files to delete)`.
+///
+/// Pure so every branch is testable, including the one that must never resume a
+/// partial transfer.
+fn plan_restore(d: &std::path::Path) -> (Vec<UploadJob>, Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(d) else {
+        return (Vec::new(), Vec::new());
     };
+
+    // Ids mentioned by either file, so a body and its sidecar are considered
+    // together rather than as two independent files.
+    let mut ids: Vec<String> = Vec::new();
     for e in entries.flatten() {
-        let _ = std::fs::remove_file(e.path());
+        let Some(name) = e.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if let Some(id) = name
+            .strip_suffix(".part")
+            .or_else(|| name.strip_suffix(".json"))
+        {
+            if !ids.iter().any(|x| x == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+
+    let mut jobs = Vec::new();
+    let mut delete = Vec::new();
+    for id in ids {
+        let body = d.join(format!("{id}.part"));
+        match job_from_files(&body, &d.join(format!("{id}.json")), &id) {
+            Some(job) => jobs.push(job),
+            None => {
+                delete.push(body);
+                delete.push(d.join(format!("{id}.json")));
+            }
+        }
+    }
+    (jobs, delete)
+}
+
+/// Rebuild a job from its staged files, or `None` if it cannot be trusted.
+fn job_from_files(body: &std::path::Path, meta: &std::path::Path, id: &str) -> Option<UploadJob> {
+    let raw = std::fs::read_to_string(meta).ok()?;
+    let m: StagedMeta = serde_json::from_str(&raw).ok()?;
+    // The sidecar must describe the file it sits next to. Ids are generated
+    // server-side, so a mismatch means the directory was edited by hand.
+    if m.id != id {
+        return None;
+    }
+    // A body that is not the size we recorded was truncated after staging, so
+    // resuming it would push a short file that still hashes consistently.
+    let on_disk = std::fs::metadata(body).ok()?.len();
+    if on_disk != m.size {
+        return None;
+    }
+    let now = now_ms();
+    Some(UploadJob {
+        id: m.id,
+        conn: m.conn,
+        pool: m.pool,
+        name: m.name,
+        size: m.size,
+        sent: 0,
+        // Resumed jobs come back ready to push, never mid-flight: the old
+        // attempt is gone and its progress with it.
+        phase: Phase::Staged,
+        sha256: None,
+        error: None,
+        at_ms: if m.at_ms == 0 { now } else { m.at_ms },
+        started_ms: 0,
+        speed_bps: 0.0,
+        daemon_recv_bps: 0.0,
+        daemon_write_bps: 0.0,
+        user_id: m.user_id,
+        username: m.username,
+    })
+}
+
+/// Recover fully-staged uploads across a restart and delete the rest.
+///
+/// Jobs live in memory, so a restart drops them; without this the startup sweep
+/// would also destroy their staged bodies, turning a survivable interruption
+/// into a multi-GB re-upload from the browser. Anything incomplete is removed,
+/// since it can never be resumed safely.
+pub fn restore(state: &AppState) {
+    let (jobs, delete) = plan_restore(&dir(&state.data_dir));
+    for p in delete {
+        let _ = std::fs::remove_file(p);
+    }
+    if jobs.is_empty() {
+        return;
+    }
+    let mut map = state.uploads.write().expect("uploads lock poisoned");
+    for job in jobs {
+        let name = job.name.clone();
+        let size = job.size;
+        map.insert(job.id.clone(), Arc::new(Mutex::new(job)));
+        tracing::info!("resumed staged upload {name} ({size} bytes); push to send it");
     }
 }
 
@@ -214,6 +334,31 @@ async fn stage(
         username: user.username.clone(),
     };
     let view_json = view(&job);
+    // Written *after* the body is complete, which is what makes it a
+    // completeness marker: a restart finds both files only if the whole body
+    // arrived, and drops a `.part` with no sidecar rather than resuming it.
+    let meta = StagedMeta {
+        id: job.id.clone(),
+        conn: job.conn.clone(),
+        pool: job.pool.clone(),
+        name: job.name.clone(),
+        size: job.size,
+        user_id: job.user_id.clone(),
+        username: job.username.clone(),
+        at_ms: job.at_ms,
+    };
+    if let Err(e) = tokio::fs::write(
+        staged_meta_path(&state.data_dir, &id),
+        serde_json::to_vec(&meta).unwrap_or_default(),
+    )
+    .await
+    {
+        // Without the sidecar the upload would not survive a restart, so treat
+        // it as a failed stage rather than silently accepting a job that could
+        // be dropped later.
+        remove_staged(&state.data_dir, &id);
+        return Err(ApiError::internal(format!("record staged upload: {e}")));
+    }
     state
         .uploads
         .write()
@@ -305,9 +450,9 @@ async fn discard(
             return Err(ApiError::conflict("upload is still running"));
         }
     }
-    tokio::fs::remove_file(staged_path(&state.data_dir, &id))
-        .await
-        .ok();
+    // Both files go, including the sidecar: leaving it behind would make the
+    // next startup treat the id as resume-able when its body is gone.
+    remove_staged(&state.data_dir, &id);
     state
         .uploads
         .write()
@@ -487,9 +632,12 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     verify(&local, &remote)?;
 
     // --- clean up ----------------------------------------------------------
+    // Both files, so a completed transfer leaves nothing for the next startup
+    // to consider resuming.
     tokio::fs::remove_file(&path)
         .await
         .map_err(|e| format!("remove staged file: {e}"))?;
+    let _ = tokio::fs::remove_file(staged_meta_path(&state.data_dir, id)).await;
     let mut j = job.lock().expect("job lock poisoned");
     j.phase = Phase::Done;
     j.sha256 = Some(local.clone());
@@ -576,6 +724,29 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A private staging directory for one test, so cases cannot interfere.
+    fn staged_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("virtman-restore-{tag}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The sidecar body, with `size` as the claimed length.
+    fn meta_json(id: &str, size: u64) -> String {
+        format!(
+            r#"{{"id":"{id}","conn":"c1","pool":"default","name":"some.iso",
+               "size":{size},"user_id":"u1","username":"alice","at_ms":123}}"#
+        )
+    }
+
+    /// A `.part` of `body_len` bytes plus a sidecar claiming `meta_size`, so a
+    /// mismatch can be produced on purpose.
+    fn write_pair(d: &std::path::Path, id: &str, body_len: usize, meta_size: u64) {
+        std::fs::write(d.join(format!("{id}.part")), vec![7u8; body_len]).unwrap();
+        std::fs::write(d.join(format!("{id}.json")), meta_json(id, meta_size)).unwrap();
+    }
 
     /// The decision the whole staging design exists to make. Tested directly
     /// because it is otherwise only reachable after a multi-gigabyte round
@@ -680,19 +851,91 @@ mod tests {
         assert!(!path.exists(), "staged file must be cleaned up");
     }
 
-    /// The sweep only touches the uploads directory.
+    /// A fully-staged upload survives a restart: the body and its sidecar are
+    /// both there, so it comes back ready to push without re-uploading.
     #[test]
-    fn sweep_removes_orphaned_staged_files() {
-        let dir = std::env::temp_dir().join("virtman-sweep-test");
-        let up = dir.join("uploads");
-        std::fs::create_dir_all(&up).unwrap();
-        let keep = dir.join("store.json");
+    fn a_complete_staged_upload_is_resumed() {
+        let d = staged_dir("resume-complete");
+        write_pair(&d, "abc123", 8, 8);
+
+        let (jobs, delete) = plan_restore(&d);
+        assert_eq!(jobs.len(), 1, "the upload is recovered");
+        assert_eq!(jobs[0].name, "some.iso");
+        assert_eq!(jobs[0].size, 8);
+        // Resumed work comes back ready, never mid-flight: the previous attempt
+        // is gone and any partial progress with it.
+        assert_eq!(jobs[0].phase, Phase::Staged);
+        assert_eq!(jobs[0].sent, 0);
+        assert!(delete.is_empty(), "nothing to delete: {delete:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The check that stops a half-written body being resumed. Pushing it would
+    /// send partial bytes, the daemon would store exactly those, and the hashes
+    /// would agree -- a truncated volume reported as verified.
+    #[test]
+    fn an_incomplete_staged_upload_is_deleted_not_resumed() {
+        let d = staged_dir("resume-partial");
+        // Body present, but only part of what the sidecar claims.
+        write_pair(&d, "half00", 4, 8);
+
+        let (jobs, delete) = plan_restore(&d);
+        assert!(jobs.is_empty(), "a partial body must never be resumed");
+        assert_eq!(delete.len(), 2, "both files are removed: {delete:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A body with no sidecar means the process died before the body finished.
+    #[test]
+    fn a_body_without_a_sidecar_is_deleted() {
+        let d = staged_dir("resume-nosidecar");
+        std::fs::write(d.join("orphan.part"), b"junk").unwrap();
+
+        let (jobs, delete) = plan_restore(&d);
+        assert!(jobs.is_empty());
+        assert_eq!(delete.len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A sidecar whose body is gone must not resurrect a job that cannot send.
+    #[test]
+    fn a_sidecar_without_a_body_is_deleted() {
+        let d = staged_dir("resume-nobody");
+        let id = "metaonly";
+        std::fs::write(d.join(format!("{id}.json")), meta_json(id, 8)).unwrap();
+
+        let (jobs, delete) = plan_restore(&d);
+        assert!(jobs.is_empty());
+        assert_eq!(delete.len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A sidecar describing a different id than the file it sits beside means
+    /// the directory was edited by hand, so it is not trusted.
+    #[test]
+    fn a_sidecar_for_another_id_is_rejected() {
+        let d = staged_dir("resume-mismatch");
+        std::fs::write(d.join("abcdefgh.part"), b"12345678").unwrap();
+        std::fs::write(d.join("abcdefgh.json"), meta_json("different", 8)).unwrap();
+
+        let (jobs, _) = plan_restore(&d);
+        assert!(jobs.is_empty(), "mismatched sidecar must not be resumed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Only our own files are touched: an unrelated file in the staging
+    /// directory is left alone.
+    #[test]
+    fn unrelated_files_are_left_alone() {
+        let d = staged_dir("resume-other");
+        let keep = d.join("notes.txt");
         std::fs::write(&keep, b"x").unwrap();
-        let orphan = up.join("dead.part");
-        std::fs::write(&orphan, b"junk").unwrap();
-        sweep(&dir);
-        assert!(!orphan.exists(), "orphaned staged file removed");
-        assert!(keep.exists(), "unrelated files left alone");
-        let _ = std::fs::remove_dir_all(&dir);
+        write_pair(&d, "keepme00", 4, 4);
+
+        let (jobs, delete) = plan_restore(&d);
+        assert_eq!(jobs.len(), 1);
+        assert!(delete.is_empty());
+        assert!(keep.exists(), "unrelated file removed");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

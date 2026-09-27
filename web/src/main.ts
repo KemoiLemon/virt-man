@@ -4556,6 +4556,7 @@ function uploadsSection(pool: string): string {
           <span>${fmtBytes(j.sent)} of ${fmtBytes(j.size)}</span>
           <span>${speed}</span>
           <span>${done && j.sha256 ? `sha256 ${esc(j.sha256.slice(0, 12))}…` : ""}</span>
+          ${j.phase === "staged" ? `<button class="btn" data-up-push="${esc(j.id)}">Send to daemon</button>` : ""}
           <button class="btn icon" data-up-${live ? "cancel" : "clear"}="${esc(j.id)}"
             title="${live ? "Cancel and discard the staged copy" : "Dismiss"}">${ic.close()}</button>
         </div>
@@ -4592,6 +4593,21 @@ function bindUploads() {
   }
   for (const b of host.querySelectorAll<HTMLElement>("[data-up-clear]")) {
     b.onclick = () => void drop(b.dataset.upClear!, true);
+  }
+  // A job that came back from a previous run is already staged on disk, so the
+  // bytes do not need to be sent again: one click restarts the daemon leg.
+  for (const b of host.querySelectorAll<HTMLElement>("[data-up-push]")) {
+    b.onclick = async () => {
+      const id = b.dataset.upPush!;
+      b.setAttribute("disabled", "true");
+      try {
+        await api.pushUpload(id);
+      } catch (e) {
+        b.removeAttribute("disabled");
+        return toast((e as Error).message, "bad");
+      }
+      await pollUploads();
+    };
   }
 }
 

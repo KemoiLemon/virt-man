@@ -112,14 +112,24 @@ freshly loaded page re-lists in-flight transfers from `GET /uploads`, because
 the job lives on the server and not in the page. Keep it that way; making the
 transfer depend on the client, or tracking progress client-side, breaks it.
 
-A **web server restart does lose an in-flight transfer**: jobs are in memory
-and the startup sweep deletes staged bodies (they are orphaned by definition
-once the job map is gone). That is a lost transfer, not a corrupt one: the
-daemon rejects a short body because the server sends `Content-Length`, so a
-partial upload cannot be stored as if it were complete. Retrying means
-re-uploading from the browser, since the staged copy is gone.
+A **web server restart no longer loses a staged upload**: jobs are in memory,
+so a restart would otherwise drop them and the sweep would delete their bodies.
+Instead `uploads::restore` runs at startup and brings back every upload whose
+body **arrived in full**, as a `staged` job with a Send button on the pool
+window — the bytes are already on disk, so resuming costs no re-upload.
 
-**Activity is server-side and per-user.** Long operations report their outcome
+Its sidecar (`<id>.json`, holding conn/pool/name/size/owner) is written only
+after the body completes, and that is deliberate: the sidecar **is** the
+completeness marker. Resuming a half-written body would send partial bytes, the
+daemon would store exactly those, and the two hashes would **agree** — the hash
+check proves the bytes travelled intact, not that the staged file was ever
+complete, so a naive resume would report a truncated volume as verified. A
+`.part` with no sidecar, a sidecar with no body, a size that disagrees with the
+recorded one, or a sidecar naming a different id, are all deleted rather than
+resumed. A restart is still fatal to a transfer **mid-body** (nothing complete
+to resume), and to nothing else.
+
+**Destructive daemon calls are logged by the proxy, not the SPA.** Long operations report their outcome
 to `POST /activity`, stored in `store.json` so it survives restarts. A
 non-admin sees only their own rows; an admin sees all, and the attribution
 cannot be forged without the `users` scope. Progress during an operation is

@@ -318,11 +318,27 @@ await check("the pool window shows a background progress bar for the transfer", 
   assert.match(section.textContent, /Ready/, "and its phase");
 });
 
+await check("a staged upload offers to send itself, not just cancel", () => {
+  // This is the resume path. A transfer recovered after a restart comes back in
+  // exactly this state, so the button under test is the same one that makes a
+  // recovered upload recoverable without re-sending the bytes.
+  const send = document.querySelector("#pool-uploads [data-up-push]");
+  assert.ok(send, "staged transfer has a Send action");
+  assert.match(send.textContent, /Send to daemon/, `unhelpful label: ${send.textContent}`);
+});
+
 await check("the pool window shows the daemon leg's speed", async () => {
-  // Push it, then read the card while the transfer is still in flight: the
-  // speed has to appear live, not only in the final state.
-  const push = await json(`/uploads/${uiStaged.id}/push`, { method: "POST" });
-  assert.equal(push.phase, "uploading");
+  // Started by clicking Send, which is the path a recovered transfer takes; the
+  // card is then read while the transfer is still in flight, since the speed
+  // has to appear live and not only in the final state.
+  const send = document.querySelector("#pool-uploads [data-up-push]");
+  assert.ok(send, "Send button present");
+  send.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(500);
+  const started = await json(`/uploads/${uiStaged.id}`);
+  // A small test body can finish before this read, so "no longer staged" is the
+  // claim: the click started it. Requiring "uploading" would be a race.
+  assert.notEqual(started.phase, "staged", "Send did not start the transfer");
   let sawSpeed = false;
   for (let i = 0; i < 60; i++) {
     await wait(100);
