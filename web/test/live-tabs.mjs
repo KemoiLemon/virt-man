@@ -186,6 +186,27 @@ check("firewall editor opens with rules and port-forward tables", () => {
   await wait(300);
 }
 
+// ---- Network detail page ---------------------------------------------------
+// Selecting a network in the sidebar opens its own page (info cards + IPAM).
+document.querySelector(".tree-net")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1500);
+
+check("a network page shows card info and an IPAM table", () => {
+  assert.ok(document.querySelector("#net-back"), "network page opened (back button)");
+  const cards = [...document.querySelectorAll(".cards .card")];
+  assert.ok(cards.length > 0, `${cards.length} info card(s)`);
+  const labels = cards.map((c) => c.querySelector("i")?.textContent.trim());
+  for (const want of ["TYPE", "SUBNET", "GATEWAY", "DHCP IPS REMAINING"]) {
+    assert.ok(labels.includes(want), `${want} card present (${labels})`);
+  }
+  const remaining = cards.find((c) => c.querySelector("i")?.textContent.trim() === "DHCP IPS REMAINING");
+  // Either "free / total" for a subnet, or a dash for a network with no pool.
+  assert.match(remaining.querySelector("b").textContent.trim(), /^(\d+ \/ \d+|—)$/, "remaining count shape");
+  assert.match(document.body.textContent, /IPAM Allocations/, "IPAM section present");
+  assert.ok(document.querySelector("#ipam-add"), "add-allocation action present");
+  results.push(["info", `network cards: ${labels.join(", ")}`]);
+});
+
 // ---- VM tabs ---------------------------------------------------------------
 document.querySelector(".tree-row.tree-vm")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

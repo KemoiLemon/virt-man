@@ -146,6 +146,33 @@ test("nextFreeIp skips the gateway and allocated addresses", () => {
   );
 });
 
+test("dhcpRemaining counts the pool minus the gateway and allocations", () => {
+  // Default /24 pool is .2-.254 = 253 addresses; the gateway (.1, outside the
+  // range anyway) and two static allocations are not available.
+  const remaining = xml.dhcpRemaining("192.168.167.1/24", [
+    "192.168.167.2",
+    "192.168.167.10",
+  ]);
+  assert.equal(remaining.total, 253);
+  assert.equal(remaining.free, 251);
+});
+
+test("dhcpRemaining treats an in-range gateway as taken", () => {
+  // When the range includes the gateway address it must not be counted free.
+  const remaining = xml.dhcpRemaining("10.0.0.1/29", [], {
+    start: "10.0.0.1",
+    end: "10.0.0.6",
+  });
+  assert.equal(remaining.total, 6);
+  assert.equal(remaining.free, 5, "gateway excluded from the free count");
+});
+
+test("dhcpRemaining reports nothing for a network with no pool", () => {
+  // Bridge-mode and subnet-less networks have no DHCP pool to speak of.
+  assert.equal(xml.dhcpRemaining("", []), null);
+  assert.equal(xml.dhcpRemaining("192.168.1.1/31", []), null, "no usable hosts");
+});
+
 test("UEFI guests get the real OVMF loader and a templated nvram store", () => {
   const out = xml.domainXml({
     name: "box",

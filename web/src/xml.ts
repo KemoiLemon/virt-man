@@ -334,6 +334,20 @@ export function defaultDhcpRange(ipCidr: string): { start: string; end: string }
 /// First unallocated address in a network's DHCP range (explicit, else the
 /// derived default), skipping the gateway and any IPs already handed out.
 /// Returns null when the subnet or range is missing/exhausted.
+/// The addresses already spoken for in a network: every static allocation,
+/// plus the gateway itself (dnsmasq never hands that out). Shared by the
+/// next-free lookup and the remaining-count so the two can never disagree.
+function usedAddresses(ipCidr: string, used: string[]): Set<string> {
+  const set = new Set<string>();
+  for (const entry of used) {
+    const trimmed = entry?.trim();
+    if (trimmed) set.add(trimmed);
+  }
+  const gw = ipCidr.split("/")[0];
+  if (gw) set.add(gw);
+  return set;
+}
+
 export function nextFreeIp(
   ipCidr: string,
   used: string[],
@@ -344,14 +358,34 @@ export function nextFreeIp(
   const start = ipv4(r.start);
   const end = ipv4(r.end);
   if (start == null || end == null || start > end) return null;
-  const usedSet = new Set(used.filter(Boolean).map((x) => x.trim()));
-  const gw = ipCidr.split("/")[0];
-  if (gw) usedSet.add(gw);
+  const taken = usedAddresses(ipCidr, used);
   for (let n = start; n <= end; n++) {
     const s = ipv4str(n);
-    if (!usedSet.has(s)) return s;
+    if (!taken.has(s)) return s;
   }
   return null;
+}
+
+/// How much of the DHCP pool is left: addresses in the range that are neither
+/// the gateway nor already handed out as static allocations. `null` when the
+/// network has no pool to speak of (bridge mode, or no subnet).
+export function dhcpRemaining(
+  ipCidr: string,
+  used: string[],
+  range?: { start: string; end: string },
+): { free: number; total: number } | null {
+  const r = range ?? defaultDhcpRange(ipCidr);
+  if (!r) return null;
+  const start = ipv4(r.start);
+  const end = ipv4(r.end);
+  if (start == null || end == null || start > end) return null;
+  const total = end - start + 1;
+  const taken = usedAddresses(ipCidr, used);
+  let handedOut = 0;
+  for (let n = start; n <= end; n++) {
+    if (taken.has(ipv4str(n))) handedOut++;
+  }
+  return { free: total - handedOut, total };
 }
 
 function netmaskBits(mask: string): number {

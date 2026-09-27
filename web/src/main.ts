@@ -13,7 +13,7 @@ import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
-import { domainXml, defaultDhcpRange, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeXml, withFirmware } from "./xml";
+import { domainXml, defaultDhcpRange, dhcpRemaining, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, DhcpHost, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
@@ -1604,7 +1604,10 @@ async function renderNetPage() {
     const dhcpRange = form.dhcp_start && form.dhcp_end
       ? { start: form.dhcp_start, end: form.dhcp_end }
       : defaultDhcpRange(form.ip);
-    const dhcpLabel = dhcpRange ? `${dhcpRange.start} – ${dhcpRange.end}` : "—";
+    // Free addresses left in the pool: the range minus the gateway and every
+    // static allocation. More useful at a glance than the range bounds, which
+    // are derivable and shown in the IPAM table anyway.
+    const remaining = dhcpRemaining(form.ip, hosts.map((h) => h.ip), dhcpRange ?? undefined);
     // No explicit forwarders means dnsmasq answers on the gateway itself.
     const dnsLabel = form.dns || (form.forward === "nat" && form.ip ? gateway : "—");
 
@@ -1633,7 +1636,7 @@ async function renderNetPage() {
         <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${esc(form.bridge || "—")}</b><i>BRIDGE</i></div></div>
         <div class="card"><span class="card-ic">${ic.circleDot(20)}</span><div><b>${esc(form.ip || "—")}</b><i>SUBNET</i></div></div>
         <div class="card"><span class="card-ic">${ic.chevron(20)}</span><div><b>${esc(gateway)}</b><i>GATEWAY</i></div></div>
-        <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${esc(dhcpLabel)}</b><i>DHCP RANGE</i></div></div>
+        <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${remaining ? `${remaining.free} / ${remaining.total}` : "—"}</b><i>DHCP IPS REMAINING</i></div></div>
         <div class="card"><span class="card-ic">${ic.options(20)}</span><div><b>${esc(dnsLabel)}</b><i>DNS</i></div></div>
         <div class="card"><span class="card-ic">${ic.autostart(20)}</span><div><b>${net.persistent ? "Persistent" : "Transient"}</b><i>PERSISTENCE</i></div></div>
       </div>
