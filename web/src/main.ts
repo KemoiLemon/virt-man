@@ -12,6 +12,7 @@ import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRat
 import type { DomainStats, HostStats } from "./stats";
 import { allTasks, clearTask, onTasks, runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
+import { attachSuggest } from "./suggest";
 import { domainXml, defaultDhcpRange, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, DhcpHost, NetworkForm, PoolForm } from "./xml";
 
@@ -2087,6 +2088,43 @@ function fwOpt(list: string[], sel: string, labels?: Record<string, string>): st
   return list.map((v) => `<option value="${v}" ${v === sel ? "selected" : ""}>${esc(labels?.[v] ?? v)}</option>`).join("");
 }
 
+/// IP addresses worth suggesting in the firewall's source/dest fields: every
+/// network's gateway, its DHCP endpoints, and each static allocation. Fetched
+/// once per editor open and read lazily by the suggesters, so the list can
+/// arrive after the rule table has already painted.
+async function collectIpCandidates(conn: string): Promise<string[]> {
+  const out = new Set<string>();
+  const nets = await api.get<NetworkSummary[]>(`/proxy/${conn}/networks`).catch(() => []);
+  if (!Array.isArray(nets)) return [];
+  for (const n of nets) {
+    const { xml } = await api
+      .get<{ xml: string }>(`/proxy/${conn}/networks/${encodeURIComponent(n.name)}/xml`)
+      .catch(() => ({ xml: "" }));
+    if (!xml) continue;
+    const form = networkFormFromXml(xml);
+    if (form.ip) {
+      out.add(form.ip.split("/")[0]);
+      const range = form.dhcp_start && form.dhcp_end
+        ? { start: form.dhcp_start, end: form.dhcp_end }
+        : defaultDhcpRange(form.ip);
+      if (range) {
+        out.add(range.start);
+        out.add(range.end);
+      }
+    }
+    for (const h of form.hosts ?? []) if (h.ip) out.add(h.ip);
+  }
+  return [...out].sort();
+}
+
+/// Offer IP suggestions on a rule table's source/dest inputs. Called after
+/// every render: the inputs are recreated each time, so listeners never stack.
+function attachRuleIpSuggest(root: Element, candidates: () => string[]) {
+  root.querySelectorAll("[data-r-src], [data-r-dst]").forEach((n: Element) => {
+    attachSuggest(n as HTMLInputElement, candidates);
+  });
+}
+
 function fwRuleRow(r: FirewallRule): string {
   return `
     <tr>
@@ -2175,9 +2213,14 @@ function readFwFwdRows(root: Element): FirewallForward[] {
 /// Network firewall editor: rules and NAT port forwards, in a wide modal.
 function openFirewallEditor(netName: string) {
   if (!selectedConn) return;
+  const conn = selectedConn;
   let rules: FirewallRule[] = [];
   let forwards: FirewallForward[] = [];
   let policy: FirewallPolicy = blankPolicy();
+  // Every address this daemon knows about, for the source/dest fields.
+  // Filled after the modal paints; the suggesters read it lazily per keystroke.
+  let ipCandidates: string[] = [];
+  void collectIpCandidates(conn).then((ips) => { ipCandidates = ips; });
 
   const el = openModal(
     `Firewall — ${esc(netName)}`,
@@ -2211,6 +2254,9 @@ function openFirewallEditor(netName: string) {
         ${forwards.map(fwFwdRow).join("") || `<tr><td colspan="8" class="empty">No port forwards.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>`);
+
+    // Re-attached every render: render() rebuilds these inputs from scratch.
+    attachRuleIpSuggest(el, () => ipCandidates);
 
     $("#fw-add-rule", el).onclick = () => {
       read();
@@ -2712,6 +2758,7 @@ setHtml(content, `
 
 async function renderVmBody(vm: string) {
   if (!selectedConn) return;
+  const conn = selectedConn; // narrowed copy for the nested closures below
   const body = $("#vm-body");
   // Only the Hardware tab stretches to fill the pane; every other tab scrolls
   // normally. Drop the class here and let the hardware branch re-add it.
@@ -2983,6 +3030,9 @@ async function renderVmBody(vm: string) {
       vmRules = readFwRuleRows(rulesBody);
       vmPolicy = readFwPolicy(rulesBody);
     };
+    // Addresses to offer in this guest's source/dest fields.
+    let ipCandidates: string[] = [];
+    void collectIpCandidates(conn).then((ips) => { ipCandidates = ips; });
     const renderRules = () => {
       setHtml(rulesBody, `
         <div class="section-title fw-cat">Default Policies</div>
@@ -2996,6 +3046,7 @@ async function renderVmBody(vm: string) {
           <button class="btn" id="vmfw-add">${ic.plus(14)} Add rule</button>
           <button class="btn primary" id="vmfw-apply">${ic.firewall(14)} Apply</button>
         </div>`);
+      attachRuleIpSuggest(rulesBody, () => ipCandidates);
       $("#vmfw-add", rulesBody).onclick = () => {
         readRules();
         vmRules.push(blankRule());

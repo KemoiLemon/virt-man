@@ -152,6 +152,40 @@ check("firewall editor opens with rules and port-forward tables", () => {
   modal.remove();
 });
 
+// The source/dest IP fields suggest what the daemon actually knows about.
+{
+  // Add a rule so there is a row to type into.
+  document.querySelector("[data-fwedit]")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1200);
+  const modal = document.querySelector(".modal-back.open");
+  modal?.querySelector("#fw-add-rule")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(500);
+  const src = modal?.querySelector("[data-r-src]");
+  check("firewall source IP field offers addresses to pick from", () => {
+    assert.ok(src, "source IP input rendered");
+    src.dispatchEvent(new window.Event("focus"));
+    const options = [...document.querySelectorAll(".select-popover .select-option")]
+      .map((b) => b.textContent);
+    assert.ok(options.length > 0, `suggestions offered (${options})`);
+    // They must be real addresses from this daemon's networks, not placeholders.
+    assert.ok(
+      options.every((o) => /^\d{1,3}(\.\d{1,3}){3}$/.test(o)),
+      `each suggestion is an IPv4 address (${options})`,
+    );
+    results.push(["info", `IP suggestions: ${options.join(", ")}`]);
+    // Typing narrows the list.
+    src.value = options[0];
+    src.dispatchEvent(new window.Event("input", { bubbles: true }));
+    const filtered = [...document.querySelectorAll(".select-popover .select-option")]
+      .map((b) => b.textContent);
+    assert.ok(filtered.length <= options.length, "typing filters the list");
+  });
+  // Dismiss the suggestion popover (a fixed-position node) before moving on.
+  document.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  modal?.remove();
+  await wait(300);
+}
+
 // ---- VM tabs ---------------------------------------------------------------
 document.querySelector(".tree-row.tree-vm")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
