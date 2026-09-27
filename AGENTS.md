@@ -67,10 +67,15 @@ silently broken UI.
 **No native OS chrome.** `<select>` is `display:none` behind a themed
 `.select-trigger`/`.select-popover` listbox (`web/src/listbox.ts`). Never use
 `window.prompt`/`confirm`/`alert` — use `askText`/`askConfirm` in `main.ts`.
-The browser's right-click menu is suppressed inside the sidebar too: the
-resource tree opens its own `.ctxmenu` (`web/src/ctxmenu.ts`) with the row's
-actions. Outside the sidebar the native menu is left alone, so copy/paste
-still works in the XML and log panes.
+The browser's right-click menu is replaced on resource surfaces: every sidebar
+row, and in the content pane the cards, dashboard rows, tabs and page header
+open a `.ctxmenu` (`web/src/ctxmenu.ts`). One builder per resource (`vmMenu`,
+`netMenu`, `poolMenu`, `serverMenu`, `rootMenu` in `main.ts`) serves every
+surface, so a guest offers the same actions wherever it is right-clicked.
+Every item carries an icon. Plain text, form fields and the XML and log panes
+keep the native menu, so copy/paste still works there. Add Resource lives in
+the Datacenter/sidebar-background menu and the Ctrl+K palette, not as a
+sidebar button.
 
 **No inline event handlers.** `onclick="..."` in an HTML string is blocked by
 the CSP. Assign handlers in JS after rendering.

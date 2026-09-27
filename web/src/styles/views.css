@@ -36,14 +36,6 @@ table.grid th.col-actions, table.grid td.col-actions { width: 1%; white-space: n
 .state.on { color: var(--ok); }
 .tname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 table.grid td.tname:hover { color: var(--accent); }
-.tree-add {
-  width: 100%; border: 0; border-top: 1px solid var(--line);
-  background: var(--panel); color: var(--accent); cursor: pointer;
-  font: inherit; font-size: 11px; letter-spacing: 1px; min-height: 35px;
-  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  flex: 0 0 auto;
-}
-.tree-add:hover { background: var(--accent-bg); color: var(--accent-fg); }
 
 /* ------------------------------------------------------------- tab bar */
 .tabbar {

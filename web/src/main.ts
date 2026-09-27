@@ -262,90 +262,109 @@ function toggleTheme() {
 /// exist) rather than a snapshot taken at boot.
 function openCommandPalette() {
   const cmds: TayneCommand[] = [];
-  const add = (id: string, label: string, hint: string | undefined, run: () => void) =>
-    cmds.push({ id, label, hint, run });
-
-  add("nav-dc", "Go to Datacenter", "Servers and guests", () => {
+  const add = (id: string, label: string, hint: string | undefined, icon: string, run: () => void) =>
+    cmds.push({ id, label, hint, icon, run });
+  const toDc = (tab: typeof dcTab) => () => {
     leaveCurrentView();
     selectedConn = null;
-    selectedVm = null;
-    dcTab = "dashboard";
+    clearResourceSelection();
+    dcTab = tab;
     renderTree();
     renderDc();
-  });
+  };
 
-  for (const c of connections) {
-    add(`nav-server-${c.id}`, `Server — ${c.name}`, c.url, () => {
-      leaveCurrentView();
-      selectedConn = c.id;
-      selectedVm = null;
-      connTab = "dashboard";
-      renderTree();
-      void renderConn();
-    });
-    for (const v of treeVms[c.id] ?? []) {
-      add(`nav-vm-${c.id}-${v.name}`, `VM — ${v.name}`, c.name, () => {
-        leaveCurrentView();
-        selectedConn = c.id;
-        selectedVm = v.name;
-        vmTab = "summary";
-        renderTree();
-        void renderVm();
-      });
-    }
-  }
-
-  // Actions on the selected guest, when one is open.
+  // Actions on what is open come first: they are what you most likely want.
   if (selectedConn && selectedVm) {
     const conn = selectedConn;
     const vm = selectedVm;
-    const power = (id: string, label: string, path: string) =>
-      add(id, `${label} — ${vm}`, "Selected VM", async () => {
-        try {
-          await act(`/proxy/${conn}/domains/${encodeURIComponent(vm)}${path}`, "POST");
-        } catch {
-          return; // act already toasts the daemon's error
-        }
-        void renderVm();
-      });
-    power("vm-start", "Start", "/start");
-    power("vm-shutdown", "Shutdown", "/shutdown");
-    power("vm-reboot", "Reboot", "/reboot");
-    power("vm-destroy", "Force stop", "/destroy");
-    add("vm-console", `Open console — ${vm}`, "Selected VM", () => {
-      leaveCurrentView();
-      vmTab = "console";
-      renderTree();
-      void renderVm();
-    });
-    add("vm-hwedit", `Edit hardware — ${vm}`, "Selected VM", () => {
-      leaveCurrentView();
-      vmTab = "hardware";
-      renderTree();
-      void renderVm();
-    });
-    add("vm-rename", `Rename — ${vm}`, "Selected VM", () => {
-      void renameVm(vm);
-    });
-    add("vm-delete", `Delete — ${vm}`, "Selected VM", () => {
-      void deleteVm(vm);
-    });
+    const running = (treeVms[conn] ?? []).find((v) => v.name === vm)?.active === true;
+    const power = (id: string, label: string, icon: string, path: string) =>
+      add(id, `${label} — ${vm}`, "This VM", icon, () => void treeVmPower(conn, vm, path));
+    if (running) {
+      power("vm-shutdown", "Shutdown", ic.stop(), "/shutdown");
+      power("vm-reboot", "Reboot", ic.reboot(), "/reboot");
+      power("vm-reset", "Reset", ic.reset(), "/reset");
+      power("vm-destroy", "Force stop", ic.forceStop(), "/destroy");
+    } else {
+      power("vm-start", "Start", ic.start(), "/start");
+      // libvirt can only rename a shut-off guest.
+      add("vm-rename", `Rename — ${vm}`, "This VM", ic.edit(), () => void renameVm(vm));
+    }
+    add("vm-delete", `Delete — ${vm}`, "This VM", ic.trash(), () => void deleteVm(vm));
+  }
+  if (selectedConn && selectedNet) {
+    const net = selectedNet;
+    add("net-edit", `Edit network — ${net}`, "This network", ic.edit(), () => void openEditNetwork(net));
+    add("net-fw", `Firewall rules — ${net}`, "This network", ic.firewall(), () => openFirewallEditor(net));
+    add("net-delete", `Delete network — ${net}`, "This network", ic.trash(),
+      () => void deleteNetwork(net).then(() => refreshTreeVms()));
+  }
+  if (selectedConn && selectedPool) {
+    const pool = selectedPool;
+    add("pool-upload", `Upload ISO — ${pool}`, "This pool", ic.upload(), () => openUpload(pool));
+    add("pool-volume", `New volume — ${pool}`, "This pool", ic.disk(), () => openCreateVolume(pool));
   }
 
-  if (selectedConn && !selectedVm) {
-    add("create-vm", "Create VM", "On the selected server", () => openCreateVm());
+  // Creation. Resource kinds that need a server are offered for the one open.
+  add("add-resource", "Add resource", "VM, network, pool or server", ic.plus(), () => openAddResource());
+  add("add-server", "Add server", "Connect to a daemon", ic.server(), () => openConnectionDialog());
+  if (selectedConn) {
+    const server = connections.find((c) => c.id === selectedConn)?.name ?? "";
+    add("create-vm", "Create VM", server, ic.vm(), () => openCreateVm());
+    add("create-net", "Create network", server, ic.network(), () => openCreateNetwork());
+    add("create-pool", "Create pool", server, ic.storage(), () => openCreatePool());
   }
-  add("add-server", "Add server", "Connect to a daemon", () => openConnectionDialog());
+
+  // Navigation. Every page with a URL is reachable, and the hint says where
+  // it lives, so typing a server, guest, network or pool name finds it.
+  add("nav-dc", "Datacenter", "Dashboard", ic.datacenter(), toDc("dashboard"));
+  add("nav-dc-servers", "Datacenter — Servers", "/servers", ic.server(), toDc("servers"));
+  add("nav-dc-guests", "Datacenter — Guests", "/guests", ic.vms(), toDc("guests"));
+  const connTabs: [typeof connTab, string, string][] = [
+    ["dashboard", "Dashboard", ic.datacenter()],
+    ["vms", "VMs", ic.vms()],
+    ["networks", "Networks", ic.network()],
+    ["storage", "Storage", ic.storage()],
+    ["firewall", "Firewall", ic.firewall()],
+  ];
+  const vmTabs: [typeof vmTab, string, string][] = [
+    ["summary", "Summary", ic.vm()],
+    ["console", "Console", ic.vm()],
+    ["hardware", "Hardware", ic.cpu()],
+    ["options", "Options", ic.options()],
+    ["firewall", "Firewall", ic.firewall()],
+    ["xml", "XML", ic.xml()],
+  ];
+  for (const c of connections) {
+    for (const [tab, label, icon] of connTabs) {
+      add(`nav-${c.id}-${tab}`, `${c.name} — ${label}`, "Server", icon, () => selectServer(c.id, tab));
+    }
+    for (const v of treeVms[c.id] ?? []) {
+      const name = v.title || v.name;
+      for (const [tab, label, icon] of vmTabs) {
+        add(`nav-${c.id}-vm-${v.name}-${tab}`, tab === "summary" ? `VM — ${name}` : `VM — ${name} — ${label}`,
+          c.name, icon, () => selectVmRow(c.id, v.name, tab));
+      }
+    }
+    for (const n of treeNets[c.id] ?? []) {
+      add(`nav-${c.id}-net-${n.name}`, `Network — ${n.name}`, c.name, ic.network(), () => selectNetRow(c.id, n.name));
+    }
+    for (const pl of treePools[c.id] ?? []) {
+      add(`nav-${c.id}-pool-${pl.name}`, `Pool — ${pl.name}`, c.name, ic.storage(), () => selectPoolRow(c.id, pl.name));
+    }
+  }
+
   add(
     "toggle-theme",
     "Toggle theme",
     document.documentElement.getAttribute("data-theme") === "dark" ? "dark → light" : "light → dark",
+    ic.theme(),
     toggleTheme,
   );
   if (canAdmin()) {
-    add("admin-panel", "Admin panel", "Users, permissions, API keys", () => openAdmin());
+    add("admin-panel", "Admin panel", "Users, roles, API keys, activity", ic.admin(), () => openAdmin());
   }
-  if (!authDisabled) add("logout", "Sign out", "End this session", () => void logout());
+  if (!authDisabled) add("logout", "Sign out", "End this session", ic.logout(), () => void logout());
 
   openTayne(cmds);
 }
@@ -535,7 +554,6 @@ setHtml(app, `
     <div class="layout">
       <div class="pane list-pane">
         <div class="restree" id="tree"></div>
-        <button class="tree-add" id="add-resource">${ic.plus(14)} Add Resource</button>
         ${authDisabled ? "" : `<div class="side-profile" id="profile-btn"></div>`}
       </div>
       <div class="pane">
@@ -546,7 +564,6 @@ setHtml(app, `
   $("#theme-btn").onclick = toggleTheme;
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
   if ($("#admin-btn")) $("#admin-btn").onclick = openAdmin;
-  $("#add-resource").onclick = () => openAddResource();
 
   renderProfileBtn();
   renderCurrent();
@@ -777,152 +794,202 @@ async function treeNetPower(conn: string, net: string, action: "start" | "stop")
   if (selectedConn === conn && selectedNet === net) void renderNetPage();
 }
 
-/// The actions offered for whatever row was right-clicked.
-function treeMenuItems(row: HTMLElement | null): CtxItem[] {
-  const dc = row?.id === "dc-row";
-  const connId = row?.dataset.conn ?? row?.dataset.vmConn ?? row?.dataset.netConn ?? row?.dataset.poolConn;
-
-  // Sidebar background / Datacenter root: creation and a manual refresh.
-  if (!row || dc) {
-    return [
-      { label: "Add Resource", icon: ic.plus(), run: () => openAddResource() },
-      { label: "Refresh", icon: ic.reboot(), separator: true, run: () => void refreshTreeVms() },
-    ];
-  }
-
-  const vmName = row.dataset.vm;
-  if (vmName && connId) {
-    const guest = (treeVms[connId] ?? []).find((v) => v.name === vmName);
-    const running = guest?.active === true;
-    return [
-      {
-        label: "Start", icon: ic.start(), disabled: running,
-        run: () => void treeVmPower(connId, vmName, "/start"),
+/// Actions for one guest. Shared by the tree, the VM cards and the datacenter
+/// guest cards, so a guest offers the same menu wherever it is right-clicked.
+function vmMenu(connId: string, vmName: string): CtxItem[] {
+  const guest = (treeVms[connId] ?? []).find((v) => v.name === vmName);
+  const running = guest?.active === true;
+  return [
+    { label: "Open", icon: ic.vm(), run: () => selectVmRow(connId, vmName, "summary") },
+    {
+      label: "Start", icon: ic.start(), disabled: running, separator: true,
+      run: () => void treeVmPower(connId, vmName, "/start"),
+    },
+    {
+      label: "Shutdown", icon: ic.stop(), disabled: !running,
+      run: () => void treeVmPower(connId, vmName, "/shutdown"),
+    },
+    {
+      label: "Reboot", icon: ic.reboot(), disabled: !running,
+      run: () => void treeVmPower(connId, vmName, "/reboot"),
+    },
+    {
+      label: "Reset", icon: ic.reset(), disabled: !running,
+      run: () => void treeVmPower(connId, vmName, "/reset"),
+    },
+    {
+      label: "Force stop", icon: ic.forceStop(), disabled: !running,
+      run: () => void treeVmPower(connId, vmName, "/destroy"),
+    },
+    { label: "Console", icon: ic.vm(), separator: true, run: () => selectVmRow(connId, vmName, "console") },
+    { label: "Hardware", icon: ic.cpu(), run: () => selectVmRow(connId, vmName, "hardware") },
+    { label: "Options", icon: ic.options(), run: () => selectVmRow(connId, vmName, "options") },
+    { label: "Firewall", icon: ic.firewall(), run: () => selectVmRow(connId, vmName, "firewall") },
+    { label: "XML", icon: ic.xml(), run: () => selectVmRow(connId, vmName, "xml") },
+    {
+      // Renaming is libvirt-only for shut-off guests; offer it only then.
+      label: "Rename", icon: ic.edit(), separator: true, disabled: running,
+      run: () => { selectedConn = connId; void renameVm(vmName); },
+    },
+    {
+      label: "Delete", icon: ic.trash(), danger: true,
+      run: () => {
+        selectVmRow(connId, vmName);
+        void deleteVm(vmName).then(() => refreshTreeVms());
       },
-      {
-        label: "Shutdown", icon: ic.stop(), disabled: !running,
-        run: () => void treeVmPower(connId, vmName, "/shutdown"),
-      },
-      {
-        label: "Reboot", icon: ic.reboot(), disabled: !running,
-        run: () => void treeVmPower(connId, vmName, "/reboot"),
-      },
-      {
-        label: "Reset", icon: ic.reset(), disabled: !running,
-        run: () => void treeVmPower(connId, vmName, "/reset"),
-      },
-      {
-        label: "Force stop", icon: ic.forceStop(), disabled: !running,
-        run: () => void treeVmPower(connId, vmName, "/destroy"),
-      },
-      { label: "Console", icon: ic.vm(), separator: true, run: () => selectVmRow(connId, vmName, "console") },
-      { label: "Hardware", icon: ic.cpu(), run: () => selectVmRow(connId, vmName, "hardware") },
-      { label: "Options", icon: ic.options(), run: () => selectVmRow(connId, vmName, "options") },
-      { label: "Firewall", icon: ic.firewall(), run: () => selectVmRow(connId, vmName, "firewall") },
-      { label: "Rename", icon: ic.edit(), separator: true, run: () => void renameVm(vmName) },
-      {
-        label: "Delete", icon: ic.trash(), danger: true,
-        run: () => {
-          selectVmRow(connId, vmName);
-          void deleteVm(vmName).then(() => refreshTreeVms());
-        },
-      },
-    ];
-  }
-
-  const netName = row.dataset.net;
-  if (netName && connId) {
-    const net = (treeNets[connId] ?? []).find((n) => n.name === netName);
-    const active = net?.active === true;
-    const autostart = net?.autostart === true;
-    return [
-      {
-        label: active ? "Stop" : "Start", icon: active ? ic.stop() : ic.start(),
-        run: () => void treeNetPower(connId, netName, active ? "stop" : "start"),
-      },
-      {
-        label: autostart ? "Disable autostart" : "Enable autostart", icon: ic.autostart(),
-        run: async () => {
-          try {
-            await api.post(`/proxy/${connId}/networks/${encodeURIComponent(netName)}/autostart`,
-              { autostart: !autostart });
-            toast("OK");
-          } catch (e) {
-            return toast((e as Error).message, "bad");
-          }
-          await refreshTreeVms();
-        },
-      },
-      { label: "Edit network", icon: ic.edit(), separator: true, run: () => openEditNetwork(netName) },
-      { label: "Firewall rules", icon: ic.firewall(), run: () => openFirewallEditor(netName) },
-      {
-        label: "Delete", icon: ic.trash(), danger: true,
-        run: () => {
-          selectNetRow(connId, netName);
-          void deleteNetwork(netName).then(() => refreshTreeVms());
-        },
-      },
-    ];
-  }
-
-  const poolName = row.dataset.pool;
-  if (poolName && connId) {
-    return [
-      { label: "Open", icon: ic.storage(), run: () => selectPoolRow(connId, poolName) },
-      { label: "Upload ISO", icon: ic.upload(), separator: true, run: () => openUpload(poolName) },
-      { label: "New volume", icon: ic.plus(), run: () => openCreateVolume(poolName) },
-      {
-        label: "Delete pool", icon: ic.trash(), danger: true, separator: true,
-        run: () => {
-          selectPoolRow(connId, poolName);
-          void deletePool(poolName).then(() => refreshTreeVms());
-        },
-      },
-    ];
-  }
-
-  const serverName = row.dataset.conn;
-  if (serverName) {
-    return [
-      { label: "Dashboard", icon: ic.datacenter(), run: () => selectServer(serverName, "dashboard") },
-      { label: "VMs", icon: ic.vms(), run: () => selectServer(serverName, "vms") },
-      { label: "Networks", icon: ic.network(), run: () => selectServer(serverName, "networks") },
-      { label: "Storage", icon: ic.storage(), run: () => selectServer(serverName, "storage") },
-      { label: "Firewall", icon: ic.firewall(), run: () => selectServer(serverName, "firewall") },
-      {
-        label: "Create VM", icon: ic.plus(), separator: true,
-        run: () => { selectedConn = serverName; renderTree(); openCreateVm(); },
-      },
-      {
-        label: "Create network", icon: ic.plus(),
-        run: () => { selectedConn = serverName; renderTree(); openCreateNetwork(); },
-      },
-      {
-        label: "Create pool", icon: ic.plus(),
-        run: () => { selectedConn = serverName; renderTree(); openCreatePool(); },
-      },
-      { label: "Edit server", icon: ic.edit(), separator: true, run: () => openConnectionDialog(serverName) },
-      {
-        label: "Remove server", icon: ic.trash(), danger: true,
-        run: () => void deleteConnection(serverName),
-      },
-    ];
-  }
-
-  return [{ label: "Add Resource", icon: ic.plus(), run: () => openAddResource() }];
+    },
+  ];
 }
 
-/// Right-click inside the sidebar opens the row's actions instead of the
-/// browser's own menu. Delegated from `document` so re-rendering the tree
-/// never stacks listeners. Outside the sidebar the native menu is left alone,
-/// so copy/paste still works in the XML and log panes.
+/// Actions for one network (tree row, network card, dashboard row).
+function netMenu(connId: string, netName: string): CtxItem[] {
+  const net = (treeNets[connId] ?? []).find((n) => n.name === netName);
+  const active = net?.active === true;
+  const autostart = net?.autostart === true;
+  // The editors read the selected server; point it at this network's owner
+  // first, since a dashboard row can belong to a server that is not selected.
+  const onConn = (f: () => void) => () => { selectedConn = connId; f(); };
+  return [
+    { label: "Open", icon: ic.network(), run: () => selectNetRow(connId, netName) },
+    {
+      label: active ? "Stop" : "Start", icon: active ? ic.stop() : ic.start(), separator: true,
+      run: () => void treeNetPower(connId, netName, active ? "stop" : "start"),
+    },
+    {
+      label: autostart ? "Disable autostart" : "Enable autostart", icon: ic.autostart(),
+      run: async () => {
+        try {
+          await api.post(`/proxy/${connId}/networks/${encodeURIComponent(netName)}/autostart`,
+            { autostart: !autostart });
+          toast("OK");
+        } catch (e) {
+          return toast((e as Error).message, "bad");
+        }
+        await refreshTreeVms();
+      },
+    },
+    { label: "Edit network", icon: ic.edit(), separator: true, run: onConn(() => void openEditNetwork(netName)) },
+    { label: "Firewall rules", icon: ic.firewall(), run: onConn(() => openFirewallEditor(netName)) },
+    {
+      label: "Delete", icon: ic.trash(), danger: true, separator: true,
+      run: () => {
+        selectNetRow(connId, netName);
+        void deleteNetwork(netName).then(() => refreshTreeVms());
+      },
+    },
+  ];
+}
+
+/// Actions for one storage pool (tree row, pool card, dashboard card).
+function poolMenu(connId: string, poolName: string): CtxItem[] {
+  const onConn = (f: () => void) => () => { selectedConn = connId; f(); };
+  return [
+    { label: "Open", icon: ic.storage(), run: () => selectPoolRow(connId, poolName) },
+    { label: "Upload ISO", icon: ic.upload(), separator: true, run: onConn(() => openUpload(poolName)) },
+    { label: "New volume", icon: ic.disk(), run: onConn(() => openCreateVolume(poolName)) },
+    {
+      label: "Delete pool", icon: ic.trash(), danger: true, separator: true,
+      run: () => {
+        selectPoolRow(connId, poolName);
+        void deletePool(poolName).then(() => refreshTreeVms());
+      },
+    },
+  ];
+}
+
+/// Actions for one server (tree row, server card, dashboard row).
+function serverMenu(serverId: string): CtxItem[] {
+  const create = (f: () => void) => () => { selectedConn = serverId; renderTree(); f(); };
+  return [
+    { label: "Dashboard", icon: ic.datacenter(), run: () => selectServer(serverId, "dashboard") },
+    { label: "VMs", icon: ic.vms(), run: () => selectServer(serverId, "vms") },
+    { label: "Networks", icon: ic.network(), run: () => selectServer(serverId, "networks") },
+    { label: "Storage", icon: ic.storage(), run: () => selectServer(serverId, "storage") },
+    { label: "Firewall", icon: ic.firewall(), run: () => selectServer(serverId, "firewall") },
+    { label: "Create VM", icon: ic.plus(), separator: true, run: create(() => openCreateVm()) },
+    { label: "Create network", icon: ic.plus(), run: create(() => openCreateNetwork()) },
+    { label: "Create pool", icon: ic.plus(), run: create(() => openCreatePool()) },
+    { label: "Edit server", icon: ic.edit(), separator: true, run: () => openConnectionDialog(serverId) },
+    { label: "Remove server", icon: ic.trash(), danger: true, run: () => void deleteConnection(serverId) },
+  ];
+}
+
+/// Creation and refresh: the sidebar background and the Datacenter root.
+/// This is where Add Resource lives now that the sidebar button is gone.
+function rootMenu(): CtxItem[] {
+  return [
+    { label: "Add Resource", icon: ic.plus(), run: () => openAddResource() },
+    { label: "Add server", icon: ic.server(), run: () => openConnectionDialog() },
+    { label: "Refresh", icon: ic.reboot(), separator: true, run: () => void refreshTreeVms() },
+  ];
+}
+
+/// The actions offered for whatever tree row was right-clicked.
+function treeMenuItems(row: HTMLElement | null): CtxItem[] {
+  if (!row || row.id === "dc-row") return rootMenu();
+  const d = row.dataset;
+  if (d.vm && d.vmConn) return vmMenu(d.vmConn, d.vm);
+  if (d.net && d.netConn) return netMenu(d.netConn, d.net);
+  if (d.pool && d.poolConn) return poolMenu(d.poolConn, d.pool);
+  if (d.conn) return serverMenu(d.conn);
+  return rootMenu();
+}
+
+/// Menu for something right-clicked in the content pane, or null to leave the
+/// browser's own menu alone. Only resource surfaces (cards, dashboard rows,
+/// tabs) are claimed: text, the XML and log panes and every form field keep
+/// the native menu, so copy and paste still work there.
+function contentMenuItems(target: Element): CtxItem[] | null {
+  if (target.closest("input, textarea, select, .cmd, pre, .select-popover")) return null;
+  const el = target.closest<HTMLElement>(
+    "[data-vm-open], [data-dc-vm], [data-net-open], [data-dash-net], [data-pool-open], " +
+    "[data-dash-pool], [data-open-conn-row], [data-dc-dash-conn], .tab[data-tab], .tab[data-vmtab], " +
+    ".tab[data-dctab], .create-card, .net-create-card, .dhead",
+  );
+  if (!el) return null;
+  const d = el.dataset;
+  if (d.vmOpen && selectedConn) return vmMenu(selectedConn, d.vmOpen);
+  if (d.dcVm && d.dcVmConn) return vmMenu(d.dcVmConn, d.dcVm);
+  if (d.netOpen && selectedConn) return netMenu(selectedConn, d.netOpen);
+  if (d.dashNet && d.dashConn) return netMenu(d.dashConn, d.dashNet);
+  if (d.poolOpen && selectedConn) return poolMenu(selectedConn, d.poolOpen);
+  if (d.dashPool && d.dashConn) return poolMenu(d.dashConn, d.dashPool);
+  if (d.openConnRow) return serverMenu(d.openConnRow);
+  if (d.dcDashConn) return serverMenu(d.dcDashConn);
+  // A server tab, or a create card: the same server-level actions.
+  if ((d.tab || el.matches(".create-card, .net-create-card")) && selectedConn && !selectedVm) {
+    return serverMenu(selectedConn);
+  }
+  if (d.vmtab && selectedConn && selectedVm) return vmMenu(selectedConn, selectedVm);
+  if (d.dctab || el.matches(".create-card")) return rootMenu();
+  // The page header stands for the page's own resource.
+  if (el.matches(".dhead")) {
+    if (!selectedConn) return rootMenu();
+    if (selectedVm) return vmMenu(selectedConn, selectedVm);
+    if (selectedNet) return netMenu(selectedConn, selectedNet);
+    if (selectedPool) return poolMenu(selectedConn, selectedPool);
+    return serverMenu(selectedConn);
+  }
+  return null;
+}
+
+/// Right-click opens the actions for whatever resource is under the cursor:
+/// any row in the sidebar, and the cards, dashboard rows, tabs and page header
+/// in the content pane. Delegated from `document` so re-rendering never stacks
+/// listeners. Anywhere else the native menu is left alone, so copy/paste still
+/// works in the XML and log panes and in every form field.
 document.addEventListener("contextmenu", (e) => {
   const target = e.target as Element | null;
-  const pane = target?.closest?.(".list-pane");
-  if (!pane) return;
+  if (!target?.closest) return;
+  let items: CtxItem[] | null = null;
+  if (target.closest(".list-pane")) {
+    items = treeMenuItems(target.closest(".tree-row") as HTMLElement | null);
+  } else if (target.closest("#content")) {
+    items = contentMenuItems(target);
+  }
+  if (!items) return;
   e.preventDefault();
-  const row = target?.closest?.(".tree-row") as HTMLElement | null;
-  openContextMenu(e.clientX, e.clientY, treeMenuItems(row));
+  openContextMenu(e.clientX, e.clientY, items);
 });
 
 /// Refresh the guest list backing the tree for the selected server.

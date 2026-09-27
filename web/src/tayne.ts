@@ -11,6 +11,8 @@ export interface TayneCommand {
   label: string;
   /** Secondary text on the right, e.g. the owning server's name. */
   hint?: string;
+  /** Icon markup from `ic` (a trusted static SVG string from icons.ts). */
+  icon?: string;
   run: () => void;
 }
 
@@ -77,6 +79,19 @@ function ensure() {
   S.list = list;
 }
 
+/// The row icon, built without innerHTML: only the inner <svg> is imported,
+/// because `.ico > svg` is a direct-child rule (same as the context menu).
+function iconEl(markup: string): HTMLSpanElement {
+  const wrap = document.createElement("span");
+  wrap.className = "ico tayne-ic";
+  const doc = new DOMParser().parseFromString(markup, "image/svg+xml");
+  const svg = doc.documentElement?.nodeName.toLowerCase() === "svg"
+    ? doc.documentElement
+    : doc.querySelector("svg");
+  if (svg) wrap.append(document.importNode(svg, true));
+  return wrap;
+}
+
 function highlight() {
   S.list?.querySelectorAll<HTMLButtonElement>(".tayne-row").forEach((r, i) => {
     r.classList.toggle("sel", i === S.selected);
@@ -99,6 +114,8 @@ function render() {
     row.type = "button";
     row.className = "tayne-row" + (i === S.selected ? " sel" : "");
     row.setAttribute("role", "option");
+
+    if (c.icon) row.append(iconEl(c.icon));
 
     const label = document.createElement("span");
     label.className = "tayne-label";

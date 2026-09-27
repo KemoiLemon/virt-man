@@ -134,9 +134,14 @@ check("no native select is visible; each has a themed trigger", () => {
 });
 
 check("themed dialog opens instead of native window.prompt", () => {
-  const addResource = document.querySelector("#add-resource");
-  assert.ok(addResource, "sidebar has an Add Resource affordance");
-  assert.match(addResource.textContent, /Add Resource/);
+  // Add Resource moved off the sidebar into the root's right-click menu.
+  assert.equal(document.querySelector("#add-resource"), null, "no sidebar Add Resource button");
+  document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("contextmenu", {
+    bubbles: true, cancelable: true, clientX: 50, clientY: 50,
+  }));
+  const addResource = [...document.querySelectorAll(".ctxmenu-item")]
+    .find((b) => b.textContent.trim() === "Add Resource");
+  assert.ok(addResource, "the Datacenter menu offers Add Resource");
   addResource.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   const modal = document.querySelector(".modal-back.open");
   assert.ok(modal, "a themed modal opened (not window.prompt)");
@@ -214,7 +219,7 @@ check("sidebar renders a nested resource tree", () => {
     assert.ok(s.querySelector(".tree-ic svg"), "server node has an icon");
     assert.ok(s.querySelector(".tree-label"), "server node has a label");
   }
-  assert.ok(document.querySelector(".tree-add"), "Add Resource pinned footer");
+  assert.equal(document.querySelector(".tree-add"), null, "no Add Resource footer");
 });
 
 await (async () => {
@@ -274,10 +279,62 @@ await (async () => {
     document.querySelector(".ctxmenu")?.remove();
   }
 
-  check("right-click outside the sidebar keeps the native menu", () => {
+  check("right-click on plain content keeps the native menu", () => {
     const pane = document.querySelector("#content");
-    assert.equal(rightClick(pane), false, "content pane is not hijacked");
+    assert.equal(rightClick(pane), false, "content pane background is not hijacked");
+    document.querySelector(".ctxmenu")?.remove();
   });
+
+  // Resource surfaces in the content pane get the same menu as their tree row.
+  const dcRow = document.querySelector("#dc-row");
+  dcRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  document.querySelector('[data-dctab="guests"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const guestCard = document.querySelector("[data-dc-vm]");
+  if (guestCard) {
+    const prevented = rightClick(guestCard.querySelector(".storage-card-title") ?? guestCard);
+    check("a guest card offers the guest's menu", () => {
+      assert.ok(prevented, "native menu suppressed on a card");
+      const items = labels();
+      for (const want of ["Open", "Console", "Hardware", "XML", "Delete"]) {
+        assert.ok(items.includes(want), `${want} offered (${items})`);
+      }
+    });
+    document.querySelector(".ctxmenu")?.remove();
+  }
+  document.querySelector('[data-dctab="servers"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const serverCard = document.querySelector("[data-open-conn-row]");
+  if (serverCard) {
+    rightClick(serverCard);
+    check("a server card offers the server's menu", () => {
+      const items = labels();
+      for (const want of ["Dashboard", "Storage", "Create VM", "Remove server"]) {
+        assert.ok(items.includes(want), `${want} offered (${items})`);
+      }
+    });
+    document.querySelector(".ctxmenu")?.remove();
+  }
+  check("every context-menu item has an icon", () => {
+    // Re-queried here: a tab click re-renders the pane, so the cards found
+    // above are detached and events on them never reach the listener.
+    const surfaces = [
+      document.querySelector("#dc-row"),
+      document.querySelector(".tree-row.tree-group"),
+      document.querySelector(".tree-row.tree-vm"),
+      document.querySelector(".tree-row.tree-net"),
+      document.querySelector(".tree-row.tree-pool"),
+      document.querySelector("[data-open-conn-row]"),
+    ];
+    for (const el of surfaces.filter(Boolean)) {
+      rightClick(el);
+      const items = [...document.querySelectorAll(".ctxmenu-item")];
+      assert.ok(items.length, "menu opened");
+      for (const b of items) {
+        assert.ok(b.querySelector(".ico > svg"), `"${b.textContent.trim()}" has an icon`);
+      }
+      document.querySelector(".ctxmenu")?.remove();
+    }
+  });
+  document.querySelector('[data-dctab="dashboard"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 })();
 
 await (async () => {
@@ -530,6 +587,35 @@ check("the palette filters commands as you type", () => {
   const rows = [...document.querySelectorAll(".tayne-row")];
   assert.equal(rows.length, 1, "only the theme command matches");
   assert.ok(rows[0].textContent.includes("Toggle theme"), "theme command shown");
+});
+
+check("the palette reaches every page, with an icon on each command", () => {
+  const input = document.querySelector(".tayne-input");
+  input.value = "";
+  input.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const rows = [...document.querySelectorAll(".tayne-row")];
+  for (const r of rows) {
+    assert.ok(r.querySelector(".ico > svg"), `"${r.textContent.trim()}" has an icon`);
+  }
+  const labels = rows.map((r) => r.querySelector(".tayne-label").textContent);
+  for (const want of ["Datacenter", "Datacenter — Guests", "Add resource", "Add server"]) {
+    assert.ok(labels.includes(want), `${want} offered`);
+  }
+  assert.ok(labels.some((l) => / — Storage$/.test(l)), "a server's Storage tab");
+  assert.ok(labels.some((l) => /^Pool — /.test(l)), "a storage pool page");
+  assert.ok(labels.some((l) => /^Network — /.test(l)), "a network page");
+  // Typing a guest's name finds its console directly.
+  const vmRow = labels.find((l) => /^VM — .+ — Console$/.test(l));
+  assert.ok(vmRow, "a guest's console");
+});
+
+check("running a palette page command navigates there", () => {
+  const input = document.querySelector(".tayne-input");
+  input.value = "Datacenter — Guests";
+  input.dispatchEvent(new window.Event("input", { bubbles: true }));
+  input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  assert.equal(window.location.pathname, "/guests");
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
 });
 
 check("Escape closes the palette", () => {

@@ -12,6 +12,7 @@ before(async () => {
   const dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost/" });
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
+  globalThis.DOMParser = dom.window.DOMParser;
   tayne = await import("./_build/tayne.js");
 });
 
@@ -102,4 +103,19 @@ test("clicking a row runs it and closes", () => {
   document.querySelector(".tayne-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   assert.equal(invoked, "done");
   assert.ok(!tayne.tayneOpen());
+});
+
+// Icons are optional per command and built as real elements (no innerHTML),
+// with the <svg> a direct child of .ico so the shared `.ico > svg` rule applies.
+test("a command's icon renders as a direct svg child of .ico", () => {
+  const icon = '<span class="ico"><svg viewBox="0 0 256 256"><path d="M0 0h256v256H0z"></path></svg></span>';
+  tayne.openTayne([
+    { id: "a", label: "With icon", icon, run() {} },
+    { id: "b", label: "Without", run() {} },
+  ]);
+  const rows = [...document.querySelectorAll(".tayne-row")];
+  assert.ok(rows[0].querySelector(".tayne-ic > svg"), "icon present");
+  assert.equal(rows[0].querySelector(".tayne-ic").nextElementSibling.className, "tayne-label", "icon sits before the label");
+  assert.equal(rows[1].querySelector(".tayne-ic"), null, "no icon when none given");
+  tayne.closeTayne();
 });
