@@ -71,6 +71,14 @@ let pendingPoll: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
 /// without every render refetching.
 const treeVms: Record<string, DomainSummary[]> = {};
+/// Networks and storage pools per connection, shown in the sidebar alongside
+/// guests so a network or pool is one click away from its management page.
+const treeNets: Record<string, NetworkSummary[]> = {};
+const treePools: Record<string, PoolSummary[]> = {};
+/// The network/pool currently open in the content pane (mutually exclusive
+/// with selectedVm, like the server tabs).
+let selectedNet: string | null = null;
+let selectedPool: string | null = null;
 /// Console view settings, kept across tab switches and reconnects.
 let consoleZoom = 0; // 0 = fit to the stage
 let consoleResizeObserver: ResizeObserver | null = null;
@@ -424,8 +432,10 @@ function renderTree() {
 
   const serverRows = connections
     .map((c) => {
-      const selected = c.id === selectedConn && !selectedVm;
+      const selected = c.id === selectedConn && !selectedVm && !selectedNet && !selectedPool;
       const vms = treeVms[c.id] ?? [];
+      const nets = treeNets[c.id] ?? [];
+      const pools = treePools[c.id] ?? [];
       const running = vms.filter((v) => v.active).length;
       // Servers auto-expand: guests show as soon as they are known, without
       // requiring the server to be selected first.
@@ -445,12 +455,40 @@ function renderTree() {
               )
               .join("")
           : "";
+      const netRows = nets.length
+        ? nets
+            .map(
+              (n) => `
+      <button class="tree-row tree-res tree-net ${selectedNet === n.name && selectedConn === c.id ? "sel" : ""}"
+        data-net="${esc(n.name)}" data-net-conn="${c.id}">
+        <span class="tree-ic ${n.active ? "on" : ""}">${ic.network()}</span>
+        <span class="tree-label">${esc(n.name)}</span>
+        <span class="tree-state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span>
+      </button>`,
+            )
+            .join("")
+        : `<div class="tree-empty tree-res-empty">No networks.</div>`;
+      const poolRows = pools.length
+        ? pools
+            .map(
+              (p) => `
+      <button class="tree-row tree-res tree-pool ${selectedPool === p.name && selectedConn === c.id ? "sel" : ""}"
+        data-pool="${esc(p.name)}" data-pool-conn="${c.id}">
+        <span class="tree-ic ${p.active ? "on" : ""}">${ic.storage()}</span>
+        <span class="tree-label">${esc(p.name)}</span>
+        <span class="tree-state ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
+      </button>`,
+            )
+            .join("")
+        : `<div class="tree-empty tree-res-empty">No pools.</div>`;
       return `
       <button class="tree-row tree-group ${selected ? "sel" : ""}" data-conn="${c.id}">
         <span class="tree-ic ${running > 0 ? "on" : ""}">${ic.server()}</span>
         <span class="tree-label">${esc(c.name)}</span>
         <span class="tree-state">${vms.length ? `${running}/${vms.length}` : ""}</span>
-      </button>${guestRows}`;
+      </button>${guestRows}
+      <div class="tree-subhead">Networks</div>${netRows}
+      <div class="tree-subhead">Storage</div>${poolRows}`;
     })
     .join("");
 
@@ -465,6 +503,8 @@ function renderTree() {
     leaveCurrentView();
     selectedConn = null;
     selectedVm = null;
+    selectedNet = null;
+    selectedPool = null;
     dcTab = "dashboard";
     renderTree();
     renderDc();
@@ -474,6 +514,8 @@ function renderTree() {
       leaveCurrentView();
       selectedConn = (row as HTMLElement).dataset.conn!;
       selectedVm = null;
+      selectedNet = null;
+      selectedPool = null;
       connTab = "dashboard";
       renderTree();
       renderConn();
@@ -489,34 +531,73 @@ function renderTree() {
       leaveCurrentView();
       selectedConn = el.dataset.vmConn!;
       selectedVm = el.dataset.vm!;
+      selectedNet = null;
+      selectedPool = null;
       vmTab = "summary";
       renderTree();
       void renderVm();
+    };
+  });
+  tree.querySelectorAll("[data-net]").forEach((row: Element) => {
+    const el = row as HTMLElement;
+    el.onclick = () => {
+      leaveCurrentView();
+      selectedConn = el.dataset.netConn!;
+      selectedVm = null;
+      selectedNet = el.dataset.net!;
+      selectedPool = null;
+      renderTree();
+      void renderNetPage();
+    };
+  });
+  tree.querySelectorAll("[data-pool]").forEach((row: Element) => {
+    const el = row as HTMLElement;
+    el.onclick = () => {
+      leaveCurrentView();
+      selectedConn = el.dataset.poolConn!;
+      selectedVm = null;
+      selectedNet = null;
+      selectedPool = el.dataset.pool!;
+      renderTree();
+      void renderPoolPage();
     };
   });
 }
 
 /// Refresh the guest list backing the tree for the selected server.
 async function refreshTreeVms() {
-  // Every server's guests, not just the selected one: the tree auto-expands,
-  // so an unselected server still has to show its VMs.
+  // Every server's guests, networks and pools, not just the selected one:
+  // the tree auto-expands all three, so an unselected server still has to
+  // show its resources.
   const results = await Promise.all(
     connections.map(async (c) => {
       try {
-        const vms = await api.get<DomainSummary[]>(`/proxy/${c.id}/domains`);
-        return [c.id, vms] as const;
+        const [vms, nets, pools] = await Promise.all([
+          api.get<DomainSummary[]>(`/proxy/${c.id}/domains`),
+          api.get<NetworkSummary[]>(`/proxy/${c.id}/networks`),
+          api.get<PoolSummary[]>(`/proxy/${c.id}/pools`),
+        ]);
+        return [c.id, vms, nets, pools] as const;
       } catch {
         // Unreachable daemon: keep whatever we last knew rather than
         // collapsing its branch. The content pane surfaces the error.
-        return [c.id, treeVms[c.id] ?? []] as const;
+        return [c.id, treeVms[c.id] ?? [], treeNets[c.id] ?? [], treePools[c.id] ?? []] as const;
       }
     }),
   );
 
   let changed = false;
-  for (const [id, vms] of results) {
+  for (const [id, vms, nets, pools] of results) {
     if (JSON.stringify(treeVms[id]) !== JSON.stringify(vms)) {
       treeVms[id] = vms;
+      changed = true;
+    }
+    if (JSON.stringify(treeNets[id]) !== JSON.stringify(nets)) {
+      treeNets[id] = nets;
+      changed = true;
+    }
+    if (JSON.stringify(treePools[id]) !== JSON.stringify(pools)) {
+      treePools[id] = pools;
       changed = true;
     }
   }
@@ -527,6 +608,8 @@ async function refreshTreeVms() {
     // The Datacenter view lists the same guests, so keep it in step; without
     // this its Guests table stays empty until another action redraws it.
     if (!selectedConn && !selectedVm) renderDc();
+    // Network/pool pages poll their own data; the tree refresh above is what
+    // keeps the sidebar counts and states live.
   }
 }
 
@@ -1258,6 +1341,154 @@ function openAddUser(root: Element) {
       void loadAdmin(root);
     } catch (e) { toast((e as Error).message, "bad"); }
   };
+}
+
+// ---------------------------------------------------------------- resource pages
+
+/// Return to the selected server's dashboard from a network/pool page.
+function backToConn() {
+  selectedNet = null;
+  selectedPool = null;
+  connTab = "dashboard";
+  renderTree();
+  renderConn();
+}
+
+/// Dedicated network page: information, IPAM (DHCP range + DNS) and the
+/// basic lifecycle/edit actions, all for the network selected in the sidebar.
+async function renderNetPage() {
+  if (!selectedConn || !selectedNet) return;
+  const content = $("#content");
+  const name = selectedNet;
+  try {
+    const [summary, xml] = await Promise.all([
+      api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`),
+      api.get<{ xml: string }>(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/xml`),
+    ]);
+    const net = summary.find((n) => n.name === name);
+    if (!net) {
+      setHtml(content, `<div class="empty">Network "${esc(name)}" no longer exists.</div>`);
+      return;
+    }
+    const form = networkFormFromXml(xml.xml);
+    const typeLabel = form.forward === "bridge" ? "Bridge" : form.forward === "nat" ? "NAT" : "Isolated";
+
+    setHtml(content, `
+      <div class="dhead">
+        <button class="btn icon" id="net-back" title="Back">${ic.back()}</button>
+        <span class="dtitle">${esc(name)}</span>
+        <span class="badge ${net.active ? "on" : ""}">${net.active ? "Active" : "Inactive"}</span>
+      </div>
+      <div class="dsub">${esc(typeLabel)} network</div>
+      <div class="actions">
+        <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
+        <button class="btn ${net.autostart ? "on" : ""}" id="net-autostart">${ic.autostart(14)} Autostart ${net.autostart ? "on" : "off"}</button>
+        <button class="btn primary" id="net-edit">${ic.edit(14)} Edit</button>
+        <button class="btn" id="net-fw">${ic.firewall(14)} Firewall</button>
+        <button class="btn danger" id="net-del">${ic.trash(14)} Delete</button>
+      </div>
+      <div class="specs">
+        <div class="spec"><b>Bridge</b><span>${esc(form.bridge || "—")}</span></div>
+        <div class="spec"><b>Subnet</b><span>${esc(form.ip || "—")}</span></div>
+        <div class="spec"><b>DHCP range</b><span>${form.dhcp_start && form.dhcp_end ? `${esc(form.dhcp_start)} – ${esc(form.dhcp_end)}` : "—"}</span></div>
+        <div class="spec"><b>DNS forwarders</b><span>${esc(form.dns || "—")}</span></div>
+        <div class="spec"><b>Persistent</b><span>${net.persistent ? "Persistent" : "Transient"}</span></div>
+      </div>
+      <div class="section-title fw-cat">IPAM</div>
+      <div class="specs">
+        <div class="spec"><b>Gateway</b><span>${esc(form.ip ? form.ip.split("/")[0] : "—")}</span></div>
+        <div class="spec"><b>DHCP start</b><span>${esc(form.dhcp_start || "—")}</span></div>
+        <div class="spec"><b>DHCP end</b><span>${esc(form.dhcp_end || "—")}</span></div>
+        <div class="spec"><b>DNS</b><span>${esc(form.dns || "—")}</span></div>
+      </div>`);
+
+    $("#net-back", content).onclick = backToConn;
+    $("#net-toggle", content).onclick = async () => {
+      await netAction(net.active ? "stop" : "start", name);
+      void renderNetPage();
+    };
+    $("#net-autostart", content).onclick = async () => {
+      await toggleAutostart(name);
+      void renderNetPage();
+    };
+    $("#net-edit", content).onclick = () => openEditNetwork(name);
+    $("#net-fw", content).onclick = () => openFirewallEditor(name);
+    $("#net-del", content).onclick = async () => {
+      await deleteNetwork(name);
+      backToConn();
+    };
+  } catch (e) {
+    setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
+  }
+}
+
+/// Dedicated storage page: one pool's capacity plus full volume management.
+async function renderPoolPage() {
+  if (!selectedConn || !selectedPool) return;
+  const content = $("#content");
+  const name = selectedPool;
+  try {
+    const [pool, vols] = await Promise.all([
+      api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`),
+      api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}/volumes`),
+    ]);
+    const p = pool.find((x) => x.name === name);
+    if (!p) {
+      setHtml(content, `<div class="empty">Pool "${esc(name)}" no longer exists.</div>`);
+      return;
+    }
+    const used = p.allocation ?? 0;
+    const cap = p.capacity ?? 0;
+    const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+
+    setHtml(content, `
+      <div class="dhead">
+        <button class="btn icon" id="pool-back" title="Back">${ic.back()}</button>
+        <span class="dtitle">${esc(name)}</span>
+        <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
+      </div>
+      <div class="dsub">Storage pool</div>
+      <div class="actions">
+        <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
+        <button class="btn" id="pool-newvol">${ic.plus(14)} New volume</button>
+        <button class="btn danger" id="pool-del">${ic.trash(14)} Delete pool</button>
+      </div>
+      <div class="metric">
+        <div class="metric-head">
+          <span class="metric-ic">${ic.storage()}</span>
+          <b>Allocation</b>
+          <span class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</span>
+        </div>
+        <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
+        <div class="metric-foot">
+          <span>${fmtBytes(used)} used</span>
+          <span>${fmtBytes(p.available)} free</span>
+          <span>${fmtBytes(cap)} total</span>
+        </div>
+      </div>
+      <div class="section-title fw-cat">Volumes</div>
+      <table class="grid">
+        <tr><th>Volume</th><th>Size</th><th>Allocated</th><th></th></tr>
+        ${vols.map((v) => `
+          <tr><td>${esc(v.name)}</td><td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
+          <td><button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
+      </table>`);
+
+    $("#pool-back", content).onclick = backToConn;
+    $("#pool-upload", content).onclick = () => openUpload(name);
+    $("#pool-newvol", content).onclick = () => openCreateVolume(name);
+    $("#pool-del", content).onclick = async () => {
+      await deletePool(name);
+      backToConn();
+    };
+    content.querySelectorAll("[data-pvol-del]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => {
+        void deleteVolume(name, (b as HTMLElement).dataset.pvolDel!).then(() => renderPoolPage());
+      };
+    });
+  } catch (e) {
+    setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
+  }
 }
 
 // ---------------------------------------------------------------- connection view
@@ -3843,7 +4074,9 @@ function startPolling() {
     if (!selectedConn && !selectedVm && dcTab === "dashboard") {
       loadDcDashboard();
     } else if (selectedConn && !selectedVm) {
-      if (connTab === "dashboard") loadDashboard();
+      if (selectedNet) renderNetPage();
+      else if (selectedPool) renderPoolPage();
+      else if (connTab === "dashboard") loadDashboard();
       else if (connTab === "vms") loadVms();
       else if (connTab === "networks") loadNetworks();
       else if (connTab === "storage") loadPools();

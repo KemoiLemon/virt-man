@@ -5,6 +5,7 @@
 import type { IconNode as LucideIconNode } from "lucide";
 import {
   ArrowDown,
+  ArrowLeft,
   ArrowLeftRight,
   ArrowUp,
   Boxes,
@@ -142,6 +143,7 @@ export const ic = {
   down: svg(ArrowDown),
   up: svg(ArrowUp),
   bidir: svg(ArrowLeftRight),
+  back: svg(ArrowLeft),
   // Console toolbar
   zoomIn: svg(ZoomIn),
   zoomOut: svg(ZoomOut),
