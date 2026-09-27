@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestVm, removeTestVm } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8813";
 
@@ -45,6 +46,10 @@ globalThis.document = document;
 // jsdom's canvas has no 2D context, so painting a frame would throw. The
 // viewer's putImageData sits behind an optional call, so it degrades to a
 // no-op here; geometry and controls are still assertable.
+// Live suites own their fixture: reuse a guest if the host has one,
+// otherwise define a disposable one so the run never depends on
+// whatever happens to be on this machine.
+const fixture = await ensureTestVm(base);
 window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
 const tabNamed = (n) => [...document.querySelectorAll(".tabbar .tab")]
@@ -188,6 +193,7 @@ check("leaving the console tab tears the session down", () => {
 for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }
+await removeTestVm(base, fixture);
 const failed = results.filter(([s]) => s === "FAIL");
 // Exit before closing the window: pending app timers still reference it.
 if (failed.length) { console.error(`\n${failed.length} check(s) failed`); process.exit(1); }

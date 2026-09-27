@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestVm, removeTestVm } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
 
@@ -51,6 +52,10 @@ window.fetch = (input, init) => {
   const url = typeof input === "string" ? new URL(input, base).toString() : input;
   return fetch(url, init);
 };
+// Live suites own their fixture: reuse a guest if the host has one,
+// otherwise define a disposable one so the run never depends on
+// whatever happens to be on this machine.
+const fixture = await ensureTestVm(base);
 window.eval(code);
 await new Promise((r) => window.setTimeout(r, 2000));
 
@@ -412,6 +417,7 @@ check("Escape closes the palette", () => {
 for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }
+await removeTestVm(base, fixture);
 const failed = results.filter(([s]) => s === "FAIL");
 window.close();
 if (failed.length) {

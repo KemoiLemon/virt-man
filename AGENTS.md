@@ -160,8 +160,15 @@ introduce a poll interval.
   (root-owned, mode 0600; `sudo cat` to read it).
 - `virt-man-web` — HTTPS `[::]:8006`, admin / `password123`. A leftover
   `viewer` / `password123` RBAC test account exists and may want removing.
-- Test VM `alpinelinux3.23` — running, 1 vCPU, 768 MB, **both** VNC (5900) and
-  SPICE (5901), network `internet`.
+
+**Live suites provision their own guest.** `web/test/_fixture.mjs` runs at the
+start of every guest-driven suite: it reuses an existing domain when the host
+has one, and otherwise defines a disposable `vmtest-suite` (small disk, one
+NIC, VNC) that it tears down again — including the disk — when the run ends.
+Never reintroduce a dependency on a particular guest existing here; that made
+the suites fail on any host with no VMs, and made them inspect whatever guest
+the user happened to have. A suite that needs a different shape of guest
+should extend the fixture rather than poke at ambient state.
 
 Node rejects the web UI's self-signed cert, so point live suites at a loopback
 sidecar (HTTP) rather than `https://127.0.0.1:8006`. Suites that must
