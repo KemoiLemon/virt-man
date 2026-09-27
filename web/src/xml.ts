@@ -177,8 +177,12 @@ export function networkXml(f: NetworkForm, uuid = ""): string {
   } else if (f.forward === "bridge") {
     forward = `<forward mode="bridge"/>`;
   }
-  // Only a bridge-mode network attaches to a host bridge device.
-  const bridge = f.forward === "bridge" && f.bridge ? `<bridge name="${esc(f.bridge)}"/>` : "";
+  // A bridge-mode network attaches to a host bridge device; a NAT or isolated
+  // network owns one libvirt created (virbr1…). Its name must be kept too:
+  // dropping it let libvirt pick a new bridge on every save, which is a change
+  // to the running network, so saving the editor restarted the network (and
+  // could rename its bridge under the firewall rules).
+  const bridge = f.bridge ? `<bridge name="${esc(f.bridge)}"/>` : "";
   // Custom DNS forwarders (NAT only). libvirt wants <dns> before <ip>.
   let dns = "";
   if (f.forward === "nat" && f.dns.trim()) {

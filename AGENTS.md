@@ -26,7 +26,8 @@ cd web/server && cargo clippy && cargo test
 #   arg is the base URL; defaults to http://127.0.0.1:8799
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route,
-#   live-vmnet (needs sudo: checks tc and dnsmasq; boots its own guest),
+#   live-vmnet (needs sudo: checks tc and the IPAM store; boots its own guest),
+#   live-ipam (needs sudo + the Alpine live ISO: a real udhcpc against our DHCP),
 #   live-history (needs the server to have been sampling for ~30 s),
 #   live-empty (no args: runs its own server against a stub daemon with no resources),
 #   live-ops (needs sudo: defines a SPICE guest, stops/starts the daemon)
@@ -316,9 +317,8 @@ applies every change to the running guest *and* its definition
   in KiB/s (taken as Mbit/s). They are enforced at once — libvirt installs an
   htb class and an ingress policer on the host tap; `live-vmnet` reads them
   back with `tc`, not from the XML.
-- IPAM uses `virNetworkUpdate` on the DHCP host section, **never** a network
-  redefine: `PUT /networks/{name}/xml` destroys and restarts a running network,
-  dropping every guest on it. `live-vmnet` checks dnsmasq's pids are unchanged.
+- IPAM changes only the daemon's store (below); nothing is restarted.
+  `live-vmnet` checks the bridge's ifindex is unchanged.
 - Hot-add needs a free PCIe root port. q35 gives each device its own and libvirt
   only creates as many as boot needs, so new guests are defined with
   `HOTPLUG_PORTS` (14, as virt-manager does; four were measured to be used up
@@ -327,6 +327,35 @@ applies every change to the running guest *and* its definition
   `pending` while the guest still holds the device; never claim it is gone.
 - The hardware editor rebuilds every `<interface>`, so it carries `<bandwidth>`
   through (`devicesFromXml`/`deviceXml`), or a hardware save would lift limits.
+
+**The daemon is the DHCP and DNS server; libvirt runs no dnsmasq.**
+(`daemon/src/ipam/`.) Any libvirt network with an IPv4 `<ip>` is taken over:
+its `<dhcp>` range and hosts, `<dns>` forwarders and `<domain>` move into
+`/etc/virt-man/ipam.json`, and the definition gets `<dns enable='no'/>` and no
+`<dhcp>`, so libvirt starts no dnsmasq. A supervisor (every 5 s, and at start)
+does the takeover, binds DHCP (`0.0.0.0:67`, `SO_BINDTODEVICE` per bridge) and
+DNS (gateway `:53`, UDP+TCP) for each active managed network, and prunes.
+
+- **Every address is permanent.** A guest with no reservation is given the
+  lowest free address in the range at DISCOVER, and that becomes a `dynamic`
+  reservation tied to its VM UUID. Release, reboot, lease expiry and daemon
+  restarts never move it; deleting the VM removes it (by absence, on the next
+  supervisor pass). Deleting a reservation by hand just means the guest gets a
+  new one at its next DHCP. Only MACs of guests on this host are answered.
+- **DNS** answers A for reservation names (bare and `name.<domain>`), PTR for
+  the subnet, NXDOMAIN under the domain, and forwards everything else to the
+  network's forwarders or the host's `/etc/resolv.conf` (never to itself).
+- **The network editor still speaks libvirt XML.** `GET …/xml` puts the stored
+  IPAM back in (`ipam::xml::inject`); `PUT …/xml` takes it out (`strip`,
+  `merge`, which keeps a reservation's `dynamic`/`vm` when it comes back
+  unchanged) and redefines libvirt **only if what libvirt runs changed**
+  (`same_definition`). A NAT network's `<bridge name>` must survive the editor
+  (`networkXml`), or every save looked like a new bridge and restarted it.
+- **Restarting a network unplugs its guests.** Destroying it deletes the
+  bridge; libvirt does not reattach running guests' taps to the new one
+  (measured). Every restart path calls `networks::reattach_taps`. That missing
+  step is why "delete a reservation, then restore it" left a guest with no
+  address: the delete redefined the network.
 
 **Read `VIR_DOMAIN_XML_INACTIVE` for firewall/filterref work.** A running
 guest's live XML omits filterrefs added since boot, so reading live XML loses

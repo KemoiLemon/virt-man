@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod disks;
 mod firewall;
+mod ipam;
 mod libvirt;
 mod rfb;
 mod tls;
@@ -52,7 +53,10 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to load TLS certificate: {e}"))?;
 
-    let app = api::build(auth);
+    // IPAM: DHCP and DNS for guest networks, in place of libvirt's dnsmasq.
+    let ipam = ipam::server::Ipam::load(ipam::store::IPAM_PATH.into())?;
+    tokio::spawn(ipam::server::supervise(ipam.clone()));
+    let app = api::build(auth, ipam);
 
     // Unix socket listener.
     let sock_path = cfg.unix_socket_path();

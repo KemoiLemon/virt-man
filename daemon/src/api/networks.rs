@@ -1,28 +1,38 @@
 use axum::Json;
 use axum::Router;
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use virt::network::Network;
 
 use super::ApiError;
+use crate::ipam::server::Ipam;
+use crate::ipam::xml as ipamxml;
 use crate::libvirt::with_conn;
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/networks", get(list).post(create))
+        .route("/networks", get(list))
         .route("/networks/bridges", get(bridges))
         .route("/networks/{name}", get(get_one).delete(delete))
-        .route("/networks/{name}/xml", get(get_xml).put(put_xml))
         .route("/networks/{name}/start", post(start))
         .route("/networks/{name}/stop", post(stop))
         .route("/networks/{name}/autostart", post(set_autostart))
-        .route("/networks/{name}/hosts", axum::routing::put(put_host))
+}
+
+/// Routes that read or change IPAM state.
+pub fn ipam_routes(ipam: Ipam) -> Router {
+    Router::new()
+        .route("/networks", axum::routing::post(create))
+        .route("/networks/{name}/xml", get(get_xml).put(put_xml))
+        .route("/networks/{name}/hosts", get(list_hosts).put(put_host))
         .route(
             "/networks/{name}/hosts/{mac}",
             axum::routing::delete(delete_host),
         )
+        .route("/networks/{name}/ipam", get(get_ipam).put(put_ipam))
+        .with_state(ipam)
 }
 
 async fn list() -> Result<Json<Value>, ApiError> {
@@ -157,44 +167,190 @@ async fn bridges() -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(v)))
 }
 
-async fn get_xml(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
-        Ok(json!({"name": n.get_name().unwrap_or_default(), "xml": n.get_xml_desc(0)?}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+/// The definition as the editor should see it: libvirt's, with this daemon's
+/// IPAM (range, reservations, forwarders, domain) put back in, so the editor
+/// works on one document whoever serves the network.
+async fn get_xml(
+    State(ipam): State<Ipam>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let n2 = name.clone();
+    let xml = with_conn(move |c| Ok(Network::lookup_by_name(c, &n2)?.get_xml_desc(0)?))
+        .await
+        .map_err(ApiError::internal)?;
+    let stored = ipam.lock().networks.get(&name).cloned();
+    let xml = match stored {
+        Some(net) if ipamxml::is_managed(&xml) => ipamxml::inject(&xml, &net),
+        _ => xml,
+    };
+    Ok(Json(json!({"name": name, "xml": xml})))
 }
 
-/// Define/replace a network. The edited XML carries the original uuid, so
-/// define_xml updates it in place; a name change needs the network inactive
-/// first, so destroy a running one and restart it after the define.
-async fn put_xml(Path(name): Path<String>, body: String) -> Result<Json<Value>, ApiError> {
+/// Define/replace a network.
+///
+/// The IPAM part of the edited XML (DHCP range, reservations, DNS forwarders,
+/// domain) goes to this daemon's store, and libvirt gets the definition
+/// without it. If that is all that changed, the running network is left
+/// alone: changing a range or a reservation never restarts anything. Only a
+/// change to what libvirt itself runs (subnet, bridge, forward mode, a rename)
+/// restarts the network, and its guests are plugged back in afterwards.
+async fn put_xml(
+    State(ipam): State<Ipam>,
+    Path(name): Path<String>,
+    body: String,
+) -> Result<Json<Value>, ApiError> {
+    let managed = ipamxml::needs_takeover(&body) || ipamxml::is_managed(&body);
+    let libvirt_xml = if managed {
+        ipamxml::strip(&body)
+    } else {
+        body.clone()
+    };
+    if managed {
+        let merged = ipamxml::merge(ipam.lock().networks.get(&name), &body)
+            .ok_or_else(|| ApiError::bad_request("the network has no IPv4 subnet"))?;
+        let mut s = ipam.lock();
+        s.networks.insert(name.clone(), merged);
+        ipam.save(&s).map_err(ApiError::internal)?;
+    }
+    let old_name = name.clone();
     let v = with_conn(move |c| {
-        let was_active = Network::lookup_by_name(c, &name)
-            .map(|n| n.is_active().unwrap_or(false))
-            .unwrap_or(false);
-        if was_active && let Ok(n) = Network::lookup_by_name(c, &name) {
+        let existing = Network::lookup_by_name(c, &old_name).ok();
+        let was_active = existing.as_ref().is_some_and(|n| n.is_active().unwrap_or(false));
+        let before = existing
+            .as_ref()
+            .and_then(|n| n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE).ok())
+            .unwrap_or_default();
+        if same_definition(&before, &libvirt_xml) {
+            return Ok(json!({"name": old_name, "defined": true, "restarted": false}));
+        }
+        if was_active && let Some(n) = &existing {
             n.destroy()?;
         }
-        let n = Network::define_xml(c, &body)?;
+        let n = Network::define_xml(c, &libvirt_xml)?;
         let new_name = n.get_name().unwrap_or_default();
-        let started = if was_active {
-            n.create().map(|_| true).unwrap_or(false)
+        let (started, reattached) = if was_active {
+            match n.create() {
+                Ok(_) => (true, reattach_taps(c, &n)),
+                Err(_) => (false, 0),
+            }
         } else {
-            false
+            (false, 0)
         };
-        Ok(json!({"name": new_name, "defined": true, "started": started}))
+        Ok(json!({"name": new_name, "defined": true, "restarted": started, "reattached": reattached}))
     })
     .await
     .map_err(ApiError::internal)?;
+    // A rename moves the stored IPAM with it.
+    if let Some(new) = v["name"].as_str().filter(|n| *n != name) {
+        let mut s = ipam.lock();
+        if let Some(net) = s.networks.remove(&name) {
+            s.networks.insert(new.to_string(), net);
+            ipam.save(&s).map_err(ApiError::internal)?;
+        }
+    }
     Ok(Json(v))
 }
 
-async fn create(body: String) -> Result<Json<Value>, ApiError> {
+/// Whether two definitions describe the same network to libvirt, ignoring
+/// what libvirt fills in by itself (uuid, generated MAC, stp/delay defaults)
+/// and whitespace. Conservative: anything it cannot see as equal is a change.
+fn same_definition(a: &str, b: &str) -> bool {
+    let norm = |x: &str| {
+        let mut s = ipamxml::strip_generated(x);
+        s.retain(|c| !c.is_whitespace());
+        s.replace('"', "'")
+    };
+    !a.is_empty() && norm(a) == norm(b)
+}
+
+/// Plug every running guest's interface on `n` back into its bridge.
+///
+/// Destroying a network deletes its bridge, and every guest tap on it is left
+/// with no master; starting the network makes a new, empty bridge. libvirt does
+/// not reconnect them (measured: the taps stayed detached, and update-device or
+/// a link down/up did not help), so each guest silently lost its network until
+/// it was restarted. That is what editing a network, or deleting an IPAM
+/// reservation back when that redefined it, did to every guest on it.
+///
+/// Returns how many taps were reattached.
+pub(crate) fn reattach_taps(c: &virt::connect::Connect, n: &Network) -> usize {
+    let Ok(xml) = n.get_xml_desc(0) else { return 0 };
+    let Some(bridge) = xml
+        .find("<bridge")
+        .and_then(|i| {
+            attr_value(
+                &xml[i..xml[i..].find('>').map_or(xml.len(), |e| i + e)],
+                "name",
+            )
+        })
+        .map(str::to_string)
+    else {
+        return 0;
+    };
+    let net = n.get_name().unwrap_or_default();
+    let mut done = 0;
+    for d in c
+        .list_all_domains(virt::sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE)
+        .unwrap_or_default()
+    {
+        let Ok(dx) = d.get_xml_desc(0) else { continue };
+        for tap in taps_on_network(&dx, &net) {
+            let ok = std::process::Command::new("ip")
+                .args(["link", "set", "dev", &tap, "master", &bridge])
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok {
+                done += 1;
+            } else {
+                tracing::warn!("could not reattach {tap} to {bridge}");
+            }
+        }
+    }
+    done
+}
+
+/// Target devs of a live domain's interfaces on network `net`.
+fn taps_on_network(domain_xml: &str, net: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = domain_xml;
+    while let Some(i) = rest.find("<interface") {
+        let block = &rest[i..];
+        let Some(end) = block.find("</interface>") else {
+            break;
+        };
+        let b = &block[..end];
+        let on_net = b.find("<source").is_some_and(|s| {
+            let tag = &b[s..b[s..].find('>').map_or(b.len(), |e| s + e)];
+            attr_value(tag, "network") == Some(net)
+        });
+        if on_net
+            && let Some(t) = b.find("<target")
+            && let Some(dev) = attr_value(&b[t..b[t..].find('>').map_or(b.len(), |e| t + e)], "dev")
+        {
+            out.push(dev.to_string());
+        }
+        rest = &block[end + 12..];
+    }
+    out
+}
+
+async fn create(State(ipam): State<Ipam>, body: String) -> Result<Json<Value>, ApiError> {
+    // A new network with an IPv4 subnet is served by this daemon from the
+    // start, so libvirt never runs dnsmasq for it.
+    let libvirt_xml = if ipamxml::needs_takeover(&body) {
+        let net = crate::ipam::store::import(&body)
+            .ok_or_else(|| ApiError::bad_request("the network has no IPv4 subnet"))?;
+        let name =
+            open_name(&body).ok_or_else(|| ApiError::bad_request("the network has no name"))?;
+        let mut s = ipam.lock();
+        s.networks.insert(name, net);
+        ipam.save(&s).map_err(ApiError::internal)?;
+        ipamxml::strip(&body)
+    } else {
+        body
+    };
     let v = with_conn(move |c| {
-        let n = Network::define_xml(c, &body)?;
+        let n = Network::define_xml(c, &libvirt_xml)?;
         let name = n.get_name().unwrap_or_default();
         n.create()?;
         Ok(json!({"name": name, "started": true}))
@@ -259,6 +415,46 @@ async fn set_autostart(
     Ok(Json(v))
 }
 
+fn open_name(xml: &str) -> Option<String> {
+    let i = xml.find("<name>")? + 6;
+    let j = xml[i..].find("</name>")?;
+    Some(xml[i..i + j].trim().to_string())
+}
+
+fn managed(ipam: &Ipam, name: &str) -> Result<crate::ipam::store::Net, ApiError> {
+    ipam.lock().networks.get(name).cloned().ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "network '{name}' has no IPv4 subnet served by this host, so it has no address reservations"
+        ))
+    })
+}
+
+fn reservation_json(r: &crate::ipam::store::Reservation, guests: &Ipam) -> Value {
+    json!({
+        "mac": r.mac,
+        "ip": r.ip.to_string(),
+        "name": r.name,
+        "dynamic": r.dynamic,
+        "vm": r.vm,
+        "vm_name": guests.guest_of(&r.mac).map(|g| g.1),
+        "seen_ms": r.seen_ms,
+    })
+}
+
+/// Every reservation on a network, with the guest each belongs to.
+async fn list_hosts(
+    State(ipam): State<Ipam>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let net = managed(&ipam, &name)?;
+    let hosts: Vec<Value> = net
+        .reservations
+        .iter()
+        .map(|r| reservation_json(r, &ipam))
+        .collect();
+    Ok(Json(json!({"network": name, "hosts": hosts})))
+}
+
 /// A DHCP reservation, as the VM Network tab edits it.
 #[derive(Deserialize)]
 struct HostReq {
@@ -268,159 +464,190 @@ struct HostReq {
     name: Option<String>,
 }
 
-/// `<host .../>` for a reservation. Values are validated before this, so the
-/// quoting cannot be broken out of.
-fn host_xml(mac: &str, ip: &str, name: Option<&str>) -> String {
-    match name {
-        Some(n) => format!("<host mac='{mac}' name='{n}' ip='{ip}'/>"),
-        None => format!("<host mac='{mac}' ip='{ip}'/>"),
-    }
-}
-
-/// Every `<host>` in a network's DHCP section, as (mac, ip).
-fn dhcp_hosts(xml: &str) -> Vec<(String, String)> {
-    let attr = |tag: &str, name: &str| -> Option<String> {
-        let a = &tag[tag.find(&format!(" {name}="))? + name.len() + 2..];
-        let q = a.chars().next()?;
-        let a = &a[1..];
-        Some(a[..a.find(q)?].to_ascii_lowercase())
-    };
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(i) = rest.find("<host ") {
-        let t = &rest[i..];
-        let end = t.find('>').unwrap_or(t.len());
-        let tag = &t[..end];
-        if let (Some(m), Some(ip)) = (attr(tag, "mac"), attr(tag, "ip")) {
-            out.push((m, ip));
-        }
-        rest = &t[end..];
-    }
-    out
-}
-
-/// Flags for a network change: the persistent definition always, and the
-/// running dnsmasq too when the network is up -- so a reservation applies at
-/// once without restarting the network (which would drop every guest on it).
-fn net_affect(n: &Network) -> u32 {
-    let live = n.is_active().unwrap_or(false);
-    virt::sys::VIR_NETWORK_UPDATE_AFFECT_CONFIG
-        | if live {
-            virt::sys::VIR_NETWORK_UPDATE_AFFECT_LIVE
-        } else {
-            0
-        }
-}
-
-/// Add or change the reservation for one MAC, live.
+/// Add or change the reservation for one MAC. Takes effect at the guest's
+/// next DHCP exchange; nothing is restarted.
 async fn put_host(
+    State(ipam): State<Ipam>,
     Path(name): Path<String>,
     Json(req): Json<HostReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let mac = super::nics::normalize_mac(&req.mac).map_err(ApiError::bad_request)?;
+    use crate::ipam::store::{Reservation, clean_hostname, normalize_mac};
+    let mac = normalize_mac(&req.mac)
+        .ok_or_else(|| ApiError::bad_request(format!("'{}' is not a MAC address", req.mac)))?;
     let ip: std::net::Ipv4Addr = req
         .ip
         .trim()
         .parse()
         .map_err(|_| ApiError::bad_request(format!("'{}' is not an IPv4 address", req.ip)))?;
-    let host = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
-    if let Some(h) = host
-        && !h
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-    {
-        return Err(ApiError::bad_request(
-            "a hostname may only contain letters, digits, '-' and '.'",
-        ));
-    }
-    let host = host.map(str::to_string);
-    let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
-        let xml = n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE)?;
-        let existing = dhcp_hosts(&xml);
-        let ip = ip.to_string();
-        if let Some((other, _)) = existing.iter().find(|(m, i)| *i == ip && *m != mac) {
-            return Err(format!("{ip} is already reserved for {other}").into());
-        }
-        let entry = host_xml(&mac, &ip, host.as_deref());
-        let flags = net_affect(&n);
-        let section = virt::sys::VIR_NETWORK_SECTION_IP_DHCP_HOST;
-        if existing.iter().any(|(m, _)| *m == mac) {
-            // MODIFY matches by MAC, so the old IP is replaced in place.
-            n.update(
-                virt::sys::VIR_NETWORK_UPDATE_COMMAND_MODIFY,
-                section,
-                -1,
-                &entry,
-                flags,
-            )?;
-        } else {
-            n.update(
-                virt::sys::VIR_NETWORK_UPDATE_COMMAND_ADD_LAST,
-                section,
-                -1,
-                &entry,
-                flags,
-            )?;
-        }
-        Ok(json!({"network": name, "mac": mac, "ip": ip}))
-    })
-    .await
-    .map_err(ApiError::bad_request)?;
-    Ok(Json(v))
+    let host = match req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(h) => Some(
+            clean_hostname(h)
+                .filter(|c| c == &h.to_ascii_lowercase())
+                .ok_or_else(|| {
+                    ApiError::bad_request("a hostname may only contain letters, digits and '-'")
+                })?,
+        ),
+        None => None,
+    };
+    managed(&ipam, &name)?;
+    let vm = ipam.guest_of(&mac).map(|g| g.0);
+    let r = ipam
+        .update(&name, |n| {
+            if !n.contains_host(ip) || ip == n.gateway {
+                return Err(format!("{ip} is not a usable address on this network"));
+            }
+            if let Some(other) = n.reservations.iter().find(|r| r.ip == ip && r.mac != mac) {
+                return Err(format!("{ip} is already reserved for {}", other.mac));
+            }
+            let seen = n.reservation_for_mac(&mac).map_or(0, |r| r.seen_ms);
+            n.reservations.retain(|r| r.mac != mac);
+            let r = Reservation {
+                mac: mac.clone(),
+                ip,
+                name: host,
+                dynamic: false,
+                vm,
+                seen_ms: seen,
+            };
+            n.reservations.push(r.clone());
+            Ok(r)
+        })
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(
+        json!({"network": name, "host": reservation_json(&r, &ipam)}),
+    ))
 }
 
-/// Drop the reservation for one MAC, live.
-async fn delete_host(Path((name, mac)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
-    let mac = super::nics::normalize_mac(&mac).map_err(ApiError::bad_request)?;
-    let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
-        let xml = n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE)?;
-        let Some((_, ip)) = dhcp_hosts(&xml).into_iter().find(|(m, _)| *m == mac) else {
-            return Ok(json!({"network": name, "mac": mac, "removed": false}));
-        };
-        // DELETE matches the entry; give it the same mac and ip it has.
-        n.update(
-            virt::sys::VIR_NETWORK_UPDATE_COMMAND_DELETE,
-            virt::sys::VIR_NETWORK_SECTION_IP_DHCP_HOST,
-            -1,
-            &host_xml(&mac, &ip, None),
-            net_affect(&n),
-        )?;
-        Ok(json!({"network": name, "mac": mac, "removed": true}))
+/// Drop the reservation for one MAC.
+///
+/// The address is free again, but the guest is not left without one: its next
+/// DHCP exchange gets a fresh address from the range, which becomes its
+/// permanent reservation in turn. (Deleting used to redefine the network and
+/// unplug every guest on it; now nothing is restarted.)
+async fn delete_host(
+    State(ipam): State<Ipam>,
+    Path((name, mac)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let mac = crate::ipam::store::normalize_mac(&mac)
+        .ok_or_else(|| ApiError::bad_request("not a MAC address"))?;
+    managed(&ipam, &name)?;
+    let removed = ipam
+        .update(&name, |n| {
+            let before = n.reservations.len();
+            n.reservations.retain(|r| r.mac != mac);
+            Ok(n.reservations.len() != before)
+        })
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(
+        json!({"network": name, "mac": mac, "removed": removed}),
+    ))
+}
+
+/// The network's IPAM settings, and whether this host is serving it now.
+async fn get_ipam(
+    State(ipam): State<Ipam>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let n = managed(&ipam, &name)?;
+    let (a, b) = (u32::from(n.range_start), u32::from(n.range_end));
+    let used = n
+        .reservations
+        .iter()
+        .filter(|r| (a..=b).contains(&u32::from(r.ip)))
+        .count() as u32;
+    Ok(Json(json!({
+        "network": name,
+        "serving": ipam.serving(&name),
+        "gateway": n.gateway.to_string(),
+        "prefix": n.prefix,
+        "range_start": n.range_start.to_string(),
+        "range_end": n.range_end.to_string(),
+        "range_size": b.saturating_sub(a) + 1,
+        "range_used": used,
+        "dns_forwarders": n.dns_forwarders.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "domain": n.domain,
+        "lease_secs": n.lease_secs,
+    })))
+}
+
+#[derive(Deserialize)]
+struct IpamReq {
+    range_start: String,
+    range_end: String,
+    #[serde(default)]
+    dns_forwarders: Vec<String>,
+    #[serde(default)]
+    domain: Option<String>,
+}
+
+/// Change the dynamic range, forwarders or domain. Existing reservations are
+/// kept even when the range no longer covers them: they are permanent.
+async fn put_ipam(
+    State(ipam): State<Ipam>,
+    Path(name): Path<String>,
+    Json(req): Json<IpamReq>,
+) -> Result<Json<Value>, ApiError> {
+    let parse = |s: &str| -> Result<std::net::Ipv4Addr, ApiError> {
+        s.trim()
+            .parse()
+            .map_err(|_| ApiError::bad_request(format!("'{s}' is not an IPv4 address")))
+    };
+    let (start, end) = (parse(&req.range_start)?, parse(&req.range_end)?);
+    let fwd = req
+        .dns_forwarders
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| parse(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let domain = match req
+        .domain
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        Some(d)
+            if d.split('.').all(|l| {
+                crate::ipam::store::clean_hostname(l).as_deref() == Some(&l.to_ascii_lowercase())
+            }) =>
+        {
+            Some(d.to_ascii_lowercase())
+        }
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "the domain may only contain letters, digits, '-' and '.'",
+            ));
+        }
+        None => None,
+    };
+    managed(&ipam, &name)?;
+    ipam.update(&name, |n| {
+        n.validate_range(start, end)?;
+        n.range_start = start;
+        n.range_end = end;
+        n.dns_forwarders = fwd;
+        n.domain = domain;
+        Ok(())
     })
-    .await
     .map_err(ApiError::bad_request)?;
-    Ok(Json(v))
+    get_ipam(State(ipam), Path(name)).await
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn dhcp_hosts_are_read_with_either_quote_and_any_attribute_order() {
-        let xml = "<network><ip><dhcp>
-          <range start='10.0.0.2' end='10.0.0.254'/>
-          <host mac='52:54:00:AA:00:01' name='web' ip='10.0.0.10'/>
-          <host ip=\"10.0.0.11\" mac=\"52:54:00:aa:00:02\"/>
-        </dhcp></ip></network>";
+    fn taps_are_found_only_for_the_restarted_network() {
+        let xml = "<domain><devices>
+          <interface type='network'><source network='internet' bridge='virbr1'/><target dev='vnet1'/></interface>
+          <interface type='network'><source network='internal'/><target dev='vnet2'/></interface>
+          <interface type=\"network\"><mac address='x'/><source network=\"internet\"/><target dev=\"vnet9\"/></interface>
+          <interface type='network'><source network='internet'/></interface>
+        </devices></domain>";
         assert_eq!(
-            super::dhcp_hosts(xml),
-            vec![
-                ("52:54:00:aa:00:01".to_string(), "10.0.0.10".to_string()),
-                ("52:54:00:aa:00:02".to_string(), "10.0.0.11".to_string()),
-            ]
+            super::taps_on_network(xml, "internet"),
+            vec!["vnet1", "vnet9"]
         );
-    }
-
-    #[test]
-    fn host_xml_includes_the_name_only_when_given() {
-        assert_eq!(
-            super::host_xml("52:54:00:aa:00:01", "10.0.0.5", None),
-            "<host mac='52:54:00:aa:00:01' ip='10.0.0.5'/>"
-        );
-        assert!(
-            super::host_xml("52:54:00:aa:00:01", "10.0.0.5", Some("web")).contains("name='web'")
-        );
+        assert_eq!(super::taps_on_network(xml, "internal"), vec!["vnet2"]);
+        assert!(super::taps_on_network(xml, "other").is_empty());
     }
 
     use super::*;

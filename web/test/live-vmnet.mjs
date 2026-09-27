@@ -1,9 +1,9 @@
 // VM Network tab, against a real running guest: live rate limits (checked on
-// the host's tc qdiscs, not just the XML), live IPAM reservations (checked in
-// the running dnsmasq's hostsfile), hot-add, hot-remove, NICs added elsewhere
-// appearing, and the old /firewall URL.
+// the host's tc qdiscs, not just the XML), IPAM reservations (checked in the
+// daemon's store and in its DNS answers, with the bridge left untouched),
+// hot-add, hot-remove, NICs added elsewhere appearing, and the old /firewall URL.
 //
-// Needs sudo (virsh, tc, reading dnsmasq state) and a network named by
+// Needs sudo (virsh, tc, reading /etc/virt-man/ipam.json) and a network named by
 // VM_NET (default "internet") that has a DHCP range. Defines and boots its own
 // throwaway guest from the same generator Create VM uses, and removes it.
 //
@@ -25,7 +25,12 @@ const x = await import(new URL("./_build/xml.js", import.meta.url).href);
 const code = readFileSync("test/_live/app.iife.js", "utf8");
 const conn = (await (await fetch(base + "/connections")).json())[0];
 const sh = (...a) => execFileSync("sudo", a).toString();
-const hostsfile = () => sh("cat", `/var/lib/libvirt/dnsmasq/${NET}.hostsfile`);
+// The daemon's IPAM store: what its DHCP server will hand out.
+const reserved = (mac) => JSON.parse(sh("cat", "/etc/virt-man/ipam.json")).networks[NET]?.reservations.find((r) => r.mac === mac);
+const bridgeIndex = () => {
+  const br = sh("virsh", "net-info", NET).match(/Bridge:\s+(\S+)/)?.[1];
+  return readFileSync(`/sys/class/net/${br}/ifindex`, "utf8").trim();
+};
 
 const def = await fetch(`${base}/proxy/${conn.id}/domains?start=true`, {
   method: "POST", headers: { "Content-Type": "application/xml" },
@@ -76,20 +81,20 @@ try {
   check("RX limit is enforced on the host tap (htb, ~10 Mbit)", /rate 97\d\dKbit/.test(cls), cls.trim());
   check("TX limit is enforced by the ingress policer (~20 Mbit)", /rate 19\d\d\dKbit/.test(pol), pol.trim().slice(0, 120));
 
-  // IPAM: verified in the running dnsmasq, without a network restart.
-  // dnsmasq runs as a parent and a helper; compare the whole set of pids.
-  // `pgrep -f` via sudo also matches the sudo process running it, whose pid
-  // changes every call, so match the dnsmasq binary by exact name instead.
-  const dnsmasqPids = () => execFileSync("pgrep", ["-x", "dnsmasq", "-a"]).toString().split("\n")
-    .filter((l) => l.includes(`/${NET}.conf`)).map((l) => l.split(" ")[0]).sort().join(",");
-  const dnsmasqPid = dnsmasqPids();
+  // IPAM: in the daemon's store, served by its DNS, and the network is not
+  // restarted to apply it (a restart recreates the bridge: a new ifindex).
+  const bridgeBefore = bridgeIndex();
   rows()[0].querySelector("[data-nic-ipam]").click(); await wait(50);
   const ip = d.querySelector("#ipam-ip").value;
   check("IPAM suggests a free address", /^\d+\.\d+\.\d+\.\d+$/.test(ip), ip);
   d.querySelector("#ipam-ok").click();
   check("the table shows the reserved address", await until(() => rows()[0]?.textContent.includes(ip)));
-  check("the reservation reaches the running dnsmasq", hostsfile().includes(`${mac0},${ip}`));
-  check("the network was not restarted to apply it", dnsmasqPids() === dnsmasqPid, `${dnsmasqPid} -> ${dnsmasqPids()}`);
+  check("the reservation is in the daemon's IPAM, as a manual one", reserved(mac0)?.ip === ip && reserved(mac0)?.dynamic === false,
+    JSON.stringify(reserved(mac0)));
+  const gw = JSON.parse(sh("cat", "/etc/virt-man/ipam.json")).networks[NET].gateway;
+  const dug = execFileSync("dig", ["+short", `@${gw}`, VM, "A"]).toString().trim();
+  check("…and its name resolves to it on the network's DNS", dug === ip, dug);
+  check("the network was not restarted to apply it", bridgeIndex() === bridgeBefore);
 
   // Hot-add from the tab.
   d.querySelector("#vmnet-add").click(); await wait(50);
@@ -112,9 +117,10 @@ try {
 
   await until(() => rows()[0]?.querySelector("[data-nic-ipam]"));
   rows()[0].querySelector("[data-nic-ipam]").click(); await wait(50);
-  check("an existing reservation offers Make dynamic", !!d.querySelector("#ipam-clear"));
+  check("an existing reservation offers Release", !!d.querySelector("#ipam-clear"));
   d.querySelector("#ipam-clear")?.click();
-  check("Make dynamic removes the reservation live", await until(() => !hostsfile().includes(mac0)));
+  check("Release removes the reservation", await until(() => !reserved(mac0)));
+  check("…and still does not restart the network", bridgeIndex() === bridgeBefore);
 
   w.history.pushState(null, "", `/${encodeURIComponent(conn.name)}/vms/${VM}/firewall`);
   w.dispatchEvent(new w.PopStateEvent("popstate"));

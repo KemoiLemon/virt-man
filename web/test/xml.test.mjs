@@ -289,3 +289,14 @@ test("new guests carry spare PCIe root ports for hot-plug", () => {
   const idx = [...out.matchAll(/index="(\d+)" model="pcie-root-port"/g)].map((m) => Number(m[1]));
   assert.ok(idx.every((i) => i > 0) && new Set(idx).size === idx.length, "ports have distinct non-zero indices");
 });
+
+// Saving the network editor must not change what libvirt runs when only IPAM
+// changed: a NAT network's bridge name used to be dropped, so every save was a
+// "new" bridge and restarted the network.
+test("a NAT network keeps its bridge name through the editor", () => {
+  const src = `<network><name>n</name><forward mode="nat"/><bridge name="virbr1" stp="on" delay="0"/><ip address="10.0.0.1" prefix="24"/></network>`;
+  const out = xml.networkXml(xml.networkFormFromXml(src));
+  assert.match(out, /<bridge name="virbr1"\/>/);
+  const created = xml.networkXml({ name: "x", forward: "nat", bridge: "", ip: "10.1.0.1/24", dhcp_start: "", dhcp_end: "", dns: "", hosts: [] });
+  assert.doesNotMatch(created, /<bridge/, "a new network still lets libvirt pick one");
+});

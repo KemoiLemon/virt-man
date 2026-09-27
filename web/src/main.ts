@@ -18,8 +18,8 @@ import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
-import { autoVolumeName, domainXml, defaultDhcpRange, dhcpRemaining, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
-import type { DomainForm, DhcpHost, NetworkForm, PoolForm } from "./xml";
+import { autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
+import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
 /// (the frontend compares against them), so capitalizing happens only here.
@@ -1983,6 +1983,36 @@ function leaveMissing(tab: "networks" | "storage", message: string) {
 
 /// Dedicated network page: card-based information, an IPAM allocation list
 /// (MAC -> IP DHCP hosts) and the lifecycle/edit actions.
+/// A network's DHCP range, DNS forwarders and domain. Stored by this host's
+/// IPAM, so saving never touches the libvirt network or its guests.
+function openIpamSettings(conn: string, net: string, ipam: IpamInfo) {
+  const el = openModal(`DHCP & DNS — ${esc(net)}`, `
+    <div class="grid2">
+      <label class="field"><span>Range start</span><input id="ipam-rs" value="${esc(ipam.range_start)}"></label>
+      <label class="field"><span>Range end</span><input id="ipam-re" value="${esc(ipam.range_end)}"></label>
+    </div>
+    <label class="field"><span>DNS forwarders (blank = the host's own resolvers)</span>
+      <input id="ipam-fwd" value="${esc(ipam.dns_forwarders.join(", "))}" placeholder="1.1.1.1, 9.9.9.9"></label>
+    <label class="field"><span>Domain (optional)</span>
+      <input id="ipam-dom" value="${esc(ipam.domain ?? "")}" placeholder="lab"></label>
+    <div class="dsub">Guests get addresses from the range, and keep them until they are deleted;
+      changing the range never moves one. Guest names resolve as <code>name</code>${ipam.domain ? ` and <code>name.${esc(ipam.domain)}</code>` : ""}.</div>`,
+    `<button class="btn primary" id="ipam-set-ok">Save</button>`);
+  $("#ipam-set-ok", el).onclick = async () => {
+    try {
+      await api.put(`/proxy/${conn}/networks/${encodeURIComponent(net)}/ipam`, {
+        range_start: ($("#ipam-rs", el) as HTMLInputElement).value.trim(),
+        range_end: ($("#ipam-re", el) as HTMLInputElement).value.trim(),
+        dns_forwarders: ($("#ipam-fwd", el) as HTMLInputElement).value.split(/[\s,]+/).filter(Boolean),
+        domain: ($("#ipam-dom", el) as HTMLInputElement).value.trim() || null,
+      });
+      el.remove();
+      toast("DHCP & DNS settings saved");
+      if (selectedNet === net) void renderNetPage();
+    } catch (e) { toast((e as Error).message, "bad"); }
+  };
+}
+
 async function renderNetPage() {
   if (!selectedConn || !selectedNet) return;
   if (isOffline(selectedConn)) return renderOffline();
@@ -1992,38 +2022,34 @@ async function renderNetPage() {
   const content = $("#content");
   const name = selectedNet;
   try {
-    const [summary, xml] = await Promise.all([
+    const netBase = `/proxy/${selectedConn}/networks/${encodeURIComponent(name)}`;
+    const [summary, xml, ipamState] = await Promise.all([
       api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`),
-      api.get<{ xml: string }>(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/xml`),
+      api.get<{ xml: string }>(`${netBase}/xml`),
+      // Absent for a network this host does not serve (bridge mode, or no
+      // IPv4 subnet): no IPAM section then.
+      Promise.all([
+        api.get<IpamInfo>(`${netBase}/ipam`),
+        api.get<{ hosts: IpamHost[] }>(`${netBase}/hosts`),
+      ]).catch(() => null),
     ]);
     // The poll may have started this render and the user then switched panes;
     // painting now would yank their view back to the network page.
     if (!stillCurrent(gen)) return;
     const net = summary.find((n) => n.name === name);
     if (!net) return leaveMissing("networks", `Network "${name}" no longer exists`);
-    const uuid = networkUuid(xml.xml);
     const form = networkFormFromXml(xml.xml);
+    const ipam = ipamState?.[0] ?? null;
     const typeLabel = form.forward === "bridge" ? "Bridge" : form.forward === "nat" ? "NAT" : "Isolated";
     const gateway = form.ip ? form.ip.split("/")[0] : "—";
-    const hosts = form.hosts ?? [];
-    // libvirt enables DHCP for any network with an <ip>; an absent <range>
-    // means the default range (gateway+1 .. broadcast-1), not "no DHCP".
-    const dhcpRange = form.dhcp_start && form.dhcp_end
-      ? { start: form.dhcp_start, end: form.dhcp_end }
-      : defaultDhcpRange(form.ip);
-    // Free addresses left in the pool: the range minus the gateway and every
-    // static allocation. More useful at a glance than the range bounds, which
-    // are derivable and shown in the IPAM table anyway.
-    const remaining = dhcpRemaining(form.ip, hosts.map((h) => h.ip), dhcpRange ?? undefined);
-    // No explicit forwarders means dnsmasq answers on the gateway itself.
-    const dnsLabel = form.dns || (form.forward === "nat" && form.ip ? gateway : "—");
-
-    // Persist the current host list back into the network definition.
-    const saveHosts = async (next: DhcpHost[]) => {
-      const rebuilt = networkXml({ ...form, hosts: next }, uuid);
-      await api.putXml(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/xml`, rebuilt);
-      await refreshTreeVms();
-    };
+    const hosts = ipamState?.[1].hosts ?? [];
+    const dhcpRange = ipam ? { start: ipam.range_start, end: ipam.range_end } : null;
+    const remaining = ipam ? { free: ipam.range_size - ipam.range_used, total: ipam.range_size } : null;
+    // Guests ask the gateway, which answers their names and forwards the rest.
+    const dnsLabel = ipam
+      ? `${ipam.gateway}${ipam.dns_forwarders.length ? ` → ${ipam.dns_forwarders.join(", ")}` : ""}`
+      : "—";
+    const hostsUrl = `${netBase}/hosts`;
 
     setHtml(content, `
       <div class="dhead">
@@ -2044,25 +2070,35 @@ async function renderNetPage() {
         <div class="card"><span class="card-ic">${ic.circleDot(20)}</span><div><b>${esc(form.ip || "—")}</b><i>SUBNET</i></div></div>
         <div class="card"><span class="card-ic">${ic.chevron(20)}</span><div><b>${esc(gateway)}</b><i>GATEWAY</i></div></div>
         <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${remaining ? `${remaining.free} / ${remaining.total}` : "—"}</b><i>DHCP IPS REMAINING</i></div></div>
+        <div class="card"><span class="card-ic">${ic.circleDot(20)}</span><div><b>${dhcpRange ? `${esc(dhcpRange.start)} – ${esc(dhcpRange.end.split(".").pop() ?? "")}` : "—"}</b><i>DHCP RANGE</i></div></div>
         <div class="card"><span class="card-ic">${ic.options(20)}</span><div><b>${esc(dnsLabel)}</b><i>DNS</i></div></div>
         <div class="card"><span class="card-ic">${ic.autostart(20)}</span><div><b>${net.persistent ? "Persistent" : "Transient"}</b><i>PERSISTENCE</i></div></div>
       </div>
 
+      ${ipam ? `
       <div class="section-title fw-cat">IPAM Allocations</div>
-      <table class="grid">
-        <tr><th>Name</th><th>MAC address</th><th>IP address</th><th></th></tr>
+      <div class="dsub" style="margin-bottom:8px">${ipam.serving
+        ? "Served by this host. A guest with no allocation gets one from the range and keeps it until the VM is deleted."
+        : "Not being served right now (the network is stopped)."}</div>
+      <table class="grid" id="ipam-hosts">
+        <tr><th>Name</th><th>VM</th><th>MAC address</th><th>IP address</th><th>Last seen</th><th></th></tr>
         ${hosts.map((h, i) => `
-          <tr>
+          <tr data-ipam-mac="${esc(h.mac)}">
             <td>${esc(h.name || "—")}</td>
+            <td>${esc(h.vm_name ?? "—")}</td>
             <td>${esc(h.mac)}</td>
-            <td>${esc(h.ip)}</td>
+            <td>${esc(h.ip)}${h.dynamic ? ` <span class="state" title="Assigned from the range when the guest first asked">auto</span>` : ""}</td>
+            <td>${h.seen_ms ? `${ago(h.seen_ms)} ago` : "—"}</td>
             <td class="col-actions"><div class="row-actions">
               <button class="btn icon" data-ipam-edit="${i}" title="Edit">${ic.edit()}</button>
-              <button class="btn danger icon" data-ipam-del="${i}" title="Delete">${ic.trash()}</button>
+              <button class="btn danger icon" data-ipam-del="${i}" title="Release">${ic.trash()}</button>
             </div></td>
-          </tr>`).join("") || `<tr><td colspan="4" class="empty">No static allocations — guests use the DHCP range.</td></tr>`}
+          </tr>`).join("") || `<tr><td colspan="6" class="empty">No allocations yet — guests get one from the range when they first ask.</td></tr>`}
       </table>
-      <div class="actions"><button class="btn" id="ipam-add">${ic.plus(14)} Add allocation</button></div>`);
+      <div class="actions">
+        <button class="btn" id="ipam-add">${ic.plus(14)} Add allocation</button>
+        <button class="btn" id="ipam-settings">${ic.options(14)} DHCP &amp; DNS settings</button>
+      </div>` : ""}`);
 
     const editHost = (idx: number | null) => {
       const h = idx === null ? { mac: "", ip: "", name: "" } : hosts[idx];
@@ -2128,13 +2164,13 @@ async function renderNetPage() {
         const mac = macInp.value.trim();
         const ip = ipInp.value.trim();
         if (!mac || !ip) return toast("MAC and IP are required", "bad");
-        const next = [...hosts];
-        if (idx === null) next.push({ mac, ip, name: nameInp.value.trim() });
-        else next[idx] = { mac, ip, name: nameInp.value.trim() };
-        el.remove();
         try {
-          await saveHosts(next);
-          toast("Allocation saved");
+          // Editing an allocation to a different MAC is a move: drop the old.
+          const old = idx === null ? null : hosts[idx];
+          if (old && old.mac !== mac.toLowerCase()) await api.del(`${hostsUrl}/${encodeURIComponent(old.mac)}`);
+          await api.put(hostsUrl, { mac, ip, name: nameInp.value.trim() || undefined });
+          el.remove();
+          toast("Allocation saved — the guest gets it at its next DHCP exchange");
           void renderNetPage();
         } catch (e) { toast((e as Error).message, "bad"); }
       };
@@ -2154,17 +2190,22 @@ async function renderNetPage() {
       await deleteNetwork(name);
       backToConn();
     };
-    $("#ipam-add", content).onclick = () => editHost(null);
+    const addBtn = $("#ipam-add", content);
+    if (addBtn) addBtn.onclick = () => editHost(null);
+    const setBtn = $("#ipam-settings", content);
+    if (setBtn && ipam) setBtn.onclick = () => openIpamSettings(conn, name, ipam);
     content.querySelectorAll("[data-ipam-edit]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => editHost(+(b as HTMLElement).dataset.ipamEdit!);
     });
     content.querySelectorAll("[data-ipam-del]").forEach((b: Element) => {
       (b as HTMLElement).onclick = async () => {
-        const i = +(b as HTMLElement).dataset.ipamDel!;
-        const next = hosts.filter((_, j) => j !== i);
+        const h = hosts[+(b as HTMLElement).dataset.ipamDel!];
+        if (!h) return;
         try {
-          await saveHosts(next);
-          toast("Allocation removed");
+          await api.del(`${hostsUrl}/${encodeURIComponent(h.mac)}`);
+          toast(h.vm_name
+            ? `Released — ${h.vm_name} gets a new address from the range at its next DHCP`
+            : "Allocation released");
           void renderNetPage();
         } catch (e) { toast((e as Error).message, "bad"); }
       };
@@ -2179,55 +2220,6 @@ async function renderNetPage() {
       return leaveMissing("networks", `Network "${name}" no longer exists`);
     }
     setHtml(content, `<div class="empty">${esc((e as Error).message)}</div>`);
-  }
-}
-
-/// Read a domain's network interfaces (network + MAC) from its XML.
-function domainInterfaces(xml: string): { network: string; mac: string }[] {
-  const out: { network: string; mac: string }[] = [];
-  const attr = (tag: string, name: string) =>
-    tag.match(new RegExp(`${name}\\s*=\\s*['"]([^'"]*)['"]`))?.[1] ?? "";
-  for (const m of xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)) {
-    const block = m[0];
-    const network = attr(block.match(/<source\b[^>]*>/)?.[0] ?? "", "network");
-    const mac = attr(block.match(/<mac\b[^>]*>/)?.[0] ?? "", "address");
-    if (network && mac) out.push({ network, mac });
-  }
-  return out;
-}
-
-/// After a VM is defined, add a static DHCP allocation for each of its NICs:
-/// pick the first free address in that network's DHCP range and write a
-/// <host mac=… ip=…/> entry. Best effort — a NIC on a bridge (no <ip>) or a
-/// network with a full range is skipped rather than failing VM creation.
-async function autoAllocateIpam(conn: string, vmName: string) {
-  try {
-    const { xml } = await api.get<{ xml: string }>(
-      `/proxy/${conn}/domains/${encodeURIComponent(vmName)}/xml`);
-    for (const nic of domainInterfaces(xml)) {
-      try {
-        const { xml: netXml } = await api.get<{ xml: string }>(
-          `/proxy/${conn}/networks/${encodeURIComponent(nic.network)}/xml`);
-        const form = networkFormFromXml(netXml);
-        if (!form.ip) continue; // bridge networks have no DHCP
-        const uuid = networkUuid(netXml);
-        const existing = form.hosts ?? [];
-        if (existing.some((h) => h.mac === nic.mac)) continue;
-        const range = form.dhcp_start && form.dhcp_end
-          ? { start: form.dhcp_start, end: form.dhcp_end }
-          : defaultDhcpRange(form.ip);
-        const ip = nextFreeIp(form.ip, existing.map((h) => h.ip), range ?? undefined);
-        if (!ip) continue;
-        const hosts = [...existing, { mac: nic.mac, ip, name: vmName }];
-        await api.putXml(
-          `/proxy/${conn}/networks/${encodeURIComponent(nic.network)}/xml`,
-          networkXml({ ...form, hosts }, uuid));
-      } catch {
-        // Skip this NIC's network; the VM is already defined.
-      }
-    }
-  } catch {
-    // No interfaces, or the domain vanished — nothing to allocate.
   }
 }
 
@@ -2570,24 +2562,19 @@ async function collectIpCandidates(conn: string): Promise<string[]> {
   const out = new Set<string>();
   const nets = await api.get<NetworkSummary[]>(`/proxy/${conn}/networks`).catch(() => []);
   if (!Array.isArray(nets)) return [];
-  for (const n of nets) {
-    const { xml } = await api
-      .get<{ xml: string }>(`/proxy/${conn}/networks/${encodeURIComponent(n.name)}/xml`)
-      .catch(() => ({ xml: "" }));
-    if (!xml) continue;
-    const form = networkFormFromXml(xml);
-    if (form.ip) {
-      out.add(form.ip.split("/")[0]);
-      const range = form.dhcp_start && form.dhcp_end
-        ? { start: form.dhcp_start, end: form.dhcp_end }
-        : defaultDhcpRange(form.ip);
-      if (range) {
-        out.add(range.start);
-        out.add(range.end);
-      }
+  await Promise.all(nets.map(async (n) => {
+    const base = `/proxy/${conn}/networks/${encodeURIComponent(n.name)}`;
+    const [ipam, hosts] = await Promise.all([
+      api.get<IpamInfo>(`${base}/ipam`).catch(() => null),
+      api.get<{ hosts: IpamHost[] }>(`${base}/hosts`).catch(() => null),
+    ]);
+    if (ipam) {
+      out.add(ipam.gateway);
+      out.add(ipam.range_start);
+      out.add(ipam.range_end);
     }
-    for (const h of form.hosts ?? []) if (h.ip) out.add(h.ip);
-  }
+    for (const h of hosts?.hosts ?? []) out.add(h.ip);
+  }));
   return [...out].sort();
 }
 
@@ -3266,6 +3253,18 @@ setHtml(content, `
   else await renderVmBody(vm);
 }
 
+/// A network's IPAM, from the daemon (`GET /networks/{name}/ipam`).
+interface IpamInfo {
+  serving: boolean; gateway: string; prefix: number;
+  range_start: string; range_end: string; range_size: number; range_used: number;
+  dns_forwarders: string[]; domain: string | null; lease_secs: number;
+}
+/// One reservation (`GET /networks/{name}/hosts`).
+interface IpamHost {
+  mac: string; ip: string; name: string | null; dynamic: boolean;
+  vm: string | null; vm_name: string | null; seen_ms: number;
+}
+
 async function renderVmBody(vm: string) {
   if (!selectedConn) return;
   const conn = selectedConn; // narrowed copy for the nested closures below
@@ -3540,8 +3539,9 @@ async function renderVmBody(vm: string) {
     let nics: Nic[] = [];
     let nets: NetworkSummary[] = [];
     let running = false;
-    // Network name -> its form (subnet, DHCP range, reservations).
-    const netForms = new Map<string, ReturnType<typeof networkFormFromXml>>();
+    // Network name -> its IPAM state (subnet, range) and reservations, from
+    // the daemon's own IPAM. Absent for a network it does not serve.
+    const netIpam = new Map<string, { ipam: IpamInfo; hosts: IpamHost[] }>();
     try {
       const [ifs, ns, info] = await Promise.all([
         api.get<{ interfaces: Nic[] }>(`/proxy/${conn}/domains/${encVm}/interfaces`),
@@ -3553,9 +3553,14 @@ async function renderVmBody(vm: string) {
       running = info.active === true;
       const used = [...new Set(nics.map((n) => n.network).filter(Boolean) as string[])];
       await Promise.all(used.map(async (name) => {
-        const { xml } = await api.get<{ xml: string }>(`/proxy/${conn}/networks/${encodeURIComponent(name)}/xml`)
-          .catch(() => ({ xml: "" }));
-        if (xml) netForms.set(name, networkFormFromXml(xml));
+        const base = `/proxy/${conn}/networks/${encodeURIComponent(name)}`;
+        try {
+          const [ipam, h] = await Promise.all([
+            api.get<IpamInfo>(`${base}/ipam`),
+            api.get<{ hosts: IpamHost[] }>(`${base}/hosts`),
+          ]);
+          netIpam.set(name, { ipam, hosts: h.hosts });
+        } catch { /* not served here (no IPv4 subnet): no IPAM for it */ }
       }));
     } catch (e) {
       setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -3563,10 +3568,9 @@ async function renderVmBody(vm: string) {
     }
     if (!stillCurrentVm(conn, vm, "network")) return;
 
-    const reservation = (n: Nic) => {
-      const f = n.network ? netForms.get(n.network) : undefined;
-      return f?.hosts?.find((h) => h.mac.toLowerCase() === (n.mac ?? "").toLowerCase());
-    };
+    const reservation = (n: Nic) =>
+      (n.network ? netIpam.get(n.network)?.hosts : undefined)
+        ?.find((h) => h.mac === (n.mac ?? "").toLowerCase());
     const fmtRateCell = (v: number | null) => (v ? `${v} Mbps` : "Unlimited");
     const liveNote = running
       ? "Changes apply to the running guest immediately and are kept for its next boot."
@@ -3579,13 +3583,15 @@ async function renderVmBody(vm: string) {
         <tr><th>Device</th><th>MAC</th><th>Network</th><th>Model</th><th>IPAM address</th><th>RX limit</th><th>TX limit</th><th class="col-actions"></th></tr>
         ${nics.map((n, i) => {
           const r = reservation(n);
-          const hasDhcp = !!(n.network && netForms.get(n.network)?.ip);
+          const hasDhcp = !!(n.network && netIpam.has(n.network));
           return `<tr data-nic="${i}">
             <td>${esc(n.dev ?? "—")}</td>
             <td><code>${esc(n.mac ?? "—")}</code></td>
             <td>${esc(n.network ?? "—")}</td>
             <td>${esc(n.model ?? "—")}</td>
-            <td>${r ? esc(r.ip) : `<span class="state">${hasDhcp ? "Dynamic" : "No DHCP"}</span>`}</td>
+            <td>${r
+              ? `${esc(r.ip)}${r.dynamic ? ` <span class="state" title="Assigned from the range when the guest first asked; kept until the VM is deleted">auto</span>` : ""}`
+              : `<span class="state">${hasDhcp ? "Not yet assigned" : "No DHCP"}</span>`}</td>
             <td>${fmtRateCell(n.rx_mbps)}</td>
             <td>${fmtRateCell(n.tx_mbps)}</td>
             <td class="col-actions">
@@ -3676,39 +3682,40 @@ async function renderVmBody(vm: string) {
     body.querySelectorAll("[data-nic-ipam]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => {
         const n = nics[Number((b as HTMLElement).dataset.nicIpam)];
-        const form = n?.network ? netForms.get(n.network) : undefined;
-        if (!n?.mac || !n.network || !form?.ip) return;
+        const ipamNet = n?.network ? netIpam.get(n.network) : undefined;
+        const mac = n?.mac;
+        if (!mac || !n.network || !ipamNet) return;
+        const { ipam } = ipamNet;
         const current = reservation(n);
-        const range = form.dhcp_start && form.dhcp_end
-          ? { start: form.dhcp_start, end: form.dhcp_end } : undefined;
         const suggested = current?.ip
-          ?? nextFreeIp(form.ip, (form.hosts ?? []).map((h) => h.ip), range) ?? "";
+          ?? nextFreeIp(`${ipam.gateway}/${ipam.prefix}`, ipamNet.hosts.map((h) => h.ip),
+            { start: ipam.range_start, end: ipam.range_end }) ?? "";
         const el = openModal(`IPAM address — ${n.mac}`, `
-          <label class="field"><span>IP address on ${esc(n.network)} (${esc(form.ip)})</span>
-            <input id="ipam-ip" value="${esc(suggested)}" placeholder="blank = dynamic"></label>
+          <label class="field"><span>IP address on ${esc(n.network)} (${esc(ipam.gateway)}/${ipam.prefix})</span>
+            <input id="ipam-ip" value="${esc(suggested)}" placeholder="blank = assign automatically"></label>
           <label class="field"><span>Hostname (optional)</span>
             <input id="ipam-name" value="${esc(current?.name ?? vm)}"></label>
-          <div class="dsub">Takes effect at once for new leases, without restarting the network.
-            A running guest picks it up when it renews its lease.</div>`,
-          `${current ? `<button class="btn danger" id="ipam-clear">Make dynamic</button>` : ""}
+          <div class="dsub">The guest gets this address at its next DHCP exchange; nothing is restarted.
+            Every address is kept until the VM is deleted.</div>`,
+          `${current ? `<button class="btn danger" id="ipam-clear">Release</button>` : ""}
            <button class="btn primary" id="ipam-ok">Save</button>`);
         const hostUrl = `/proxy/${conn}/networks/${encodeURIComponent(n.network)}/hosts`;
         $("#ipam-ok", el).onclick = async () => {
           const ip = ($("#ipam-ip", el) as HTMLInputElement).value.trim();
           try {
-            if (!ip) await api.del(`${hostUrl}/${encodeURIComponent(n.mac!)}`);
-            else await api.put(hostUrl, { mac: n.mac, ip, name: ($("#ipam-name", el) as HTMLInputElement).value.trim() || undefined });
+            if (!ip) await api.del(`${hostUrl}/${encodeURIComponent(mac)}`);
+            else await api.put(hostUrl, { mac, ip, name: ($("#ipam-name", el) as HTMLInputElement).value.trim() || undefined });
             el.remove();
-            toast(ip ? `Reserved ${ip}` : "Address is dynamic");
+            toast(ip ? `Reserved ${ip}` : "Released: the guest gets an address from the range at its next DHCP");
             reload();
           } catch (e) { toast((e as Error).message, "bad"); }
         };
         const clear = $("#ipam-clear", el);
         if (clear) clear.onclick = async () => {
           try {
-            await api.del(`${hostUrl}/${encodeURIComponent(n.mac!)}`);
+            await api.del(`${hostUrl}/${encodeURIComponent(mac)}`);
             el.remove();
-            toast("Address is dynamic");
+            toast("Released: the guest gets an address from the range at its next DHCP");
             reload();
           } catch (e) { toast((e as Error).message, "bad"); }
         };
@@ -4903,10 +4910,11 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
       // Defined shut off: creating a guest must not also boot it, so a
       // mis-sized or mis-configured VM cannot start eating resources before
       // it has been reviewed. Start it deliberately from the VM view.
+      // No IPAM step: the daemon's DHCP server gives each NIC an address the
+      // first time it asks and keeps it until the VM is deleted. (Allocating
+      // here rewrote the network definition, which restarted it and
+      // disconnected every other guest on it.)
       await api.postXml(`/proxy/${conn}/domains?start=false`, withDevices(domainXml(form), devices));
-      // Give each of the new guest's NICs a static DHCP allocation in its
-      // network, so it keeps a stable IP.
-      await autoAllocateIpam(conn, form.name);
     });
     toast("VM created");
     renderConn();

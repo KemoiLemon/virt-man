@@ -58,7 +58,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn build(auth: Auth) -> Router {
+pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
     let fw = firewall::FirewallState::new();
     let authed = Router::new()
         .merge(health::routes())
@@ -66,6 +66,7 @@ pub fn build(auth: Auth) -> Router {
         .merge(metrics::routes())
         .merge(domains::routes())
         .merge(networks::routes())
+        .merge(networks::ipam_routes(ipam))
         .merge(filters::routes())
         .merge(pools::routes())
         .merge(volumes::routes())
