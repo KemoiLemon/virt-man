@@ -61,24 +61,22 @@ fn api_key_user(state: &AppState, req: &Request) -> Option<User> {
     let store = state.read();
     let api_key = store.api_keys.iter().find(|k| k.hash == hash)?;
     let mut user = store.user_by_id(&api_key.user_id).cloned()?;
-    // A key can only narrow its owner. Collapse the intersection into the
-    // user's own overrides so every downstream permission() call sees the
-    // capped values without knowing a key was involved.
-    user.scopes = store.key_effective_scopes(&user, api_key);
+    // A key can only narrow its owner: `Store::privs` intersects with this,
+    // so every check sees the cap without knowing a key was involved. An empty
+    // list means "whatever the owner has".
+    if !api_key.privs.is_empty() {
+        user.key_privs = Some(api_key.privs.iter().cloned().collect());
+    }
     Some(user)
 }
 
+pub const LOCAL_ID: &str = "local";
+
 /// Synthetic user for loopback mode (no auth): full admin.
 pub fn local_user() -> User {
-    User {
-        id: "local".into(),
-        username: "local".into(),
-        password_hash: String::new(),
-        role: "admin".into(),
-        nickname: "local".into(),
-        avatar: None,
-        scopes: Default::default(),
-    }
+    let mut u = User::new("local".into(), String::new(), "local".into());
+    u.id = LOCAL_ID.into();
+    u
 }
 
 /// Middleware factory: require authentication (session cookie or API key) and
@@ -106,18 +104,17 @@ pub fn require_user(
 }
 
 /// Middleware factory: require the authenticated user (set by `require_user`)
-/// to hold `scope` permission at the given level (read or write).
-pub fn require_scope(
+/// to hold `privilege` at `path`.
+pub fn require_priv(
     state: AppState,
-    scope: &'static str,
-    write: bool,
+    path: &'static str,
+    privilege: &'static str,
 ) -> impl Fn(Extension<User>, Request, Next) -> Pin<Box<dyn Future<Output = Response> + Send>> + Clone
 {
     move |Extension(user): Extension<User>, req: Request, next: Next| {
         let state = state.clone();
         Box::pin(async move {
-            let allowed = state.read().can(&user, scope, write);
-            if allowed {
+            if state.read().can(&user, path, privilege) {
                 next.run(req).await
             } else {
                 StatusCode::FORBIDDEN.into_response()
@@ -131,11 +128,19 @@ pub fn user_json(u: &User) -> serde_json::Value {
     serde_json::json!({
         "id": u.id,
         "username": u.username,
-        "role": u.role,
         "nickname": u.nickname,
         "avatar": u.avatar,
-        "scopes": u.scopes,
     })
+}
+
+/// A user as they see themselves: what they may do at `/`, so the SPA can
+/// hide what the API would refuse. Cosmetic only; the API checks every call.
+pub fn me_json(store: &crate::store::Store, u: &User) -> serde_json::Value {
+    let mut v = user_json(u);
+    v["admin"] = serde_json::json!(store.is_admin(u));
+    v["privs"] = serde_json::json!(store.privs(u, "/"));
+    v["quota"] = serde_json::json!(u.quota);
+    v
 }
 
 #[cfg(test)]

@@ -60,19 +60,17 @@ async fn setup(
         return Err(ApiError::conflict("already set up"));
     }
 
-    let user = User {
-        id: random_hex(8),
-        username,
-        password_hash: auth::hash_password(&password)?,
-        role: "admin".into(),
-        nickname: if req.nickname.trim().is_empty() {
-            "admin".to_string()
-        } else {
-            req.nickname.trim().to_string()
-        },
-        avatar: None,
-        scopes: Default::default(),
+    let nickname = match req.nickname.trim() {
+        "" => "admin".to_string(),
+        n => n.to_string(),
     };
+    let user = User::new(username, auth::hash_password(&password)?, nickname);
+    store.acl.push(crate::perm::AclEntry {
+        path: "/".into(),
+        ugid: format!("user:{}", user.id),
+        role: crate::perm::ADMIN_ROLE.into(),
+        propagate: true,
+    });
     store.users.push(user.clone());
     store.save(&state.data_dir)?;
     drop(store);
@@ -123,7 +121,8 @@ fn login_response(state: &AppState, username: &str, password: &str) -> Result<Re
         axum::http::header::SET_COOKIE,
         auth::session_cookie(&token).parse().unwrap(),
     );
-    Ok((headers, Json(auth::user_json(&user))).into_response())
+    let body = auth::me_json(&state.read(), &user);
+    Ok((headers, Json(body)).into_response())
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -150,6 +149,9 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     (headers, Json(json!({"logged_out": true}))).into_response()
 }
 
-async fn me(axum::extract::Extension(user): axum::extract::Extension<User>) -> Json<Value> {
-    Json(auth::user_json(&user))
+async fn me(
+    State(state): State<AppState>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
+) -> Json<Value> {
+    Json(auth::me_json(&state.read(), &user))
 }

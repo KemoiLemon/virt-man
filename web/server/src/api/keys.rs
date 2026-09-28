@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::ApiError;
 use crate::auth;
 use crate::state::AppState;
-use crate::store::{random_hex, random_name, sha256_hex, ApiKey, Scopes, User};
+use crate::store::{random_hex, random_name, sha256_hex, ApiKey, User};
 
 pub fn routes(state: &AppState) -> Router<AppState> {
     // Own keys (any authenticated user), plus admin-wide listing/creation and
@@ -28,7 +28,7 @@ fn key_json(k: &ApiKey) -> Value {
         "name": k.name,
         "prefix": k.prefix,
         "user_id": k.user_id,
-        "scopes": k.scopes,
+        "privs": k.privs,
     })
 }
 
@@ -50,7 +50,7 @@ async fn all_keys(
     State(state): State<AppState>,
     axum::extract::Extension(user): axum::extract::Extension<User>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "users", false)?;
+    super::enforce(&state, &user, "/", "Permissions.Modify")?;
     let keys: Vec<Value> = state.read().api_keys.iter().map(key_json).collect();
     Ok(Json(json!(keys)))
 }
@@ -61,9 +61,9 @@ struct CreateKeyReq {
     /// inventing a label.
     #[serde(default)]
     name: String,
-    /// Per-scope ceiling. Omitted or empty means "inherit the owner".
+    /// Privilege ceiling. Omitted or empty means "inherit the owner".
     #[serde(default)]
-    scopes: Scopes,
+    privs: Vec<String>,
     /// Admin-only: whose key this is. Defaults to the caller.
     #[serde(default)]
     user_id: Option<String>,
@@ -84,7 +84,7 @@ async fn create_any_key(
     axum::extract::Extension(user): axum::extract::Extension<User>,
     Json(req): Json<CreateKeyReq>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "users", true)?;
+    super::enforce(&state, &user, "/", "Permissions.Modify")?;
     let owner = req.user_id.clone().unwrap_or_else(|| user.id.clone());
     issue_key(&state, &owner, req)
 }
@@ -94,7 +94,7 @@ fn issue_key(state: &AppState, owner_id: &str, req: CreateKeyReq) -> Result<Json
         "" => random_name(),
         n => n.to_string(),
     };
-    super::users::validate_scopes(&req.scopes)?;
+    let privs = super::roles::validate_privs(&req.privs)?;
 
     let mut store = state.write();
     if store.user_by_id(owner_id).is_none() {
@@ -108,7 +108,8 @@ fn issue_key(state: &AppState, owner_id: &str, req: CreateKeyReq) -> Result<Json
         name,
         hash: sha256_hex(key.as_bytes()),
         prefix: key[..11].to_string(),
-        scopes: req.scopes,
+        privs,
+        scopes: Default::default(),
     };
     store.api_keys.push(api_key.clone());
     store.save(&state.data_dir)?;
@@ -117,7 +118,7 @@ fn issue_key(state: &AppState, owner_id: &str, req: CreateKeyReq) -> Result<Json
         "name": api_key.name,
         "prefix": api_key.prefix,
         "user_id": api_key.user_id,
-        "scopes": api_key.scopes,
+        "privs": api_key.privs,
         "key": key,
     })))
 }
@@ -145,7 +146,7 @@ async fn delete_any_key(
     Path(id): Path<String>,
     axum::extract::Extension(user): axum::extract::Extension<User>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "users", true)?;
+    super::enforce(&state, &user, "/", "Permissions.Modify")?;
     let mut store = state.write();
     let Some(pos) = store.api_keys.iter().position(|k| k.id == id) else {
         return Err(ApiError::not_found("no such API key"));

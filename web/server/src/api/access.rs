@@ -1,5 +1,6 @@
 //! `GET /access-logs`: guest connections, filtered, grouped and sorted.
-//! Needs read access to VMs, like the rest of what guests do.
+//! A whole server's log names every guest's traffic, so it needs
+//! `Sys.Modify` on the node; one guest's log needs `VM.Audit` on that guest.
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -24,7 +25,21 @@ async fn logs(
     axum::extract::Extension(user): axum::extract::Extension<User>,
     Query(q): Query<access::Query>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "vms", false)?;
+    if q.vm.is_empty() {
+        super::enforce(
+            &state,
+            &user,
+            &crate::perm::node_path(&q.conn),
+            "Sys.Modify",
+        )?;
+    } else {
+        super::enforce(
+            &state,
+            &user,
+            &crate::perm::vm_path(&q.conn, &q.vm),
+            "VM.Audit",
+        )?;
+    }
     if state.read().connection(&q.conn).is_none() {
         return Err(ApiError::not_found("no such connection"));
     }
@@ -49,7 +64,12 @@ async fn vms(
     axum::extract::Extension(user): axum::extract::Extension<User>,
     Query(q): Query<VmsQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "vms", false)?;
+    super::enforce(
+        &state,
+        &user,
+        &crate::perm::node_path(&q.conn),
+        "Sys.Modify",
+    )?;
     let a = state.access.clone();
     let names = tokio::task::spawn_blocking(move || a.vms(&q.conn))
         .await

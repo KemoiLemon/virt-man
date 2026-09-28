@@ -46,22 +46,18 @@ pub fn routes(state: &AppState) -> Router<AppState> {
     let read = Router::new()
         .route("/connections", get(list))
         .route("/connections/{id}/test", get(test))
-        .route("/connections/{id}/cert", get(fetch_cert))
-        .layer(middleware::from_fn(auth::require_scope(
-            state.clone(),
-            "connections",
-            false,
-        )));
+        // Each handler checks its own daemon: listing filters by it.
+        .route("/connections/{id}/cert", get(fetch_cert));
     let write = Router::new()
         .route("/connections", axum::routing::post(create))
         .route(
             "/connections/{id}",
             axum::routing::put(update).delete(remove),
         )
-        .layer(middleware::from_fn(auth::require_scope(
+        .layer(middleware::from_fn(auth::require_priv(
             state.clone(),
-            "connections",
-            true,
+            "/",
+            "Sys.Modify",
         )));
     Router::new()
         .merge(read)
@@ -85,12 +81,17 @@ fn conn_json(c: &Connection, health: Option<&crate::health::DaemonHealth>) -> Va
     })
 }
 
-async fn list(State(state): State<AppState>) -> Json<Value> {
+/// The daemons the caller may see: those they hold `Sys.Audit` on.
+async fn list(
+    State(state): State<AppState>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
+) -> Json<Value> {
     let health = state.health.read().expect("health lock poisoned").clone();
-    let conns: Vec<Value> = state
-        .read()
+    let store = state.read();
+    let conns: Vec<Value> = store
         .connections
         .iter()
+        .filter(|c| store.can(&user, &crate::perm::node_path(&c.id), "Sys.Audit"))
         .map(|c| conn_json(c, health.get(&c.id)))
         .collect();
     Json(json!(conns))
@@ -218,6 +219,14 @@ async fn remove(
             return Err(ApiError::not_found("no such connection"));
         };
         store.connections.remove(pos);
+        store.resources.retain(|r| r.conn != id);
+        let node = crate::perm::node_path(&id);
+        store
+            .acl
+            .retain(|e| e.path != node && !e.path.starts_with(&format!("{node}/")));
+        for u in &mut store.users {
+            u.quota.daemons.remove(&id);
+        }
         store.save(&state.data_dir)?;
     }
     // A removed server takes its graphs with it. The collector would also do
@@ -247,7 +256,7 @@ async fn fetch_cert(
     Path(id): Path<String>,
     axum::extract::Extension(user): axum::extract::Extension<User>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "connections", false)?;
+    super::enforce(&state, &user, "/", "Sys.Modify")?;
     let url = {
         let store = state.read();
         let Some(c) = store.connection(&id) else {
@@ -265,7 +274,9 @@ async fn fetch_cert(
 async fn test(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
 ) -> Result<Json<Value>, ApiError> {
+    super::enforce(&state, &user, &crate::perm::node_path(&id), "Sys.Audit")?;
     let conn = {
         let store = state.read();
         store.connection(&id).cloned()

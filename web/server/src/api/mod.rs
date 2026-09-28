@@ -1,5 +1,6 @@
 pub mod access;
 pub mod activity;
+pub mod admin;
 pub mod auth;
 pub mod connections;
 pub mod health;
@@ -65,10 +66,10 @@ impl From<String> for ApiError {
     }
 }
 
-/// Scope permission check for handlers. Called after `require_user` has put
-/// the user in request extensions.
-pub fn enforce(state: &AppState, user: &User, scope: &str, write: bool) -> Result<(), ApiError> {
-    if state.read().can(user, scope, write) {
+/// Privilege check for handlers. Called after `require_user` has put the
+/// user in request extensions.
+pub fn enforce(state: &AppState, user: &User, path: &str, privilege: &str) -> Result<(), ApiError> {
+    if state.read().can(user, path, privilege) {
         Ok(())
     } else {
         Err(ApiError::forbidden())
@@ -86,6 +87,7 @@ pub fn build(state: AppState) -> axum::Router<AppState> {
         .merge(profile::routes(&state))
         .merge(keys::routes(&state))
         .merge(activity::routes(&state))
+        .merge(admin::routes(&state))
         .merge(access::routes(&state))
         .merge(history::routes(&state))
         .merge(uploads::routes(&state))

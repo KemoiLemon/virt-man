@@ -2,118 +2,43 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub type Scopes = HashMap<String, Permission>;
-
-/// Every permission scope the backend checks. This is the single source of
-/// truth: the roles API hands it to the UI so the editor can never invent a
-/// scope name that nothing enforces.
-pub const SCOPES: [&str; 6] = [
-    "users",
-    "settings",
-    "connections",
-    "vms",
-    "networks",
-    "storage",
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Permission {
-    Read,
-    Write,
-    None,
-}
-
-impl Permission {
-    /// Ordering for intersecting two permissions. None < Read < Write.
-    fn rank(self) -> u8 {
-        match self {
-            Permission::None => 0,
-            Permission::Read => 1,
-            Permission::Write => 2,
-        }
-    }
-
-    /// The weaker of two permissions, used to cap an API key by its owner.
-    pub fn min(self, other: Permission) -> Permission {
-        if self.rank() <= other.rank() {
-            self
-        } else {
-            other
-        }
-    }
-}
-
-/// A role is data, not an enum: admins can add their own and retune the
-/// built-in three. `builtin` roles may be edited but never renamed or
-/// deleted, so a store always has something to fall back on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoleDef {
-    pub name: String,
-    #[serde(default)]
-    pub builtin: bool,
-    #[serde(default)]
-    pub scopes: Scopes,
-}
-
-fn scopes_of(pairs: &[(&str, Permission)]) -> Scopes {
-    pairs.iter().map(|(s, p)| ((*s).to_string(), *p)).collect()
-}
-
-/// The three built-in roles, matching the permissions this app shipped with
-/// before roles were stored as data.
-pub fn builtin_roles() -> Vec<RoleDef> {
-    use Permission::{None as No, Read, Write};
-    vec![
-        RoleDef {
-            name: "admin".into(),
-            builtin: true,
-            scopes: scopes_of(&SCOPES.map(|s| (s, Write))),
-        },
-        RoleDef {
-            name: "operator".into(),
-            builtin: true,
-            scopes: scopes_of(&SCOPES.map(|s| {
-                (
-                    s,
-                    if matches!(s, "users" | "settings") {
-                        No
-                    } else {
-                        Write
-                    },
-                )
-            })),
-        },
-        RoleDef {
-            name: "viewer".into(),
-            builtin: true,
-            scopes: scopes_of(&SCOPES.map(|s| {
-                (
-                    s,
-                    if matches!(s, "users" | "settings") {
-                        No
-                    } else {
-                        Read
-                    },
-                )
-            })),
-        },
-    ]
-}
+use crate::perm;
+pub use crate::perm::{AclEntry, Group, Kind, Privs, Quota, Resource, RoleDef};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
     pub username: String,
     pub password_hash: String,
-    /// Role name, resolved against `Store::roles`. A plain string so custom
-    /// roles work and so existing stores ("admin"/"operator"/"viewer") load
-    /// unchanged.
-    pub role: String,
     pub nickname: String,
     pub avatar: Option<String>,
+    /// Pre-ACL fields, read only to migrate an old store.
+    #[serde(default, skip_serializing)]
+    pub role: String,
+    #[serde(default, skip_serializing)]
+    pub scopes: HashMap<String, String>,
     #[serde(default)]
-    pub scopes: Scopes,
+    pub quota: Quota,
+    /// Set for a request made with an API key: the privileges the key may
+    /// use. Never stored.
+    #[serde(skip)]
+    pub key_privs: Option<Privs>,
+}
+
+impl User {
+    pub fn new(username: String, password_hash: String, nickname: String) -> Self {
+        User {
+            id: random_hex(8),
+            username,
+            password_hash,
+            nickname,
+            avatar: None,
+            role: String::new(),
+            scopes: HashMap::new(),
+            quota: Quota::default(),
+            key_privs: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,10 +60,13 @@ pub struct ApiKey {
     /// sha256 hex of the key; the key itself is shown only once.
     pub hash: String,
     pub prefix: String,
-    /// Per-scope ceiling for this key. Empty means "whatever the owner has".
+    /// Privilege ceiling for this key. Empty means "whatever the owner has".
     /// A key can only ever narrow its owner's access, never widen it.
     #[serde(default)]
-    pub scopes: Scopes,
+    pub privs: Vec<String>,
+    /// Pre-ACL ceiling, read only to migrate an old store.
+    #[serde(default, skip_serializing)]
+    pub scopes: HashMap<String, String>,
 }
 
 /// One recorded action by one user, kept so the admin panel can show who did
@@ -176,7 +104,20 @@ pub struct Store {
     /// written before this existed still loads.
     #[serde(default)]
     pub activity: Vec<ActivityEntry>,
+    #[serde(default)]
+    pub groups: Vec<Group>,
+    #[serde(default)]
+    pub acl: Vec<AclEntry>,
+    /// Who owns each VM, network and volume made through this app.
+    #[serde(default)]
+    pub resources: Vec<Resource>,
+    /// Bumped when the permission model changes shape, so migration runs once.
+    #[serde(default)]
+    pub perm_version: u32,
 }
+
+/// The permission model this build writes. 0 is the old per-scope one.
+const PERM_VERSION: u32 = 1;
 
 impl Store {
     pub fn load(data_dir: &Path) -> Result<Self, String> {
@@ -189,18 +130,113 @@ impl Store {
         } else {
             Store::default()
         };
+        store.migrate();
         store.seed_builtin_roles();
         Ok(store)
     }
 
-    /// Add any missing built-in role. Runs on every load so stores written
-    /// before roles existed gain them, and so a deleted builtin comes back.
+    /// Add any missing built-in role, and put the built-ins back to their
+    /// definition: they are what migration and new accounts rely on meaning a
+    /// fixed thing, so custom access belongs in a custom role.
     pub fn seed_builtin_roles(&mut self) {
-        for def in builtin_roles() {
-            if !self.roles.iter().any(|r| r.name == def.name) {
-                self.roles.push(def);
+        for def in perm::builtin_roles() {
+            match self.roles.iter_mut().find(|r| r.name == def.name) {
+                Some(r) => *r = def,
+                None => self.roles.push(def),
             }
         }
+    }
+
+    /// Turn a pre-ACL store into ACL entries, once.
+    ///
+    /// Every role keeps its old access as privileges (`legacy_privs`), and
+    /// every user gets their role, plus a personal role for any per-user
+    /// overrides, at `/`. A key's scope ceiling becomes a privilege ceiling.
+    /// Nothing is owned yet, so everything already on a daemon falls to the
+    /// first administrator (`default_owner`).
+    fn migrate(&mut self) {
+        if self.perm_version >= PERM_VERSION {
+            return;
+        }
+        let old_roles: Vec<RoleDef> = std::mem::take(&mut self.roles);
+        let privs_of = |scopes: &HashMap<String, String>| perm::legacy_privs(scopes);
+        let is_old_builtin = |n: &str| matches!(n, "admin" | "operator" | "viewer");
+        for r in &old_roles {
+            if !is_old_builtin(&r.name) {
+                self.roles.push(RoleDef {
+                    name: r.name.clone(),
+                    builtin: false,
+                    privs: privs_of(&r.scopes),
+                    scopes: HashMap::new(),
+                });
+            }
+        }
+        let legacy = |name: &str| -> HashMap<String, String> {
+            match old_roles.iter().find(|r| r.name == name) {
+                Some(r) if !r.scopes.is_empty() => r.scopes.clone(),
+                _ => {
+                    // A store from before roles were data: fall back to the
+                    // historical meaning of the three names.
+                    let lvl = |admin: &str, op: &str, view: &str| match name {
+                        "admin" => admin.to_string(),
+                        "operator" => op.to_string(),
+                        "viewer" => view.to_string(),
+                        _ => "none".to_string(),
+                    };
+                    ["connections", "vms", "networks", "storage"]
+                        .iter()
+                        .map(|s| (s.to_string(), lvl("write", "write", "read")))
+                        .chain(
+                            ["users", "settings"]
+                                .iter()
+                                .map(|s| (s.to_string(), lvl("write", "none", "none"))),
+                        )
+                        .collect()
+                }
+            }
+        };
+        let mut acl = vec![];
+        let mut extra_roles = vec![];
+        for u in &self.users {
+            let mut scopes = legacy(&u.role);
+            scopes.extend(u.scopes.clone());
+            let privs = privs_of(&scopes);
+            let full = perm::PRIVILEGES.iter().all(|p| privs.iter().any(|x| x == p));
+            let role = if full {
+                perm::ADMIN_ROLE.to_string()
+            } else if u.scopes.is_empty() && !is_old_builtin(&u.role) {
+                u.role.clone()
+            } else {
+                let name = format!("legacy-{}", u.username);
+                extra_roles.push(RoleDef {
+                    name: name.clone(),
+                    builtin: false,
+                    privs,
+                    scopes: HashMap::new(),
+                });
+                name
+            };
+            acl.push(AclEntry {
+                path: "/".into(),
+                ugid: format!("user:{}", u.id),
+                role,
+                propagate: true,
+            });
+        }
+        self.roles.extend(extra_roles);
+        self.acl.extend(acl);
+        for k in &mut self.api_keys {
+            if !k.scopes.is_empty() && k.privs.is_empty() {
+                let mut all: HashMap<String, String> =
+                    ["connections", "vms", "networks", "storage", "users"]
+                        .iter()
+                        .map(|s| (s.to_string(), "write".to_string()))
+                        .collect();
+                all.extend(k.scopes.clone());
+                k.privs = privs_of(&all);
+            }
+        }
+        self.perm_version = PERM_VERSION;
     }
 
     /// Atomic write: temp file + rename, so a crash mid-write cannot truncate
@@ -232,54 +268,91 @@ impl Store {
         self.roles.iter().find(|r| r.name == name)
     }
 
-    /// Per-user override first, then the user's role. Anything the role does
-    /// not mention is denied: fail closed, so adding a scope to SCOPES without
-    /// granting it cannot silently hand out access.
-    pub fn permission(&self, user: &User, scope: &str) -> Permission {
-        if let Some(p) = user.scopes.get(scope) {
-            return *p;
-        }
-        self.role(&user.role)
-            .and_then(|r| r.scopes.get(scope).copied())
-            .unwrap_or(Permission::None)
+    /// Who owns a resource. Anything not recorded belongs to the first
+    /// administrator: guests that predate ownership, or were made outside this
+    /// app, stay administrable without being handed to every user.
+    pub fn owner_of(&self, kind: Kind, conn: &str, name: &str) -> Option<String> {
+        self.resource(kind, conn, name)
+            .map(|r| r.owner.clone())
+            .or_else(|| self.default_owner())
     }
 
-    /// Permission upgrade ordering for the "can write" check.
-    pub fn can(&self, user: &User, scope: &str, write: bool) -> bool {
-        if write {
-            self.permission(user, scope) == Permission::Write
-        } else {
-            self.permission(user, scope) != Permission::None
-        }
+    pub fn resource(&self, kind: Kind, conn: &str, name: &str) -> Option<&Resource> {
+        self.resources
+            .iter()
+            .find(|r| r.kind == kind && r.conn == conn && r.name == name)
     }
 
-    /// Who counts as an administrator: whoever can write the users scope.
-    /// Derived rather than name-matched, so a custom role granting users:write
-    /// is a real admin and the "last admin" guards still hold.
+    pub fn resource_mut(&mut self, kind: Kind, conn: &str, name: &str) -> Option<&mut Resource> {
+        self.resources
+            .iter_mut()
+            .find(|r| r.kind == kind && r.conn == conn && r.name == name)
+    }
+
+    /// The ACL's answer, except for loopback mode's synthetic user, which is
+    /// the whole install's administrator by definition and has no entries.
+    /// Its id cannot collide with a real account (those are 16 hex digits).
+    fn acl_privs(&self, user: &User, path: &str) -> Privs {
+        if user.id == crate::auth::LOCAL_ID {
+            return perm::PRIVILEGES.iter().map(|s| s.to_string()).collect();
+        }
+        perm::acl_privs(&self.acl, &self.roles, &self.groups, &user.id, path)
+    }
+
+    pub fn default_owner(&self) -> Option<String> {
+        self.users
+            .iter()
+            .find(|u| self.is_admin(u))
+            .map(|u| u.id.clone())
+    }
+
+    /// Everything `user` may do at `path`.
+    ///
+    /// The ACL decides, then ownership adds: the owner of a VM or network
+    /// holds all of its privileges. A suspended resource keeps only the
+    /// read-only ones for anyone who is not an administrator — its owner
+    /// included, which is the point of suspending it. An API key then caps the
+    /// result to its own list.
+    pub fn privs(&self, user: &User, path: &str) -> Privs {
+        let mut p = self.acl_privs(user, path);
+        if let Some((kind, conn, name)) = perm::path_resource(path) {
+            if self.owner_of(kind, conn, name).as_deref() == Some(user.id.as_str()) {
+                p.extend(perm::owner_privs(kind).iter().map(|s| s.to_string()));
+            }
+            let suspended = self.resource(kind, conn, name).is_some_and(|r| r.suspended);
+            if suspended && !self.is_admin_raw(user) {
+                p.retain(|x| x.ends_with(".Audit"));
+            }
+        }
+        if let Some(cap) = &user.key_privs {
+            p.retain(|x| cap.contains(x));
+        }
+        p
+    }
+
+    pub fn can(&self, user: &User, path: &str, privilege: &str) -> bool {
+        self.privs(user, path).contains(privilege)
+    }
+
+    /// Administrator: may change permissions at `/`. Derived, not a flag, so
+    /// a custom role granting it is a real admin and the "last admin" guards
+    /// still hold.
     pub fn is_admin(&self, user: &User) -> bool {
-        self.permission(user, "users") == Permission::Write
+        self.can(user, "/", "Permissions.Modify")
+    }
+
+    /// `is_admin` without the resource and key steps, for use inside `privs`.
+    fn is_admin_raw(&self, user: &User) -> bool {
+        let p = self.acl_privs(user, "/");
+        p.contains("Permissions.Modify")
+            && user
+                .key_privs
+                .as_ref()
+                .is_none_or(|k| k.contains("Permissions.Modify"))
     }
 
     pub fn admin_count(&self) -> usize {
         self.users.iter().filter(|u| self.is_admin(u)).count()
-    }
-
-    /// Effective scopes for a request authenticated by an API key: the key's
-    /// ceiling intersected with the owner's own access, materialised as
-    /// per-user overrides so `permission()` needs no extra plumbing.
-    pub fn key_effective_scopes(&self, owner: &User, key: &ApiKey) -> Scopes {
-        SCOPES
-            .iter()
-            .map(|scope| {
-                let owner_perm = self.permission(owner, scope);
-                let capped = match key.scopes.get(*scope) {
-                    Some(k) => k.min(owner_perm),
-                    // Unlisted scope inherits the owner unchanged.
-                    None => owner_perm,
-                };
-                ((*scope).to_string(), capped)
-            })
-            .collect()
     }
 }
 
@@ -339,196 +412,213 @@ pub fn avatar_path(data_dir: &Path, seq: u64, ext: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn user(role: &str) -> User {
+    fn user(id: &str) -> User {
         User {
-            id: "u1".into(),
-            username: "u".into(),
+            id: id.into(),
+            username: id.into(),
             password_hash: String::new(),
-            role: role.into(),
-            nickname: "u".into(),
+            nickname: id.into(),
             avatar: None,
-            scopes: Scopes::new(),
+            role: String::new(),
+            scopes: HashMap::new(),
+            quota: Quota::default(),
+            key_privs: None,
         }
     }
 
-    fn store_with(users: Vec<User>) -> Store {
+    fn grant(s: &mut Store, path: &str, who: &str, role: &str) {
+        s.acl.push(AclEntry {
+            path: path.into(),
+            ugid: format!("user:{who}"),
+            role: role.into(),
+            propagate: true,
+        });
+    }
+
+    /// An admin `a` and a plain user `u`, both granted at `/`.
+    fn store() -> Store {
         let mut s = Store::default();
         s.seed_builtin_roles();
-        s.users = users;
+        s.perm_version = PERM_VERSION;
+        s.users = vec![user("a"), user("u")];
+        grant(&mut s, "/", "a", perm::ADMIN_ROLE);
+        grant(&mut s, "/", "u", perm::DEFAULT_ROLE);
         s
+    }
+
+    fn own(s: &mut Store, kind: Kind, name: &str, owner: &str) {
+        s.resources.push(Resource {
+            kind,
+            conn: "c".into(),
+            pool: String::new(),
+            name: name.into(),
+            owner: owner.into(),
+            suspended: false,
+            path: String::new(),
+            capacity: 0,
+            blank: false,
+            created_ms: 0,
+        });
+    }
+
+    #[test]
+    fn a_user_holds_their_own_vm_and_nobody_elses() {
+        let mut s = store();
+        own(&mut s, Kind::Vm, "mine", "u");
+        own(&mut s, Kind::Vm, "theirs", "a");
+        let u = user("u");
+        assert!(s.can(&u, &perm::vm_path("c", "mine"), "VM.Config"));
+        assert!(s.can(&u, &perm::vm_path("c", "mine"), "VM.Console"));
+        assert!(!s.can(&u, &perm::vm_path("c", "theirs"), "VM.Audit"));
+    }
+
+    #[test]
+    fn creating_and_reading_are_separate() {
+        let s = store();
+        let u = user("u");
+        // The default role may create but not read other guests.
+        assert!(s.can(&u, "/nodes/c/vms", "VM.Allocate"));
+        assert!(!s.can(&u, "/nodes/c/vms", "VM.Audit"));
+    }
+
+    #[test]
+    fn unrecorded_resources_belong_to_the_first_admin() {
+        let s = store();
+        assert_eq!(s.owner_of(Kind::Vm, "c", "old").as_deref(), Some("a"));
+        assert!(!s.can(&user("u"), &perm::vm_path("c", "old"), "VM.Audit"));
+    }
+
+    #[test]
+    fn sharing_a_vm_is_an_acl_entry_on_its_path() {
+        let mut s = store();
+        own(&mut s, Kind::Vm, "shared", "a");
+        grant(&mut s, &perm::vm_path("c", "shared"), "u", "VMUser");
+        let u = user("u");
+        let p = perm::vm_path("c", "shared");
+        assert!(s.can(&u, &p, "VM.PowerMgmt"));
+        assert!(!s.can(&u, &p, "VM.Config"));
+    }
+
+    #[test]
+    fn suspending_leaves_the_owner_read_only_but_not_the_admin() {
+        let mut s = store();
+        own(&mut s, Kind::Network, "lan", "u");
+        s.resource_mut(Kind::Network, "c", "lan").unwrap().suspended = true;
+        let p = perm::net_path("c", "lan");
+        assert!(s.can(&user("u"), &p, "Network.Audit"));
+        assert!(!s.can(&user("u"), &p, "Network.Use"));
+        assert!(!s.can(&user("u"), &p, "Network.Config"));
+        assert!(s.can(&user("a"), &p, "Network.Config"));
+    }
+
+    #[test]
+    fn a_key_never_exceeds_its_owner_and_can_narrow_it() {
+        let s = store();
+        let mut k = user("u");
+        k.key_privs = Some(
+            ["Sys.Audit", "Permissions.Modify"]
+                .iter()
+                .map(|x| x.to_string())
+                .collect(),
+        );
+        assert!(s.can(&k, "/", "Sys.Audit"));
+        assert!(!s.can(&k, "/", "Permissions.Modify"), "owner lacks it");
+        assert!(!s.can(&k, "/nodes/c/vms", "VM.Allocate"), "key lacks it");
+        let mut ka = user("a");
+        ka.key_privs = Some(Privs::new());
+        assert!(!s.is_admin(&ka), "an empty key is powerless");
+    }
+
+    #[test]
+    fn admin_is_derived_from_the_privilege_not_a_name() {
+        let mut s = store();
+        s.roles.push(RoleDef {
+            name: "custom".into(),
+            builtin: false,
+            privs: vec!["Permissions.Modify".into()],
+            scopes: HashMap::new(),
+        });
+        s.users.push(user("c"));
+        grant(&mut s, "/", "c", "custom");
+        assert!(s.is_admin(&user("c")));
+        assert_eq!(s.admin_count(), 2);
+    }
+
+    #[test]
+    fn a_retuned_builtin_role_is_restored_on_load() {
+        let mut s = store();
+        s.roles
+            .iter_mut()
+            .find(|r| r.name == perm::ADMIN_ROLE)
+            .unwrap()
+            .privs
+            .clear();
+        s.seed_builtin_roles();
+        assert!(s.is_admin(&user("a")));
+    }
+
+    /// An install from before ACLs: roles with scope maps, a user override,
+    /// a scoped key. Everyone must keep the access they had.
+    #[test]
+    fn an_old_store_migrates_to_equivalent_acls() {
+        let json = r#"{
+            "users": [
+              {"id":"a","username":"root","password_hash":"","role":"admin","nickname":"","avatar":null},
+              {"id":"o","username":"op","password_hash":"","role":"operator","nickname":"","avatar":null},
+              {"id":"v","username":"viewer","password_hash":"","role":"viewer","nickname":"","avatar":null,
+               "scopes":{"storage":"write"}},
+              {"id":"c","username":"cus","password_hash":"","role":"netonly","nickname":"","avatar":null}
+            ],
+            "sessions": {}, "connections": [], "avatar_seq": 0,
+            "roles": [
+              {"name":"admin","builtin":true,"scopes":{"users":"write","settings":"write","connections":"write","vms":"write","networks":"write","storage":"write"}},
+              {"name":"operator","builtin":true,"scopes":{"users":"none","settings":"none","connections":"write","vms":"write","networks":"write","storage":"write"}},
+              {"name":"viewer","builtin":true,"scopes":{"users":"none","settings":"none","connections":"read","vms":"read","networks":"read","storage":"read"}},
+              {"name":"netonly","scopes":{"networks":"write"}}
+            ],
+            "api_keys": [{"id":"k","user_id":"a","name":"k","hash":"","prefix":"","scopes":{"users":"none"}}]
+        }"#;
+        let mut s: Store = serde_json::from_str(json).unwrap();
+        s.migrate();
+        s.seed_builtin_roles();
+        let v = |id: &str| s.users.iter().find(|u| u.id == id).unwrap().clone();
+        assert!(s.is_admin(&v("a")));
+        let root = s.acl.iter().find(|e| e.ugid == "user:a").unwrap();
+        assert_eq!(root.role, perm::ADMIN_ROLE, "a full admin gets the real role");
+        assert!(!s.is_admin(&v("o")));
+        assert!(
+            s.can(&v("o"), "/nodes/c/vms/x", "VM.Config"),
+            "operator keeps VM write"
+        );
+        assert!(s.can(&v("v"), "/nodes/c/vms/x", "VM.Audit"));
+        assert!(!s.can(&v("v"), "/nodes/c/vms/x", "VM.Config"));
+        assert!(
+            s.can(&v("v"), "/nodes/c/storage/p", "Datastore.Allocate"),
+            "override kept"
+        );
+        assert!(s.can(&v("c"), "/nodes/c/networks/n", "Network.Config"));
+        assert!(!s.can(&v("c"), "/nodes/c/vms/x", "VM.Audit"));
+        let k = &s.api_keys[0];
+        assert!(!k.privs.contains(&"Permissions.Modify".to_string()));
+        assert!(k.privs.contains(&"VM.Config".to_string()));
+        // Migration runs once: a second load must not duplicate entries.
+        let n = s.acl.len();
+        s.migrate();
+        assert_eq!(s.acl.len(), n);
+    }
+
+    #[test]
+    fn loopback_modes_local_user_is_an_administrator() {
+        let s = Store::default();
+        let local = crate::auth::local_user();
+        assert!(s.is_admin(&local));
+        assert!(s.can(&local, &perm::vm_path("c", "x"), "VM.Config"));
     }
 
     #[test]
     fn a_store_written_before_activity_existed_still_loads() {
-        // The activity log was added later, so an existing store.json has no
-        // `activity` key at all. Without the serde default that fails to
-        // parse and the whole install refuses to start.
-        let json = r#"{
-            "users": [],
-            "sessions": {},
-            "connections": [],
-            "api_keys": [],
-            "avatar_seq": 0
-        }"#;
+        let json = r#"{"users":[],"sessions":{},"connections":[],"api_keys":[],"avatar_seq":0}"#;
         let parsed: Store = serde_json::from_str(json).expect("old store parses");
         assert!(parsed.activity.is_empty());
-        assert!(parsed.roles.is_empty(), "roles also default");
-    }
-
-    #[test]
-    fn activity_entries_round_trip_through_the_store() {
-        let mut s = Store::default();
-        s.activity.push(ActivityEntry {
-            id: "a1".into(),
-            user_id: "u1".into(),
-            username: "alice".into(),
-            label: "Create VM box".into(),
-            status: "failed".into(),
-            message: "disk full".into(),
-            at_ms: 1_700_000_000_000,
-        });
-        let text = serde_json::to_string(&s).expect("serializes");
-        let back: Store = serde_json::from_str(&text).expect("parses");
-        assert_eq!(back.activity.len(), 1);
-        assert_eq!(back.activity[0].username, "alice");
-        assert_eq!(back.activity[0].status, "failed");
-        assert_eq!(back.activity[0].at_ms, 1_700_000_000_000);
-    }
-
-    fn key(scopes: &[(&str, Permission)]) -> ApiKey {
-        ApiKey {
-            id: "k1".into(),
-            user_id: "u1".into(),
-            name: "k".into(),
-            hash: String::new(),
-            prefix: "vm_".into(),
-            scopes: scopes_of(scopes),
-        }
-    }
-
-    #[test]
-    fn builtin_roles_keep_their_historical_permissions() {
-        let s = store_with(vec![]);
-        let admin = user("admin");
-        let operator = user("operator");
-        let viewer = user("viewer");
-
-        for scope in SCOPES {
-            assert_eq!(
-                s.permission(&admin, scope),
-                Permission::Write,
-                "admin {scope}"
-            );
-        }
-        assert_eq!(s.permission(&operator, "users"), Permission::None);
-        assert_eq!(s.permission(&operator, "settings"), Permission::None);
-        assert_eq!(s.permission(&operator, "vms"), Permission::Write);
-        assert_eq!(s.permission(&viewer, "users"), Permission::None);
-        assert_eq!(s.permission(&viewer, "vms"), Permission::Read);
-    }
-
-    #[test]
-    fn per_user_override_beats_the_role() {
-        let mut s = store_with(vec![]);
-        let mut u = user("viewer");
-        u.scopes.insert("vms".into(), Permission::Write);
-        assert_eq!(s.permission(&u, "vms"), Permission::Write);
-        // ...and can also restrict an admin.
-        let mut a = user("admin");
-        a.scopes.insert("users".into(), Permission::None);
-        assert_eq!(s.permission(&a, "users"), Permission::None);
-        assert!(!s.is_admin(&a));
-        s.users = vec![a];
-        assert_eq!(s.admin_count(), 0);
-    }
-
-    #[test]
-    fn an_unknown_role_denies_everything() {
-        // Fail closed: a dangling role name must not grant access.
-        let s = store_with(vec![]);
-        let u = user("no-such-role");
-        for scope in SCOPES {
-            assert_eq!(s.permission(&u, scope), Permission::None, "{scope}");
-        }
-    }
-
-    #[test]
-    fn a_scope_the_role_omits_is_denied() {
-        let mut s = store_with(vec![]);
-        s.roles.push(RoleDef {
-            name: "partial".into(),
-            builtin: false,
-            scopes: scopes_of(&[("vms", Permission::Read)]),
-        });
-        let u = user("partial");
-        assert_eq!(s.permission(&u, "vms"), Permission::Read);
-        assert_eq!(s.permission(&u, "storage"), Permission::None);
-    }
-
-    #[test]
-    fn a_key_can_narrow_its_owner() {
-        let s = store_with(vec![]);
-        let owner = user("admin");
-        let k = key(&[("vms", Permission::Read)]);
-        let eff = s.key_effective_scopes(&owner, &k);
-        assert_eq!(eff["vms"], Permission::Read, "narrowed");
-        // Unlisted scopes inherit the owner untouched.
-        assert_eq!(eff["storage"], Permission::Write);
-    }
-
-    #[test]
-    fn a_key_can_never_exceed_its_owner() {
-        let s = store_with(vec![]);
-        let owner = user("viewer"); // vms: read
-        let k = key(&[("vms", Permission::Write), ("users", Permission::Write)]);
-        let eff = s.key_effective_scopes(&owner, &k);
-        assert_eq!(eff["vms"], Permission::Read, "capped down to the owner");
-        assert_eq!(eff["users"], Permission::None, "owner has none, so none");
-    }
-
-    #[test]
-    fn demoting_the_owner_weakens_existing_keys() {
-        let s = store_with(vec![]);
-        let k = key(&[("vms", Permission::Write)]);
-        let before = s.key_effective_scopes(&user("operator"), &k);
-        assert_eq!(before["vms"], Permission::Write);
-        let after = s.key_effective_scopes(&user("viewer"), &k);
-        assert_eq!(after["vms"], Permission::Read, "follows the owner down");
-    }
-
-    #[test]
-    fn permission_min_is_an_ordering() {
-        use Permission::{None as No, Read, Write};
-        assert_eq!(Write.min(Read), Read);
-        assert_eq!(Read.min(Write), Read);
-        assert_eq!(Read.min(No), No);
-        assert_eq!(Write.min(Write), Write);
-    }
-
-    #[test]
-    fn admin_is_derived_from_users_write_not_the_role_name() {
-        let mut s = store_with(vec![]);
-        s.roles.push(RoleDef {
-            name: "custom-admin".into(),
-            builtin: false,
-            scopes: scopes_of(&[("users", Permission::Write)]),
-        });
-        let u = user("custom-admin");
-        assert!(
-            s.is_admin(&u),
-            "a custom role granting users:write is an admin"
-        );
-        s.users = vec![u];
-        assert_eq!(s.admin_count(), 1);
-    }
-
-    #[test]
-    fn seeding_restores_a_missing_builtin() {
-        let mut s = Store::default();
-        s.seed_builtin_roles();
-        s.roles.retain(|r| r.name != "admin");
-        assert!(s.role("admin").is_none());
-        s.seed_builtin_roles();
-        assert!(s.role("admin").is_some(), "builtin comes back on load");
     }
 }

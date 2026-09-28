@@ -281,14 +281,18 @@ async fn stage(
     Query(q): Query<HashMap<String, String>>,
     body: Body,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "storage", true)?;
-
     let conn = q.get("conn").cloned().unwrap_or_default();
     let pool = q.get("pool").cloned().unwrap_or_default();
     let name = q.get("name").cloned().unwrap_or_default();
     if conn.is_empty() || pool.is_empty() || name.is_empty() {
         return Err(ApiError::bad_request("conn, pool and name are required"));
     }
+    super::enforce(
+        &state,
+        &user,
+        &crate::perm::pool_path(&conn, &pool),
+        "Datastore.AllocateSpace",
+    )?;
     // The target has to be valid *now*: finding out after a multi-GB upload
     // that the connection or the name was never usable wastes the user's time.
     let conn_rec = state
@@ -320,6 +324,24 @@ async fn stage(
     if size == 0 {
         let _ = tokio::fs::remove_file(&path).await;
         return Err(ApiError::bad_request("empty body"));
+    }
+    // The size is known only once the body is here; checked before anything
+    // reaches the daemon. Administrators have no quota.
+    if !state.read().is_admin(&user) {
+        let quota = crate::guard::check_quota(
+            &state,
+            &conn_rec,
+            &user,
+            crate::perm::Usage {
+                storage_bytes: size,
+                ..Default::default()
+            },
+        )
+        .await;
+        if let Err(e) = quota {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(e);
+        }
     }
 
     let job = UploadJob {
@@ -404,6 +426,16 @@ async fn spool_inner(body: Body, path: &std::path::Path) -> Result<u64, ApiError
     Ok(total)
 }
 
+/// A staged upload is its uploader's to send or discard, or an admin's.
+fn own_job(state: &AppState, user: &User, job: &JobRef) -> Result<(), ApiError> {
+    let owner = job.lock().expect("job lock poisoned").user_id.clone();
+    if owner == user.id || state.read().is_admin(user) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden())
+    }
+}
+
 fn lookup(state: &AppState, id: &str) -> Result<JobRef, ApiError> {
     state
         .uploads
@@ -416,18 +448,20 @@ fn lookup(state: &AppState, id: &str) -> Result<JobRef, ApiError> {
 
 async fn one(
     State(state): State<AppState>,
-    axum::extract::Extension(_user): axum::extract::Extension<User>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let job = lookup(&state, &id)?;
+    own_job(&state, &user, &job)?;
     let j = job.lock().expect("job lock poisoned");
     Ok(Json(view(&j)))
 }
 
 async fn list(
     State(state): State<AppState>,
-    axum::extract::Extension(_user): axum::extract::Extension<User>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
 ) -> Result<Json<Value>, ApiError> {
+    let admin = state.read().is_admin(&user);
     // Forget finished transfers that have been on screen long enough. Done on
     // this path rather than a timer: the pool page polls it every second while
     // it is open, which is exactly when the clutter would be visible, and a
@@ -442,6 +476,7 @@ async fn list(
         .read()
         .expect("uploads lock poisoned")
         .values()
+        .filter(|j| admin || j.lock().expect("job lock poisoned").user_id == user.id)
         .cloned()
         .collect();
     let mut out: Vec<Value> = jobs
@@ -459,8 +494,8 @@ async fn discard(
     axum::extract::Extension(user): axum::extract::Extension<User>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "storage", true)?;
     let job = lookup(&state, &id)?;
+    own_job(&state, &user, &job)?;
     {
         let j = job.lock().expect("job lock poisoned");
         if j.phase == Phase::Uploading || j.phase == Phase::Verifying {
@@ -485,8 +520,8 @@ async fn push(
     axum::extract::Extension(user): axum::extract::Extension<User>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, "storage", true)?;
     let job = lookup(&state, &id)?;
+    own_job(&state, &user, &job)?;
     {
         let mut j = job.lock().expect("job lock poisoned");
         if j.phase == Phase::Uploading || j.phase == Phase::Verifying {
@@ -660,6 +695,27 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     j.phase = Phase::Done;
     j.finished_ms = now_ms();
     j.sha256 = Some(local.clone());
+    // The volume is the uploader's: they may delete it, and it counts
+    // against their storage. Not `blank`: its contents are theirs, so it is
+    // only ever attached as raw (see `guard`).
+    let record = crate::perm::Resource {
+        kind: crate::perm::Kind::Volume,
+        conn: j.conn.clone(),
+        pool: j.pool.clone(),
+        name: j.name.clone(),
+        owner: j.user_id.clone(),
+        suspended: false,
+        path: String::new(),
+        capacity: j.size,
+        blank: false,
+        created_ms: now_ms(),
+    };
+    drop(j);
+    let mut store = state.write();
+    store.resources.push(record);
+    if let Err(e) = store.save(&state.data_dir) {
+        tracing::warn!("could not record upload owner: {e}");
+    }
     Ok(local)
 }
 

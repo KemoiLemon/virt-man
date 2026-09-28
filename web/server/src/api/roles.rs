@@ -8,35 +8,31 @@ use serde_json::{json, Value};
 
 use super::ApiError;
 use crate::auth;
+use crate::perm::{RoleDef, PRIVILEGES};
 use crate::state::AppState;
-use crate::store::{RoleDef, Scopes, SCOPES};
 
 pub fn routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/roles", get(list).post(create))
         .route("/roles/{name}", axum::routing::put(update).delete(remove))
-        .layer(middleware::from_fn(auth::require_scope(
+        .layer(middleware::from_fn(auth::require_priv(
             state.clone(),
-            "users",
-            true,
+            "/",
+            "Permissions.Modify",
         )))
         .layer(middleware::from_fn(auth::require_user(state.clone())))
 }
 
 fn role_json(r: &RoleDef) -> Value {
-    json!({
-        "name": r.name,
-        "builtin": r.builtin,
-        "scopes": r.scopes,
-    })
+    json!({ "name": r.name, "builtin": r.builtin, "privs": r.privs })
 }
 
-/// Roles plus the scope vocabulary, so the editor renders exactly the scopes
+/// Roles plus the privilege vocabulary, so the editor renders exactly what
 /// the backend enforces instead of a hardcoded list that can drift.
 async fn list(State(state): State<AppState>) -> Json<Value> {
     let store = state.read();
     let roles: Vec<Value> = store.roles.iter().map(role_json).collect();
-    Json(json!({ "roles": roles, "scopes": SCOPES }))
+    Json(json!({ "roles": roles, "privileges": PRIVILEGES }))
 }
 
 #[derive(Deserialize)]
@@ -44,11 +40,11 @@ struct RoleReq {
     #[serde(default)]
     name: String,
     #[serde(default)]
-    scopes: Scopes,
+    privs: Vec<String>,
 }
 
 fn valid_name(name: &str) -> Result<String, ApiError> {
-    let name = name.trim().to_ascii_lowercase();
+    let name = name.trim();
     if name.is_empty() {
         return Err(ApiError::bad_request("role name is required"));
     }
@@ -60,7 +56,19 @@ fn valid_name(name: &str) -> Result<String, ApiError> {
             "role name may only contain letters, digits, - and _",
         ));
     }
-    Ok(name)
+    Ok(name.to_string())
+}
+
+/// Reject privilege names nothing enforces, so the editor cannot save a
+/// grant that silently never applies.
+pub fn validate_privs(privs: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut out = privs.to_vec();
+    if let Some(bad) = out.iter().find(|p| !PRIVILEGES.contains(&p.as_str())) {
+        return Err(ApiError::bad_request(format!("unknown privilege: {bad}")));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 async fn create(
@@ -68,94 +76,76 @@ async fn create(
     Json(req): Json<RoleReq>,
 ) -> Result<Json<Value>, ApiError> {
     let name = valid_name(&req.name)?;
-    super::users::validate_scopes(&req.scopes)?;
+    let privs = validate_privs(&req.privs)?;
     let mut store = state.write();
-    if store.role(&name).is_some() {
+    if store
+        .roles
+        .iter()
+        .any(|r| r.name.eq_ignore_ascii_case(&name))
+    {
         return Err(ApiError::conflict("role already exists"));
     }
     let def = RoleDef {
         name,
         builtin: false,
-        scopes: req.scopes,
+        privs,
+        scopes: Default::default(),
     };
     store.roles.push(def.clone());
     store.save(&state.data_dir)?;
     Ok(Json(role_json(&def)))
 }
 
-/// Retune a role's permissions. Built-in roles are editable (that is the
-/// "customize existing ones" half) but cannot be renamed, so users pointing at
-/// them never dangle.
+/// Retune a custom role. Built-in roles are fixed: migration and new
+/// accounts rely on them meaning one thing, so custom access belongs in a
+/// custom role.
 async fn update(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(req): Json<RoleReq>,
 ) -> Result<Json<Value>, ApiError> {
-    super::users::validate_scopes(&req.scopes)?;
+    let privs = validate_privs(&req.privs)?;
     let mut store = state.write();
     let Some(idx) = store.roles.iter().position(|r| r.name == name) else {
         return Err(ApiError::not_found("no such role"));
     };
-
-    let mut def = store.roles[idx].clone();
-    def.scopes = req.scopes;
-
-    // Renaming is only allowed for custom roles, and must carry its users.
-    let rename = {
-        let next = req.name.trim();
-        if next.is_empty() || next.eq_ignore_ascii_case(&name) {
-            None
-        } else if def.builtin {
-            return Err(ApiError::bad_request("cannot rename a built-in role"));
-        } else {
-            let next = valid_name(next)?;
-            if store.role(&next).is_some() {
-                return Err(ApiError::conflict("role already exists"));
-            }
-            Some(next)
-        }
+    if store.roles[idx].builtin {
+        return Err(ApiError::bad_request("built-in roles cannot be changed"));
+    }
+    let next = match req.name.trim() {
+        "" => name.clone(),
+        n => valid_name(n)?,
     };
-    if let Some(ref next) = rename {
-        def.name = next.clone();
+    if next != name
+        && store
+            .roles
+            .iter()
+            .any(|r| r.name.eq_ignore_ascii_case(&next))
+    {
+        return Err(ApiError::conflict("role already exists"));
     }
 
-    // Refuse a change that would leave nobody able to administer. Simulate it
-    // against every user, since an admin may hold this role rather than the
-    // built-in one.
-    let mut probe = store.roles.clone();
-    probe[idx] = def.clone();
-    let admins = store
-        .users
-        .iter()
-        .filter(|u| {
-            let role_name = match (&rename, u.role == name) {
-                (Some(next), true) => next.clone(),
-                _ => u.role.clone(),
-            };
-            // Same precedence as Store::permission: override first, then role.
-            match u.scopes.get("users") {
-                Some(p) => *p == crate::store::Permission::Write,
-                None => probe
-                    .iter()
-                    .find(|r| r.name == role_name)
-                    .and_then(|r| r.scopes.get("users"))
-                    .map(|p| *p == crate::store::Permission::Write)
-                    .unwrap_or(false),
-            }
-        })
-        .count();
-    if admins == 0 {
+    // Refuse an outcome with no administrator: an admin may hold this role.
+    let before = store.roles[idx].clone();
+    store.roles[idx] = RoleDef {
+        name: next.clone(),
+        builtin: false,
+        privs,
+        scopes: Default::default(),
+    };
+    for e in store.acl.iter_mut().filter(|e| e.role == name) {
+        e.role = next.clone();
+    }
+    if store.admin_count() == 0 {
+        store.roles[idx] = before;
+        for e in store.acl.iter_mut().filter(|e| e.role == next) {
+            e.role = name.clone();
+        }
         return Err(ApiError::bad_request(
             "that change would leave no administrator",
         ));
     }
-
-    store.roles[idx] = def.clone();
-    if let Some(next) = rename {
-        for u in store.users.iter_mut().filter(|u| u.role == name) {
-            u.role = next.clone();
-        }
-    }
+    let def = store.roles[idx].clone();
     store.save(&state.data_dir)?;
     Ok(Json(role_json(&def)))
 }
@@ -171,12 +161,12 @@ async fn remove(
     if store.roles[pos].builtin {
         return Err(ApiError::bad_request("cannot delete a built-in role"));
     }
-    // Refuse while anyone still holds it, rather than silently orphaning them
-    // into a role that no longer resolves (which would deny everything).
-    let holders = store.users.iter().filter(|u| u.role == name).count();
-    if holders > 0 {
+    // Refuse while any grant uses it, rather than leaving grants that name a
+    // role that no longer resolves (which would silently deny).
+    let uses = store.acl.iter().filter(|e| e.role == name).count();
+    if uses > 0 {
         return Err(ApiError::bad_request(format!(
-            "{holders} user(s) still use this role"
+            "{uses} permission(s) still use this role"
         )));
     }
     store.roles.remove(pos);

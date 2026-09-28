@@ -8,23 +8,40 @@ use serde_json::{json, Value};
 
 use super::ApiError;
 use crate::auth;
+use crate::perm::{AclEntry, Quota, DEFAULT_ROLE};
 use crate::state::AppState;
-use crate::store::{random_hex, Scopes, User};
+use crate::store::{Store, User};
 
 pub fn routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/users", get(list).post(create))
         .route("/users/{id}", axum::routing::put(update).delete(remove))
-        .layer(middleware::from_fn(auth::require_scope(
+        .layer(middleware::from_fn(auth::require_priv(
             state.clone(),
-            "users",
-            true,
+            "/",
+            "Permissions.Modify",
         )))
         .layer(middleware::from_fn(auth::require_user(state.clone())))
 }
 
+/// A user as the admin page lists them: the account, its groups, its quota,
+/// and whether it administers.
+fn admin_json(store: &Store, u: &User) -> Value {
+    let mut v = auth::user_json(u);
+    v["admin"] = json!(store.is_admin(u));
+    v["quota"] = json!(u.quota);
+    v["groups"] = json!(store
+        .groups
+        .iter()
+        .filter(|g| g.members.contains(&u.id))
+        .map(|g| g.name.clone())
+        .collect::<Vec<_>>());
+    v
+}
+
 async fn list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let users: Vec<Value> = state.read().users.iter().map(auth::user_json).collect();
+    let store = state.read();
+    let users: Vec<Value> = store.users.iter().map(|u| admin_json(&store, u)).collect();
     Ok(Json(json!(users)))
 }
 
@@ -34,14 +51,18 @@ struct CreateUser {
     password: String,
     #[serde(default)]
     nickname: String,
+    /// Role granted at `/`. Defaults to `User`: see its daemons and pools,
+    /// create guests and networks, and so see only their own.
     #[serde(default = "default_role")]
     role: String,
     #[serde(default)]
-    scopes: Scopes,
+    groups: Vec<String>,
+    #[serde(default)]
+    quota: Quota,
 }
 
 fn default_role() -> String {
-    "viewer".into()
+    DEFAULT_ROLE.into()
 }
 
 async fn create(
@@ -54,30 +75,38 @@ async fn create(
             "username required and password must be at least 8 characters",
         ));
     }
+    let hash = auth::hash_password(&req.password)?;
     let mut store = state.write();
     if store.user_by_username(&username).is_some() {
         return Err(ApiError::conflict("username already exists"));
     }
-    if store.role(&req.role).is_none() {
-        return Err(ApiError::bad_request(format!("no such role: {}", req.role)));
+    let role = req.role.trim();
+    if !role.is_empty() && store.role(role).is_none() {
+        return Err(ApiError::bad_request(format!("no such role: {role}")));
     }
-    validate_scopes(&req.scopes)?;
-    let user = User {
-        id: random_hex(8),
-        username,
-        password_hash: auth::hash_password(&req.password)?,
-        role: req.role,
-        nickname: if req.nickname.trim().is_empty() {
-            "user".to_string()
-        } else {
-            req.nickname.trim().to_string()
-        },
-        avatar: None,
-        scopes: req.scopes,
+    let nickname = match req.nickname.trim() {
+        "" => "user".to_string(),
+        n => n.to_string(),
     };
+    let mut user = User::new(username, hash, nickname);
+    user.quota = req.quota;
+    if !role.is_empty() {
+        store.acl.push(AclEntry {
+            path: "/".into(),
+            ugid: format!("user:{}", user.id),
+            role: role.into(),
+            propagate: true,
+        });
+    }
+    for g in &req.groups {
+        let Some(group) = store.groups.iter_mut().find(|x| &x.name == g) else {
+            return Err(ApiError::bad_request(format!("no such group: {g}")));
+        };
+        group.members.push(user.id.clone());
+    }
     store.users.push(user.clone());
     store.save(&state.data_dir)?;
-    Ok(Json(auth::user_json(&user)))
+    Ok(Json(admin_json(&store, &user)))
 }
 
 #[derive(Deserialize)]
@@ -89,23 +118,29 @@ struct UpdateUser {
     #[serde(default)]
     nickname: Option<String>,
     #[serde(default)]
-    role: Option<String>,
+    groups: Option<Vec<String>>,
     #[serde(default)]
-    scopes: Option<Scopes>,
+    quota: Option<Quota>,
 }
 
 async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    axum::extract::Extension(actor): axum::extract::Extension<User>,
     Json(req): Json<UpdateUser>,
 ) -> Result<Json<Value>, ApiError> {
+    let hash = match &req.password {
+        Some(p) if p.len() < 8 => {
+            return Err(ApiError::bad_request(
+                "password must be at least 8 characters",
+            ))
+        }
+        Some(p) => Some(auth::hash_password(p)?),
+        None => None,
+    };
     let mut store = state.write();
     let Some(idx) = store.users.iter().position(|u| u.id == id) else {
         return Err(ApiError::not_found("no such user"));
     };
-
-    // Validate against other users before taking the mutable borrow.
     if let Some(ref username) = req.username {
         let username = username.trim();
         if username.is_empty() {
@@ -119,73 +154,54 @@ async fn update(
             return Err(ApiError::conflict("username already exists"));
         }
     }
-    if let Some(ref role) = req.role {
-        if store.role(role).is_none() {
-            return Err(ApiError::bad_request(format!("no such role: {role}")));
+    if let Some(ref groups) = req.groups {
+        if let Some(g) = groups
+            .iter()
+            .find(|g| !store.groups.iter().any(|x| &x.name == *g))
+        {
+            return Err(ApiError::bad_request(format!("no such group: {g}")));
         }
     }
-    if let Some(ref scopes) = req.scopes {
-        validate_scopes(scopes)?;
-    }
 
-    // Build the updated user first, then refuse the change if it would leave
-    // the install with no administrator. Admin-ness is derived from the
-    // effective users:write permission, so a role change, a scope override or
-    // a retuned role can all cause it — checking the outcome catches every
-    // path instead of only self-demotion by role.
-    let mut updated = store.users[idx].clone();
-    if let Some(username) = req.username {
-        updated.username = username.trim().to_string();
-    }
-    if let Some(password) = req.password {
-        if password.len() < 8 {
-            return Err(ApiError::bad_request(
-                "password must be at least 8 characters",
-            ));
+    // Group membership can carry administration, so apply it to a copy and
+    // refuse an outcome with no administrator left.
+    let mut next_groups = store.groups.clone();
+    if let Some(ref groups) = req.groups {
+        for g in &mut next_groups {
+            g.members.retain(|m| m != &id);
+            if groups.contains(&g.name) {
+                g.members.push(id.clone());
+            }
         }
-        updated.password_hash = auth::hash_password(&password)?;
     }
-    if let Some(nickname) = req.nickname {
-        updated.nickname = if nickname.trim().is_empty() {
-            "user".into()
-        } else {
-            nickname.trim().into()
-        };
-    }
-    if let Some(role) = req.role {
-        updated.role = role;
-    }
-    if let Some(scopes) = req.scopes {
-        updated.scopes = scopes;
-    }
-
-    let was_admin = store.is_admin(&store.users[idx]);
-    let is_admin = store.is_admin(&updated);
-    if was_admin && !is_admin && store.admin_count() <= 1 {
+    let was = store.admin_count();
+    let prev_groups = std::mem::replace(&mut store.groups, next_groups);
+    if was > 0 && store.admin_count() == 0 {
+        store.groups = prev_groups;
         return Err(ApiError::bad_request(
-            "cannot remove the last administrator",
+            "that change would leave no administrator",
         ));
     }
-    let _ = actor;
 
-    store.users[idx] = updated;
-    let user = store.users[idx].clone();
-    store.save(&state.data_dir)?;
-    Ok(Json(auth::user_json(&user)))
-}
-
-/// Reject scope names nothing enforces. Without this the UI could save an
-/// override that silently never applies (as "domains" did).
-pub fn validate_scopes(scopes: &Scopes) -> Result<(), ApiError> {
-    for name in scopes.keys() {
-        if !crate::store::SCOPES.contains(&name.as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "unknown scope: {name} (valid: {})",
-                crate::store::SCOPES.join(", ")
-            )));
-        }
+    let u = &mut store.users[idx];
+    if let Some(username) = req.username {
+        u.username = username.trim().to_string();
     }
-    Ok(())
+    if let Some(hash) = hash {
+        u.password_hash = hash;
+    }
+    if let Some(nickname) = req.nickname {
+        u.nickname = match nickname.trim() {
+            "" => "user".into(),
+            n => n.into(),
+        };
+    }
+    if let Some(quota) = req.quota {
+        u.quota = quota;
+    }
+    let user = u.clone();
+    store.save(&state.data_dir)?;
+    Ok(Json(admin_json(&store, &user)))
 }
 
 async fn remove(
@@ -204,6 +220,22 @@ async fn remove(
         return Err(ApiError::bad_request(
             "cannot delete the last administrator",
         ));
+    }
+    // Whatever they owned passes to the first administrator rather than
+    // becoming unowned, so it stays visible and administrable.
+    let heir = store
+        .users
+        .iter()
+        .find(|u| u.id != id && store.is_admin(u))
+        .map(|u| u.id.clone())
+        .unwrap_or_default();
+    for r in store.resources.iter_mut().filter(|r| r.owner == id) {
+        r.owner = heir.clone();
+    }
+    let me = format!("user:{id}");
+    store.acl.retain(|e| e.ugid != me);
+    for g in &mut store.groups {
+        g.members.retain(|m| m != &id);
     }
     store.users.remove(pos);
     store.api_keys.retain(|k| k.user_id != id);

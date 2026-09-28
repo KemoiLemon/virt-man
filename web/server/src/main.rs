@@ -3,12 +3,16 @@ mod api;
 mod auth;
 mod config;
 mod daemon;
+mod guard;
 mod health;
 mod history;
 mod httpsredirect;
+mod perm;
+mod routes;
 mod state;
 mod store;
 mod tls;
+mod xmlcheck;
 
 use state::AppState;
 use tower_http::services::{ServeDir, ServeFile};

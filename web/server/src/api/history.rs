@@ -18,12 +18,14 @@ pub fn routes(state: &AppState) -> Router<AppState> {
         .layer(middleware::from_fn(auth::require_user(state.clone())))
 }
 
-/// Permission scope for a series kind, matching the proxy's mapping of the
-/// daemon routes the same numbers come from live.
-fn scope(kind: &str) -> &'static str {
-    match kind {
-        "vm" | "nic" | "disk" => "vms",
-        _ => "connections",
+/// The privilege and path a series needs, matching the proxy's mapping of
+/// the daemon routes the same numbers come from live. Datacenter totals span
+/// every daemon, so they are an administrator's view.
+fn need(q: &history::Query) -> (String, &'static str) {
+    match q.kind.as_str() {
+        "vm" | "nic" | "disk" => (crate::perm::vm_path(&q.conn, &q.name), "VM.Audit"),
+        "host" => (crate::perm::node_path(&q.conn), "Sys.Audit"),
+        _ => ("/".into(), "Permissions.Modify"),
     }
 }
 
@@ -32,7 +34,8 @@ async fn series(
     axum::extract::Extension(user): axum::extract::Extension<User>,
     Query(q): Query<history::Query>,
 ) -> Result<Json<Value>, ApiError> {
-    super::enforce(&state, &user, scope(&q.kind), false)?;
+    let (path, privilege) = need(&q);
+    super::enforce(&state, &user, &path, privilege)?;
     let h = state.history.clone();
     let now = history::now_ms() as i64;
     let (rows, step) = tokio::task::spawn_blocking(move || h.query(&q, now))
@@ -49,12 +52,19 @@ async fn series(
 
 #[cfg(test)]
 mod tests {
+    fn q(kind: &str) -> crate::history::Query {
+        serde_json::from_value(serde_json::json!({
+            "conn": "c", "kind": kind, "name": "web", "since_ms": 0
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn guest_series_need_vm_access() {
-        assert_eq!(super::scope("vm"), "vms");
-        assert_eq!(super::scope("nic"), "vms");
-        assert_eq!(super::scope("disk"), "vms");
-        assert_eq!(super::scope("host"), "connections");
-        assert_eq!(super::scope("dc"), "connections");
+    fn guest_series_need_that_guest() {
+        for k in ["vm", "nic", "disk"] {
+            assert_eq!(super::need(&q(k)), ("/nodes/c/vms/web".into(), "VM.Audit"));
+        }
+        assert_eq!(super::need(&q("host")), ("/nodes/c".into(), "Sys.Audit"));
+        assert_eq!(super::need(&q("dc")).1, "Permissions.Modify");
     }
 }

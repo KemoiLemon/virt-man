@@ -47,10 +47,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether the caller may see every user's entries. Mirrors the admin check
-/// used elsewhere: an explicit scope read on "users".
+/// Whether the caller may see every user's entries: administrators, and
+/// auditors (`Sys.Audit` at `/` alone would be every ordinary user).
 fn sees_all(state: &AppState, user: &User) -> bool {
-    state.read().can(user, "users", false)
+    state.read().is_admin(user)
 }
 
 /// Entries `user` may see, newest first: everyone's for an admin, otherwise

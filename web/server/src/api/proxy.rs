@@ -10,6 +10,9 @@ use futures_util::StreamExt;
 use super::ApiError;
 use crate::auth;
 use crate::daemon;
+use crate::guard;
+use crate::perm::Kind;
+use crate::routes::{self, Special};
 use crate::state::AppState;
 use crate::store::User;
 use std::collections::HashMap;
@@ -31,9 +34,9 @@ const MAX_CACHED_ENTRIES: usize = 1024;
 /// A remote daemon costs a network round trip per read, so opening a page used
 /// to show nothing until it answered. The SPA asks for this copy to paint at
 /// once and then re-reads for real, so a stale entry is on screen for one round
-/// trip at most. Reads are cached only after `enforce` has passed, and daemon
-/// answers do not vary by user, so serving an entry leaks nothing the caller
-/// could not have read directly.
+/// trip at most. The raw daemon answer is cached, and served only after the
+/// privilege check passes and through the same per-user filtering as a fresh
+/// answer, so an entry leaks nothing the caller could not have read directly.
 #[derive(Default)]
 struct ReadCache {
     entries: HashMap<(String, String), (Instant, String, axum::body::Bytes)>,
@@ -139,18 +142,25 @@ fn vv_host(headers: &HeaderMap, daemon_host: &str) -> String {
     }
 }
 
-/// Map a proxied daemon path to the permission scope it belongs to.
-fn path_scope(path: &str) -> &'static str {
-    // /flows is what guests connected to: guest data, like /domains.
-    if path.contains("/domains") || path.ends_with("/flows") || path.contains("/flows?") {
-        "vms"
-    } else if path.contains("/networks") {
-        "networks"
-    } else if path.contains("/pools") || path.contains("/fetches") {
-        // URL fetches write into a pool.
-        "storage"
-    } else {
-        "connections"
+/// Largest request body the proxy will buffer to check. Definitions are a
+/// few KiB; anything larger than this is not one.
+const MAX_CHECKED_BODY: usize = 4 * 1024 * 1024;
+
+/// Filter a successful list answer to what `user` may see.
+fn filter(
+    state: &AppState,
+    user: &User,
+    conn: &str,
+    special: &Special,
+    body: &[u8],
+) -> Option<Vec<u8>> {
+    match special {
+        Special::ListVms => guard::filter_list(state, user, conn, Kind::Vm, body),
+        Special::ListNetworks => guard::filter_list(state, user, conn, Kind::Network, body),
+        Special::ListPools => guard::filter_pools(state, user, conn, body),
+        Special::ListBridges => guard::filter_bridges(state, user, conn, body),
+        Special::ListVolumes { pool } => guard::annotate_volumes(state, user, conn, pool, body),
+        _ => None,
     }
 }
 
@@ -296,7 +306,15 @@ async fn proxy(
     let write = method != axum::http::Method::GET && method != axum::http::Method::HEAD;
     // Captured before `method` is moved into the request below.
     let destructive = method == axum::http::Method::DELETE;
-    super::enforce(&state, &user, path_scope(uri.path()), write)?;
+    let rest_path = uri
+        .path()
+        .strip_prefix(&format!("/proxy/{conn_id}"))
+        .unwrap_or("/");
+    // Every daemon route needs one privilege at one path; a route the table
+    // does not know is refused rather than guessed at.
+    let need =
+        routes::classify(&conn_id, method.as_str(), rest_path).ok_or_else(ApiError::forbidden)?;
+    super::enforce(&state, &user, &need.path, need.privilege)?;
 
     let conn = {
         let store = state.read();
@@ -329,6 +347,9 @@ async fn proxy(
             .expect("read cache poisoned")
             .get(&conn_id, rest);
         if let Some((age_ms, content_type, bytes)) = hit {
+            let bytes = filter(&state, &user, &conn_id, &need.special, &bytes)
+                .map(axum::body::Bytes::from)
+                .unwrap_or(bytes);
             return Response::builder()
                 .header(header::CONTENT_TYPE, content_type)
                 .header(CACHED_AGE, age_ms.to_string())
@@ -349,23 +370,42 @@ async fn proxy(
         }
     }
 
-    // Stream the request body straight through (ISO uploads are large).
-    let stream = body
-        .into_data_stream()
-        .map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
-    let resp = builder
-        .body(reqwest::Body::wrap_stream(stream))
-        .send()
-        .await
-        .map_err(|e| {
-            let mut msg = format!("daemon error: {e}");
-            let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&e);
-            while let Some(s) = src {
-                msg.push_str(&format!(" | {s}"));
-                src = s.source();
-            }
-            ApiError::bad_request(msg)
-        })?;
+    // A body the guard must read is buffered; anything else streams straight
+    // through (ISO uploads are large, and only an admin can send one here).
+    let checks_body = !matches!(
+        need.special,
+        Special::None
+            | Special::AdminOnly
+            | Special::DeleteVm { .. }
+            | Special::DeleteNetwork { .. }
+            | Special::DeleteVolume { .. }
+    ) && write;
+    let (req_body, checked, created) = if checks_body {
+        let bytes = axum::body::to_bytes(body, MAX_CHECKED_BODY)
+            .await
+            .map_err(|_| ApiError::bad_request("request body too large"))?;
+        let created = guard::before(&state, &user, &conn, &need.special, &bytes).await?;
+        (reqwest::Body::from(bytes.clone()), bytes, created)
+    } else {
+        guard::before(&state, &user, &conn, &need.special, &[]).await?;
+        let stream = body
+            .into_data_stream()
+            .map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
+        (
+            reqwest::Body::wrap_stream(stream),
+            axum::body::Bytes::new(),
+            None,
+        )
+    };
+    let resp = builder.body(req_body).send().await.map_err(|e| {
+        let mut msg = format!("daemon error: {e}");
+        let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&e);
+        while let Some(s) = src {
+            msg.push_str(&format!(" | {s}"));
+            src = s.source();
+        }
+        ApiError::bad_request(msg)
+    })?;
 
     let status = resp.status();
     let resp_headers = resp.headers().clone();
@@ -387,6 +427,17 @@ async fn proxy(
         }
     }
 
+    if status.is_success() && write {
+        guard::after(&state, &conn_id, &need.special, created, &checked, &bytes);
+    }
+    let bytes = if status.is_success() {
+        filter(&state, &user, &conn_id, &need.special, &bytes)
+            .map(axum::body::Bytes::from)
+            .unwrap_or(bytes)
+    } else {
+        bytes
+    };
+
     // Recorded in the backend rather than the SPA: this way every client is
     // covered, including an API key or a direct call, not just our buttons.
     if destructive {
@@ -401,7 +452,11 @@ async fn proxy(
 
     let mut out = Response::builder().status(status);
     for (name, value) in resp_headers.iter() {
-        if name.as_str() != "transfer-encoding" && name.as_str() != "connection" {
+        // The length changes when a list is filtered; axum sets it again.
+        if !matches!(
+            name.as_str(),
+            "transfer-encoding" | "connection" | "content-length"
+        ) {
             out = out.header(name, value);
         }
     }
@@ -411,23 +466,6 @@ async fn proxy(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn guest_traffic_needs_vm_access() {
-        assert_eq!(super::path_scope("/proxy/c/flows"), "vms");
-        assert_eq!(super::path_scope("/proxy/c/domains/web/capture/abc"), "vms");
-        assert_eq!(
-            super::path_scope("/proxy/c/networks/internet/flows-policy"),
-            "networks"
-        );
-    }
-
-    #[test]
-    fn fetching_into_a_pool_needs_storage_access() {
-        assert_eq!(super::path_scope("/proxy/c/pools/ISOs/fetch"), "storage");
-        assert_eq!(super::path_scope("/proxy/c/fetches"), "storage");
-        assert_eq!(super::path_scope("/proxy/c/fetches/abc"), "storage");
-    }
-
     #[test]
     fn a_loopback_daemon_hands_out_the_host_the_browser_used() {
         let mut h = super::HeaderMap::new();
