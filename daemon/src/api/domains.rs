@@ -448,19 +448,13 @@ async fn rename(
             return Err(format!("a domain named '{new_name}' already exists").into());
         }
 
-        let xml = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?;
-        let Some(new_xml) = rename_xml(&xml, &new_name) else {
-            return Err("no <name> element in domain XML".to_string().into());
-        };
-
-        // Undefine first, then define the renamed XML: both definitions share
-        // one UUID, which libvirt will not let coexist. If the define fails,
-        // put the old definition back so a rename can never destroy the VM.
-        d.undefine_flags(0)?;
-        if let Err(e) = Domain::define_xml(c, &new_xml) {
-            let _ = Domain::define_xml(c, &xml); // rollback, best effort
-            return Err(format!("define renamed domain failed: {e}").into());
-        }
+        // libvirt's own rename, not undefine + define. Undefining a UEFI guest
+        // with no flags is refused outright ("Cannot undefine domain with
+        // NVRAM/varstore", measured), so the old way could not rename any UEFI
+        // guest -- every guest the forms make. virDomainRename keeps the UUID,
+        // the variable store and everything else, in one step, and fails
+        // without having changed anything.
+        d.rename(&new_name, 0)?;
         Ok(json!({"name": new_name, "renamed": true}))
     })
     .await
@@ -468,57 +462,65 @@ async fn rename(
     Ok(Json(v))
 }
 
-/// Swap the domain's `<name>` content, leaving every other byte — UUID,
-/// devices, disk paths — untouched.
-fn rename_xml(xml: &str, new_name: &str) -> Option<String> {
-    let start = xml.find("<name")?;
-    let open_end = start + xml[start..].find('>')?;
-    let close = xml[open_end..].find("</name>")? + open_end;
-    Some(format!(
-        "{}{}{}",
-        &xml[..open_end + 1],
-        new_name,
-        &xml[close..]
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn rename_swaps_only_the_name_content() {
-        let with_name = "<domain type='kvm'><name>old</name><uuid>abc</uuid><devices/></domain>";
-        let out = rename_xml(with_name, "new").expect("name element present");
-        assert!(out.contains("<name>new</name>"), "name swapped:\n{out}");
-        // Everything else must survive byte-for-byte: the UUID is what makes
-        // the renamed domain still the same VM to libvirt.
-        assert!(out.contains("<uuid>abc</uuid>"), "uuid kept:\n{out}");
-        assert!(out.contains("<domain type='kvm'>"), "attributes kept");
-        assert_eq!(
-            out.matches("<name>").count(),
-            1,
-            "no duplicated name element"
+    /// Renaming a UEFI guest keeps its identity and its variable store. The
+    /// old undefine + define could not: libvirt refuses to undefine a guest
+    /// with a varstore unless told what to do with it, so it renamed no UEFI
+    /// guest at all. Real libvirt, one throwaway guest that is never started.
+    /// `sudo -E cargo test --bins -- --ignored renaming_a_uefi`
+    #[tokio::test]
+    #[ignore = "needs root and a reachable qemu:///system"]
+    async fn renaming_a_uefi_guest_keeps_its_uuid_and_varstore() {
+        const NV: &str = "/var/lib/libvirt/qemu/nvram/renameprobe_VARS.fd";
+        let xml = format!(
+            "<domain type='kvm'><name>renameprobe</name><memory unit='KiB'>131072</memory><vcpu>1</vcpu>\
+             <os><type arch='x86_64' machine='q35'>hvm</type>\
+             <loader readonly='yes' type='pflash' format='raw'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>\
+             <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd' format='raw'>{NV}</nvram></os>\
+             <features><acpi/></features><devices/></domain>"
         );
-    }
+        let uuid = with_conn(move |c| Ok(Domain::define_xml(c, &xml)?.get_uuid_string()?))
+            .await
+            .expect("define");
+        std::fs::write(NV, b"probe-vars").expect("varstore");
 
-    #[test]
-    fn rename_never_matches_neighbouring_name_prefixes() {
-        // <hostname> and <nvram> both contain "name" but are NOT the domain
-        // name element; a sloppy search would corrupt them.
-        let xml = "<domain><name>old</name><devices><hostname>x</hostname></devices></domain>";
-        let out = rename_xml(xml, "new").unwrap();
-        assert_eq!(out.matches("<name>").count(), 1);
+        let res = rename(
+            Path("renameprobe".into()),
+            Json(RenameReq {
+                name: "renameprobe-2".into(),
+            }),
+        )
+        .await;
+        let u2 = uuid.clone();
+        let after = with_conn(move |c| {
+            let d = crate::libvirt::domain(c, &u2)?;
+            Ok((d.get_name()?, d.get_xml_desc(0)?))
+        })
+        .await;
+        let vars = std::fs::read(NV).ok();
+        let u3 = uuid.clone();
+        let _ = with_conn(move |c| {
+            crate::libvirt::domain(c, &u3)?.undefine_flags(virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM)?;
+            Ok(())
+        })
+        .await;
+
         assert!(
-            out.contains("<hostname>x</hostname>"),
-            "hostname untouched:\n{out}"
+            res.is_ok(),
+            "rename refused: {:?}",
+            res.err().map(|e| e.message)
         );
-        assert!(!out.contains("old"), "old name gone:\n{out}");
-    }
-
-    #[test]
-    fn rename_without_a_name_element_is_none() {
-        assert!(rename_xml("<domain><devices/></domain>", "x").is_none());
+        let (name, xml) = after.expect("found by uuid after the rename");
+        assert_eq!(name, "renameprobe-2", "renamed, same UUID");
+        assert!(xml.contains(NV), "the varstore is still attached");
+        assert_eq!(
+            vars.as_deref(),
+            Some(&b"probe-vars"[..]),
+            "and its contents kept"
+        );
     }
 
     #[test]

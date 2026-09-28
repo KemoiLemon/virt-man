@@ -5,6 +5,7 @@ mod disks;
 mod firewall;
 mod ipam;
 mod libvirt;
+mod migrate;
 mod rfb;
 mod titles;
 mod tls;
@@ -57,6 +58,14 @@ async fn run() -> Result<(), String> {
     // IPAM: DHCP and DNS for guest networks, in place of libvirt's dnsmasq.
     let ipam = ipam::server::Ipam::load(ipam::store::IPAM_PATH.into())?;
     tokio::spawn(ipam::server::supervise(ipam.clone()));
+    // Rename guests, networks and pools to their UUIDs, now and as they
+    // become free to rename (a guest once it is shut off). Off until the web
+    // server addresses everything by UUID: renaming first would leave its
+    // name-keyed links, grants and ownership pointing at nothing.
+    // ponytail: gated by env var until the web side ships; remove the gate then.
+    if std::env::var("VIRT_MAN_MIGRATE_UUIDS").is_ok_and(|v| v == "1") {
+        tokio::spawn(migrate::run(ipam.clone()));
+    }
     // Access log: guest connections from the kernel's connection tracker.
     // Live packet captures stop themselves when nobody is watching.
     tokio::spawn(api::capture::reaper());
