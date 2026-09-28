@@ -491,9 +491,59 @@ check("the key is shown once, generated name, limited privileges", () => {
 });
 for (const k of mintedKeys) await window.fetch(`/keys/${k.id}`, { method: "DELETE" });
 
+// ---- Admin context menus: rows offer their own actions; the sidebar offers
+// admin actions, not the resource tree's.
+{
+  const rc = (el) => {
+    const e = new window.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 50 });
+    el.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  const labels = () => [...document.querySelectorAll(".ctxmenu .ctxmenu-label")].map((x) => x.textContent.trim());
+  click(document.querySelector('#tree [data-admin-section="users"]'));
+  await wait(1200);
+  const row = [...document.querySelectorAll("#admin-area tr")].find((r) => r.querySelector("[data-edit-user]"));
+  const prevented = rc(row.querySelector("td"));
+  check("right-clicking an admin row offers that row's actions", () => {
+    assert.ok(prevented, "native menu replaced");
+    assert.deepEqual(labels(), ["Edit", "Permissions", "Limits", "Delete"]);
+    const del = [...document.querySelectorAll(".ctxmenu-item")].find((b) => b.textContent.includes("Delete"));
+    assert.ok(del.classList.contains("danger"), "Delete is marked destructive");
+  });
+  // An item runs the row's own button: Edit opens the same dialog.
+  [...document.querySelectorAll(".ctxmenu-item")].find((b) => b.textContent.includes("Edit")).click();
+  await wait(300);
+  check("a menu item does what the row's button does", () => {
+    assert.match(topModal()?.querySelector(".modal-head")?.textContent ?? "", /Edit/);
+    topModal().remove();
+  });
+  rc(document.querySelector('#tree [data-admin-section="groups"]'));
+  check("the admin sidebar offers admin actions, not the resource tree's", () => {
+    const l = labels();
+    assert.deepEqual(l, ["Open Groups", "Add group", "Return"]);
+    assert.ok(!l.some((x) => /Add server|Create VM|Add resource/i.test(x)), `no resource-tree items (${l})`);
+  });
+  [...document.querySelectorAll(".ctxmenu-item")].find((b) => b.textContent.includes("Add group")).click();
+  await wait(1500);
+  check("a sidebar action opens the section and runs its button", () => {
+    assert.equal(window.location.pathname, "/admin/groups");
+    assert.match(topModal()?.querySelector(".modal-head")?.textContent ?? "", /Add group/);
+    topModal().remove();
+  });
+  rc(document.querySelector("#admin-area .section-title, #admin-area .hint, #admin-area") ?? document.body);
+  document.querySelector(".ctxmenu")?.remove();
+}
+
 // ---- A reload of an admin URL lands on that section.
+// Self-contained: it used to assert whatever path the previous block happened
+// to leave behind, which is not what the comment above says it checks.
+window.history.pushState(null, "", "/admin/keys");
+window.dispatchEvent(new window.PopStateEvent("popstate"));
+await wait(1200);
 check("an admin URL parses to its section", () => {
   assert.equal(window.location.pathname, "/admin/keys");
+  assert.equal(document.querySelector("#tree .tree-row.sel")?.dataset.adminSection, "keys", "sidebar follows");
+  assert.match(document.querySelector("#content .dtitle")?.textContent ?? "", /API Keys/, "the section painted");
 });
 
 // ---- Return.

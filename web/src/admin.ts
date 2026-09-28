@@ -111,6 +111,39 @@ export function adminTree(section: AdminSection): string {
       ${g.sections.map((s) => row(s, "tree-vm admin-item")).join("")}`).join("")}`;
 }
 
+/// A right-click / long-press menu for an admin table row or card: exactly the
+/// actions its own buttons offer, plus Open when the row names a resource.
+///
+/// Built from the row's buttons rather than a per-section list, so the menu
+/// can never offer something the row does not (or miss something it does),
+/// and every table added later gets its menu for free. Each item clicks the
+/// real button, so it runs the same code and the same checks.
+export function adminRowMenu(target: Element): { label: string; icon: string; danger: boolean; disabled: boolean; separator: boolean; run: () => void }[] | null {
+  const row = target.closest<HTMLElement>("#admin-area tr, #admin-area .storage-card, #admin-area .card[data-go], #admin-area [data-quota-user]");
+  if (!row || row.querySelector("th")) return null;
+  const items: { label: string; icon: string; danger: boolean; disabled: boolean; separator: boolean; run: () => void }[] = [];
+  // The resource-opening name cell, the dashboard card or usage card.
+  const open = row.matches("[data-go], [data-quota-user], tr.row-open") ? row : row.querySelector<HTMLElement>("[data-open-res]");
+  if (open) {
+    items.push({ label: "Open", icon: ic.logs(), danger: false, disabled: false, separator: false, run: () => open.click() });
+  }
+  // Card headers hold a nested table; only the card's own buttons count.
+  const buttons = [...row.querySelectorAll<HTMLButtonElement>(".row-actions > .btn, .col-actions > .btn")]
+    .filter((b) => b.closest("tr, .storage-card") === row || !row.matches(".storage-card"));
+  buttons.forEach((b, i) => {
+    items.push({
+      label: b.title || b.textContent?.trim() || "Action",
+      icon: b.querySelector(".ico")?.outerHTML ?? "",
+      danger: b.classList.contains("danger"),
+      disabled: b.disabled,
+      // Destructive actions sit apart from the rest.
+      separator: (i === 0 && items.length > 0) || (b.classList.contains("danger") && i > 0),
+      run: () => b.click(),
+    });
+  });
+  return items.length ? items : null;
+}
+
 export function adminTitle(section: AdminSection): string {
   return LABEL[section];
 }

@@ -142,7 +142,9 @@
   .tree-row, .dhead, .tab,
   [data-open], [data-vm-open], [data-dc-vm], [data-net-open], [data-dash-net],
   [data-pool-open], [data-dash-pool], [data-open-conn-row], [data-dc-dash-conn],
-  tr.row-open { -webkit-touch-callout: none; }
+  tr.row-open,
+  /* Admin page: its table rows and cards own the long press (adminRowMenu). */
+  #admin-area tr, #admin-area .storage-card, #admin-area .card { -webkit-touch-callout: none; }
 }
 
 /* --------------------------------------------------- console soft keyboard

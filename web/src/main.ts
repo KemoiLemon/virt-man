@@ -1,7 +1,7 @@
 import { openCropDialog } from "./crop";
 import { api, cacheFirst, uploadWithProgress } from "./api";
 import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, StagedUpload, User, VolumeSummary } from "./api";
-import { adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
+import { adminRowMenu, adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -1208,6 +1208,46 @@ function treeMenuItems(row: HTMLElement | null): CtxItem[] {
   return rootMenu();
 }
 
+/// A right-clicked admin sidebar row: open it, and its section's main action.
+/// Without this the admin sidebar offered the resource tree's menu (Add
+/// server, Create VM), which belongs to a page the user has left.
+function adminTreeMenu(row: HTMLElement | null): CtxItem[] | null {
+  const sec = row?.dataset.adminSection as AdminSection | undefined;
+  if (!sec) return null;
+  const open = (s: AdminSection) => () => openAdmin(s);
+  // What each section's own add button does, reached from the menu. It opens
+  // the section, then clicks its real button, so it is the same code path.
+  const add: Partial<Record<AdminSection, [string, string]>> = {
+    users: ["Add user", "#add-user"],
+    groups: ["Add group", "#add-group"],
+    roles: ["New role", "#add-role"],
+    permissions: ["Add permission", "#add-acl"],
+    daemons: ["Add daemon", "#add-daemon"],
+    keys: ["New API key", "#add-key"],
+    vms: ["Create VM for a user", "#res-new"],
+    networks: ["Create network for a user", "#res-new"],
+  };
+  const items: CtxItem[] = [{ label: `Open ${row!.querySelector(".tree-label")?.textContent?.trim() ?? ""}`, icon: ic.logs(), run: open(sec) }];
+  const a = add[sec];
+  if (a) {
+    items.push({
+      label: a[0], icon: ic.plus(), separator: true,
+      run: () => {
+        openAdmin(sec);
+        // The section paints after an await; click once its button is there.
+        const tryClick = (n: number) => {
+          const b = document.querySelector<HTMLElement>(`#admin-area ${a[1]}`);
+          if (b) b.click();
+          else if (n > 0) setTimeout(() => tryClick(n - 1), 100);
+        };
+        tryClick(50);
+      },
+    });
+  }
+  items.push({ label: "Return", icon: ic.ret(), separator: true, run: () => leaveAdmin() });
+  return items;
+}
+
 /// Menu for something right-clicked in the content pane, or null to leave the
 /// browser's own menu alone. Only resource surfaces (cards, dashboard rows,
 /// tabs) are claimed: text, the XML and log panes and every form field keep
@@ -1255,7 +1295,14 @@ function contentMenuItems(target: Element): CtxItem[] | null {
 function menuAt(target: Element | null, x: number, y: number): boolean {
   if (!target?.closest) return false;
   let items: CtxItem[] | null = null;
-  if (target.closest(".list-pane")) {
+  if (adminSection) {
+    // The admin page has its own actions: a section in the sidebar offers
+    // open and its common action; a row offers exactly its own buttons.
+    if (target.closest(".list-pane")) items = adminTreeMenu(target.closest<HTMLElement>("[data-admin-section]"));
+    else if (target.closest("#content") && !target.closest("input, textarea, select, .cmd, pre, .select-popover")) {
+      items = adminRowMenu(target);
+    }
+  } else if (target.closest(".list-pane")) {
     items = treeMenuItems(target.closest(".tree-row") as HTMLElement | null);
   } else if (target.closest("#content")) {
     items = contentMenuItems(target);
