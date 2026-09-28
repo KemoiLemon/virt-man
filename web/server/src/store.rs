@@ -318,6 +318,17 @@ impl Store {
     pub fn privs(&self, user: &User, path: &str) -> Privs {
         let mut p = self.acl_privs(user, path);
         if let Some((kind, conn, name)) = perm::path_resource(path) {
+            // `*.Allocate` means "create here" on a collection and "delete
+            // this" on a resource. The default role grants the first at `/`,
+            // and it propagated onto every resource as the second: any user
+            // could delete anyone's VM or network. On a resource, Allocate
+            // therefore counts only from a grant that is not merely the
+            // inherited create -- an administrator's, or one made on the
+            // resource or its daemon (a share, a VMAdmin grant) -- and from
+            // ownership, below.
+            if !self.is_admin_raw(user) && !self.granted_below_root(user, path) {
+                p.retain(|x| !x.ends_with(".Allocate"));
+            }
             if self.owner_of(kind, conn, name).as_deref() == Some(user.id.as_str()) {
                 p.extend(perm::owner_privs(kind).iter().map(|s| s.to_string()));
             }
@@ -344,6 +355,25 @@ impl Store {
     }
 
     /// `is_admin` without the resource and key steps, for use inside `privs`.
+    /// Whether the user's privileges at `path` come from an entry below `/`
+    /// (on the resource, its kind, or its daemon), rather than from the
+    /// grant at the root that every account gets.
+    fn granted_below_root(&self, user: &User, path: &str) -> bool {
+        let me = format!("user:{}", user.id);
+        let groups: Vec<String> = self
+            .groups
+            .iter()
+            .filter(|g| g.members.contains(&user.id))
+            .map(|g| format!("group:{}", g.name))
+            .collect();
+        let mine = |e: &AclEntry| e.ugid == me || groups.contains(&e.ugid);
+        self.acl.iter().any(|e| {
+            mine(e)
+                && e.path != "/"
+                && (e.path == path || (e.propagate && path.starts_with(&format!("{}/", e.path))))
+        })
+    }
+
     fn is_admin_raw(&self, user: &User) -> bool {
         let p = self.acl_privs(user, "/");
         p.contains("Permissions.Modify")
@@ -472,6 +502,35 @@ mod tests {
         assert!(s.can(&u, &perm::vm_path("c", "mine"), "VM.Config"));
         assert!(s.can(&u, &perm::vm_path("c", "mine"), "VM.Console"));
         assert!(!s.can(&u, &perm::vm_path("c", "theirs"), "VM.Audit"));
+    }
+
+    /// A user with the default role must not be able to delete, rename,
+    /// start or configure someone else's VM or network. The role grants
+    /// VM.Allocate and Network.Allocate at / so users can create, and that
+    /// propagates onto every resource path, where Allocate means delete.
+    #[test]
+    fn creating_vms_does_not_let_you_delete_other_peoples() {
+        let mut s = store();
+        own(&mut s, Kind::Vm, "theirs", "a");
+        own(&mut s, Kind::Network, "theirnet", "a");
+        let u = user("u");
+        for p in ["VM.Allocate", "VM.Config", "VM.PowerMgmt", "VM.Console"] {
+            assert!(
+                !s.can(&u, &perm::vm_path("c", "theirs"), p),
+                "{p} on another's VM"
+            );
+        }
+        for p in ["Network.Allocate", "Network.Config", "Network.Use"] {
+            assert!(
+                !s.can(&u, &perm::net_path("c", "theirnet"), p),
+                "{p} on another's network"
+            );
+        }
+        // Still able to create: the collection paths keep the grant.
+        assert!(s.can(&u, "/nodes/c/vms", "VM.Allocate"));
+        assert!(s.can(&u, "/nodes/c/networks", "Network.Allocate"));
+        // An admin and the owner still can.
+        assert!(s.can(&user("a"), &perm::vm_path("c", "theirs"), "VM.Allocate"));
     }
 
     #[test]
