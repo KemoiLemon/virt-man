@@ -198,12 +198,28 @@ table.grid + .actions { margin-top: 12px; }
    table it belongs to. */
 .actions > .al-open { margin-left: auto; }
 .al-modal { width: 1100px; }
-.al-filters { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; }
+/* The filters are one themed block above the table, not loose controls on the
+   page: the fields and the rows are different things, so a border and the
+   panel surface separate them. */
+.al-filters {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
+  background: var(--panel2); border: 1px solid var(--line); padding: 10px;
+}
 .al-filters .field { min-width: 120px; margin: 0; }
 .al-filters .al-grow { flex: 1; min-width: 180px; }
+/* Live / Packet capture / Start sit among the fields, so they take a field's
+   box (12 px text, 6 px padding) instead of the smaller default button: at
+   the default metrics they read as a different, shorter kind of control. */
+.al-filters > .btn { font-size: 12px; letter-spacing: 0; padding: 6px 10px; }
 .al-check { flex-direction: row; align-items: center; gap: 6px; min-width: 0 !important; }
 .al-table td { white-space: nowrap; }
-.al-table td:nth-child(4) { white-space: normal; word-break: break-all; }
+/* The one column allowed to wrap: a long name must not widen the table. */
+.al-table td.al-domain { white-space: normal; word-break: break-all; }
+/* Which way the connection went, matching the capture table's colours: what
+   arrived at the guest reads as good, what left it as the accent. */
+.al-dir { width: 1%; }
+.al-dir.al-in { color: var(--ok); }
+.al-dir.al-out { color: var(--accent); }
 th.al-sort { cursor: pointer; user-select: none; }
 th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
 .al-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

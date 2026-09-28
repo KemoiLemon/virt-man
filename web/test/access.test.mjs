@@ -12,7 +12,7 @@ before(async () => {
 });
 
 test("a filter becomes the server's query", () => {
-  const f = { ...a.defaultFilter("web"), proto: "tcp", q: " github.com ", port: "443", group: "domain", kind: "connections", page: 2 };
+  const f = { ...a.defaultFilter("web"), proto: "tcp", q: " github.com ", port: "443", group: "domain", kind: "connections", direction: "in", page: 2 };
   const p = new URLSearchParams(a.logQuery("c1", f, 1_000_000_000));
   assert.equal(p.get("conn"), "c1");
   assert.equal(p.get("vm"), "web");
@@ -21,12 +21,14 @@ test("a filter becomes the server's query", () => {
   assert.equal(p.get("port"), "443");
   assert.equal(p.get("group"), "domain");
   assert.equal(p.get("kind"), "connections");
+  assert.equal(p.get("direction"), "in");
   assert.equal(p.get("offset"), String(2 * a.PAGE));
   assert.equal(p.get("since_ms"), String(1_000_000_000 - 86_400_000), "last 24 h by default");
   const bare = new URLSearchParams(a.logQuery("c1", { ...a.defaultFilter(), port: "abc" }, 0));
   assert.equal(bare.get("port"), null, "a non-numeric port is not sent");
   assert.equal(bare.get("vm"), null);
   assert.equal(bare.get("kind"), null, "both is the default and is not sent");
+  assert.equal(bare.get("direction"), null, "in and out is the default and is not sent");
 });
 
 test("clicking a column flips it; a new column starts at its natural order", () => {
@@ -53,11 +55,10 @@ test("grouping sorts by count, and a group drills into its connections", () => {
   assert.equal(f.sort, "time", "back to connections, newest first");
 });
 
-test("durations and the sort marker read naturally", () => {
-  assert.equal(a.fmtDuration(0, 5_000, 0), "5 s");
-  assert.equal(a.fmtDuration(0, 125_000, 0), "2 m 5 s");
-  assert.equal(a.fmtDuration(0, 0, 3_720_000), "open 1 h 2 m", "an open connection counts to now");
-  const f = { ...a.defaultFilter(), sort: "bytes", dir: "asc" };
+test("the direction filter narrows to one way, and the sort marker reads naturally", () => {
+  assert.deepEqual(Object.keys(a.DIR_LABEL), ["", "out", "in"], "both, then each way");
+  const f = { ...a.defaultFilter(), sort: "bytes", dir: "asc", direction: "out" };
+  assert.equal(new URLSearchParams(a.logQuery("c1", f, 0)).get("direction"), "out");
   assert.equal(a.sortMark(f, "bytes"), " ▲");
   assert.equal(a.sortMark(f, "time"), "");
 });

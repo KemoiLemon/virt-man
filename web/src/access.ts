@@ -6,6 +6,15 @@ export type Group = "" | "domain" | "ip" | "proto" | "port" | "vm";
 /// Which records: the guests' DNS lookups, the connections the kernel
 /// tracked, or both.
 export type Kind = "both" | "dns" | "connections";
+/// Which way a connection went: the guest opened it (`out`), or someone
+/// reached the guest (`in`, a port forward). Empty is both.
+export type FlowDir = "" | "in" | "out";
+
+export const DIR_LABEL: Record<FlowDir, string> = {
+  "": "In and out",
+  out: "Outgoing",
+  in: "Incoming",
+};
 
 export const KIND_LABEL: Record<Kind, string> = {
   both: "DNS lookups + connections",
@@ -24,6 +33,7 @@ export interface LogFilter {
   sort: string;
   dir: Dir;
   kind: Kind;
+  direction: FlowDir;
   page: number;
 }
 
@@ -46,7 +56,7 @@ export const GROUP_LABEL: Record<Group, string> = {
 };
 
 export function defaultFilter(vm = ""): LogFilter {
-  return { vm, proto: "", q: "", port: "", range: "24h", group: "", sort: "time", dir: "desc", kind: "both", page: 0 };
+  return { vm, proto: "", q: "", port: "", range: "24h", group: "", sort: "time", dir: "desc", kind: "both", direction: "", page: 0 };
 }
 
 /// The query string for a filter.
@@ -59,6 +69,7 @@ export function logQuery(conn: string, f: LogFilter, now: number): string {
   if (/^\d+$/.test(f.port.trim())) p.set("port", f.port.trim());
   if (f.group) p.set("group", f.group);
   if (f.kind !== "both") p.set("kind", f.kind);
+  if (f.direction) p.set("direction", f.direction);
   return p.toString();
 }
 
@@ -85,18 +96,6 @@ export function drillDown(f: LogFilter, key: string): LogFilter {
     case "vm": return { ...next, vm: key };
     default: return next;
   }
-}
-
-export function fmtDuration(openedMs: number, closedMs: number, now: number): string {
-  if (!closedMs) return `open ${fmtSpan(now - openedMs)}`;
-  return fmtSpan(closedMs - openedMs);
-}
-
-function fmtSpan(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.floor(s / 60)} m ${s % 60} s`;
-  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} m`;
 }
 
 export function fmtWhen(ms: number): string {

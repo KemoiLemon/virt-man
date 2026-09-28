@@ -14,8 +14,8 @@ import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
 import { bindChartHover, isLive, loadHistory, range, rangeBar, setRange } from "./history";
-import { GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmtDuration, fmtWhen, forLive, liveApplies, logQuery, sortMark, toggleSort, withGroup } from "./access";
-import type { Group, Kind, LogFilter } from "./access";
+import { DIR_LABEL, GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmtWhen, forLive, liveApplies, logQuery, sortMark, toggleSort, withGroup } from "./access";
+import type { FlowDir, Group, Kind, LogFilter } from "./access";
 import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
@@ -2613,21 +2613,20 @@ function openAccessLogs(conn: string, vm = "") {
           || `<tr><td colspan="5" class="empty">Nothing logged for this filter.</td></tr>`}
       </table>`;
     } else {
-      const now = Date.now();
       table = `<table class="grid al-table">
-        <tr>${th("time", "Time")}${f.vm ? "" : th("vm", "VM")}${th("proto", "Proto")}${th("domain", "Domain")}${th("ip", "Destination")}${th("port", "Port")}${th("bytes", "Traffic")}<th>Duration</th></tr>
+        <tr>${th("time", "Time")}${f.vm ? "" : th("vm", "VM")}<th>Dir</th>${th("proto", "Proto")}${th("domain", "Domain")}${th("ip", "Remote")}${th("port", "Port")}${th("bytes", "Traffic")}</tr>
         ${(data.rows ?? []).map((r) => `
           <tr>
             <td>${fmtWhen(r.opened_ms)}</td>
             ${f.vm ? "" : `<td>${esc(r.vm ?? "—")}</td>`}
+            <td class="al-dir ${r.dir === "in" ? "al-in" : "al-out"}" title="${r.dir === "in" ? "Someone reached this guest" : "The guest opened this connection"}">${r.dir === "in" ? "in" : "out"}</td>
             <td>${r.kind === "dns" ? "dns" : esc(r.proto)}</td>
-            <td>${esc(r.domain ?? "—")}</td>
+            <td class="al-domain">${esc(r.domain ?? "—")}</td>
             <td><code>${esc(r.dst)}</code></td>
             <td>${r.dport || "—"}</td>
             <td>${r.kind === "dns" ? "—" : r.closed_ms ? `↑${fmtBytes(r.bytes_out)} ↓${fmtBytes(r.bytes_in)}` : "…"}</td>
-            <td>${r.kind === "dns" ? "lookup" : fmtDuration(r.opened_ms, r.closed_ms, now)}</td>
           </tr>`).join("")
-          || `<tr><td colspan="8" class="empty">Nothing logged for this filter.</td></tr>`}
+          || `<tr><td colspan="${f.vm ? 7 : 8}" class="empty">Nothing logged for this filter.</td></tr>`}
       </table>`;
     }
     const restore = holdFocus(body, "[data-al-sort], [data-al-drill], select, input");
@@ -2635,6 +2634,7 @@ function openAccessLogs(conn: string, vm = "") {
       <div class="al-filters">
         <label class="field"><span>VM</span><select id="al-vm">${opt([["", "All VMs"], ...vmList.map((v): [string, string] => [v, v])], f.vm)}</select></label>
         <label class="field"><span>Show</span><select id="al-group">${opt(Object.entries(GROUP_LABEL) as [string, string][], f.group)}</select></label>
+        <label class="field"><span>Direction</span><select id="al-direction">${opt(Object.entries(DIR_LABEL) as [string, string][], f.direction)}</select></label>
         <label class="field"><span>Protocol</span><select id="al-proto">${opt([["", "Any"], ["tcp", "TCP"], ["udp", "UDP"], ["icmp", "ICMP"]], f.proto)}</select></label>
         <label class="field"><span>Port</span><input id="al-port" value="${esc(f.port)}" placeholder="any" inputmode="numeric"></label>
         <label class="field al-grow"><span>Domain or IP</span><input id="al-q" value="${esc(f.q)}" placeholder="github.com, 140.82."></label>
@@ -2665,6 +2665,7 @@ function openAccessLogs(conn: string, vm = "") {
     sel("#al-vm", (v) => ({ ...f, vm: v, page: 0 }));
     sel("#al-group", (v) => withGroup(f, v as Group));
     sel("#al-proto", (v) => ({ ...f, proto: v, page: 0 }));
+    sel("#al-direction", (v) => ({ ...f, direction: v as FlowDir, page: 0 }));
     sel("#al-range", (v) => ({ ...f, range: v, page: 0 }));
     sel("#al-kind", (v) => ({ ...f, kind: v as Kind, page: 0 }));
     ($("#al-live", body) as HTMLButtonElement).onclick = () => {
@@ -2845,7 +2846,8 @@ interface CaptureLine {
 
 interface AccessRow {
   opened_ms: number; closed_ms: number; vm: string | null; proto: string; dst: string; dport: number;
-  domain: string | null; bytes_out: number; bytes_in: number; kind: "dns" | "connection";
+  domain: string | null; bytes_out: number; bytes_in: number; dir: FlowDir;
+  kind: "dns" | "connection";
 }
 interface AccessGroup { key: string; count: number; bytes: number; vms: number; last_ms: number }
 

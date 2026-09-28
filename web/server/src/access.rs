@@ -51,10 +51,19 @@ pub struct Flow {
     pub domain: Option<String>,
     pub bytes_out: u64,
     pub bytes_in: u64,
+    /// "in" or "out": whether the guest opened the connection or was
+    /// reached. Absent from a daemon that predates the field, and everything
+    /// such a daemon recorded is outbound.
+    #[serde(default = "outbound")]
+    pub dir: String,
     #[serde(default)]
     pub packets_out: u64,
     #[serde(default)]
     pub packets_in: u64,
+}
+
+fn outbound() -> String {
+    "out".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +116,9 @@ pub struct Query {
     /// Older form of `kind`: `dns=false` means connections only.
     #[serde(default)]
     pub dns: Option<bool>,
+    /// in | out | "" (both). Spelled out because `dir` is the sort direction.
+    #[serde(default)]
+    pub direction: String,
 }
 
 pub fn proto_name(p: u8) -> &'static str {
@@ -149,13 +161,27 @@ impl Access {
                src TEXT NOT NULL, sport INTEGER NOT NULL,
                dst TEXT NOT NULL, dport INTEGER NOT NULL,
                domain TEXT,
-               bytes_out INTEGER NOT NULL, bytes_in INTEGER NOT NULL);
+               bytes_out INTEGER NOT NULL, bytes_in INTEGER NOT NULL,
+               dir TEXT NOT NULL DEFAULT 'out');
              CREATE INDEX IF NOT EXISTS flows_time ON flows(conn, opened);
              CREATE INDEX IF NOT EXISTS flows_vm ON flows(conn, vm_name, opened);
              CREATE UNIQUE INDEX IF NOT EXISTS flows_ct ON flows(conn, ct_id, opened) WHERE ct_id <> 0;
              CREATE TABLE IF NOT EXISTS cursors(conn TEXT PRIMARY KEY, seq INTEGER NOT NULL);",
         )
         .map_err(|e| format!("init access db: {e}"))?;
+        // A database written before rows carried a direction: everything in it
+        // is outbound, which is what the column's default says.
+        let known: i64 = db
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('flows') WHERE name = 'dir'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if known == 0 {
+            db.execute_batch("ALTER TABLE flows ADD COLUMN dir TEXT NOT NULL DEFAULT 'out'")
+                .map_err(|e| format!("add the dir column: {e}"))?;
+        }
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
             path: path.to_path_buf(),
@@ -189,8 +215,8 @@ impl Access {
             let mut ins = tx
                 .prepare_cached(
                     "INSERT INTO flows(conn, ct_id, opened, closed, network, mac, vm, vm_name, proto,
-                       src, sport, dst, dport, domain, bytes_out, bytes_in)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                       src, sport, dst, dport, domain, bytes_out, bytes_in, dir)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
                      ON CONFLICT(conn, ct_id, opened) WHERE ct_id <> 0 DO UPDATE SET
                        closed = excluded.closed,
                        bytes_out = excluded.bytes_out,
@@ -216,6 +242,9 @@ impl Access {
                     f.domain,
                     f.bytes_out as i64,
                     f.bytes_in as i64,
+                    // The close record of the same connection carries the same
+                    // direction, so the insert's value stands.
+                    f.dir,
                 ])
                 .map_err(|e| e.to_string())?;
             }
@@ -339,6 +368,7 @@ impl Access {
             wh.push("dport = ?".into());
             args.push(i64::from(p).into());
         }
+        // A lookup row is the resolver's record: no kernel id, port 53.
         if !q.q.trim().is_empty() {
             wh.push("(dst LIKE ? ESCAPE '\\' OR domain LIKE ? ESCAPE '\\')".into());
             let like = format!(
@@ -359,6 +389,14 @@ impl Access {
             }
             ("" | "both", _) => {}
             (other, _) => return Err(format!("unknown kind '{other}'")),
+        }
+        match q.direction.as_str() {
+            "in" | "out" => {
+                wh.push("dir = ?".into());
+                args.push(q.direction.clone().into());
+            }
+            "" | "both" => {}
+            other => return Err(format!("unknown direction '{other}'")),
         }
         let wh = wh.join(" AND ");
         let dir = if q.dir == "asc" { "ASC" } else { "DESC" };
@@ -435,7 +473,7 @@ impl Access {
             )
             .map_err(|e| e.to_string())?;
         let sql = format!(
-            "SELECT opened, closed, vm_name, network, proto, src, sport, dst, dport, domain, bytes_out, bytes_in, ct_id
+            "SELECT opened, closed, vm_name, network, proto, src, sport, dst, dport, domain, bytes_out, bytes_in, ct_id, dir
              FROM flows WHERE {wh} ORDER BY {order} {dir}, id {dir} LIMIT {limit} OFFSET {offset}"
         );
         let mut st = db.prepare(&sql).map_err(|e| e.to_string())?;
@@ -456,6 +494,7 @@ impl Access {
                     "domain": r.get::<_, Option<String>>(9)?,
                     "bytes_out": r.get::<_, i64>(10)?,
                     "bytes_in": r.get::<_, i64>(11)?,
+                    "dir": r.get::<_, String>(13)?,
                     // A lookup through the network's resolver, not a connection.
                     "kind": if ct == 0 && dport == 53 { "dns" } else { "connection" },
                 }))
@@ -616,6 +655,7 @@ mod tests {
             domain: domain.map(Into::into),
             bytes_out: bytes / 10,
             bytes_in: bytes - bytes / 10,
+            dir: "out".into(),
             packets_out: 1,
             packets_in: 1,
         }
@@ -824,6 +864,66 @@ mod tests {
         assert!(a.query(&n, NOW).is_err());
         assert_eq!(a.query(&q("c2"), NOW).unwrap()["total"], 1);
         assert_eq!(a.vms("c1").unwrap(), vec!["db", "web"]);
+    }
+
+    #[test]
+    fn rows_can_be_narrowed_to_one_direction() {
+        let a = db();
+        let mut inbound = flow(1, 1, 10, 20, "web", 6, "203.0.113.5", 2222, None, 1000);
+        inbound.dir = "in".into();
+        a.record(
+            "c1",
+            &[
+                flow(2, 2, 11, 21, "web", 6, "1.1.1.1", 443, None, 10),
+                inbound,
+            ],
+            2,
+        )
+        .unwrap();
+        let mut d = q("c1");
+        assert_eq!(a.query(&d, NOW).unwrap()["total"], 2, "both by default");
+        d.direction = "in".into();
+        let r = a.query(&d, NOW).unwrap();
+        assert_eq!(r["total"], 1);
+        // The remote end is the destination whichever way the connection
+        // went, so a search and the ip grouping keep working on an in row.
+        assert_eq!(
+            (r["rows"][0]["dir"].as_str(), r["rows"][0]["dst"].as_str()),
+            (Some("in"), Some("203.0.113.5"))
+        );
+        d.direction = "out".into();
+        assert_eq!(a.query(&d, NOW).unwrap()["total"], 1);
+        d.direction = "sideways".into();
+        assert!(a.query(&d, NOW).is_err());
+    }
+
+    #[test]
+    fn a_database_from_before_the_direction_column_still_opens() {
+        let p = std::env::temp_dir().join(format!(
+            "access-old-{}-{}.db",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        let old = Connection::open(&p).unwrap();
+        old.execute_batch(
+            "CREATE TABLE flows(
+               id INTEGER PRIMARY KEY, conn TEXT NOT NULL, ct_id INTEGER NOT NULL,
+               opened INTEGER NOT NULL, closed INTEGER NOT NULL, network TEXT NOT NULL,
+               mac TEXT, vm TEXT, vm_name TEXT, proto INTEGER NOT NULL,
+               src TEXT NOT NULL, sport INTEGER NOT NULL, dst TEXT NOT NULL,
+               dport INTEGER NOT NULL, domain TEXT,
+               bytes_out INTEGER NOT NULL, bytes_in INTEGER NOT NULL);
+             INSERT INTO flows(conn, ct_id, opened, closed, network, proto, src, sport,
+                               dst, dport, bytes_out, bytes_in)
+             VALUES ('c1', 1, 10, 20, 'internet', 6, '10.0.0.5', 40000, '1.1.1.1', 443, 1, 2);",
+        )
+        .unwrap();
+        drop(old);
+        let a = Access::open(&p).unwrap();
+        let r = a.query(&q("c1"), NOW).unwrap();
+        assert_eq!(r["total"], 1);
+        assert_eq!(r["rows"][0]["dir"], "out", "everything old is outbound");
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
