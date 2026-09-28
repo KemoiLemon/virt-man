@@ -432,7 +432,10 @@ fn own_job(state: &AppState, user: &User, job: &JobRef) -> Result<(), ApiError> 
     if owner == user.id || state.read().is_admin(user) {
         Ok(())
     } else {
-        Err(ApiError::forbidden())
+        Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "this upload belongs to another user",
+        ))
     }
 }
 

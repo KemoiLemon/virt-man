@@ -237,7 +237,8 @@ pub async fn check_quota(
     } else {
         here
     };
-    perm::check_quota(&q, &conn.id, &here, &everywhere).map_err(ApiError::bad_request)
+    perm::check_quota(&q, &conn.id, &conn.name, &here, &everywhere, &delta)
+        .map_err(|e| ApiError::new(axum::http::StatusCode::FORBIDDEN, e))
 }
 
 /// Everything a non-admin names in a guest definition must be theirs to use:
@@ -362,7 +363,10 @@ pub async fn before(
             if admin {
                 Ok(None)
             } else {
-                Err(ApiError::forbidden())
+                Err(ApiError::new(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "only an administrator can do that: it affects the whole server, not just your resources",
+                ))
             }
         }
         Special::CreateVm => {

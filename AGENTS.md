@@ -270,6 +270,16 @@ Things that bite:
   demand; the 1 s poll skips it. Servers are managed there (Daemons), not on
   the Datacenter, and an old `/servers` link lands on that page.
 
+**A long operation reports its own outcome.** `runTask` (`web/src/task.ts`)
+takes `{ done, notify: toast }` and toasts success or the server's reason once
+the work settles. Never toast "created" beside it: that is what made a create
+refused by a quota say it succeeded. A failure toast stays until dismissed, and
+the VM create deletes the volumes it made if the guest is then refused, or a
+refused create would still count against the user's storage. Refusals are
+descriptive by construction (`api::denied`, `perm::check_quota`); keep new ones
+that way -- say what was missing, on what, and what to do.
+`test/live-quota.mjs` drives an over-limit create through the real form.
+
 **Destructive daemon calls are logged by the proxy, not the SPA.** Every
 `DELETE` proxied to the daemon is recorded with a human label, its outcome, and
 a detail line — for a VM delete that includes what happened to its storage

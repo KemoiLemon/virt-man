@@ -949,22 +949,36 @@ interface UsageRow {
   networks: number;
 }
 
-/// How full the fullest of a user's limits is, 0-100, or null when they have
-/// none. A user is as constrained as their tightest limit.
-function fullest(u: UsageRow): number | null {
-  const d = u.quota?.default ?? {};
-  const pairs: [number | null | undefined, number][] = [
-    [d.vms, u.vms], [d.vcpus, u.vcpus], [d.memory_mb, u.memory_mb],
-    [d.storage_gb, u.storage_bytes / 1073741824], [d.networks, u.networks],
-  ];
-  const ratios = pairs.filter(([cap]) => cap != null).map(([cap, used]) =>
-    cap === 0 ? (used > 0 ? 100 : 0) : Math.min(100, (used / (cap as number)) * 100));
-  return ratios.length ? Math.max(...ratios) : null;
+type DashTab = "overview" | "usage" | "ownership" | "activity";
+let dashTab: DashTab = "overview";
+
+const DASH_TABS: [DashTab, string, (s?: number) => string][] = [
+  ["overview", "Overview", ic.datacenter],
+  ["usage", "Usage", ic.quota],
+  ["ownership", "Ownership", ic.user],
+  ["activity", "Activity", ic.autostart],
+];
+
+/// One limit as a metric line: used / cap, a meter, and what is left. Each
+/// resource is its own limit, so each gets its own meter; there is no single
+/// "how full is this user" figure, because a user at 100% of their vCPUs and
+/// 5% of their storage is not 100% of anything as a whole.
+function limitMeter(label: string, used: number, cap: number | null | undefined, fmt: (n: number) => string): string {
+  if (cap == null) {
+    return `<div class="spec"><b>${esc(label)}</b><span>${fmt(used)} <span class="dim-note">· no limit</span></span></div>`;
+  }
+  const pct = cap === 0 ? (used > 0 ? 100 : 0) : Math.min(100, (used / cap) * 100);
+  return `<div class="spec limit-spec">
+      <b>${esc(label)}</b>
+      <span>${fmt(used)} / ${fmt(cap)}</span>
+      <div class="meter"><div class="meter-fill ${pct >= 100 ? "hot" : ""}" style="width:${pct.toFixed(1)}%"></div></div>
+    </div>`;
 }
 
-/// The admin page's landing view: the datacenter dashboard's layout, with
-/// administration's figures -- accounts, who owns what, how close each user
-/// is to their limits, and what happened recently.
+/// The admin page's landing view, built from the datacenter dashboard's own
+/// parts -- the card strip, metric panels with meters, spec grids and grid
+/// tables -- so it reads as the same product, split into tabs like every
+/// other multi-part page.
 const dashboard_: Painter = async (ctx, area, gen) => {
   const [res, usage, acl, act, keys] = await Promise.all([
     api.get<AdminResource[]>("/resources"),
@@ -974,111 +988,150 @@ const dashboard_: Painter = async (ctx, area, gen) => {
     api.get<ApiKey[]>("/keys"),
   ]);
   if (!ctx.stillCurrent(gen)) return;
+
   const conns = ctx.connections();
   const online = conns.filter((c) => c.online !== false).length;
   const admins = users.filter((u) => u.admin).length;
   const vms = res.filter((r) => r.kind === "vm");
   const nets = res.filter((r) => r.kind === "network");
+  const vols = res.filter((r) => r.kind === "volume");
   const suspended = res.filter((r) => r.suspended);
-  const failed = act.entries.filter((e) => e.status === "failed");
   const dayAgo = Date.now() - 86_400_000;
-  const failedToday = failed.filter((e) => e.at_ms >= dayAgo).length;
+  const today = act.entries.filter((e) => e.at_ms >= dayAgo);
+  const failedToday = today.filter((e) => e.status === "failed").length;
+  const limited = usage.filter((u) => {
+    const d = u.quota?.default ?? {};
+    return [d.vms, d.vcpus, d.memory_mb, d.storage_gb, d.networks].some((x) => x != null)
+      || Object.keys(u.quota?.daemons ?? {}).length > 0;
+  });
+  const mem = (m: number) => fmtBytes(m * 1048576);
+  const count = (n: number) => String(n);
 
-  // Owners and what they hold, the admins' share folded into one row.
-  const byOwner = new Map<string, { name: string; vms: number; nets: number; vols: number }>();
-  for (const r of res) {
-    if (r.kind === "pool") continue;
-    const k = r.owner ?? "";
-    const row = byOwner.get(k) ?? { name: r.owner_name ?? "—", vms: 0, nets: 0, vols: 0 };
-    if (r.kind === "vm") row.vms++;
-    else if (r.kind === "network") row.nets++;
-    else row.vols++;
-    byOwner.set(k, row);
+  const card = (icon: string, n: number | string, label: string, tone: string, go: AdminSection) =>
+    `<div class="card ${tone} admin-card-link" data-go="${go}" tabindex="0" role="link">
+      <span class="card-ic">${icon}</span><div><b>${n}</b><i>${label}</i></div></div>`;
+
+  // A metric panel in the datacenter dashboard's shape: head, big figure, a
+  // meter, and a two-sided foot.
+  const panel = (icon: string, title: string, value: string, pct: number, left: string, right: string, go: AdminSection) =>
+    `<div class="metric ok admin-card-link" data-go="${go}" tabindex="0" role="link">
+      <div class="metric-head"><span class="metric-ic">${icon}</span><b>${esc(title)}</b>
+        <span class="metric-value">${esc(value)}</span></div>
+      <div class="meter"><div class="meter-fill ${pct > 85 ? "hot" : ""}" style="width:${Math.min(100, pct).toFixed(1)}%"></div></div>
+      <div class="metric-foot"><span>${left}</span><span>${right}</span></div>
+    </div>`;
+
+  let body = "";
+  if (dashTab === "overview") {
+    const running = vms.filter((v) => v.state === "running").length;
+    const activeNets = nets.filter((n) => n.state === "active").length;
+    const ownedByUsers = vms.filter((v) => v.owner && !users.find((u) => u.id === v.owner)?.admin).length;
+    body = `
+      <div class="cards">
+        ${card(ic.user(20), users.length, "USERS", "", "users")}
+        ${card(ic.admin(20), admins, "ADMINISTRATORS", "", "users")}
+        ${card(ic.groups(20), groups.length, "GROUPS", "", "groups")}
+        ${card(ic.perms(20), acl.length, "PERMISSIONS", "", "permissions")}
+        ${card(ic.key(20), keys.length, "API KEYS", "", "keys")}
+      </div>
+      <div class="sumgrid">
+        ${panel(ic.server(), "Daemons", `${online}/${conns.length}`, conns.length ? (online / conns.length) * 100 : 0,
+          `${online} online`, `${conns.length - online} offline`, "daemons")}
+        ${panel(ic.vms(), "VMs", String(vms.length), vms.length ? (running / vms.length) * 100 : 0,
+          `${running} running`, `${ownedByUsers} owned by users`, "resources")}
+        ${panel(ic.network(), "Networks", String(nets.length), nets.length ? (activeNets / nets.length) * 100 : 0,
+          `${activeNets} active`, `${vols.length} volumes`, "resources")}
+        ${panel(ic.autostart(), "Activity today", String(today.length),
+          today.length ? (failedToday / today.length) * 100 : 0,
+          `${today.length - failedToday} done`, `${failedToday} failed`, "activity")}
+      </div>
+      <div class="dash-section">
+        <div class="section-title">Needs attention</div>
+        <table class="grid">
+          <tr><th>What</th><th>Where</th><th>Detail</th></tr>
+          ${[
+            ...conns.filter((c) => c.online === false).map((c) =>
+              `<tr class="row-open" tabindex="0" data-go="daemons"><td class="tname">Daemon offline</td><td>${esc(c.name)}</td>
+                <td class="task-msg">${esc(c.offline_error ?? "not answering")}</td></tr>`),
+            ...suspended.map((r) =>
+              `<tr class="row-open" tabindex="0" data-go="resources"><td class="tname">Suspended ${r.kind === "vm" ? "VM" : r.kind}</td>
+                <td>${esc(r.name)} · ${esc(r.conn_name)}</td><td>owned by ${esc(r.owner_name ?? "—")}</td></tr>`),
+            ...act.entries.filter((e) => e.status === "failed").slice(0, 5).map((e) =>
+              `<tr class="row-open" tabindex="0" data-go="activity"><td class="tname">Failed: ${esc(e.label)}</td>
+                <td>${esc(e.username)} · ${esc(ctx.relTime(e.at_ms))}</td><td class="task-msg">${esc(e.message || "—")}</td></tr>`),
+          ].join("") || `<tr><td colspan="3" class="empty">Nothing needs attention.</td></tr>`}
+        </table>
+      </div>`;
+  } else if (dashTab === "usage") {
+    // One card per limited user, each limit its own meter.
+    body = limited.length ? `<div class="card-grid">${limited.map((u) => {
+      const d = u.quota?.default ?? {};
+      const over = Object.keys(u.quota?.daemons ?? {}).length;
+      return `<div class="storage-card" data-open tabindex="0" data-quota-user="${esc(u.id)}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.user()}</span>
+          <span class="storage-card-title">${esc(u.username)}</span>
+          <span class="badge">${u.quota?.shared ? "Pooled" : "Per daemon"}</span>
+          ${over ? `<span class="badge">+${over} override${over > 1 ? "s" : ""}</span>` : ""}
+        </div>
+        <div class="specs">
+          ${limitMeter("VMs", u.vms, d.vms, count)}
+          ${limitMeter("vCPUs", u.vcpus, d.vcpus, count)}
+          ${limitMeter("Memory", u.memory_mb, d.memory_mb, mem)}
+          ${limitMeter("Storage", u.storage_bytes / 1073741824, d.storage_gb, (g) => `${Number.isInteger(g) ? g : g.toFixed(1)} GiB`)}
+          ${limitMeter("Networks", u.networks, d.networks, count)}
+        </div>
+      </div>`;
+    }).join("")}</div>
+    ${usage.length > limited.length ? `<p class="hint">${usage.length - limited.length} user(s) have no limits and are not shown. Administrators are never limited.</p>` : ""}`
+      : `<div class="empty">No user has limits. Set them under Limits › Quotas.</div>`;
+  } else if (dashTab === "ownership") {
+    const byOwner = new Map<string, { name: string; vms: number; nets: number; vols: number; vcpus: number; mem: number }>();
+    for (const r of res) {
+      if (r.kind === "pool") continue;
+      const k = r.owner ?? "";
+      const o = byOwner.get(k) ?? { name: r.owner_name ?? "—", vms: 0, nets: 0, vols: 0, vcpus: 0, mem: 0 };
+      if (r.kind === "vm") { o.vms++; o.vcpus += r.vcpus ?? 0; o.mem += r.memory_mb ?? 0; }
+      else if (r.kind === "network") o.nets++;
+      else o.vols++;
+      byOwner.set(k, o);
+    }
+    body = `<table class="grid">
+      <tr><th>Owner</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Networks</th><th>Volumes</th></tr>
+      ${[...byOwner.entries()].sort((a, b) => b[1].vms - a[1].vms).map(([id, o]) => `
+        <tr class="row-open" tabindex="0" data-owner="${esc(id)}">
+          <td class="tname">${esc(o.name)}</td><td>${o.vms}</td><td>${o.vcpus}</td><td>${mem(o.mem)}</td>
+          <td>${o.nets}</td><td>${o.vols}</td>
+        </tr>`).join("") || `<tr><td colspan="6" class="empty">Nothing on any daemon yet.</td></tr>`}
+    </table>`;
+  } else {
+    body = `<table class="grid">
+      <tr><th>When</th><th>User</th><th>Action</th><th>Result</th><th>Detail</th></tr>
+      ${act.entries.slice(0, 50).map((e) => `
+        <tr>
+          <td class="host">${esc(ctx.relTime(e.at_ms))}</td>
+          <td>${esc(e.username)}</td>
+          <td class="tname">${esc(e.label)}</td>
+          <td><span class="state ${e.status === "done" ? "on" : "bad"}">${esc(e.status === "done" ? "Done" : "Failed")}</span></td>
+          <td class="task-msg">${esc(e.message || "—")}</td>
+        </tr>`).join("") || `<tr><td colspan="5" class="empty">No activity recorded yet.</td></tr>`}
+    </table>
+    ${act.entries.length > 50 ? `<div class="actions"><button class="btn" data-go="activity">${ic.logs(14)} Full activity log</button></div>` : ""}`;
   }
 
-  const card = (icon: string, n: number | string, label: string, tone = "", go?: AdminSection) =>
-    `<div class="card ${tone} ${go ? "admin-card-link" : ""}" ${go ? `data-go="${go}" tabindex="0" role="link"` : ""}>
-      <span class="card-ic">${icon}</span><div><b>${n}</b><i>${label}</i></div></div>`;
-  const meter = (p: number) => `<div class="meter"><div class="meter-fill ${p > 85 ? "hot" : ""}" style="width:${p.toFixed(1)}%"></div></div>`;
-  const limited = usage
-    .map((u) => ({ u, p: fullest(u) }))
-    .sort((a, b) => (b.p ?? -1) - (a.p ?? -1));
-
   ctx.setHtml(area, `
-    <div class="cards">
-      ${card(ic.user(20), users.length, "USERS", "", "users")}
-      ${card(ic.admin(20), admins, "ADMINISTRATORS", "", "users")}
-      ${card(ic.groups(20), groups.length, "GROUPS", "", "groups")}
-      ${card(ic.server(20), `${online}/${conns.length}`, "DAEMONS ONLINE", online < conns.length ? "bad" : "ok", "daemons")}
-      ${card(ic.vms(20), vms.length, "VMS", "", "resources")}
-      ${card(ic.network(20), nets.length, "NETWORKS", "", "resources")}
-      ${card(ic.suspend(20), suspended.length, "SUSPENDED", suspended.length ? "warn" : "", "resources")}
-      ${card(ic.perms(20), acl.length, "PERMISSIONS", "", "permissions")}
-      ${card(ic.key(20), keys.length, "API KEYS", "", "keys")}
-      ${card(ic.autostart(20), failedToday, "FAILED TODAY", failedToday ? "bad" : "", "activity")}
+    <div class="tabbar">
+      ${DASH_TABS.map(([t, label, icon]) =>
+        `<button class="tab ${t === dashTab ? "active" : ""}" data-dash-tab="${t}">${icon(14)} ${label}</button>`).join("")}
     </div>
+    ${body}`);
 
-    <div class="dash-section">
-      <div class="section-title">Limits</div>
-      ${limited.length ? `<table class="grid">
-        <tr><th>User</th><th>Tightest limit</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Storage</th><th>Networks</th></tr>
-        ${limited.map(({ u, p }) => {
-          const d = u.quota?.default ?? {};
-          const of = (used: number | string, cap: number | string | null | undefined, unit = "") =>
-            `${used}${cap == null ? "" : ` / ${cap}${unit}`}`;
-          return `<tr class="row-open" tabindex="0" data-go="quotas">
-            <td class="tname">${esc(u.username)}${u.quota?.shared ? ` <span class="badge">pooled</span>` : ""}</td>
-            <td class="limit-cell">${p == null ? `<span class="dim-note">Unlimited</span>` : `${meter(p)}<span>${p.toFixed(0)}%</span>`}</td>
-            <td>${of(u.vms, d.vms)}</td>
-            <td>${of(u.vcpus, d.vcpus)}</td>
-            <td>${of(fmtBytes(u.memory_mb * 1048576), d.memory_mb == null ? null : fmtBytes(d.memory_mb * 1048576))}</td>
-            <td>${of(fmtBytes(u.storage_bytes), d.storage_gb, " GiB")}</td>
-            <td>${of(u.networks, d.networks)}</td>
-          </tr>`;
-        }).join("")}
-      </table>` : `<div class="empty">Every account is an administrator; limits apply to other users.</div>`}
-    </div>
-
-    <div class="dash-section">
-      <div class="section-title">Ownership</div>
-      <table class="grid">
-        <tr><th>Owner</th><th>VMs</th><th>Networks</th><th>Volumes</th></tr>
-        ${[...byOwner.entries()].sort((a, b) => b[1].vms - a[1].vms).map(([id, o]) => `
-          <tr class="row-open" tabindex="0" data-owner="${esc(id)}">
-            <td class="tname">${esc(o.name)}</td><td>${o.vms}</td><td>${o.nets}</td><td>${o.vols}</td>
-          </tr>`).join("") || `<tr><td colspan="4" class="empty">Nothing on any daemon yet.</td></tr>`}
-      </table>
-    </div>
-
-    <div class="dash-section">
-      <div class="section-title">Daemons</div>
-      <table class="grid">
-        <tr><th>Daemon</th><th>Status</th><th>VMs</th><th>Networks</th><th>Pools</th></tr>
-        ${conns.map((c) => {
-          const n = (k: string) => res.filter((r) => r.conn === c.id && r.kind === k).length;
-          return `<tr class="row-open" tabindex="0" data-go="daemons">
-            <td class="tname">${esc(c.name)}</td>
-            <td><span class="state ${c.online !== false ? "on" : "bad"}">${c.online !== false ? "Online" : "Offline"}</span></td>
-            <td>${n("vm")}</td><td>${n("network")}</td><td>${n("pool")}</td>
-          </tr>`;
-        }).join("") || `<tr><td colspan="5" class="empty">No daemons yet.</td></tr>`}
-      </table>
-    </div>
-
-    <div class="dash-section">
-      <div class="section-title">Recent Activity</div>
-      <table class="grid">
-        <tr><th>When</th><th>User</th><th>Action</th><th>Result</th></tr>
-        ${act.entries.slice(0, 8).map((e) => `
-          <tr class="row-open" tabindex="0" data-go="activity">
-            <td class="host">${esc(ctx.relTime(e.at_ms))}</td>
-            <td>${esc(e.username)}</td>
-            <td class="tname">${esc(e.label)}</td>
-            <td><span class="state ${e.status === "done" ? "on" : "bad"}">${esc(e.status)}</span></td>
-          </tr>`).join("") || `<tr><td colspan="4" class="empty">No activity recorded yet.</td></tr>`}
-      </table>
-    </div>`);
-
+  area.querySelectorAll<HTMLElement>("[data-dash-tab]").forEach((b) => {
+    b.onclick = () => {
+      dashTab = b.dataset.dashTab as DashTab;
+      ctx.go("dashboard");
+    };
+  });
   area.querySelectorAll<HTMLElement>("[data-go]").forEach((el) => {
     el.onclick = () => ctx.go(el.dataset.go as AdminSection);
   });
@@ -1086,6 +1139,12 @@ const dashboard_: Painter = async (ctx, area, gen) => {
     el.onclick = () => {
       resFilter = { kind: "", owner: el.dataset.owner ?? "", conn: "" };
       ctx.go("resources");
+    };
+  });
+  area.querySelectorAll<HTMLElement>("[data-quota-user]").forEach((el) => {
+    el.onclick = () => {
+      const u = users.find((x) => x.id === el.dataset.quotaUser);
+      if (u) openQuota(ctx, u);
     };
   });
 };

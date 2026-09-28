@@ -114,10 +114,14 @@ pub fn require_priv(
     move |Extension(user): Extension<User>, req: Request, next: Next| {
         let state = state.clone();
         Box::pin(async move {
-            if state.read().can(&user, path, privilege) {
-                next.run(req).await
-            } else {
-                StatusCode::FORBIDDEN.into_response()
+            let refused = {
+                let store = state.read();
+                (!store.can(&user, path, privilege))
+                    .then(|| crate::api::denied(&store, &user, path, privilege))
+            };
+            match refused {
+                Some(e) => e.into_response(),
+                None => next.run(req).await,
             }
         })
     }

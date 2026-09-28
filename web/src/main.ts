@@ -528,7 +528,10 @@ function toast(msg: string, kind: "ok" | "bad" = "ok") {
   };
   close.onclick = dismiss;
   requestAnimationFrame(() => el.classList.add("show"));
-  setTimeout(dismiss, 4000);
+  // A failure stays until dismissed: it carries the reason (which limit, which
+  // permission), and four seconds is not long enough to read one -- the
+  // refusals were being missed entirely. Successes still fade on their own.
+  if (kind !== "bad") setTimeout(dismiss, 4000);
 }
 
 // ---------------------------------------------------------------- boot
@@ -2947,13 +2950,12 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
     const xml = networkXml(form, uuid);
     const conn = selectedConn!;
     const owner = uuid ? null : takePendingOwner("network");
-    runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
+    void runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
       if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(initial.name)}/xml`, xml);
       else await api.postXml(`/proxy/${conn}/networks`, xml);
       if (owner) await assignOwner(conn, "network", form.name, owner);
-    });
-    toast(`${uuid ? "Update" : "Creation"} started`);
-    setTimeout(() => void renderConn(), 600);
+    }, { done: `Network ${form.name} ${uuid ? "updated" : "created"}`, notify: toast })
+      .then(() => { void refreshTreeVms(); if (selectedConn === conn && !selectedVm) void renderConn(); });
   };
 
   sync();
@@ -3439,10 +3441,9 @@ async function renderVmBody(vm: string) {
           // libvirt requires title/description right after <name>.
           next = next.replace(/(<name>[^<]*<\/name>)/, `$1\n${meta}`);
         }
-        runTask(`Update options for ${target}`, async () => {
+        void runTask(`Update options for ${target}`, async () => {
           await api.putXml(`/proxy/${selectedConn}/domains/${encodeURIComponent(target)}/xml`, next);
-        });
-        toast("Options update started");
+        }, { done: `Options for ${target} saved`, notify: toast });
       });
     } catch (e) {
       setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -4329,6 +4330,7 @@ async function createPendingVolumes(
   vmName: string,
   devices: HwDevice[],
   set: (msg: string) => void,
+  made: { pool: string; name: string }[] = [],
 ) {
   for (let i = 0; i < devices.length; i++) {
     const d = devices[i];
@@ -4342,6 +4344,7 @@ async function createPendingVolumes(
       `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`,
       { xml: volumeXml({ name, capacity_gb: sizeGb, format }),
     });
+    made.push({ pool, name });
     d.fields.volume = name;
     // Address it by path as well: the reference form is not resolvable on
     // every libvirt, and an unresolvable disk keeps the guest from starting.
@@ -4800,7 +4803,7 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
       // Close only the modal; the inline editor stays visible and the
       // post-task renderVm() below refreshes it from the new definition.
       modal?.remove();
-      runTask(`Update ${general.name.trim() || oldName}`, async (set) => {
+      void runTask(`Update ${general.name.trim() || oldName}`, async (set) => {
         let target = oldName;
         if (renamed) {
           // Rename through the dedicated endpoint: it swaps the persistent
@@ -4838,9 +4841,7 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
         await api.putXml(`/proxy/${conn}/domains/${encodeURIComponent(target)}/xml`,
           withFirmware(withDevices(stripped, devices), general.firmware, target));
         await refreshTreeVms();
-      });
-      toast("Hardware update started");
-      setTimeout(() => void renderVm(), 600);
+      }, { done: "Hardware saved", notify: toast }).then(() => void renderVm());
       return;
     }
 
@@ -4862,18 +4863,24 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
       iso_pool: newDisk.pool,
     };
     modal?.remove();
-    runTask(`Create VM ${form.name}`, async (set) => {
+    // Volumes made on the way, deleted again if the guest is not defined:
+    // otherwise a refused create (quota, permission) leaves a disk behind that
+    // still counts against the user's storage.
+    const made: { pool: string; name: string }[] = [];
+    void runTask(`Create VM ${form.name}`, async (set) => {
+      try {
       set(`creating ${newDisk.size_gb} GB volume`);
       const disk = await api.post<{ name: string; path: string }>(
         `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
         { xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+      made.push({ pool: newDisk.pool, name: disk.name });
       // Refer to the disk by its absolute path rather than by pool+volume: the
       // reference form cannot be resolved by every libvirt, and a disk libvirt
       // cannot resolve never reaches the guest's AppArmor profile, so qemu is
       // refused permission to open it and the guest will not start.
       form.disk_path = disk.path;
       // Create any additional "new volume" disks before defining the domain.
-      await createPendingVolumes(conn, form.name, devices, set);
+      await createPendingVolumes(conn, form.name, devices, set, made);
       set("defining domain");
       // Defined shut off: creating a guest must not also boot it, so a
       // mis-sized or mis-configured VM cannot start eating resources before
@@ -4883,13 +4890,19 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
       // here rewrote the network definition, which restarted it and
       // disconnected every other guest on it.)
       await api.postXml(`/proxy/${conn}/domains?start=false`, withDevices(domainXml(form), devices));
+      } catch (e) {
+        for (const v of made) {
+          await api.del(`/proxy/${conn}/pools/${encodeURIComponent(v.pool)}/volumes/${encodeURIComponent(v.name)}`)
+            .catch(() => undefined);
+        }
+        throw e;
+      }
       if (owner) {
         set("assigning owner");
         await assignOwner(conn, "vm", form.name, owner);
       }
-    });
-    toast("VM created");
-    renderConn();
+    }, { done: `VM ${form.name} created`, notify: toast })
+      .then(() => { void refreshTreeVms(); if (selectedConn === conn && !selectedVm) renderConn(); });
   };
 
   void render();
@@ -5040,11 +5053,10 @@ function openCreatePool() {
     };
     if (!form.name || !form.target) return toast("Name and target are required", "bad");
     el.remove();
-    runTask(`Create pool ${form.name}`, async () => {
+    void runTask(`Create pool ${form.name}`, async () => {
       await api.postXml(`/proxy/${selectedConn}/pools`, poolXml(form));
-    });
-    toast("Pool creation started");
-    renderConn();
+    }, { done: `Pool ${form.name} created`, notify: toast })
+      .then(() => { void refreshTreeVms(); renderConn(); });
   };
 }
 
@@ -5065,12 +5077,11 @@ function openCreateVolume(pool: string) {
     const format = ($("#vol-format", el) as HTMLSelectElement).value as "raw" | "qcow2";
     if (!name || !size) return toast("Name and size required", "bad");
     el.remove();
-    runTask(`Create volume ${name}`, async () => {
+    void runTask(`Create volume ${name}`, async () => {
       await api.post(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`, {
         xml: volumeXml({ name, capacity_gb: size, format }),
       });
-    });
-    toast("Volume creation started");
+    }, { done: `Volume ${name} created`, notify: toast });
   };
 }
 

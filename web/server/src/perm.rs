@@ -232,27 +232,63 @@ impl Usage {
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-fn over(limit: &Limit, u: &Usage, what: &str) -> Result<(), String> {
-    let checks = [
-        (limit.vms, u.vms, "VMs", ""),
-        (limit.vcpus, u.vcpus, "vCPUs", ""),
-        (limit.memory_mb, u.memory_mb, "memory", " MiB"),
-        (
-            limit.storage_gb,
-            u.storage_bytes.div_ceil(GIB),
-            "storage",
-            " GiB",
-        ),
-        (limit.networks, u.networks, "networks", ""),
-    ];
-    for (cap, used, name, unit) in checks {
-        if let Some(cap) = cap {
-            if used > cap {
-                return Err(format!(
-                    "{name} limit reached{what}: this would use {used}{unit} of {cap}{unit}"
-                ));
-            }
+/// Check one set of limits. `after` is the usage the change would leave,
+/// `asked` what the change adds. The message says which limit, what was asked
+/// for, what is already in use, and where -- "this would use 4 of 2" left
+/// users unable to tell whether their other VMs counted, or which server.
+fn over(limit: &Limit, after: &Usage, asked: &Usage, scope: &str) -> Result<(), String> {
+    let mib = |m: u64| {
+        if m >= 1024 && m.is_multiple_of(1024) {
+            format!("{} GiB", m / 1024)
+        } else {
+            format!("{m} MiB")
         }
+    };
+    let gib = |g: u64| format!("{g} GiB");
+    let count = |x: u64| x.to_string();
+    type Row<'a> = (&'a str, Option<u64>, u64, u64, &'a dyn Fn(u64) -> String);
+    let rows: [Row; 5] = [
+        ("VM", limit.vms, after.vms, asked.vms, &count),
+        ("vCPU", limit.vcpus, after.vcpus, asked.vcpus, &count),
+        (
+            "Memory",
+            limit.memory_mb,
+            after.memory_mb,
+            asked.memory_mb,
+            &mib,
+        ),
+        (
+            "Storage",
+            limit.storage_gb,
+            after.storage_bytes.div_ceil(GIB),
+            asked.storage_bytes.div_ceil(GIB),
+            &gib,
+        ),
+        (
+            "Network",
+            limit.networks,
+            after.networks,
+            asked.networks,
+            &count,
+        ),
+    ];
+    for (label, cap, used_after, want, fmt) in rows {
+        let Some(cap) = cap else { continue };
+        if used_after <= cap {
+            continue;
+        }
+        let before = used_after.saturating_sub(want);
+        let left = match cap.saturating_sub(before) {
+            0 => "none left".to_string(),
+            free => format!("{} left", fmt(free)),
+        };
+        return Err(format!(
+            "{label} limit reached {scope}: this needs {} more, you already use {} of your {} ({left}). \
+             Free some up, or ask an administrator to raise your limit.",
+            fmt(want),
+            fmt(before),
+            fmt(cap),
+        ));
     }
     Ok(())
 }
@@ -261,18 +297,26 @@ fn over(limit: &Limit, u: &Usage, what: &str) -> Result<(), String> {
 ///
 /// `here` is the resulting usage on the daemon being changed, `everywhere`
 /// the resulting usage summed over all daemons (only consulted in shared
-/// mode). Only the dimensions that grew are worth refusing on, which the
-/// caller ensures by passing usage *after* the change.
-pub fn check_quota(q: &Quota, conn: &str, here: &Usage, everywhere: &Usage) -> Result<(), String> {
+/// mode), `asked` what the change adds, and `server` the daemon's name for
+/// the message.
+pub fn check_quota(
+    q: &Quota,
+    conn: &str,
+    server: &str,
+    here: &Usage,
+    everywhere: &Usage,
+    asked: &Usage,
+) -> Result<(), String> {
+    let on = format!("on '{server}'");
     if let Some(l) = q.daemons.get(conn) {
-        over(l, here, " on this server")?;
+        over(l, here, asked, &on)?;
     }
     if q.shared {
-        over(&q.default, everywhere, " across all servers")
+        over(&q.default, everywhere, asked, "across all servers")
     } else if q.daemons.contains_key(conn) {
         Ok(())
     } else {
-        over(&q.default, here, " on this server")
+        over(&q.default, here, asked, &on)
     }
 }
 
@@ -346,6 +390,54 @@ pub fn acl_privs(
         }
     }
     Privs::new()
+}
+
+/// What a privilege lets you do, in words, for a refusal message.
+pub fn describe_priv(p: &str) -> &'static str {
+    match p {
+        "Sys.Audit" => "view this server",
+        "Sys.Modify" => "manage servers",
+        "VM.Audit" => "view this VM",
+        "VM.Allocate" => "create or delete VMs here",
+        "VM.Config" => "change this VM's configuration",
+        "VM.PowerMgmt" => "start, stop or restart this VM",
+        "VM.Console" => "open this VM's console",
+        "Network.Audit" => "view this network",
+        "Network.Allocate" => "create or delete networks here",
+        "Network.Config" => "change this network",
+        "Network.Use" => "connect VMs to this network",
+        "Datastore.Audit" => "view this storage pool",
+        "Datastore.AllocateSpace" => "create volumes in this storage pool",
+        "Datastore.Allocate" => "manage storage pools",
+        "Bridge.Use" => "use this bridge",
+        "Permissions.Modify" => "administer users and permissions",
+        _ => "do that",
+    }
+}
+
+/// A path as a person reads it: `/nodes/<id>/vms/web` becomes
+/// `VM 'web' on <server name>`. `server` maps a connection id to its name.
+pub fn describe_path(path: &str, server: &dyn Fn(&str) -> Option<String>) -> String {
+    let seg: Vec<&str> = path.trim_matches('/').splitn(4, '/').collect();
+    let srv = |c: &str| {
+        server(c)
+            .map(|n| format!("'{n}'"))
+            .unwrap_or_else(|| "this server".into())
+    };
+    match seg.as_slice() {
+        [""] => "the whole installation".into(),
+        ["nodes"] => "every server".into(),
+        ["nodes", c] => format!("server {}", srv(c)),
+        ["nodes", c, "vms"] => format!("VMs on {}", srv(c)),
+        ["nodes", c, "networks"] => format!("networks on {}", srv(c)),
+        ["nodes", c, "storage"] => format!("storage on {}", srv(c)),
+        ["nodes", c, "bridges"] => format!("bridges on {}", srv(c)),
+        ["nodes", c, "vms", n] => format!("VM '{n}' on {}", srv(c)),
+        ["nodes", c, "networks", n] => format!("network '{n}' on {}", srv(c)),
+        ["nodes", c, "storage", n] => format!("storage pool '{n}' on {}", srv(c)),
+        ["nodes", c, "bridges", n] => format!("bridge '{n}' on {}", srv(c)),
+        _ => path.to_string(),
+    }
 }
 
 /// The resource a path names, if it names one.
@@ -473,6 +565,24 @@ mod tests {
     }
 
     #[test]
+    fn refusals_name_the_thing_in_words() {
+        let srv = |c: &str| (c == "c1").then(|| "hv1".to_string());
+        assert_eq!(
+            describe_path(&vm_path("c1", "web"), &srv),
+            "VM 'web' on 'hv1'"
+        );
+        assert_eq!(describe_path("/nodes/c1/vms", &srv), "VMs on 'hv1'");
+        assert_eq!(
+            describe_path("/nodes/gone/networks/x", &srv),
+            "network 'x' on this server"
+        );
+        assert_eq!(describe_path("/", &srv), "the whole installation");
+        for p in PRIVILEGES {
+            assert_ne!(describe_priv(p), "do that", "{p} has a description");
+        }
+    }
+
+    #[test]
     fn nothing_granted_means_nothing() {
         assert!(acl_privs(&[], &builtin_roles(), &[], "u", "/").is_empty());
     }
@@ -516,12 +626,105 @@ mod tests {
             daemons: HashMap::new(),
         };
         let ok = usage(1, 2, 2048, 20);
-        assert!(check_quota(&q, "c1", &ok, &ok).is_ok());
-        let e = check_quota(&q, "c1", &usage(2, 2, 2048, 20), &ok).unwrap_err();
-        assert!(e.contains("VMs"), "{e}");
-        assert!(check_quota(&q, "c1", &usage(1, 3, 2048, 20), &ok).is_err());
-        assert!(check_quota(&q, "c1", &usage(1, 2, 2049, 20), &ok).is_err());
-        assert!(check_quota(&q, "c1", &usage(1, 2, 2048, 21), &ok).is_err());
+        assert!(check_quota(&q, "c1", "hv", &ok, &ok, &Usage::default()).is_ok());
+        let e = check_quota(
+            &q,
+            "c1",
+            "hv",
+            &usage(2, 2, 2048, 20),
+            &ok,
+            &usage(1, 0, 0, 0),
+        )
+        .unwrap_err();
+        assert!(e.starts_with("VM limit reached on 'hv'"), "{e}");
+        assert!(
+            e.contains("needs 1 more, you already use 1 of your 1 (none left)"),
+            "{e}"
+        );
+        assert!(check_quota(
+            &q,
+            "c1",
+            "hv",
+            &usage(1, 3, 2048, 20),
+            &ok,
+            &Usage::default()
+        )
+        .is_err());
+        assert!(check_quota(
+            &q,
+            "c1",
+            "hv",
+            &usage(1, 2, 2049, 20),
+            &ok,
+            &Usage::default()
+        )
+        .is_err());
+        assert!(check_quota(
+            &q,
+            "c1",
+            "hv",
+            &usage(1, 2, 2048, 21),
+            &ok,
+            &Usage::default()
+        )
+        .is_err());
+    }
+
+    /// What a user reads when a create is refused: the limit, the ask, the
+    /// current use, what is left, and the server -- in their units.
+    #[test]
+    fn a_refusal_says_what_was_asked_and_what_is_left() {
+        let q = Quota {
+            shared: false,
+            default: Limit {
+                vcpus: Some(6),
+                memory_mb: Some(8192),
+                storage_gb: Some(60),
+                ..Limit::default()
+            },
+            daemons: HashMap::new(),
+        };
+        let ask = |c, m, g| Usage {
+            vcpus: c,
+            memory_mb: m,
+            storage_bytes: g * GIB,
+            ..Usage::default()
+        };
+        let e =
+            check_quota(&q, "c", "hv1", &ask(8, 0, 0), &ask(8, 0, 0), &ask(4, 0, 0)).unwrap_err();
+        assert_eq!(
+            e,
+            "vCPU limit reached on 'hv1': this needs 4 more, you already use 4 of your 6 (2 left). \
+             Free some up, or ask an administrator to raise your limit."
+        );
+        let e = check_quota(
+            &q,
+            "c",
+            "hv1",
+            &ask(0, 10240, 0),
+            &ask(0, 10240, 0),
+            &ask(0, 4096, 0),
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("Memory limit reached")
+                && e.contains("needs 4 GiB more, you already use 6 GiB of your 8 GiB (2 GiB left)"),
+            "{e}"
+        );
+        let e = check_quota(
+            &q,
+            "c",
+            "hv1",
+            &ask(0, 0, 70),
+            &ask(0, 0, 70),
+            &ask(0, 0, 20),
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("Storage limit reached")
+                && e.contains("needs 20 GiB more, you already use 50 GiB of your 60 GiB"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -540,12 +743,15 @@ mod tests {
             default: lim.clone(),
             daemons: HashMap::new(),
         };
-        assert!(check_quota(&per, "c1", &here, &total).is_ok(), "per daemon");
+        assert!(
+            check_quota(&per, "c1", "hv", &here, &total, &Usage::default()).is_ok(),
+            "per daemon"
+        );
         let shared = Quota {
             shared: true,
             ..per.clone()
         };
-        let e = check_quota(&shared, "c1", &here, &total).unwrap_err();
+        let e = check_quota(&shared, "c1", "hv", &here, &total, &Usage::default()).unwrap_err();
         assert!(e.contains("across all servers"), "{e}");
     }
 
@@ -568,11 +774,25 @@ mod tests {
             daemons,
         };
         let two = usage(2, 0, 0, 0);
-        assert!(check_quota(&q, "small", &two, &two).is_err(), "override");
-        assert!(check_quota(&q, "big", &two, &two).is_ok(), "default");
+        assert!(
+            check_quota(&q, "small", "hv", &two, &two, &Usage::default()).is_err(),
+            "override"
+        );
+        assert!(
+            check_quota(&q, "big", "hv", &two, &two, &Usage::default()).is_ok(),
+            "default"
+        );
         let pooled = Quota { shared: true, ..q };
-        assert!(check_quota(&pooled, "small", &two, &two).is_err());
-        assert!(check_quota(&pooled, "big", &two, &usage(6, 0, 0, 0)).is_err());
+        assert!(check_quota(&pooled, "small", "hv", &two, &two, &Usage::default()).is_err());
+        assert!(check_quota(
+            &pooled,
+            "big",
+            "hv",
+            &two,
+            &usage(6, 0, 0, 0),
+            &Usage::default()
+        )
+        .is_err());
     }
 
     #[test]

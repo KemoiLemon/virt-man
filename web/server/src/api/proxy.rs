@@ -312,8 +312,14 @@ async fn proxy(
         .unwrap_or("/");
     // Every daemon route needs one privilege at one path; a route the table
     // does not know is refused rather than guessed at.
-    let need =
-        routes::classify(&conn_id, method.as_str(), rest_path).ok_or_else(ApiError::forbidden)?;
+    let need = routes::classify(&conn_id, method.as_str(), rest_path).ok_or_else(|| {
+        ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            format!(
+                "{method} {rest_path} is not an operation this server allows through the web UI"
+            ),
+        )
+    })?;
     super::enforce(&state, &user, &need.path, need.privilege)?;
 
     let conn = {

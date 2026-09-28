@@ -173,9 +173,9 @@ table.grid + .actions { margin-top: 12px; }
 /* Admin dashboard: every card opens its section. */
 .admin-card-link { cursor: pointer; }
 .admin-card-link:hover { background: var(--hover); }
-/* A user's tightest limit: a short meter beside its figure. */
-.limit-cell { display: flex; align-items: center; gap: 8px; min-width: 130px; }
-.limit-cell .meter { flex: 1; }
+/* One limit in a user's usage card: label, used / cap, and its own meter.
+   Each resource is a separate limit, so each gets a separate meter. */
+.limit-spec .meter { margin-top: 6px; }
 /* Privilege chips in the roles and API key tables. */
 .priv-cell { white-space: normal; }
 .priv {

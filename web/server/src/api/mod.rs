@@ -48,10 +48,6 @@ impl ApiError {
     pub fn not_found(message: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::NOT_FOUND, message)
     }
-
-    pub fn forbidden() -> Self {
-        Self::new(StatusCode::FORBIDDEN, "forbidden")
-    }
 }
 
 impl IntoResponse for ApiError {
@@ -69,11 +65,37 @@ impl From<String> for ApiError {
 /// Privilege check for handlers. Called after `require_user` has put the
 /// user in request extensions.
 pub fn enforce(state: &AppState, user: &User, path: &str, privilege: &str) -> Result<(), ApiError> {
-    if state.read().can(user, path, privilege) {
+    let store = state.read();
+    if store.can(user, path, privilege) {
         Ok(())
     } else {
-        Err(ApiError::forbidden())
+        Err(denied(&store, user, path, privilege))
     }
+}
+
+/// A refusal that says what was missing, on what, and why -- "forbidden" left
+/// users guessing whether they lacked a permission, hit a limit, or found a
+/// bug. Suspension is named, since it looks like a revoked grant otherwise.
+pub fn denied(store: &crate::store::Store, user: &User, path: &str, privilege: &str) -> ApiError {
+    let server = |c: &str| store.connection(c).map(|x| x.name.clone());
+    let what = crate::perm::describe_path(path, &server);
+    let suspended = crate::perm::path_resource(path)
+        .and_then(|(k, c, n)| store.resource(k, c, n))
+        .is_some_and(|r| r.suspended);
+    let msg = if suspended
+        && store
+            .privs(user, path)
+            .iter()
+            .any(|p| p.ends_with(".Audit"))
+    {
+        format!("{what} is suspended by an administrator; it is read-only until they restore it")
+    } else {
+        format!(
+            "you do not have permission to {} ({what}; needs {privilege}). Ask an administrator to grant it.",
+            crate::perm::describe_priv(privilege)
+        )
+    };
+    ApiError::new(StatusCode::FORBIDDEN, msg)
 }
 
 /// Assemble the full router. State is provided to every module here, so the

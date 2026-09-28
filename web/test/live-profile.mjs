@@ -281,18 +281,20 @@ check("the admin button opens a page, not a modal, on its dashboard", () => {
   assert.match(document.querySelector("#content .dtitle").textContent, /Dashboard/, "content pane shows the dashboard");
 });
 
-check("the admin dashboard has admin cards that open their sections", () => {
+check("the admin dashboard is tabbed, in the datacenter dashboard's parts", () => {
   const area = document.querySelector("#admin-area");
+  const tabs = [...area.querySelectorAll(".tabbar .tab")].map((t) => t.dataset.dashTab);
+  assert.deepEqual(tabs, ["overview", "usage", "ownership", "activity"]);
+  assert.equal(area.querySelector(".tab.active")?.dataset.dashTab, "overview");
   const labels = [...area.querySelectorAll(".cards .card i")].map((i) => i.textContent.trim());
-  for (const want of ["USERS", "ADMINISTRATORS", "GROUPS", "DAEMONS ONLINE", "VMS", "SUSPENDED", "PERMISSIONS", "FAILED TODAY"]) {
+  for (const want of ["USERS", "ADMINISTRATORS", "GROUPS", "PERMISSIONS", "API KEYS"]) {
     assert.ok(labels.includes(want), `${want} card (${labels})`);
   }
-  const users = [...area.querySelectorAll(".cards .card")].find((c) => c.querySelector("i").textContent.trim() === "USERS");
-  assert.match(users.querySelector("b").textContent, /^\d+$/, "a real count");
-  assert.equal(users.dataset.go, "users", "the card opens Users");
-  const titles = [...area.querySelectorAll(".section-title")].map((t) => t.textContent.trim());
-  assert.deepEqual(titles, ["Limits", "Ownership", "Daemons", "Recent Activity"]);
-  assert.ok(area.querySelectorAll("table.grid").length >= 3, "tables rendered from the live API");
+  // Metric panels, as on the datacenter dashboard, not a wall of number cards.
+  const panels = [...area.querySelectorAll(".sumgrid .metric .metric-head b")].map((b) => b.textContent.trim());
+  assert.deepEqual(panels, ["Daemons", "VMs", "Networks", "Activity today"]);
+  assert.ok(area.querySelectorAll(".sumgrid .meter").length === 4, "each panel has a meter");
+  assert.ok(!/Tightest/i.test(area.textContent), "no combined 'tightest limit' figure");
 });
 
 check("the admin sidebar groups its sections under the dashboard root", () => {
@@ -308,6 +310,22 @@ check("the admin sidebar groups its sections under the dashboard root", () => {
     "#Infrastructure", "daemons", "resources", "ips", "#Limits", "quotas", "#Audit", "activity"]);
   assert.ok(!tree.querySelector("#dc-row"), "the resource tree is replaced, not appended to");
 });
+
+click(document.querySelector('#admin-area [data-dash-tab="usage"]'));
+await wait(3000);
+check("the Usage tab shows every limit as its own meter", () => {
+  const area = document.querySelector("#admin-area");
+  assert.equal(area.querySelector(".tab.active")?.dataset.dashTab, "usage");
+  const card = area.querySelector("[data-quota-user]");
+  assert.ok(card, `a limited user's card (${area.textContent.slice(0, 160)})`);
+  const specs = [...card.querySelectorAll(".spec b")].map((b) => b.textContent.trim());
+  assert.deepEqual(specs, ["VMs", "vCPUs", "Memory", "Storage", "Networks"], "five separate limits");
+  // bob is limited on four of the five, so four meters; networks is unlimited.
+  assert.equal(card.querySelectorAll(".limit-spec .meter").length, 4, "one meter per set limit");
+  assert.match(card.textContent, /no limit/, "an unset limit says so instead of a meter");
+});
+click(document.querySelector('#admin-area [data-dash-tab="overview"]'));
+await wait(3000);
 
 click(document.querySelector('#admin-area .card[data-go="users"]'));
 await wait(900);
