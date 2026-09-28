@@ -538,7 +538,21 @@ const LIBVIRT_NFT_CHAIN: &str = "guest_input";
 
 /// Marks the rules we insert, so re-asserting cannot stack copies and a later
 /// reader can tell ours from libvirt's own.
-const OUR_MARK: &str = "virt-man dnat";
+///
+/// The surrounding quotes are part of the value, not decoration: nft takes a
+/// comment as a single quoted token, so passing it bare splits it into extra
+/// arguments and nft fails with "syntax error, unexpected dnat" — after which
+/// forwarding is still broken and nothing looks wrong from our side. Both
+/// consumers want the quotes included (nft's grammar, and the listed output
+/// where the marker is recognised), so they live here rather than at the call
+/// site.
+const OUR_MARK: &str = "\"virt-man dnat\"";
+
+/// [`OUR_MARK`] without its surrounding quotes, for matching what `nft list`
+/// prints back.
+fn our_mark_quoted() -> String {
+    OUR_MARK.trim_matches('"').to_string()
+}
 
 /// What one libvirt firewall backend had to say:
 /// - `Ok(true)`  — this backend is in use and forwards are now admitted;
@@ -657,7 +671,7 @@ async fn allow_via_nftables(subnet: &str) -> Backend {
     if !current.status.success() {
         return Ok(false);
     }
-    if String::from_utf8_lossy(&current.stdout).contains(OUR_MARK) {
+    if String::from_utf8_lossy(&current.stdout).contains(&our_mark_quoted()) {
         return Ok(true);
     }
 
@@ -810,6 +824,20 @@ mod tests {
         );
         assert_eq!(LIBVIRT_NFT_TABLE, "libvirt_network");
         assert_eq!(LIBVIRT_NFT_CHAIN, "guest_input");
+        // The comment must already carry its quotes. Bare, nft splits it into
+        // extra arguments and refuses the whole rule with "syntax error,
+        // unexpected dnat" — measured on a real host, where that left
+        // forwarding broken while the rest of the rule read correctly.
+        assert_eq!(
+            nft.last().map(String::as_str),
+            Some("\"virt-man dnat\""),
+            "the comment reaches nft as one quoted token"
+        );
+        assert_eq!(
+            our_mark_quoted(),
+            "virt-man dnat",
+            "matching is on the bare text nft lists back"
+        );
 
         let iptables = forward_accept_rule("10.74.0.0/24").join(" ");
         assert!(
