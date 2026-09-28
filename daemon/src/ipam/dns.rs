@@ -72,6 +72,30 @@ pub fn question(b: &[u8]) -> Option<Question> {
     })
 }
 
+/// Name and type of the first question in any DNS message, query or
+/// response, for display. Unlike `question`, a response is accepted.
+pub fn question_any(b: &[u8]) -> Option<(String, u16)> {
+    if b.len() < 12 || u16::from_be_bytes([b[4], b[5]]) == 0 {
+        return None;
+    }
+    let mut i = 12;
+    let mut labels = Vec::new();
+    loop {
+        let len = *b.get(i)? as usize;
+        if len == 0 {
+            i += 1;
+            break;
+        }
+        if len & 0xc0 != 0 || labels.len() > 127 {
+            return None;
+        }
+        labels.push(String::from_utf8_lossy(b.get(i + 1..i + 1 + len)?).to_ascii_lowercase());
+        i += 1 + len;
+    }
+    let qtype = u16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?]);
+    Some((labels.join("."), qtype))
+}
+
 /// What to do with a query.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Local {
@@ -284,7 +308,7 @@ fn parse_resolv(text: &str) -> Vec<Ipv4Addr> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::ipam::store::{Reservation, import};
 

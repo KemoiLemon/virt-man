@@ -14,8 +14,8 @@ import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
 import { bindChartHover, isLive, loadHistory, range, rangeBar, setRange } from "./history";
-import { GROUP_LABEL, PAGE, defaultFilter, drillDown, fmtDuration, fmtWhen, logQuery, sortMark, toggleSort, withGroup } from "./access";
-import type { Group, LogFilter } from "./access";
+import { GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmtDuration, fmtWhen, forLive, liveApplies, logQuery, sortMark, toggleSort, withGroup } from "./access";
+import type { Group, Kind, LogFilter } from "./access";
 import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
@@ -2559,6 +2559,19 @@ function openAccessLogs(conn: string, vm = "") {
     .then((r) => { vms = r.vms; paint(null); }).catch(() => {});
   let data: { total: number; rows?: AccessRow[]; groups?: AccessGroup[] } | null = null;
   let gen = 0;
+  // Live tail: re-read the newest page every couple of seconds while the
+  // dialog is open. New rows land within the web server's 5 s pull.
+  let live = false;
+  let liveTimer = 0;
+  const stopLive = () => { live = false; window.clearInterval(liveTimer); };
+  const startLive = () => {
+    live = true;
+    window.clearInterval(liveTimer);
+    liveTimer = window.setInterval(() => {
+      if (!el.isConnected) return stopLive();
+      void load();
+    }, 2000);
+  };
 
   const load = async () => {
     const mine = ++gen;
@@ -2626,7 +2639,9 @@ function openAccessLogs(conn: string, vm = "") {
         <label class="field"><span>Port</span><input id="al-port" value="${esc(f.port)}" placeholder="any" inputmode="numeric"></label>
         <label class="field al-grow"><span>Domain or IP</span><input id="al-q" value="${esc(f.q)}" placeholder="github.com, 140.82."></label>
         <label class="field"><span>Period</span><select id="al-range">${opt([["1h", "Last hour"], ["24h", "Last 24 h"], ["7d", "Last 7 days"], ["14d", "Last 14 days"]], f.range)}</select></label>
-        <label class="field al-check"><input type="checkbox" id="al-dns" ${f.dns ? "checked" : ""}><span>DNS lookups</span></label>
+        <label class="field"><span>Records</span><select id="al-kind">${opt(Object.entries(KIND_LABEL) as [string, string][], f.kind)}</select></label>
+        <button class="btn al-live ${live ? "on" : ""}" id="al-live" title="Show new entries as they arrive">${ic.circleDot(14)} Live</button>
+        <button class="btn" id="al-capture" title="Watch a VM's packets as they happen">${ic.logs(14)} Packet capture</button>
       </div>
       ${table}
       <div class="al-foot">
@@ -2640,14 +2655,26 @@ function openAccessLogs(conn: string, vm = "") {
       </div>`);
     restore();
 
-    const set = (next: LogFilter) => { f = next; void load(); };
+    const set = (next: LogFilter) => {
+      f = next;
+      if (live && !liveApplies(f)) stopLive();
+      void load();
+    };
     const sel = (id: string, fn: (v: string) => LogFilter) =>
       ($(id, body) as HTMLSelectElement).addEventListener("change", (e) => set(fn((e.target as HTMLSelectElement).value)));
     sel("#al-vm", (v) => ({ ...f, vm: v, page: 0 }));
     sel("#al-group", (v) => withGroup(f, v as Group));
     sel("#al-proto", (v) => ({ ...f, proto: v, page: 0 }));
     sel("#al-range", (v) => ({ ...f, range: v, page: 0 }));
-    ($("#al-dns", body) as HTMLInputElement).onchange = (e) => set({ ...f, dns: (e.target as HTMLInputElement).checked, page: 0 });
+    sel("#al-kind", (v) => ({ ...f, kind: v as Kind, page: 0 }));
+    ($("#al-live", body) as HTMLButtonElement).onclick = () => {
+      if (live) { stopLive(); paint(null); return; }
+      // Live means newest first: switch to that view, keeping the filters.
+      f = forLive(f);
+      startLive();
+      void load();
+    };
+    ($("#al-capture", body) as HTMLButtonElement).onclick = () => openPacketCapture(conn, f.vm || vm);
     // Typing filters as you go, after a pause, instead of on every key.
     let timer = 0;
     for (const [id, key] of [["#al-q", "q"], ["#al-port", "port"]] as const) {
@@ -2670,6 +2697,150 @@ function openAccessLogs(conn: string, vm = "") {
   }
   paint(null);
   void load();
+}
+
+/// Live packet capture on one VM: every packet it sends or receives, as it
+/// happens, while this window is open. The daemon captures only while this
+/// polls, and stops by itself a few seconds after it is closed.
+function openPacketCapture(conn: string, vmHint: string) {
+  const vms = (treeVms[conn] ?? []).filter((v) => v.active).map((v) => v.name);
+  let vm = vms.includes(vmHint) ? vmHint : vms[0] ?? "";
+  let session: string | null = null;
+  let after = 0;
+  let lines: CaptureLine[] = [];
+  let paused = false;
+  let dropped = 0;
+  let timer = 0;
+  const KEEP = 2000; // lines kept on screen; the daemon holds more for the pcap
+  const el = openModal("Packet capture", `
+    <div class="al-filters">
+      <label class="field"><span>VM</span><select id="pc-vm">${vms.map((v) =>
+        `<option value="${esc(v)}" ${v === vm ? "selected" : ""}>${esc(v)}</option>`).join("") || `<option value="">No running VMs</option>`}</select></label>
+      <label class="field"><span>Protocol</span><select id="pc-proto">
+        <option value="">Any</option><option value="tcp">TCP</option><option value="udp">UDP</option>
+        <option value="dns">DNS</option><option value="icmp">ICMP</option><option value="arp">ARP</option></select></label>
+      <label class="field"><span>Port</span><input id="pc-port" placeholder="any" inputmode="numeric"></label>
+      <label class="field al-grow"><span>Host IP</span><input id="pc-host" placeholder="any"></label>
+      <button class="btn primary" id="pc-start">${ic.start(14)} Start</button>
+      <button class="btn" id="pc-pause" disabled>Pause</button>
+      <button class="btn" id="pc-pcap" disabled title="Download what was captured, for Wireshark">${ic.download(14)} .pcap</button>
+    </div>
+    <div class="dsub" id="pc-status">Captures only while this window is open; nothing is stored.</div>
+    <div class="pc-scroll" id="pc-scroll"></div>`, "");
+  el.querySelector(".modal")?.classList.add("wide", "al-modal");
+  const status = $("#pc-status", el) as HTMLElement;
+  const scroller = $("#pc-scroll", el) as HTMLElement;
+  const startBtn = $("#pc-start", el) as HTMLButtonElement;
+  const pauseBtn = $("#pc-pause", el) as HTMLButtonElement;
+  const pcapBtn = $("#pc-pcap", el) as HTMLButtonElement;
+  const base = () => `/proxy/${conn}/domains/${encodeURIComponent(vm)}/capture`;
+  queueMicrotask(() => repaint());
+
+  const hostPort = (h: string, p: number | null) => (p == null ? esc(h) : `${esc(h)}:${p}`);
+  const row = (l: CaptureLine) => `<tr class="pc-${l.dir}">
+    <td>${fmtWhen(l.ts_us / 1000).split(" ")[1]}.${String(Math.floor((l.ts_us % 1_000_000) / 1000)).padStart(3, "0")}</td>
+    <td>${l.dir === "out" ? "→" : "←"}</td><td>${esc(l.proto)}</td>
+    <td>${hostPort(l.src, l.sport)}</td><td>${hostPort(l.dst, l.dport)}</td>
+    <td>${l.len}</td><td>${esc(l.info)}</td></tr>`;
+  const head = `<tr><th>Time</th><th>Dir</th><th>Proto</th><th>Source</th><th>Destination</th><th>Len</th><th>Info</th></tr>`;
+  const repaint = () => {
+    // Follow the newest line unless the user scrolled up to read.
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+    // The whole table, not rows into an existing one: setHtml sanitizes out
+    // of context, and a bare <tr> outside a <table> is dropped, which left
+    // the capture counting packets while showing none.
+    setHtml(scroller, `<table class="grid al-table pc-table" id="pc-table">${head}${
+      lines.map(row).join("") || `<tr><td colspan="7" class="empty">No packets yet.</td></tr>`}</table>`);
+    if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  };
+
+  const stop = async () => {
+    window.clearInterval(timer);
+    const id = session;
+    session = null;
+    setHtml(startBtn, `${ic.start(14)} Start`);
+    pauseBtn.disabled = true;
+    if (id) await api.del(`${base()}/${id}`).catch(() => {});
+  };
+  const poll = async () => {
+    if (!session) return;
+    if (!el.isConnected) return void stop();
+    try {
+      const r = await api.get<{ lines: CaptureLine[]; last: number; dropped: number }>(`${base()}/${session}?after=${after}`);
+      after = r.last;
+      dropped = r.dropped;
+      if (!paused && r.lines.length) {
+        lines = [...lines, ...r.lines].slice(-KEEP);
+        repaint();
+      }
+      status.textContent = `Capturing on ${vm} — ${after} packets${dropped ? `, ${dropped} oldest dropped from the buffer` : ""}${paused ? " (display paused)" : ""}.`;
+    } catch (e) {
+      status.textContent = `Capture ended: ${(e as Error).message}`;
+      window.clearInterval(timer);
+      session = null;
+      setHtml(startBtn, `${ic.start(14)} Start`);
+      pauseBtn.disabled = true;
+    }
+  };
+
+  startBtn.onclick = async () => {
+    if (session) return void stop();
+    if (!vm) return toast("No running VM to capture", "bad");
+    const port = ($("#pc-port", el) as HTMLInputElement).value.trim();
+    const host = ($("#pc-host", el) as HTMLInputElement).value.trim();
+    try {
+      const r = await api.post<{ id: string; interfaces: string[] }>(base(), {
+        proto: ($("#pc-proto", el) as HTMLSelectElement).value || undefined,
+        port: /^\d+$/.test(port) ? Number(port) : undefined,
+        host: host || undefined,
+      });
+      session = r.id;
+      after = 0;
+      lines = [];
+      paused = false;
+      repaint();
+      setHtml(startBtn, `${ic.stop(14)} Stop`);
+      pauseBtn.disabled = false;
+      pauseBtn.textContent = "Pause";
+      pcapBtn.disabled = false;
+      status.textContent = `Capturing on ${vm} (${r.interfaces.join(", ")})…`;
+      timer = window.setInterval(() => void poll(), 1000);
+    } catch (e) {
+      toast((e as Error).message, "bad");
+    }
+  };
+  pauseBtn.onclick = () => {
+    paused = !paused;
+    pauseBtn.textContent = paused ? "Resume" : "Pause";
+  };
+  pcapBtn.onclick = async () => {
+    if (!session) return toast("Start a capture first; a finished one is gone", "bad");
+    try {
+      const res = await fetch(`${base()}/${session}/pcap`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(res.statusText);
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${vm}-${new Date().toISOString().replace(/[:.]/g, "-")}.pcap`;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) { toast((e as Error).message, "bad"); }
+  };
+  ($("#pc-vm", el) as HTMLSelectElement).addEventListener("change", (e) => {
+    void stop().then(() => { vm = (e.target as HTMLSelectElement).value; });
+  });
+  // Closing the window stops the capture at once rather than waiting for the
+  // daemon's idle timeout.
+  new MutationObserver((_, obs) => {
+    if (!el.isConnected) { obs.disconnect(); void stop(); }
+  }).observe(document.body, { childList: true });
+}
+
+interface CaptureLine {
+  seq: number; ts_us: number; dir: "in" | "out"; iface: string; len: number; proto: string;
+  src: string; dst: string; sport: number | null; dport: number | null; info: string;
 }
 
 interface AccessRow {

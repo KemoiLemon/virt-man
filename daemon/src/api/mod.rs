@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod console;
 pub mod domains;
 pub mod fetch;
@@ -71,6 +72,7 @@ pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
         .merge(pools::routes())
         .merge(volumes::routes())
         .merge(fetch::routes())
+        .merge(capture::routes())
         // One firewall state for both: a NIC change re-applies the ruleset,
         // and must take the same lock as a rules PUT.
         .merge(firewall::routes(fw.clone()))

@@ -3,6 +3,15 @@
 // dialog, since it needs setHtml/openModal.
 
 export type Group = "" | "domain" | "ip" | "proto" | "port" | "vm";
+/// Which records: the guests' DNS lookups, the connections the kernel
+/// tracked, or both.
+export type Kind = "both" | "dns" | "connections";
+
+export const KIND_LABEL: Record<Kind, string> = {
+  both: "DNS lookups + connections",
+  dns: "DNS lookups",
+  connections: "Connections",
+};
 export type Dir = "asc" | "desc";
 
 export interface LogFilter {
@@ -14,7 +23,7 @@ export interface LogFilter {
   group: Group;
   sort: string;
   dir: Dir;
-  dns: boolean;
+  kind: Kind;
   page: number;
 }
 
@@ -37,7 +46,7 @@ export const GROUP_LABEL: Record<Group, string> = {
 };
 
 export function defaultFilter(vm = ""): LogFilter {
-  return { vm, proto: "", q: "", port: "", range: "24h", group: "", sort: "time", dir: "desc", dns: true, page: 0 };
+  return { vm, proto: "", q: "", port: "", range: "24h", group: "", sort: "time", dir: "desc", kind: "both", page: 0 };
 }
 
 /// The query string for a filter.
@@ -49,7 +58,7 @@ export function logQuery(conn: string, f: LogFilter, now: number): string {
   if (f.q.trim()) p.set("q", f.q.trim());
   if (/^\d+$/.test(f.port.trim())) p.set("port", f.port.trim());
   if (f.group) p.set("group", f.group);
-  if (!f.dns) p.set("dns", "false");
+  if (f.kind !== "both") p.set("kind", f.kind);
   return p.toString();
 }
 
@@ -99,4 +108,15 @@ export function fmtWhen(ms: number): string {
 /// `▲`/`▼` on the active sort column.
 export function sortMark(f: LogFilter, col: string): string {
   return f.sort === col ? (f.dir === "asc" ? " ▲" : " ▼") : "";
+}
+
+/// Live tail only makes sense where new rows appear: the newest-first,
+/// ungrouped first page. Anywhere else it would reshuffle what is being read.
+export function liveApplies(f: LogFilter): boolean {
+  return !f.group && f.sort === "time" && f.dir === "desc" && f.page === 0;
+}
+
+/// The view a Live toggle switches to: newest first, first page, same filters.
+export function forLive(f: LogFilter): LogFilter {
+  return { ...f, group: "", sort: "time", dir: "desc", page: 0 };
 }

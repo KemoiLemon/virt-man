@@ -141,7 +141,8 @@ fn vv_host(headers: &HeaderMap, daemon_host: &str) -> String {
 
 /// Map a proxied daemon path to the permission scope it belongs to.
 fn path_scope(path: &str) -> &'static str {
-    if path.contains("/domains") {
+    // /flows is what guests connected to: guest data, like /domains.
+    if path.contains("/domains") || path.ends_with("/flows") || path.contains("/flows?") {
         "vms"
     } else if path.contains("/networks") {
         "networks"
@@ -410,6 +411,16 @@ async fn proxy(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guest_traffic_needs_vm_access() {
+        assert_eq!(super::path_scope("/proxy/c/flows"), "vms");
+        assert_eq!(super::path_scope("/proxy/c/domains/web/capture/abc"), "vms");
+        assert_eq!(
+            super::path_scope("/proxy/c/networks/internet/flows-policy"),
+            "networks"
+        );
+    }
+
     #[test]
     fn fetching_into_a_pool_needs_storage_access() {
         assert_eq!(super::path_scope("/proxy/c/pools/ISOs/fetch"), "storage");

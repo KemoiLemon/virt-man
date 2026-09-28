@@ -12,7 +12,7 @@ before(async () => {
 });
 
 test("a filter becomes the server's query", () => {
-  const f = { ...a.defaultFilter("web"), proto: "tcp", q: " github.com ", port: "443", group: "domain", dns: false, page: 2 };
+  const f = { ...a.defaultFilter("web"), proto: "tcp", q: " github.com ", port: "443", group: "domain", kind: "connections", page: 2 };
   const p = new URLSearchParams(a.logQuery("c1", f, 1_000_000_000));
   assert.equal(p.get("conn"), "c1");
   assert.equal(p.get("vm"), "web");
@@ -20,12 +20,13 @@ test("a filter becomes the server's query", () => {
   assert.equal(p.get("q"), "github.com", "trimmed");
   assert.equal(p.get("port"), "443");
   assert.equal(p.get("group"), "domain");
-  assert.equal(p.get("dns"), "false");
+  assert.equal(p.get("kind"), "connections");
   assert.equal(p.get("offset"), String(2 * a.PAGE));
   assert.equal(p.get("since_ms"), String(1_000_000_000 - 86_400_000), "last 24 h by default");
   const bare = new URLSearchParams(a.logQuery("c1", { ...a.defaultFilter(), port: "abc" }, 0));
   assert.equal(bare.get("port"), null, "a non-numeric port is not sent");
   assert.equal(bare.get("vm"), null);
+  assert.equal(bare.get("kind"), null, "both is the default and is not sent");
 });
 
 test("clicking a column flips it; a new column starts at its natural order", () => {
@@ -59,4 +60,16 @@ test("durations and the sort marker read naturally", () => {
   const f = { ...a.defaultFilter(), sort: "bytes", dir: "asc" };
   assert.equal(a.sortMark(f, "bytes"), " ▲");
   assert.equal(a.sortMark(f, "time"), "");
+});
+
+test("live tail applies only to the newest, ungrouped first page", () => {
+  const f = a.defaultFilter();
+  assert.ok(a.liveApplies(f));
+  assert.ok(!a.liveApplies({ ...f, group: "domain" }));
+  assert.ok(!a.liveApplies({ ...f, dir: "asc" }));
+  assert.ok(!a.liveApplies({ ...f, page: 1 }));
+  assert.ok(!a.liveApplies({ ...f, sort: "bytes" }));
+  const back = a.forLive({ ...f, group: "ip", sort: "count", dir: "asc", page: 3, vm: "web", kind: "dns" });
+  assert.ok(a.liveApplies(back), "switching to live gives the newest-first view");
+  assert.deepEqual([back.vm, back.kind], ["web", "dns"], "…keeping the filters");
 });

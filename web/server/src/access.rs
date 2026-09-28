@@ -99,7 +99,12 @@ pub struct Query {
     pub limit: Option<i64>,
     #[serde(default)]
     pub offset: Option<i64>,
-    /// Include DNS lookups (port 53 rows). Default: yes.
+    /// dns | connections | both (default both). DNS rows are the guests'
+    /// lookups through the network's resolver; connections are everything the
+    /// kernel tracked.
+    #[serde(default)]
+    pub kind: String,
+    /// Older form of `kind`: `dns=false` means connections only.
     #[serde(default)]
     pub dns: Option<bool>,
 }
@@ -346,8 +351,14 @@ impl Access {
             args.push(like.clone().into());
             args.push(like.into());
         }
-        if q.dns == Some(false) {
-            wh.push("NOT (dport = 53 AND ct_id = 0)".into());
+        // A lookup row is the resolver's record: no kernel id, port 53.
+        match (q.kind.as_str(), q.dns) {
+            ("dns", _) => wh.push("(dport = 53 AND ct_id = 0)".into()),
+            ("connections", _) | ("", Some(false)) => {
+                wh.push("NOT (dport = 53 AND ct_id = 0)".into())
+            }
+            ("" | "both", _) => {}
+            (other, _) => return Err(format!("unknown kind '{other}'")),
         }
         let wh = wh.join(" AND ");
         let dir = if q.dir == "asc" { "ASC" } else { "DESC" };
@@ -800,6 +811,17 @@ mod tests {
             5,
             "lookups can be hidden"
         );
+        n.dns = None;
+        n.kind = "connections".into();
+        assert_eq!(a.query(&n, NOW).unwrap()["total"], 5, "connections only");
+        n.kind = "dns".into();
+        let d = a.query(&n, NOW).unwrap();
+        assert_eq!(d["total"], 1, "lookups only");
+        assert_eq!(d["rows"][0]["kind"], "dns");
+        n.kind = "both".into();
+        assert_eq!(a.query(&n, NOW).unwrap()["total"], 6);
+        n.kind = "bogus".into();
+        assert!(a.query(&n, NOW).is_err());
         assert_eq!(a.query(&q("c2"), NOW).unwrap()["total"], 1);
         assert_eq!(a.vms("c1").unwrap(), vec!["db", "web"]);
     }

@@ -57,6 +57,8 @@ async fn run() -> Result<(), String> {
     let ipam = ipam::server::Ipam::load(ipam::store::IPAM_PATH.into())?;
     tokio::spawn(ipam::server::supervise(ipam.clone()));
     // Access log: guest connections from the kernel's connection tracker.
+    // Live packet captures stop themselves when nobody is watching.
+    tokio::spawn(api::capture::reaper());
     ipam::flows::enable_accounting();
     {
         let owners = ipam.clone();

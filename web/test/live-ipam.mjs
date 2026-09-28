@@ -95,7 +95,13 @@ try {
   check("after restoring a reservation the guest gets exactly that address", (await dhcp()) === restored);
   check("…and the network was never restarted", readFileSync(`/sys/class/net/virbr1/ifindex`, "utf8").trim() === br);
 
-  const dns = await consoleRun([`nslookup ipamtest 2>&1 | tail -2`, `echo FWD=$(nslookup alpinelinux.org 2>&1 | grep -A9 '^Name:' | grep -c '^Address')`, `cat /etc/resolv.conf`], 3000);
+  // Retried: the console read is a fixed window, and on a busy host the
+  // guest's first lookup can land after it closes. The answer is what is
+  // checked, not how fast it came.
+  let dns = "";
+  for (let i = 0; i < 3 && !dns.includes(`Address: ${restored}`); i++) {
+    dns = await consoleRun([`nslookup ipamtest 2>&1 | tail -2`, `echo FWD=$(nslookup alpinelinux.org 2>&1 | grep -A9 '^Name:' | grep -c '^Address')`, `cat /etc/resolv.conf`], 3000);
+  }
   check("the guest resolves guest names through the gateway", dns.includes(`Address: ${restored}`), dns.slice(-400));
   const fwd = Number(dns.match(/FWD=(\d+)/)?.[1] ?? 0);
   check("…and outside names are forwarded upstream", fwd >= 1, `FWD=${fwd}`);
@@ -115,6 +121,27 @@ try {
   check("…and the lookup itself", conns?.rows?.some((r) => r.kind === "dns" && r.domain === "example.org"));
   const byDomain = await logsFor({ group: "domain" });
   check("grouping by domain counts what the guest reached", byDomain.groups?.some((g) => g.key === "example.org" && g.count >= 2), JSON.stringify(byDomain.groups));
+
+  const onlyDns = await logsFor({ kind: "dns" });
+  check("the Records filter shows only lookups when asked", onlyDns.rows?.length > 0 && onlyDns.rows.every((r) => r.kind === "dns"));
+  const onlyConn = await logsFor({ kind: "connections" });
+  check("…or only connections", onlyConn.rows?.length > 0 && onlyConn.rows.every((r) => r.kind === "connection"));
+
+  // Live packet capture: only while polled, decoded, exportable, stoppable.
+  const cap = await api(`/domains/${VM}/capture`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  check("a packet capture starts on the guest's interface", !!cap.id && cap.interfaces?.length === 1, JSON.stringify(cap));
+  await consoleRun(["ping -c2 -W2 1.1.1.1 >/dev/null; nslookup github.com >/dev/null; echo PINGED"], 6000);
+  const got = await api(`/domains/${VM}/capture/${cap.id}?after=0`);
+  const lines = got.lines ?? [];
+  check("it streams the guest's ping, both ways",
+    lines.some((l) => l.info === "echo request" && l.dir === "out") && lines.some((l) => l.info === "echo reply" && l.dir === "in"),
+    JSON.stringify(lines.slice(0, 5)));
+  check("…and its DNS question by name", lines.some((l) => l.proto === "dns" && /github\.com/.test(l.info)));
+  const pcap = new Uint8Array(await (await fetch(`${base}/proxy/${conn.id}/domains/${VM}/capture/${cap.id}/pcap`)).arrayBuffer());
+  check("the capture downloads as a pcap file", pcap.length > 24 && pcap[0] === 0xd4 && pcap[3] === 0xa1);
+  await api(`/domains/${VM}/capture/${cap.id}`, { method: "DELETE" });
+  const after = await fetch(`${base}/proxy/${conn.id}/domains/${VM}/capture/${cap.id}?after=0`);
+  check("stopping it ends the capture", after.status === 404);
 
   await api(`/domains/${VM}/destroy`, { method: "POST" });
   await api(`/domains/${VM}`, { method: "DELETE" });

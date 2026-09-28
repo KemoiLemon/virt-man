@@ -377,7 +377,21 @@ per-connection cursor (reset when a daemon restarts and its sequence drops).
 - Measured: a 300-connection burst cost the daemon 80 ms of CPU in total.
 - UI: `openAccessLogs(conn, vm?)`, from the server Firewall tab, each network's
   firewall editor and the VM Network tab; the button carries `.al-open`, which
-  pushes it to the right of its action row.
+  pushes it to the right of its action row. A Records dropdown picks DNS
+  lookups / connections / both (`kind=`), and Live re-reads the newest page
+  every 2 s (only on the newest-first ungrouped view; changing to any other
+  view turns it off).
+
+**Live packet capture exists only while someone watches.**
+(`daemon/src/api/capture.rs`.) `POST /domains/{vm}/capture` opens one
+`AF_PACKET` socket per guest tap; the SPA polls `…/capture/{id}?after=N`
+(no streaming through the proxy, same pattern as the console). A session
+stops when not polled for 20 s, after 30 min regardless, or on `DELETE`; at
+most 8 run at once, each holding at most 5000 packets truncated to 1600
+bytes. `…/pcap` returns what is held as a pcap file. Nothing is stored.
+Rows go into the capture table as a whole `<table>` through `setHtml`: bare
+`<tr>` markup is dropped by the sanitizer outside a table, which once showed a
+capture counting packets while displaying none.
 
 **Read `VIR_DOMAIN_XML_INACTIVE` for firewall/filterref work.** A running
 guest's live XML omits filterrefs added since boot, so reading live XML loses
