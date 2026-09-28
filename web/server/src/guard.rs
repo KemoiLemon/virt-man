@@ -144,14 +144,26 @@ pub fn annotate_volumes(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let owner = store
+        let rec = store
             .resources
             .iter()
-            .find(|r| r.kind == Kind::Volume && r.conn == conn && r.pool == pool && r.name == name)
+            .find(|r| r.kind == Kind::Volume && r.conn == conn && r.pool == pool && r.name == name);
+        let owner = rec
             .map(|r| r.owner.clone())
             .or_else(|| store.default_owner())
             .unwrap_or_default();
         x["mine"] = (owner == user.id).into();
+        // Whether it may be attached as qcow2 (made empty here, so it has no
+        // backing file); anything else only as raw. Lets the create form offer
+        // only disks the define will accept, instead of failing at the end.
+        x["blank"] = rec.is_some_and(|r| r.blank).into();
+        // In use by a guest already: `check_domain_refs` does not stop two
+        // guests sharing a writable disk, so the form has to say so.
+        x["owner_name"] = store
+            .user_by_id(&owner)
+            .map(|u| u.username.clone())
+            .unwrap_or_default()
+            .into();
     }
     serde_json::to_vec(&v).ok()
 }

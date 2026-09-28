@@ -4537,7 +4537,11 @@ async function openHardwareEditor(opts: {
   }
 
   // New VM: one disk is created up front, described by these fields.
-  const newDisk = { pool: "", size_gb: 10, format: "qcow2" as "raw" | "qcow2" };
+  // The boot disk: a new volume, or one the user already has ("existing").
+  const newDisk = {
+    pool: "", size_gb: 10, format: "qcow2" as "raw" | "qcow2",
+    mode: "new" as "new" | "existing", volume: "",
+  };
 
   // Create VM keeps its modal; editing an existing guest renders the editor
   // inline in the Hardware tab, so devices are editable without an extra
@@ -4648,7 +4652,10 @@ async function openHardwareEditor(opts: {
       { key: "general", icon: ic.datacenter(), label: "General", sum: general.name || "unnamed" },
       { key: "processors", icon: ic.cpu(), label: "Processors", sum: `${general.cpus} vCPU` },
       { key: "memory", icon: ic.memory(), label: "Memory", sum: `${general.memory_mb} MB` },
-      ...(editing ? [] : [{ key: "disk", icon: ic.disk(), label: "Hard Disk", sum: `${newDisk.size_gb} GB ${newDisk.format}` }]),
+      ...(editing ? [] : [{
+        key: "disk", icon: ic.disk(), label: "Hard Disk",
+        sum: newDisk.mode === "existing" ? (newDisk.volume || "choose a volume") : `${newDisk.size_gb} GB ${newDisk.format}`,
+      }]),
       { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics },
       { key: "firmware", icon: ic.cpu(), label: "BIOS", sum: general.firmware === "uefi" ? "UEFI (OVMF)" : "BIOS (SeaBIOS)" },
     ];
@@ -4732,16 +4739,48 @@ async function openHardwareEditor(opts: {
           <label class="field"><span>Memory (MB)</span>
             <input id="g-mem" type="number" min="128" step="256" value="${general.memory_mb}"></label>
         </div>`;
-      case "disk":
+      case "disk": {
+        // Volumes the user may boot from: their own, and not already another
+        // guest's disk (one writable disk in two guests corrupts both). An
+        // admin sees every free volume. ISOs are media, not boot disks.
+        const all = await volumes(newDisk.pool);
+        const usable = all.filter((v) => !v.name.toLowerCase().endsWith(".iso")
+          && (canAdmin() || v.mine) && !(v.used_by?.length));
+        const held = all.filter((v) => (canAdmin() || v.mine) && v.used_by?.length);
+        if (newDisk.mode === "existing" && !usable.some((v) => v.name === newDisk.volume)) {
+          newDisk.volume = usable[0]?.name ?? "";
+        }
+        const chosen = usable.find((v) => v.name === newDisk.volume);
+        const mode = `<label class="field"><span>Disk</span><select id="g-disk-mode">
+            <option value="new" ${newDisk.mode === "new" ? "selected" : ""}>Create a new volume</option>
+            <option value="existing" ${newDisk.mode === "existing" ? "selected" : ""}>Use one of my volumes</option>
+          </select></label>`;
+        const pool = `<label class="field"><span>Storage Pool</span>
+            <select id="g-pool">${opt(pools.map((p) => p.name), newDisk.pool)}</select></label>`;
+        if (newDisk.mode === "existing") {
+          return `<div class="hw-page active">
+            <h3 class="hw-title">Hard Disk</h3>
+            ${mode}${pool}
+            ${usable.length ? `<label class="field"><span>Volume</span><select id="g-volume">
+                ${usable.map((v) => `<option value="${esc(v.name)}" ${v.name === newDisk.volume ? "selected" : ""}>
+                  ${esc(`${v.name} — ${fmtBytes(v.capacity)}`)}</option>`).join("")}
+              </select></label>
+              ${chosen && !chosen.blank && !canAdmin()
+                ? `<p class="hint">Attached as raw: only disks created empty here may be used as qcow2.</p>` : ""}`
+              : `<p class="hint">You have no free volumes in this pool${held.length ? " (the ones you have are already attached to a guest)" : ""}.
+                  Create one from the pool's page, or choose "Create a new volume".</p>`}
+            ${held.length ? `<p class="hint">In use, not offered: ${held.map((v) => esc(`${v.name} (${v.used_by!.join(", ")})`)).join("; ")}.</p>` : ""}
+          </div>`;
+        }
         return `<div class="hw-page active">
           <h3 class="hw-title">Hard Disk</h3>
-          <label class="field"><span>Storage Pool</span>
-            <select id="g-pool">${opt(pools.map((p) => p.name), newDisk.pool)}</select></label>
+          ${mode}${pool}
           <label class="field"><span>Disk Size (GB)</span>
             <input id="g-size" type="number" min="1" value="${newDisk.size_gb}"></label>
           <label class="field"><span>Format</span>
             <select id="g-format">${opt(["qcow2", "raw"], newDisk.format)}</select></label>
         </div>`;
+      }
       case "display":
         return `<div class="hw-page active">
           <h3 class="hw-title">Display</h3>
@@ -4764,9 +4803,13 @@ async function openHardwareEditor(opts: {
   }
 
   async function render() {
+    // The page first: it can settle choices the sidebar summarises (the disk
+    // page picks a default volume), and a template literal evaluates the
+    // sidebar before awaiting the page otherwise.
+    const pageBody = await pageHtml();
     setHtml(bodyHost, `<div class="hw-body">
       <nav class="hw-side" id="hw-side">${sidebar()}</nav>
-      <div class="hw-pane" id="hw-pane">${await pageHtml()}</div>
+      <div class="hw-pane" id="hw-pane">${pageBody}</div>
     </div>`);
     if (!inline) {
       (bodyHost as HTMLElement).style.padding = "0";
@@ -4792,7 +4835,9 @@ async function openHardwareEditor(opts: {
     bind("#g-mem", (v) => { general.memory_mb = Math.max(128, +v || 128); });
     bind("#g-gfx", (v) => { general.graphics = v as "vnc" | "spice"; });
     bind("#g-fw", (v) => { general.firmware = v as "uefi" | "bios"; });
-    bind("#g-pool", (v) => { newDisk.pool = v; });
+    bind("#g-pool", (v) => { newDisk.pool = v; newDisk.volume = ""; });
+    bind("#g-disk-mode", (v) => { newDisk.mode = v === "existing" ? "existing" : "new"; });
+    bind("#g-volume", (v) => { newDisk.volume = v; });
     bind("#g-size", (v) => { newDisk.size_gb = Math.max(1, +v || 1); });
     bind("#g-format", (v) => { newDisk.format = v as "raw" | "qcow2"; });
 
@@ -4988,6 +5033,12 @@ async function openHardwareEditor(opts: {
     }
 
     if (!general.name.trim()) return toast("Name is required", "bad");
+    // Caught here, with the form still open, rather than after it closes.
+    if (newDisk.mode === "existing" && !newDisk.volume) {
+      page = "disk";
+      void render();
+      return toast("Choose a volume for the hard disk, or create a new one", "bad");
+    }
     const form: DomainForm = {
       name: general.name.trim(),
       cpus: general.cpus,
@@ -5011,11 +5062,26 @@ async function openHardwareEditor(opts: {
     const made: { pool: string; name: string }[] = [];
     void runTask(`Create VM ${form.name}`, async (set) => {
       try {
-      set(`creating ${newDisk.size_gb} GB volume`);
-      const disk = await api.post<{ name: string; path: string }>(
-        `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
-        { xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
-      made.push({ pool: newDisk.pool, name: disk.name });
+      let disk: { name: string; path: string };
+      if (newDisk.mode === "existing") {
+        // One of the user's own volumes, by path like a new one. The format
+        // follows what the server will accept: qcow2 only for a volume made
+        // empty here, since an uploaded qcow2 can name any host file as its
+        // backing store; anything else goes on as raw.
+        const v = (await volumes(newDisk.pool)).find((x) => x.name === newDisk.volume);
+        if (!v) throw new Error("choose a volume for the hard disk, or create a new one");
+        disk = { name: v.name, path: v.path };
+        const qcow = v.name.toLowerCase().endsWith(".qcow2");
+        form.disk_format = qcow && (v.blank || canAdmin()) ? "qcow2" : "raw";
+      } else {
+        set(`creating ${newDisk.size_gb} GB volume`);
+        disk = await api.post<{ name: string; path: string }>(
+          `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
+          { xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+        // Only a volume made here is deleted again if the create is refused;
+        // a chosen one was the user's before and stays theirs.
+        made.push({ pool: newDisk.pool, name: disk.name });
+      }
       // Refer to the disk by its absolute path rather than by pool+volume: the
       // reference form cannot be resolved by every libvirt, and a disk libvirt
       // cannot resolve never reaches the guest's AppArmor profile, so qemu is

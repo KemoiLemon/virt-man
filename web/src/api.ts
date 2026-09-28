@@ -322,6 +322,13 @@ export interface VolumeSummary {
   path: string;
   capacity: number;
   allocation: number;
+  /// Guests that have it attached (from the daemon).
+  used_by?: string[];
+  /// From the web server's proxy: the caller owns it; and it was made empty
+  /// here, so it may be attached as qcow2.
+  mine?: boolean;
+  blank?: boolean;
+  owner_name?: string;
 }
 
 /// One row of the server's persistent, per-user activity log.

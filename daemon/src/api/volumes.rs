@@ -34,13 +34,20 @@ async fn list(Path(pool): Path<String>) -> Result<Json<Value>, ApiError> {
         // `pools::refresh_for_read`.
         super::pools::refresh_for_read(&p);
         let vols = p.list_all_volumes(0)?;
+        // Which guests hold each volume, so a picker can say "in use by" and
+        // not offer one guest's disk to another. One pass over the domains.
+        let held = crate::disks::holders_by_label(c);
         let mut arr = Vec::with_capacity(vols.len());
         for vol in &vols {
+            let name = vol.get_name().unwrap_or_default();
+            let path = vol.get_path().unwrap_or_default();
+            let used_by = crate::disks::holders_of(&held, &pool, &name, &path);
             arr.push(json!({
-                "name": vol.get_name().unwrap_or_default(),
-                "path": vol.get_path().unwrap_or_default(),
+                "name": name,
+                "path": path,
                 "capacity": vol.get_info().map(|i| i.capacity).unwrap_or(0),
                 "allocation": vol.get_info().map(|i| i.allocation).unwrap_or(0),
+                "used_by": used_by,
             }));
         }
         Ok(json!(arr))

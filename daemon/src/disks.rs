@@ -276,6 +276,55 @@ pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<S
     used
 }
 
+/// Every disk label (volume reference and path) mapped to the guests that
+/// hold it, built from one pass over the domains. For a volume list: asking
+/// `referencing_domains` per volume walks every guest once per volume.
+pub fn holders_by_label(c: &Connect) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
+    let Ok(domains) = c.list_all_domains(0) else {
+        return out;
+    };
+    for d in domains {
+        let (Ok(xml), name) = (d.get_xml_desc(0), d.get_name().unwrap_or_default()) else {
+            continue;
+        };
+        for r in disk_refs(&xml) {
+            for l in labels(c, &r.source) {
+                let v = out.entry(l).or_default();
+                if !v.contains(&name) {
+                    v.push(name.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The guests holding a volume, given `holders_by_label`: by its reference
+/// and by its path, since guests may name the same disk either way.
+pub fn holders_of(
+    index: &std::collections::HashMap<String, Vec<String>>,
+    pool: &str,
+    volume: &str,
+    path: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let by_ref = DiskSource::Volume {
+        pool: pool.into(),
+        volume: volume.into(),
+    }
+    .label();
+    let by_path = DiskSource::Path(path.into()).label();
+    for l in [by_ref, by_path] {
+        for n in index.get(&l).into_iter().flatten() {
+            if !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Names of domains that reference `target`, for refusing a direct volume
 /// delete with a clear reason.
 pub fn referencing_domains(c: &Connect, target: &DiskSource) -> Vec<String> {
@@ -300,6 +349,29 @@ pub fn referencing_domains(c: &Connect, target: &DiskSource) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_volume_is_held_whether_named_by_reference_or_by_path() {
+        let mut index = std::collections::HashMap::new();
+        index.insert(
+            DiskSource::Volume {
+                pool: "p".into(),
+                volume: "a.qcow2".into(),
+            }
+            .label(),
+            vec!["web".to_string()],
+        );
+        index.insert(
+            DiskSource::Path("/img/a.qcow2".into()).label(),
+            vec!["web".to_string(), "db".to_string()],
+        );
+        assert_eq!(
+            holders_of(&index, "p", "a.qcow2", "/img/a.qcow2"),
+            ["web", "db"]
+        );
+        assert!(holders_of(&index, "p", "b.qcow2", "/img/b.qcow2").is_empty());
+    }
+
     use super::*;
 
     const GUEST: &str = r#"<domain><devices>
