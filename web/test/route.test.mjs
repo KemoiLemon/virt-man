@@ -109,14 +109,26 @@ test("an old /vms/<vm>/firewall link opens the Network tab", () => {
   assert.equal(r.routeToPath({ view: "vm", conn: "c1", vm: "web1", tab: "network" }, nodes), "/Main/vms/web1/network");
 });
 
-// The admin page is a view of its own, with a URL per section.
+// The admin page is a view of its own, with a URL per section, and per tab
+// for a tabbed section: /admin/dashboard, /admin/dashboard/usage, ...
 test("the admin page round-trips through the URL", () => {
   for (const section of r.ADMIN_SECTIONS) {
-    const route = { view: "admin", section };
-    assert.deepEqual(r.parsePath(r.routeToPath(route, nodes), nodes), route, section);
+    const tabs = r.ADMIN_TABS[section];
+    for (const tab of tabs ?? [undefined]) {
+      const route = tab ? { view: "admin", section, tab } : { view: "admin", section };
+      assert.deepEqual(r.parsePath(r.routeToPath(route, nodes), nodes), route, `${section}/${tab}`);
+    }
   }
-  assert.equal(r.routeToPath({ view: "admin", section: "dashboard" }, nodes), "/admin");
-  assert.deepEqual(r.parsePath("/admin/bogus", nodes), { view: "admin", section: "dashboard" });
+  const dash = (tab) => ({ view: "admin", section: "dashboard", tab });
+  assert.equal(r.routeToPath(dash("overview"), nodes), "/admin/dashboard", "first tab is the bare section");
+  assert.equal(r.routeToPath(dash("usage"), nodes), "/admin/dashboard/usage");
+  assert.equal(r.routeToPath({ view: "admin", section: "users" }, nodes), "/admin/users");
+  assert.deepEqual(r.parsePath("/admin", nodes), dash("overview"), "/admin is the dashboard");
+  assert.deepEqual(r.parsePath("/admin/dashboard/ownership", nodes), dash("ownership"));
+  assert.deepEqual(r.parsePath("/admin/dashboard/bogus", nodes), dash("overview"), "unknown tab");
+  assert.deepEqual(r.parsePath("/admin/bogus", nodes), dash("overview"), "unknown section");
+  // An untabbed section ignores a stray tab segment.
+  assert.deepEqual(r.parsePath("/admin/users/x", nodes), { view: "admin", section: "users" });
   // The Datacenter's Servers tab is gone; an old link lands on Daemons.
   assert.deepEqual(r.parsePath("/servers", nodes), { view: "admin", section: "daemons" });
   // A server named "admin" must not shadow the admin page.

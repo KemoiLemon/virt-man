@@ -265,7 +265,9 @@ Things that bite:
   the app belongs to the first administrator.
 - **The admin page is a view** (`/admin/<section>`, `web/src/admin.ts`), not a
   modal: it replaces the sidebar, and the admin button becomes its return
-  button. `/admin` is its dashboard; the sidebar groups sections under
+  button. Every section has its own path, and a tabbed section its tab too
+  (`/admin/dashboard/usage`; `route.ts` `ADMIN_TABS`); `/admin` is the
+  dashboard. The sidebar groups sections under
   `ADMIN_GROUPS`, and a new section must go in one. Its sections read on
   demand; the 1 s poll skips it. Servers are managed there (Daemons), not on
   the Datacenter, and an old `/servers` link lands on that page.

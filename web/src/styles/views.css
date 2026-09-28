@@ -195,6 +195,9 @@ table.grid + .actions { margin-top: 12px; }
    the create buttons are pushed right, as on a tab bar. */
 .admin-filters { align-items: flex-end; flex-wrap: wrap; }
 .admin-filters .field { min-width: 150px; margin: 0; }
+/* Admin action rows put their add / create button on the right, as a tab
+   bar's actions sit, rather than at the left edge above the table. */
+.actions-end { justify-content: flex-end; }
 .row-link { cursor: pointer; }
 .row-link:hover { color: var(--accent); }
 tr.suspended td { color: var(--dim); }

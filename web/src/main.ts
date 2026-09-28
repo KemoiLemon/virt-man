@@ -9,7 +9,7 @@ import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
-import { parsePath, routeToPath, type AdminSection, type Route } from "./route";
+import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type Route } from "./route";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
@@ -111,6 +111,8 @@ let dcTab: "dashboard" | "guests" = "dashboard";
 /// its own with its own sidebar, rather than a modal, so it has a URL and
 /// works as a page on a phone.
 let adminSection: AdminSection | null = null;
+/// The open tab of a tabbed admin section (the dashboard), part of the URL.
+let adminTab: AdminTab | undefined;
 /// Where the return button goes: the last view before the admin page.
 let lastNonAdminRoute: Route | null = null;
 let pollTimer: number | null = null;
@@ -175,7 +177,7 @@ async function fastLoad(load: () => Promise<unknown>) {
 /// The view on screen, as a route. Derived from the selection state rather
 /// than stored beside it, so the two cannot disagree.
 function currentRoute(): Route {
-  if (adminSection) return { view: "admin", section: adminSection };
+  if (adminSection) return { view: "admin", section: adminSection, tab: adminTab };
   if (!selectedConn) return { view: "dc", tab: dcTab };
   if (selectedVm) return { view: "vm", conn: selectedConn, vm: selectedVm, tab: vmTab };
   if (selectedNet) return { view: "net", conn: selectedConn, net: selectedNet };
@@ -225,6 +227,7 @@ function applyRoute(r: Route) {
   clearResourceSelection();
   // A non-admin who follows an /admin link lands on the datacenter.
   adminSection = r.view === "admin" && canAdmin() ? r.section : null;
+  adminTab = r.view === "admin" ? r.tab : undefined;
   selectedConn = r.view === "dc" || r.view === "admin" ? null : r.conn;
   if (r.view === "admin") {
     // Refused (not an admin): the datacenter, rather than a dead page.
@@ -1607,12 +1610,15 @@ async function loadDcDashboard() {
 // ----------------------------------------------------------- admin page
 
 /// Open the admin page at `section` (or where it was last).
-function openAdmin(section: AdminSection = adminSection ?? "dashboard") {
+function openAdmin(section: AdminSection = adminSection ?? "dashboard", tab?: AdminTab) {
   if (!canAdmin()) return;
   if (!adminSection) lastNonAdminRoute = currentRoute();
   leaveCurrentView();
   clearResourceSelection();
   selectedConn = null;
+  // Staying in a section keeps its tab; entering one starts at its first.
+  if (tab) adminTab = tab;
+  else if (section !== adminSection || !adminTab) adminTab = ADMIN_TABS[section]?.[0];
   adminSection = section;
   renderTree();
   renderAdmin();
@@ -1656,7 +1662,8 @@ const adminCtx: AdminCtx = {
     else if (kind === "network") selectNetRow(conn, name);
     else selectPoolRow(conn, name);
   },
-  go: (section) => openAdmin(section),
+  go: (section, tab) => openAdmin(section, tab),
+  tab: () => adminTab,
   refreshMe: async () => {
     user = await api.get<User>("/auth/me");
     await loadConnections();

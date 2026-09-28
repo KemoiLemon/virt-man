@@ -17,7 +17,7 @@ import { ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { fmtBytes } from "./stats";
 import { esc } from "./xml";
-import type { AdminSection } from "./route";
+import type { AdminSection, AdminTab } from "./route";
 
 export interface AdminCtx {
   setHtml(el: Element, html: string): void;
@@ -37,7 +37,9 @@ export interface AdminCtx {
   /// Open a guest or network in the main view.
   openResource(kind: "vm" | "network" | "pool", conn: string, name: string): void;
   /// Go to another admin section (through the router, so the URL follows).
-  go(section: AdminSection): void;
+  go(section: AdminSection, tab?: AdminTab): void;
+  /// The section's open tab, from the URL.
+  tab(): AdminTab | undefined;
   /// The identity changed (your own groups, roles): refresh it and re-render.
   refreshMe(): Promise<void>;
   /// Whether the pane still shows the render that started at `gen`.
@@ -174,7 +176,7 @@ function bind(area: Element, attr: string, run: (value: string, el: HTMLElement)
 const users_: Painter = async (ctx, area) => {
   const me = ctx.me();
   ctx.setHtml(area, `
-    <div class="actions"><button class="btn primary" id="add-user">${ic.plus(14)} Add user</button></div>
+    <div class="actions actions-end"><button class="btn primary" id="add-user">${ic.plus(14)} Add user</button></div>
     <table class="grid">
       <tr><th>Username</th><th>Display Name</th><th>Groups</th><th>Limits</th><th class="col-actions"></th></tr>
       ${users.map((u) => `
@@ -276,7 +278,7 @@ function openUser(ctx: AdminCtx, u: User | null) {
 
 const groups_: Painter = async (ctx, area) => {
   ctx.setHtml(area, `
-    <div class="actions"><button class="btn primary" id="add-group">${ic.plus(14)} Add group</button></div>
+    <div class="actions actions-end"><button class="btn primary" id="add-group">${ic.plus(14)} Add group</button></div>
     <table class="grid">
       <tr><th>Group</th><th>Comment</th><th>Members</th><th class="col-actions"></th></tr>
       ${groups.map((g) => `
@@ -350,7 +352,7 @@ function privGroups(): [string, string[]][] {
 
 const roles_: Painter = async (ctx, area) => {
   ctx.setHtml(area, `
-    <div class="actions"><button class="btn primary" id="add-role">${ic.plus(14)} New role</button></div>
+    <div class="actions actions-end"><button class="btn primary" id="add-role">${ic.plus(14)} New role</button></div>
     <table class="grid">
       <tr><th>Role</th><th>Privileges</th><th class="col-actions"></th></tr>
       ${roles.map((r) => `
@@ -454,7 +456,7 @@ const permissions_: Painter = async (ctx, area) => {
   const acl = await api.get<AclEntry[]>("/acl");
   const sorted = [...acl].sort((a, b) => a.path.localeCompare(b.path) || a.ugid.localeCompare(b.ugid));
   ctx.setHtml(area, `
-    <div class="actions"><button class="btn primary" id="add-acl">${ic.plus(14)} Add permission</button></div>
+    <div class="actions actions-end"><button class="btn primary" id="add-acl">${ic.plus(14)} Add permission</button></div>
     <p class="hint">A role granted at a path applies there and below (unless "propagate" is off). The deepest grant for a user wins over one inherited from above, and a user's own grant wins over their groups'. Owners always hold full access to what they create.</p>
     <table class="grid">
       <tr><th>Path</th><th>User / Group</th><th>Role</th><th>Propagate</th><th class="col-actions"></th></tr>
@@ -524,7 +526,7 @@ export async function openGrant(ctx: AdminCtx, pre: { ugid?: string; path?: stri
 const daemons_: Painter = async (ctx, area) => {
   const conns = ctx.connections();
   ctx.setHtml(area, `
-    <div class="actions"><button class="btn primary" id="add-daemon">${ic.plus(14)} Add daemon</button></div>
+    <div class="actions actions-end"><button class="btn primary" id="add-daemon">${ic.plus(14)} Add daemon</button></div>
     <p class="hint">Users see a daemon when they hold Sys.Audit on it (the "User" role grants it at /). Restrict one with a NoAccess grant on its path.</p>
     <table class="grid">
       <tr><th>Name</th><th>URL</th><th>Status</th><th>Cert</th><th class="col-actions"></th></tr>
@@ -858,7 +860,7 @@ const ips_: Painter = async (ctx, area, gen) => {
 const keys_: Painter = async (ctx, area) => {
   const keys = await api.get<ApiKey[]>("/keys");
   ctx.setHtml(area, `
-    <div class="actions"><button class="btn primary" id="add-key">${ic.plus(14)} New API key</button></div>
+    <div class="actions actions-end"><button class="btn primary" id="add-key">${ic.plus(14)} New API key</button></div>
     <table class="grid">
       <tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Limited to</th><th class="col-actions"></th></tr>
       ${keys.map((k) => `
@@ -914,7 +916,7 @@ const activity_: Painter = async (ctx, area, gen) => {
   const res = await api.get<{ entries: ActivityEntry[]; all_users: boolean }>("/activity");
   if (!ctx.stillCurrent(gen)) return;
   ctx.setHtml(area, `
-    <div class="actions"><button class="btn danger" id="act-clear">${ic.trash(14)} Clear all activity</button></div>
+    <div class="actions actions-end"><button class="btn danger" id="act-clear">${ic.trash(14)} Clear all activity</button></div>
     <table class="grid">
       <tr><th>When</th><th>User</th><th>Action</th><th>Result</th><th>Detail</th></tr>
       ${res.entries.map((e) => `
@@ -949,10 +951,7 @@ interface UsageRow {
   networks: number;
 }
 
-type DashTab = "overview" | "usage" | "ownership" | "activity";
-let dashTab: DashTab = "overview";
-
-const DASH_TABS: [DashTab, string, (s?: number) => string][] = [
+const DASH_TABS: [AdminTab, string, (s?: number) => string][] = [
   ["overview", "Overview", ic.datacenter],
   ["usage", "Usage", ic.quota],
   ["ownership", "Ownership", ic.user],
@@ -988,6 +987,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
     api.get<ApiKey[]>("/keys"),
   ]);
   if (!ctx.stillCurrent(gen)) return;
+  const dashTab = ctx.tab() ?? "overview";
 
   const conns = ctx.connections();
   const online = conns.filter((c) => c.online !== false).length;
@@ -1126,10 +1126,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
     ${body}`);
 
   area.querySelectorAll<HTMLElement>("[data-dash-tab]").forEach((b) => {
-    b.onclick = () => {
-      dashTab = b.dataset.dashTab as DashTab;
-      ctx.go("dashboard");
-    };
+    b.onclick = () => ctx.go("dashboard", b.dataset.dashTab as AdminTab);
   });
   area.querySelectorAll<HTMLElement>("[data-go]").forEach((el) => {
     el.onclick = () => ctx.go(el.dataset.go as AdminSection);

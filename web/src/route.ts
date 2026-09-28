@@ -9,7 +9,8 @@
 //   /<node>/vms/<vm>/<tab>         console | hardware | options | network | xml
 //   /<node>/networks/<net>         network page
 //   /<node>/storage/<pool>         pool page
-//   /admin[/<section>]             administration (users, groups, ...)
+//   /admin/<section>[/<tab>]       administration (/admin/dashboard/usage, ...)
+//   /admin                         the admin dashboard's first tab
 //
 // A node is named by its connection name. The web server answers its own API
 // on top-level paths (/users, /activity, ...), so a node whose name is one of
@@ -22,6 +23,12 @@ export type VmTab = "summary" | "hardware" | "options" | "network" | "console" |
 export type AdminSection =
   | "dashboard" | "users" | "groups" | "roles" | "permissions" | "daemons"
   | "resources" | "quotas" | "ips" | "keys" | "activity";
+/// Sections with tabs of their own. Every admin page follows the rest of the
+/// app's pattern: a section is a path segment, and so is its tab.
+export type AdminTab = "overview" | "usage" | "ownership" | "activity";
+export const ADMIN_TABS: Partial<Record<AdminSection, AdminTab[]>> = {
+  dashboard: ["overview", "usage", "ownership", "activity"],
+};
 export const ADMIN_SECTIONS: AdminSection[] = [
   "dashboard", "users", "groups", "roles", "permissions", "daemons",
   "resources", "quotas", "ips", "keys", "activity",
@@ -33,7 +40,7 @@ export type Route =
   | { view: "vm"; conn: string; vm: string; tab: VmTab }
   | { view: "net"; conn: string; net: string }
   | { view: "pool"; conn: string; pool: string }
-  | { view: "admin"; section: AdminSection };
+  | { view: "admin"; section: AdminSection; tab?: AdminTab };
 
 export interface NodeRef {
   id: string;
@@ -66,7 +73,12 @@ const enc = encodeURIComponent;
 
 export function routeToPath(r: Route, nodes: NodeRef[]): string {
   if (r.view === "dc") return r.tab === "dashboard" ? "/" : `/${r.tab}`;
-  if (r.view === "admin") return r.section === "dashboard" ? "/admin" : `/admin/${r.section}`;
+  if (r.view === "admin") {
+    // Every section has its own path, the dashboard included; the first tab
+    // of a tabbed section is its bare path, as a server's Dashboard is.
+    const first = ADMIN_TABS[r.section]?.[0];
+    return r.tab && r.tab !== first ? `/admin/${r.section}/${r.tab}` : `/admin/${r.section}`;
+  }
   const node = `/${enc(nodeSegment(r.conn, nodes))}`;
   switch (r.view) {
     case "conn":
@@ -98,9 +110,13 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
   }
   const [first, section, name, tab] = parts;
   if (!first) return { view: "dc", tab: "dashboard" };
-  if (first === "admin" && parts.length <= 2) {
+  if (first === "admin" && parts.length <= 3) {
     const s = ADMIN_SECTIONS.includes(section as AdminSection) ? (section as AdminSection) : "dashboard";
-    return { view: "admin", section: s };
+    const tabs = ADMIN_TABS[s];
+    if (!tabs) return { view: "admin", section: s };
+    // An unknown tab lands on the section's first, like a mistyped server tab.
+    const t = tabs.includes(name as AdminTab) ? (name as AdminTab) : tabs[0];
+    return { view: "admin", section: s, tab: t };
   }
   if (parts.length === 1 && first === "guests") return { view: "dc", tab: first };
   // The Datacenter's Servers tab moved to the admin page's Daemons section;

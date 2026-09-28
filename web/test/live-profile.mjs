@@ -277,7 +277,7 @@ await wait(3000);
 
 check("the admin button opens a page, not a modal, on its dashboard", () => {
   assert.ok(!document.querySelector(".modal-back.open"), "no modal opened");
-  assert.equal(window.location.pathname, "/admin", "URL is the admin page");
+  assert.equal(window.location.pathname, "/admin/dashboard", "URL is the admin dashboard");
   assert.match(document.querySelector("#content .dtitle").textContent, /Dashboard/, "content pane shows the dashboard");
 });
 
@@ -314,6 +314,7 @@ check("the admin sidebar groups its sections under the dashboard root", () => {
 click(document.querySelector('#admin-area [data-dash-tab="usage"]'));
 await wait(3000);
 check("the Usage tab shows every limit as its own meter", () => {
+  assert.equal(window.location.pathname, "/admin/dashboard/usage", "the tab is in the URL");
   const area = document.querySelector("#admin-area");
   assert.equal(area.querySelector(".tab.active")?.dataset.dashTab, "usage");
   const card = area.querySelector("[data-quota-user]");
@@ -324,8 +325,20 @@ check("the Usage tab shows every limit as its own meter", () => {
   assert.equal(card.querySelectorAll(".limit-spec .meter").length, 4, "one meter per set limit");
   assert.match(card.textContent, /no limit/, "an unset limit says so instead of a meter");
 });
+// A dashboard tab survives a reload: Back to it re-renders the same tab.
+window.history.pushState(null, "", "/admin/dashboard/ownership");
+window.dispatchEvent(new window.PopStateEvent("popstate"));
+await wait(3000);
+check("a dashboard tab URL opens that tab", () => {
+  assert.equal(document.querySelector("#admin-area .tab.active")?.dataset.dashTab, "ownership");
+  assert.equal(document.querySelector("#tree .tree-row.sel")?.dataset.adminSection, "dashboard");
+});
 click(document.querySelector('#admin-area [data-dash-tab="overview"]'));
 await wait(3000);
+check("the first tab is the bare section path", () => {
+  assert.equal(window.location.pathname, "/admin/dashboard");
+});
+
 
 click(document.querySelector('#admin-area .card[data-go="users"]'));
 await wait(900);
@@ -363,6 +376,13 @@ for (const sec of ["users", "groups", "roles", "permissions", "daemons", "resour
     const area = document.querySelector("#admin-area");
     assert.ok(area.querySelector("table.grid"), `${sec}: a table (got ${area.textContent.slice(0, 120)})`);
     assert.ok(!area.querySelector(":scope > .empty"), `${sec}: no error panel`);
+    // Add / create buttons sit at the right of their row. jsdom does no
+    // layout, so check the computed rule the layout comes from.
+    const add = area.querySelector('button.btn[id^="add-"], #act-clear');
+    if (add) {
+      const row = add.closest(".actions");
+      assert.equal(window.getComputedStyle(row).justifyContent, "flex-end", `${sec}: ${add.id} is right-aligned`);
+    }
   });
 }
 
