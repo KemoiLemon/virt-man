@@ -39,6 +39,17 @@ pub async fn daemon_get(conn: &Connection, path: &str) -> Result<Value, ApiError
     serde_json::from_slice(&bytes).map_err(|e| ApiError::internal(format!("daemon JSON: {e}")))
 }
 
+/// Whether `s` is a UUID in libvirt's canonical 8-4-4-4-12 hex form -- the
+/// same test the daemon applies, so the two agree on what counts as one.
+pub fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
 pub fn enc(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {

@@ -288,6 +288,94 @@ fn record_delete(state: &AppState, user: &User, path_and_query: &str, status: u1
     }
 }
 
+/// UUID -> libvirt name, per connection, from the daemon's own lists.
+///
+/// The daemon answers a guest, network or pool by its UUID as well as its
+/// name. The permission check here is keyed by name (grants, ownership and
+/// suspension are recorded under it), so a request by UUID must be checked
+/// as the name it resolves to -- otherwise it reaches an ACL path that
+/// carries none of them, and a "NoAccess on this guest" carve-out, or a
+/// suspension, would not apply to the same guest addressed by UUID.
+/// ponytail: refreshed on a miss, or after 5 s; a name/UUID pairing only
+/// changes when something is renamed, which re-reads on the next miss.
+#[derive(Default)]
+struct UuidNames {
+    at: HashMap<String, Instant>,
+    map: HashMap<(String, String), String>,
+}
+
+fn uuid_names() -> &'static Mutex<UuidNames> {
+    static M: OnceLock<Mutex<UuidNames>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// The libvirt name for `uuid` on this daemon, if it is one. Not a UUID, or
+/// not found: None, and the request goes on as written (the daemon then
+/// answers "not found" for an unknown one).
+async fn resolve_uuid(conn: &crate::store::Connection, uuid: &str) -> Option<String> {
+    if !crate::guard::is_uuid(uuid) {
+        return None;
+    }
+    let key = (conn.id.clone(), uuid.to_ascii_lowercase());
+    {
+        let c = uuid_names().lock().expect("uuid map poisoned");
+        let fresh =
+            c.at.get(&conn.id)
+                .is_some_and(|t| t.elapsed().as_secs() < 5);
+        if let Some(n) = c.map.get(&key) {
+            return Some(n.clone());
+        }
+        if fresh {
+            return None;
+        }
+    }
+    // A miss: re-read every list for this daemon once.
+    let mut map = HashMap::new();
+    for list in ["/domains", "/networks", "/pools"] {
+        if let Ok(v) = crate::guard::daemon_get(conn, list).await {
+            for x in v.as_array().into_iter().flatten() {
+                if let (Some(u), Some(n)) = (x["uuid"].as_str(), x["name"].as_str()) {
+                    map.insert((conn.id.clone(), u.to_ascii_lowercase()), n.to_string());
+                }
+            }
+        }
+    }
+    let mut c = uuid_names().lock().expect("uuid map poisoned");
+    c.map.retain(|(id, _), _| id != &conn.id);
+    c.map.extend(map);
+    c.at.insert(conn.id.clone(), Instant::now());
+    c.map.get(&key).cloned()
+}
+
+/// Rewrite a daemon path so a UUID naming a guest, network or pool becomes
+/// that resource's name: the permission check and the daemon then agree on
+/// which resource it is. Anything else is returned unchanged.
+async fn canonical_path(conn: &crate::store::Connection, rest: &str) -> String {
+    let mut seg: Vec<String> = rest
+        .trim_start_matches('/')
+        .split('/')
+        .map(str::to_string)
+        .collect();
+    let named = match seg.first().map(String::as_str) {
+        Some("domains") | Some("pools") => true,
+        Some("networks") => seg.get(1).map(String::as_str) != Some("bridges"),
+        _ => false,
+    };
+    if !named {
+        return rest.to_string();
+    }
+    let Some(id) = seg.get(1).cloned() else {
+        return rest.to_string();
+    };
+    match resolve_uuid(conn, &crate::routes::decode(&id)).await {
+        Some(name) => {
+            seg[1] = crate::guard::enc(&name);
+            format!("/{}", seg.join("/"))
+        }
+        None => rest.to_string(),
+    }
+}
+
 /// All daemon calls proxy through here. The daemon token never reaches the
 /// browser: the backend attaches it server-side.
 // axum extractors are the arguments; bundling them into a struct would only
@@ -306,10 +394,20 @@ async fn proxy(
     let write = method != axum::http::Method::GET && method != axum::http::Method::HEAD;
     // Captured before `method` is moved into the request below.
     let destructive = method == axum::http::Method::DELETE;
-    let rest_path = uri
+    let conn = {
+        let store = state.read();
+        let Some(c) = store.connection(&conn_id) else {
+            return Err(ApiError::not_found("no such connection"));
+        };
+        c.clone()
+    };
+    let raw_rest = uri
         .path()
         .strip_prefix(&format!("/proxy/{conn_id}"))
         .unwrap_or("/");
+    // A UUID becomes its name here, before the check and before the daemon,
+    // so both see the same resource the same way.
+    let rest_path = &canonical_path(&conn, raw_rest).await;
     // Every daemon route needs one privilege at one path; a route the table
     // does not know is refused rather than guessed at.
     let need = routes::classify(&conn_id, method.as_str(), rest_path).ok_or_else(|| {
@@ -322,21 +420,15 @@ async fn proxy(
     })?;
     super::enforce(&state, &user, &need.path, need.privilege)?;
 
-    let conn = {
-        let store = state.read();
-        let Some(c) = store.connection(&conn_id) else {
-            return Err(ApiError::not_found("no such connection"));
-        };
-        c.clone()
-    };
-
     let addr = daemon::parse_url(&conn.url)?;
     let base = addr.base.clone();
     // uri comes in as /proxy/{id}/rest/of/path — strip the prefix.
-    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    let rest = path_and_query
-        .strip_prefix(&format!("/proxy/{conn_id}"))
-        .unwrap_or(path_and_query);
+    // The canonical path (a UUID resolved to its name) plus the query, so the
+    // daemon, the cache and the activity log all see what was checked.
+    let rest = &match uri.query() {
+        Some(q) => format!("{rest_path}?{q}"),
+        None => rest_path.to_string(),
+    };
     let target = format!("{}{}", base, rest);
     // A virt-viewer file names a relay the daemon opens for one viewer: tell
     // it who that viewer is (the browser, not this server) and the host name

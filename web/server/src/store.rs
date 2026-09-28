@@ -533,6 +533,27 @@ mod tests {
         assert!(s.can(&user("a"), &perm::vm_path("c", "theirs"), "VM.Allocate"));
     }
 
+    /// A "NoAccess on this one guest" carve-out must hold whichever way the
+    /// guest is addressed. The daemon now resolves a UUID to a guest, so a
+    /// request by UUID must be checked against the same ACL key as one by
+    /// name -- here, both are the guest's canonical key.
+    #[test]
+    fn a_carve_out_holds_however_the_guest_is_addressed() {
+        let mut s = store();
+        grant(&mut s, "/nodes/c", "u", "VMAdmin");
+        let secret = "ea15249b-a713-41dc-a808-05619e42eb2a";
+        grant(&mut s, &perm::vm_path("c", secret), "u", "NoAccess");
+        let u = user("u");
+        assert!(
+            !s.can(&u, &perm::vm_path("c", secret), "VM.Console"),
+            "carved out"
+        );
+        assert!(
+            s.can(&u, &perm::vm_path("c", "other-uuid"), "VM.Console"),
+            "the rest of the daemon"
+        );
+    }
+
     #[test]
     fn creating_and_reading_are_separate() {
         let s = store();

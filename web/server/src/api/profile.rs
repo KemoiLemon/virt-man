@@ -192,7 +192,8 @@ async fn my_usage(
                         "storage_bytes": u.storage_bytes, "networks": u.networks,
                     }));
                 }
-                Err(_) => daemons.push(serde_json::json!({ "conn": c.id, "name": c.name, "online": false })),
+                Err(_) => daemons
+                    .push(serde_json::json!({ "conn": c.id, "name": c.name, "online": false })),
             }
         }
     }

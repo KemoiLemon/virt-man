@@ -224,6 +224,26 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
 mod tests {
     use super::*;
 
+    /// `classify` takes the path as written. That is only safe because the
+    /// proxy first rewrites a UUID to the resource's name (`canonical_path`):
+    /// the daemon resolves a UUID to a guest, and grants, ownership and
+    /// suspension are recorded under the name, so a check on the UUID path
+    /// would miss every one of them (a "NoAccess on this guest" carve-out
+    /// would not hold). `test/live-uuid.mjs` checks the proxy does resolve.
+    #[test]
+    fn the_check_is_on_the_path_as_written() {
+        let by_uuid = classify(
+            "c",
+            "DELETE",
+            "/domains/ea15249b-a713-41dc-a808-05619e42eb2a",
+        )
+        .unwrap();
+        assert_eq!(
+            by_uuid.path,
+            "/nodes/c/vms/ea15249b-a713-41dc-a808-05619e42eb2a"
+        );
+    }
+
     fn priv_of(method: &str, rest: &str) -> Option<(String, &'static str)> {
         classify("c", method, rest).map(|n| (n.path, n.privilege))
     }
