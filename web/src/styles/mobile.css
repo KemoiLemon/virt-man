@@ -43,7 +43,8 @@
 
   /* On a phone the sidebar is an overlay, so the two buttons that live there
      on desktop move to the topbar. */
-  .mobile-only { display: inline-flex; }
+  .mobile-only { display: inline-flex !important; }
+  .console-keys.mobile-only { display: flex !important; }
 
   /* ------------------------------------------------------------ topbar */
   .topbar { gap: 8px; padding: 0 10px; }

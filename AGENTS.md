@@ -265,7 +265,10 @@ Things that bite:
   the app belongs to the first administrator.
 - **The admin page is a view** (`/admin/<section>`, `web/src/admin.ts`), not a
   modal: it replaces the sidebar, and the admin button becomes its return
-  button. Its sections read on demand; the 1 s poll skips it.
+  button. `/admin` is its dashboard; the sidebar groups sections under
+  `ADMIN_GROUPS`, and a new section must go in one. Its sections read on
+  demand; the 1 s poll skips it. Servers are managed there (Daemons), not on
+  the Datacenter, and an old `/servers` link lands on that page.
 
 **Destructive daemon calls are logged by the proxy, not the SPA.** Every
 `DELETE` proxied to the daemon is recorded with a human label, its outcome, and
@@ -284,6 +287,9 @@ One SPA, one code path. The phone layout is a media query on `max-width:
 mobile layout when the phone is turned sideways), and **`MOBILE.md` explains
 why** — read it before changing anything below.
 
+- **`.mobile-only` is `display: none !important`** and mobile.css reveals it
+  the same way. Without `!important` it lost to `.btn` (same specificity, later
+  in the bundle) and the drawer and palette buttons showed on every desktop.
 - **`web/src/styles/mobile.css` loads last, after `density.css`.** Sizing
   overrides belong in that layer; a rule added to an earlier file loses the
   cascade and the tweak silently does nothing.

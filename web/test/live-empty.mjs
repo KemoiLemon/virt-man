@@ -70,14 +70,15 @@ try {
   const noCards = (d) => d.querySelectorAll(".create-card, .net-create-card").length === 0;
   const modalTitle = (d) => d.querySelector(".modal-back.open .modal-head, .modal-back.open h3, .modal-back.open .modal-title")?.textContent.trim() ?? "";
 
-  // No servers at all.
+  // No servers at all. Servers are managed on the admin Daemons page now (an
+  // old /servers link lands there).
   let d = await open("/servers");
-  let empty = d.querySelector(".empty-create");
-  check("no servers: says so", /No servers available/.test(empty?.textContent ?? ""), empty?.textContent);
-  check("…with a small Add Server button", empty?.querySelector("button#dc-server-create") && !d.querySelector("table.grid tr[data-open-conn-row]"));
-  empty?.querySelector("button")?.click();
+  check("no servers: the Daemons page says so", /No daemons yet/.test(d.querySelector("#admin-area")?.textContent ?? ""),
+    d.querySelector("#admin-area")?.textContent);
+  d.querySelector("#add-daemon")?.click();
   await new Promise((r) => setTimeout(r, 200));
-  check("…which opens the Add Server dialog", !!d.querySelector(".modal-back.open"), modalTitle(d));
+  check("…and Add daemon opens the Add Server dialog", /Server/i.test(modalTitle(d)), modalTitle(d));
+  let empty;
 
   d = await open("/guests");
   empty = d.querySelector(".empty-create");
@@ -88,9 +89,10 @@ try {
   await fetch(`${base}/connections`, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "stub", url: stubUrl, token: "t" }) });
   d = await open("/servers");
-  const row = d.querySelector("table.grid tr[data-open-conn-row]");
-  check("servers are a list: one table row per server", row && d.querySelectorAll("tr[data-open-conn-row]").length === 1);
-  check("…with name, URL, cert and actions", row?.textContent.includes("stub") && row?.textContent.includes(stubUrl) && row?.querySelector("[data-edit]") && row?.querySelector("[data-del]"));
+  const rows = [...d.querySelectorAll("#admin-area table.grid tr")].filter((r) => r.querySelector("[data-edit-conn]"));
+  check("servers are a list: one table row per server", rows.length === 1, rows.length);
+  check("…with name, URL and actions", rows[0]?.textContent.includes("stub") && rows[0]?.textContent.includes(stubUrl)
+    && rows[0]?.querySelector("[data-edit-conn]") && rows[0]?.querySelector("[data-del-conn]"));
   check("…and no server cards", !d.querySelector(".storage-card[data-open-conn-row]") && noCards(d));
 
   for (const [tab, what, id, dialog] of [

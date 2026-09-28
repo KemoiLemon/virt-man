@@ -21,7 +21,6 @@ const nodes = [
 test("every view round-trips through its path", () => {
   const views = [
     { view: "dc", tab: "dashboard" },
-    { view: "dc", tab: "servers" },
     { view: "dc", tab: "guests" },
     { view: "conn", conn: "c1", tab: "dashboard" },
     { view: "conn", conn: "c1", tab: "vms" },
@@ -116,8 +115,10 @@ test("the admin page round-trips through the URL", () => {
     const route = { view: "admin", section };
     assert.deepEqual(r.parsePath(r.routeToPath(route, nodes), nodes), route, section);
   }
-  assert.equal(r.routeToPath({ view: "admin", section: "users" }, nodes), "/admin");
-  assert.deepEqual(r.parsePath("/admin/bogus", nodes), { view: "admin", section: "users" });
+  assert.equal(r.routeToPath({ view: "admin", section: "dashboard" }, nodes), "/admin");
+  assert.deepEqual(r.parsePath("/admin/bogus", nodes), { view: "admin", section: "dashboard" });
+  // The Datacenter's Servers tab is gone; an old link lands on Daemons.
+  assert.deepEqual(r.parsePath("/servers", nodes), { view: "admin", section: "daemons" });
   // A server named "admin" must not shadow the admin page.
   assert.equal(r.nodeSegment("c9", [{ id: "c9", name: "admin" }]), "c9");
 });

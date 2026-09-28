@@ -1,7 +1,8 @@
 // URL <-> view mapping, so a reload (or a shared link) lands where you were.
 //
 //   /                              datacenter dashboard
-//   /servers, /guests              datacenter tabs
+//   /guests                        datacenter guests tab
+//   /servers                       old Servers tab: the admin Daemons page now
 //   /<node>                        server dashboard
 //   /<node>/vms|networks|storage|firewall
 //   /<node>/vms/<vm>               guest summary
@@ -15,14 +16,14 @@
 // those, or is shared by another node, is addressed by its connection id
 // instead: a reload of /users would otherwise get JSON, not the app.
 
-export type DcTab = "dashboard" | "servers" | "guests";
+export type DcTab = "dashboard" | "guests";
 export type ConnTab = "dashboard" | "vms" | "networks" | "storage" | "firewall";
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 export type AdminSection =
-  | "users" | "groups" | "roles" | "permissions" | "daemons"
+  | "dashboard" | "users" | "groups" | "roles" | "permissions" | "daemons"
   | "resources" | "quotas" | "ips" | "keys" | "activity";
 export const ADMIN_SECTIONS: AdminSection[] = [
-  "users", "groups", "roles", "permissions", "daemons",
+  "dashboard", "users", "groups", "roles", "permissions", "daemons",
   "resources", "quotas", "ips", "keys", "activity",
 ];
 
@@ -43,7 +44,7 @@ export interface NodeRef {
 export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
   "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
-  "groups", "acl", "resources", "ips",
+  "groups", "acl", "resources", "ips", "usage",
   "servers", "guests", "admin",
 ]);
 
@@ -65,7 +66,7 @@ const enc = encodeURIComponent;
 
 export function routeToPath(r: Route, nodes: NodeRef[]): string {
   if (r.view === "dc") return r.tab === "dashboard" ? "/" : `/${r.tab}`;
-  if (r.view === "admin") return r.section === "users" ? "/admin" : `/admin/${r.section}`;
+  if (r.view === "admin") return r.section === "dashboard" ? "/admin" : `/admin/${r.section}`;
   const node = `/${enc(nodeSegment(r.conn, nodes))}`;
   switch (r.view) {
     case "conn":
@@ -98,12 +99,13 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
   const [first, section, name, tab] = parts;
   if (!first) return { view: "dc", tab: "dashboard" };
   if (first === "admin" && parts.length <= 2) {
-    const s = ADMIN_SECTIONS.includes(section as AdminSection) ? (section as AdminSection) : "users";
+    const s = ADMIN_SECTIONS.includes(section as AdminSection) ? (section as AdminSection) : "dashboard";
     return { view: "admin", section: s };
   }
-  if (parts.length === 1 && (first === "servers" || first === "guests")) {
-    return { view: "dc", tab: first };
-  }
+  if (parts.length === 1 && first === "guests") return { view: "dc", tab: first };
+  // The Datacenter's Servers tab moved to the admin page's Daemons section;
+  // an old link still lands there (main.ts sends a non-admin to "/").
+  if (parts.length === 1 && first === "servers") return { view: "admin", section: "daemons" };
   const conn = resolveNode(first, nodes);
   if (!conn) return { view: "dc", tab: "dashboard" };
   if (!section || !CONN_TABS.includes(section as ConnTab)) {

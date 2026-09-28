@@ -17,7 +17,7 @@ import { ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { fmtBytes } from "./stats";
 import { esc } from "./xml";
-import { ADMIN_SECTIONS, type AdminSection } from "./route";
+import type { AdminSection } from "./route";
 
 export interface AdminCtx {
   setHtml(el: Element, html: string): void;
@@ -29,6 +29,9 @@ export interface AdminCtx {
   relTime(ms: number): string;
   me(): User | null;
   connections(): Connection[];
+  /// Re-read the daemon list from the server (another admin, or another tab,
+  /// may have changed it since this page loaded).
+  reloadConnections(): Promise<void>;
   openConnectionDialog(id?: string): void;
   deleteConnection(id: string): Promise<void>;
   /// Open a guest or network in the main view.
@@ -42,6 +45,7 @@ export interface AdminCtx {
 }
 
 const LABEL: Record<AdminSection, string> = {
+  dashboard: "Dashboard",
   users: "Users",
   groups: "Groups",
   roles: "Roles",
@@ -55,6 +59,7 @@ const LABEL: Record<AdminSection, string> = {
 };
 
 const ICON: Record<AdminSection, (s?: number) => string> = {
+  dashboard: ic.datacenter,
   users: ic.user,
   groups: ic.groups,
   roles: ic.roles,
@@ -67,16 +72,33 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
   activity: ic.autostart,
 };
 
-/// The admin sidebar: one row per section, in the tree's own row style so the
-/// drawer, arrow keys and long-press all behave as they do for the tree.
+/// The sidebar's groups. Every section is in exactly one (asserted by the
+/// live suite against ADMIN_SECTIONS), in the order they are listed.
+export const ADMIN_GROUPS: { label: string; sections: AdminSection[] }[] = [
+  { label: "Access", sections: ["users", "groups", "roles", "permissions", "keys"] },
+  { label: "Infrastructure", sections: ["daemons", "resources", "ips"] },
+  { label: "Limits", sections: ["quotas"] },
+  { label: "Audit", sections: ["activity"] },
+];
+
+/// The admin sidebar, laid out like the resource tree: the Dashboard is the
+/// root (as Datacenter is there), and the sections nest under group labels
+/// the way guests nest under a server. Rows keep the tree's classes, so the
+/// drawer, arrow keys and long-press behave the same.
 export function adminTree(section: AdminSection): string {
-  return `<div class="tree-row tree-root admin-root"><span class="tree-ic">${ic.admin()}</span>
-      <span class="tree-label">Administration</span></div>
-    ${ADMIN_SECTIONS.map((s) => `
-      <button class="tree-row tree-group ${s === section ? "sel" : ""}" data-admin-section="${s}">
+  const row = (s: AdminSection, cls: string) => `
+      <button class="tree-row ${cls} ${s === section ? "sel" : ""}" data-admin-section="${s}">
         <span class="tree-ic">${ICON[s]()}</span>
         <span class="tree-label">${LABEL[s]}</span>
-      </button>`).join("")}`;
+      </button>`;
+  return `
+    <button class="tree-row tree-root ${section === "dashboard" ? "sel" : ""}" data-admin-section="dashboard">
+      <span class="tree-ic">${ic.admin()}</span>
+      <span class="tree-label">Administration</span>
+    </button>
+    ${ADMIN_GROUPS.map((g) => `
+      <div class="admin-group" role="presentation">${esc(g.label)}</div>
+      ${g.sections.map((s) => row(s, "tree-vm admin-item")).join("")}`).join("")}`;
 }
 
 export function adminTitle(section: AdminSection): string {
@@ -90,7 +112,8 @@ let privileges: string[] = [];
 let users: User[] = [];
 let groups: GroupDef[] = [];
 
-async function loadMeta() {
+async function loadMeta(ctx: AdminCtx) {
+  await ctx.reloadConnections();
   const [r, u, g] = await Promise.all([
     api.get<{ roles: RoleDef[]; privileges: string[] }>("/roles"),
     api.get<User[]>("/users"),
@@ -123,7 +146,7 @@ function fmtLimit(n: number | null | undefined, unit = ""): string {
 export async function renderAdminSection(ctx: AdminCtx, area: HTMLElement, section: AdminSection, gen: number) {
   ctx.setHtml(area, skeleton("table"));
   try {
-    await loadMeta();
+    await loadMeta(ctx);
     if (!ctx.stillCurrent(gen)) return;
     await SECTIONS[section](ctx, area, gen);
   } catch (e) {
@@ -460,7 +483,7 @@ const permissions_: Painter = async (ctx, area) => {
 /// Grant a role. Prefilled from wherever it was opened: a user's or group's
 /// row, or a resource's.
 export async function openGrant(ctx: AdminCtx, pre: { ugid?: string; path?: string }) {
-  if (!roles.length) await loadMeta();
+  if (!roles.length) await loadMeta(ctx);
   const paths = await pathChoices(ctx);
   if (pre.path && !paths.some((p) => p.path === pre.path)) paths.push({ path: pre.path, label: pathLabel(ctx, pre.path) });
   const el = ctx.openModal(
@@ -913,7 +936,162 @@ const activity_: Painter = async (ctx, area, gen) => {
   };
 };
 
+// --------------------------------------------------------------- dashboard
+
+interface UsageRow {
+  id: string;
+  username: string;
+  quota: Quota;
+  vms: number;
+  vcpus: number;
+  memory_mb: number;
+  storage_bytes: number;
+  networks: number;
+}
+
+/// How full the fullest of a user's limits is, 0-100, or null when they have
+/// none. A user is as constrained as their tightest limit.
+function fullest(u: UsageRow): number | null {
+  const d = u.quota?.default ?? {};
+  const pairs: [number | null | undefined, number][] = [
+    [d.vms, u.vms], [d.vcpus, u.vcpus], [d.memory_mb, u.memory_mb],
+    [d.storage_gb, u.storage_bytes / 1073741824], [d.networks, u.networks],
+  ];
+  const ratios = pairs.filter(([cap]) => cap != null).map(([cap, used]) =>
+    cap === 0 ? (used > 0 ? 100 : 0) : Math.min(100, (used / (cap as number)) * 100));
+  return ratios.length ? Math.max(...ratios) : null;
+}
+
+/// The admin page's landing view: the datacenter dashboard's layout, with
+/// administration's figures -- accounts, who owns what, how close each user
+/// is to their limits, and what happened recently.
+const dashboard_: Painter = async (ctx, area, gen) => {
+  const [res, usage, acl, act, keys] = await Promise.all([
+    api.get<AdminResource[]>("/resources"),
+    api.get<UsageRow[]>("/usage"),
+    api.get<AclEntry[]>("/acl"),
+    api.get<{ entries: ActivityEntry[] }>("/activity"),
+    api.get<ApiKey[]>("/keys"),
+  ]);
+  if (!ctx.stillCurrent(gen)) return;
+  const conns = ctx.connections();
+  const online = conns.filter((c) => c.online !== false).length;
+  const admins = users.filter((u) => u.admin).length;
+  const vms = res.filter((r) => r.kind === "vm");
+  const nets = res.filter((r) => r.kind === "network");
+  const suspended = res.filter((r) => r.suspended);
+  const failed = act.entries.filter((e) => e.status === "failed");
+  const dayAgo = Date.now() - 86_400_000;
+  const failedToday = failed.filter((e) => e.at_ms >= dayAgo).length;
+
+  // Owners and what they hold, the admins' share folded into one row.
+  const byOwner = new Map<string, { name: string; vms: number; nets: number; vols: number }>();
+  for (const r of res) {
+    if (r.kind === "pool") continue;
+    const k = r.owner ?? "";
+    const row = byOwner.get(k) ?? { name: r.owner_name ?? "—", vms: 0, nets: 0, vols: 0 };
+    if (r.kind === "vm") row.vms++;
+    else if (r.kind === "network") row.nets++;
+    else row.vols++;
+    byOwner.set(k, row);
+  }
+
+  const card = (icon: string, n: number | string, label: string, tone = "", go?: AdminSection) =>
+    `<div class="card ${tone} ${go ? "admin-card-link" : ""}" ${go ? `data-go="${go}" tabindex="0" role="link"` : ""}>
+      <span class="card-ic">${icon}</span><div><b>${n}</b><i>${label}</i></div></div>`;
+  const meter = (p: number) => `<div class="meter"><div class="meter-fill ${p > 85 ? "hot" : ""}" style="width:${p.toFixed(1)}%"></div></div>`;
+  const limited = usage
+    .map((u) => ({ u, p: fullest(u) }))
+    .sort((a, b) => (b.p ?? -1) - (a.p ?? -1));
+
+  ctx.setHtml(area, `
+    <div class="cards">
+      ${card(ic.user(20), users.length, "USERS", "", "users")}
+      ${card(ic.admin(20), admins, "ADMINISTRATORS", "", "users")}
+      ${card(ic.groups(20), groups.length, "GROUPS", "", "groups")}
+      ${card(ic.server(20), `${online}/${conns.length}`, "DAEMONS ONLINE", online < conns.length ? "bad" : "ok", "daemons")}
+      ${card(ic.vms(20), vms.length, "VMS", "", "resources")}
+      ${card(ic.network(20), nets.length, "NETWORKS", "", "resources")}
+      ${card(ic.suspend(20), suspended.length, "SUSPENDED", suspended.length ? "warn" : "", "resources")}
+      ${card(ic.perms(20), acl.length, "PERMISSIONS", "", "permissions")}
+      ${card(ic.key(20), keys.length, "API KEYS", "", "keys")}
+      ${card(ic.autostart(20), failedToday, "FAILED TODAY", failedToday ? "bad" : "", "activity")}
+    </div>
+
+    <div class="dash-section">
+      <div class="section-title">Limits</div>
+      ${limited.length ? `<table class="grid">
+        <tr><th>User</th><th>Tightest limit</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Storage</th><th>Networks</th></tr>
+        ${limited.map(({ u, p }) => {
+          const d = u.quota?.default ?? {};
+          const of = (used: number | string, cap: number | string | null | undefined, unit = "") =>
+            `${used}${cap == null ? "" : ` / ${cap}${unit}`}`;
+          return `<tr class="row-open" tabindex="0" data-go="quotas">
+            <td class="tname">${esc(u.username)}${u.quota?.shared ? ` <span class="badge">pooled</span>` : ""}</td>
+            <td class="limit-cell">${p == null ? `<span class="dim-note">Unlimited</span>` : `${meter(p)}<span>${p.toFixed(0)}%</span>`}</td>
+            <td>${of(u.vms, d.vms)}</td>
+            <td>${of(u.vcpus, d.vcpus)}</td>
+            <td>${of(fmtBytes(u.memory_mb * 1048576), d.memory_mb == null ? null : fmtBytes(d.memory_mb * 1048576))}</td>
+            <td>${of(fmtBytes(u.storage_bytes), d.storage_gb, " GiB")}</td>
+            <td>${of(u.networks, d.networks)}</td>
+          </tr>`;
+        }).join("")}
+      </table>` : `<div class="empty">Every account is an administrator; limits apply to other users.</div>`}
+    </div>
+
+    <div class="dash-section">
+      <div class="section-title">Ownership</div>
+      <table class="grid">
+        <tr><th>Owner</th><th>VMs</th><th>Networks</th><th>Volumes</th></tr>
+        ${[...byOwner.entries()].sort((a, b) => b[1].vms - a[1].vms).map(([id, o]) => `
+          <tr class="row-open" tabindex="0" data-owner="${esc(id)}">
+            <td class="tname">${esc(o.name)}</td><td>${o.vms}</td><td>${o.nets}</td><td>${o.vols}</td>
+          </tr>`).join("") || `<tr><td colspan="4" class="empty">Nothing on any daemon yet.</td></tr>`}
+      </table>
+    </div>
+
+    <div class="dash-section">
+      <div class="section-title">Daemons</div>
+      <table class="grid">
+        <tr><th>Daemon</th><th>Status</th><th>VMs</th><th>Networks</th><th>Pools</th></tr>
+        ${conns.map((c) => {
+          const n = (k: string) => res.filter((r) => r.conn === c.id && r.kind === k).length;
+          return `<tr class="row-open" tabindex="0" data-go="daemons">
+            <td class="tname">${esc(c.name)}</td>
+            <td><span class="state ${c.online !== false ? "on" : "bad"}">${c.online !== false ? "Online" : "Offline"}</span></td>
+            <td>${n("vm")}</td><td>${n("network")}</td><td>${n("pool")}</td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="5" class="empty">No daemons yet.</td></tr>`}
+      </table>
+    </div>
+
+    <div class="dash-section">
+      <div class="section-title">Recent Activity</div>
+      <table class="grid">
+        <tr><th>When</th><th>User</th><th>Action</th><th>Result</th></tr>
+        ${act.entries.slice(0, 8).map((e) => `
+          <tr class="row-open" tabindex="0" data-go="activity">
+            <td class="host">${esc(ctx.relTime(e.at_ms))}</td>
+            <td>${esc(e.username)}</td>
+            <td class="tname">${esc(e.label)}</td>
+            <td><span class="state ${e.status === "done" ? "on" : "bad"}">${esc(e.status)}</span></td>
+          </tr>`).join("") || `<tr><td colspan="4" class="empty">No activity recorded yet.</td></tr>`}
+      </table>
+    </div>`);
+
+  area.querySelectorAll<HTMLElement>("[data-go]").forEach((el) => {
+    el.onclick = () => ctx.go(el.dataset.go as AdminSection);
+  });
+  area.querySelectorAll<HTMLElement>("[data-owner]").forEach((el) => {
+    el.onclick = () => {
+      resFilter = { kind: "", owner: el.dataset.owner ?? "", conn: "" };
+      ctx.go("resources");
+    };
+  });
+};
+
 const SECTIONS: Record<AdminSection, Painter> = {
+  dashboard: dashboard_,
   users: users_,
   groups: groups_,
   roles: roles_,

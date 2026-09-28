@@ -300,11 +300,14 @@ await (async () => {
     });
     document.querySelector(".ctxmenu")?.remove();
   }
-  document.querySelector('[data-dctab="servers"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  const serverCard = document.querySelector("[data-open-conn-row]");
+  // Servers are no longer a Datacenter tab; the dashboard's server rows are
+  // where the content pane lists them.
+  document.querySelector('[data-dctab="dashboard"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(1500);
+  const serverCard = document.querySelector("[data-dc-dash-conn]");
   if (serverCard) {
     rightClick(serverCard);
-    check("a server card offers the server's menu", () => {
+    check("a server row offers the server's menu", () => {
       const items = labels();
       for (const want of ["Dashboard", "Storage", "Create VM", "Remove server"]) {
         assert.ok(items.includes(want), `${want} offered (${items})`);
@@ -321,7 +324,7 @@ await (async () => {
       document.querySelector(".tree-row.tree-vm"),
       document.querySelector(".tree-row.tree-net"),
       document.querySelector(".tree-row.tree-pool"),
-      document.querySelector("[data-open-conn-row]"),
+      document.querySelector("[data-dc-dash-conn]"),
     ];
     for (const el of surfaces.filter(Boolean)) {
       rightClick(el);

@@ -93,7 +93,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Enter" && e.key !== " ") return;
   const el = e.target as HTMLElement | null;
-  if (!el?.matches?.("[data-open], tr.row-open, [data-dc-dash-conn]")) return;
+  if (!el?.matches?.("[data-open], tr.row-open, [data-dc-dash-conn], .admin-card-link")) return;
   e.preventDefault();
   el.click();
 });

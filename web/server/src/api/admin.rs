@@ -23,6 +23,7 @@ pub fn routes(state: &AppState) -> Router<AppState> {
         .route("/acl", get(acl).put(add_acl).delete(remove_acl))
         .route("/resources", get(resources).put(set_resource))
         .route("/ips", get(ips))
+        .route("/usage", get(usage))
         .layer(middleware::from_fn(auth::require_priv(
             state.clone(),
             "/",
@@ -441,6 +442,39 @@ async fn set_resource(
     let r = r.clone();
     store.save(&state.data_dir)?;
     Ok(Json(json!(r)))
+}
+
+// ---------------------------------------------------------------- usage
+
+/// Every non-admin user's usage (summed over the daemons that answer) next
+/// to their limits, for the admin dashboard. Read live, the same way the
+/// quota check does, so the two can never disagree.
+async fn usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let (conns, users): (Vec<Connection>, Vec<crate::store::User>) = {
+        let s = state.read();
+        let users = s.users.iter().filter(|u| !s.is_admin(u)).cloned().collect();
+        (s.connections.clone(), users)
+    };
+    let mut out = vec![];
+    for u in &users {
+        let mut total = crate::perm::Usage::default();
+        for c in &conns {
+            if let Ok(x) = crate::guard::usage_on(&state, c, &u.id).await {
+                total = total.add(x);
+            }
+        }
+        out.push(json!({
+            "id": u.id,
+            "username": u.username,
+            "quota": u.quota,
+            "vms": total.vms,
+            "vcpus": total.vcpus,
+            "memory_mb": total.memory_mb,
+            "storage_bytes": total.storage_bytes,
+            "networks": total.networks,
+        }));
+    }
+    Ok(Json(json!(out)))
 }
 
 // ---------------------------------------------------------------- IPs

@@ -162,9 +162,20 @@ table.grid + .actions { margin-top: 12px; }
 .perm.r { color: var(--warn); }
 .perm.n { color: var(--dim); font-weight: 400; }
 .perm-pair { display: inline-flex; align-items: center; gap: 4px; margin-right: 9px; font-size: 11px; color: var(--dim); }
-/* The admin page's sidebar header: a label, not a link, so it does not take
-   the hover and pointer of the rows beneath it. */
-.admin-root, .admin-root:hover { cursor: default; background: none; }
+/* Admin sidebar group labels: section headers between the rows, like the
+   tree's server rows but not selectable. Indented to the group's own level
+   so the sections read as nested under it. */
+.admin-group {
+  padding: 12px 12px 4px 14px;
+  font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--dim); user-select: none;
+}
+/* Admin dashboard: every card opens its section. */
+.admin-card-link { cursor: pointer; }
+.admin-card-link:hover { background: var(--hover); }
+/* A user's tightest limit: a short meter beside its figure. */
+.limit-cell { display: flex; align-items: center; gap: 8px; min-width: 130px; }
+.limit-cell .meter { flex: 1; }
 /* Privilege chips in the roles and API key tables. */
 .priv-cell { white-space: normal; }
 .priv {

@@ -273,25 +273,62 @@ const topModal = () => [...document.querySelectorAll(".modal-back.open")].pop();
 const beforeAdmin = { html: document.querySelector("#admin-btn").innerHTML, path: window.location.pathname };
 
 click(document.querySelector("#admin-btn"));
-await wait(1200);
+await wait(3000);
 
-check("the admin button opens a page, not a modal", () => {
+check("the admin button opens a page, not a modal, on its dashboard", () => {
   assert.ok(!document.querySelector(".modal-back.open"), "no modal opened");
   assert.equal(window.location.pathname, "/admin", "URL is the admin page");
-  assert.match(document.querySelector("#content .dtitle").textContent, /Users/, "content pane shows Users");
+  assert.match(document.querySelector("#content .dtitle").textContent, /Dashboard/, "content pane shows the dashboard");
+});
+
+check("the admin dashboard has admin cards that open their sections", () => {
+  const area = document.querySelector("#admin-area");
+  const labels = [...area.querySelectorAll(".cards .card i")].map((i) => i.textContent.trim());
+  for (const want of ["USERS", "ADMINISTRATORS", "GROUPS", "DAEMONS ONLINE", "VMS", "SUSPENDED", "PERMISSIONS", "FAILED TODAY"]) {
+    assert.ok(labels.includes(want), `${want} card (${labels})`);
+  }
+  const users = [...area.querySelectorAll(".cards .card")].find((c) => c.querySelector("i").textContent.trim() === "USERS");
+  assert.match(users.querySelector("b").textContent, /^\d+$/, "a real count");
+  assert.equal(users.dataset.go, "users", "the card opens Users");
+  const titles = [...area.querySelectorAll(".section-title")].map((t) => t.textContent.trim());
+  assert.deepEqual(titles, ["Limits", "Ownership", "Daemons", "Recent Activity"]);
+  assert.ok(area.querySelectorAll("table.grid").length >= 3, "tables rendered from the live API");
+});
+
+check("the admin sidebar groups its sections under the dashboard root", () => {
+  const tree = document.querySelector("#tree");
+  const root = tree.querySelector(".tree-root");
+  assert.equal(root.dataset.adminSection, "dashboard", "the root row is the dashboard");
+  assert.ok(root.classList.contains("sel"), "and selected");
+  const groups = [...tree.querySelectorAll(".admin-group")].map((g) => g.textContent.trim());
+  assert.deepEqual(groups, ["Access", "Infrastructure", "Limits", "Audit"]);
+  // Every section, once, each after its group label.
+  const order = [...tree.children].map((el) => el.classList.contains("admin-group") ? `#${el.textContent.trim()}` : el.dataset.adminSection);
+  assert.deepEqual(order, ["dashboard", "#Access", "users", "groups", "roles", "permissions", "keys",
+    "#Infrastructure", "daemons", "resources", "ips", "#Limits", "quotas", "#Audit", "activity"]);
+  assert.ok(!tree.querySelector("#dc-row"), "the resource tree is replaced, not appended to");
+});
+
+click(document.querySelector('#admin-area .card[data-go="users"]'));
+await wait(900);
+check("a dashboard card opens its section", () => {
+  assert.equal(window.location.pathname, "/admin/users");
   assert.ok(document.querySelector("#admin-area table.grid"), "user table rendered from the live API");
 });
 
-check("the admin page has its own sidebar of sections", () => {
-  const rows = [...document.querySelectorAll("#tree [data-admin-section]")].map((r) => r.dataset.adminSection);
-  assert.deepEqual(rows, ["users", "groups", "roles", "permissions", "daemons", "resources", "quotas", "ips", "keys", "activity"]);
-  assert.ok(!document.querySelector("#tree #dc-row"), "the resource tree is replaced, not appended to");
-  assert.equal(document.querySelector("#tree .tree-row.sel")?.dataset.adminSection, "users", "Users selected");
+// jsdom evaluates no media queries, so this is the desktop's view of the
+// shipped stylesheet: the phone-only buttons must not be displayed.
+check("phone-only chrome is not shown on a desktop", () => {
+  for (const id of ["nav-btn", "palette-btn"]) {
+    const el = document.querySelector(`#${id}`);
+    assert.ok(el, `#${id} exists (for phones)`);
+    assert.equal(window.getComputedStyle(el).display, "none", `#${id} hidden`);
+  }
 });
 
 check("the admin button stays put and becomes a return button", () => {
-  const quick = [...document.querySelectorAll(".topbar-quick button")].map((b) => b.id);
-  assert.deepEqual(quick.filter((id) => id !== "palette-btn"), ["theme-btn", "admin-btn", "logout-btn"], "same slot");
+  const quick = [...document.querySelectorAll(".topbar-quick button:not(.mobile-only)")].map((b) => b.id);
+  assert.deepEqual(quick, ["theme-btn", "admin-btn", "logout-btn"], "same slot");
   const b = document.querySelector("#admin-btn");
   assert.equal(b.title, "Return", "tooltip says Return");
   assert.notEqual(b.innerHTML, beforeAdmin.html, "icon changed");
@@ -299,7 +336,7 @@ check("the admin button stays put and becomes a return button", () => {
 });
 
 // Every section renders from the live API without an error panel.
-for (const sec of ["groups", "roles", "permissions", "daemons", "resources", "quotas", "ips", "keys", "activity"]) {
+for (const sec of ["users", "groups", "roles", "permissions", "daemons", "resources", "quotas", "ips", "keys", "activity"]) {
   click(document.querySelector(`#tree [data-admin-section="${sec}"]`));
   await wait(sec === "resources" || sec === "ips" || sec === "permissions" ? 2500 : 900);
   check(`admin section ${sec} renders and has its own URL`, () => {
@@ -444,9 +481,21 @@ check("choosing a section closes the drawer", () => {
 click(document.querySelector("#admin-btn"));
 await wait(600);
 
-check("users no longer duplicated as a Datacenter tab", () => {
-  assert.ok(!document.querySelector('[data-dctab="users"]'), "Datacenter has no Users tab");
+check("the Datacenter has only Dashboard and Guests tabs", () => {
+  click(document.querySelector("#dc-row"));
+  const tabs = [...document.querySelectorAll("[data-dctab]")].map((t) => t.dataset.dctab);
+  assert.deepEqual(tabs, ["dashboard", "guests"], "no Servers (it is the admin Daemons page) and no Users");
 });
+
+window.history.pushState(null, "", "/servers");
+window.dispatchEvent(new window.PopStateEvent("popstate"));
+await wait(900);
+check("an old /servers link opens the admin Daemons page", () => {
+  assert.equal(window.location.pathname, "/admin/daemons");
+  assert.equal(document.querySelector("#tree .tree-row.sel")?.dataset.adminSection, "daemons");
+});
+click(document.querySelector("#admin-btn"));
+await wait(600);
 
 // --------------------------------------------- non-admin sees no admin panel
 
@@ -483,6 +532,14 @@ if (LOW_USER && LOW_PASS) {
     window.dispatchEvent(new window.PopStateEvent("popstate"));
     assert.ok(!document.querySelector("#tree [data-admin-section]"), "no admin sidebar");
     assert.ok(document.querySelector("#tree #dc-row"), "resource tree shown instead");
+  });
+
+  window.history.pushState(null, "", "/servers");
+  window.dispatchEvent(new window.PopStateEvent("popstate"));
+  await wait(600);
+  check("an old /servers link sends a non-admin to the datacenter", () => {
+    assert.equal(window.location.pathname, "/", "normalised to the dashboard");
+    assert.ok(!document.querySelector("#tree [data-admin-section]"), "no admin sidebar");
   });
 
   check("the command palette hides the admin command from a non-admin", () => {

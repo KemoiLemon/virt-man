@@ -100,8 +100,12 @@ body {
 .hidden { display: none !important; }
 /* Chrome that only exists on a phone (the drawer button, the palette button,
    the console's on-screen keys). mobile.css reveals it; here it is inert, so
-   there is no second place to remember when adding one. */
-.mobile-only { display: none; }
+   there is no second place to remember when adding one.
+   !important because it must beat whatever the element otherwise is: `.btn`
+   is display:inline-flex at the same specificity and later in the bundle, so a
+   plain rule lost and the phone's drawer and palette buttons showed on every
+   desktop. mobile.css reveals it the same way. */
+.mobile-only { display: none !important; }
 /* The `hidden` attribute must beat layout display (the listbox popover is
    display:flex), or a parked popover still lays out and shows as a stray box.
    Same rule as vm-man's console.css. */

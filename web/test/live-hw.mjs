@@ -64,50 +64,39 @@ check("sidebar auto-expands guests without selecting the server", () => {
   results.push(["info", `auto-expanded guests: ${guests.length}`]);
 });
 
-// The dashboard is the landing tab; the server-management checks below target
-// the Servers tab (Add Server action + per-row edit/delete buttons).
-[...document.querySelectorAll(".tabbar .tab")]
-  .find((t) => t.textContent.trim() === "Servers")
-  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(800);
+// Server management lives on the admin page's Daemons section now (the
+// Datacenter's Servers tab is gone): Add daemon plus per-row actions.
+document.querySelector("#admin-btn")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(600);
+document.querySelector('#tree [data-admin-section="daemons"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(900);
 
-check("Datacenter actions live on the tab bar", () => {
-  const bar = document.querySelector(".tabbar");
-  assert.ok(bar, "tab bar present");
-  const actions = bar.querySelector(".tabbar-actions");
-  assert.ok(actions, "tab bar carries an actions group");
-  const add = actions.querySelector("#dc-add");
-  assert.ok(add, "Add Server sits on the tab bar");
-  assert.match(add.textContent, /Add Server/);
-  // It must not also exist as a separate bar below the tabs.
-  const strayBars = [...document.querySelectorAll(".actions")]
-    .filter((a) => a.querySelector("#dc-add"));
-  assert.equal(strayBars.length, 0, "no duplicate action bar below the tabs");
+check("server management lives on the admin Daemons page", () => {
+  assert.ok(!document.querySelector('[data-dctab="servers"]'), "no Datacenter Servers tab");
+  const add = document.querySelector("#admin-area #add-daemon");
+  assert.ok(add, "Add daemon action");
+  assert.match(add.textContent, /Add daemon/);
 });
 
 check("server rows expose an edit button, not a test button", () => {
-  const edit = document.querySelector("[data-edit]");
+  const edit = document.querySelector("[data-edit-conn]");
   assert.ok(edit, "edit button present");
   assert.ok(edit.querySelector("svg"), "edit button is an icon button");
   assert.equal(document.querySelectorAll("[data-test]").length, 0, "no test button remains");
-  assert.ok(document.querySelector("[data-del]"), "delete button still present");
+  assert.ok(document.querySelector("[data-del-conn]"), "delete button still present");
 });
 
-check("server rows expose edit and delete icon buttons", () => {
-  const card = document.querySelector("tr[data-open-conn-row]");
-  assert.ok(card, "servers are a list, one row each");
-  const actions = card.querySelector(".row-actions");
+check("server rows expose edit, permissions and delete icon buttons", () => {
+  const row = document.querySelector("#admin-area tr:has([data-edit-conn])");
+  assert.ok(row, "servers are a list, one row each");
+  const actions = row.querySelector(".row-actions");
   assert.ok(actions, "buttons share a flex row");
-  assert.equal(
-    actions.querySelectorAll(".btn").length, 2,
-    "exactly the edit + delete buttons",
-  );
-  assert.ok(actions.querySelector("[data-edit]"), "edit present");
-  assert.ok(actions.querySelector("[data-del]"), "delete present");
+  assert.ok([...actions.querySelectorAll(".btn")].every((b) => b.classList.contains("icon")), "all icon buttons");
+  assert.ok(actions.querySelector("[data-edit-conn]") && actions.querySelector("[data-del-conn]"), "edit + delete");
 });
 
 // Edit dialog must prefill from the existing connection.
-document.querySelector("[data-edit]")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+document.querySelector("[data-edit-conn]")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(400);
 check("edit opens a prefilled dialog", () => {
   const modal = document.querySelector(".modal-back.open");
@@ -117,6 +106,10 @@ check("edit opens a prefilled dialog", () => {
   assert.ok(modal.querySelector("#conn-url").value.startsWith("http"), "url prefilled");
   modal.remove();
 });
+
+// Leave the admin page (the return button) for the resource tree.
+document.querySelector("#admin-btn")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(600);
 
 // Connection view: create buttons on the tab bar.
 document.querySelector(".tree-row.tree-group")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

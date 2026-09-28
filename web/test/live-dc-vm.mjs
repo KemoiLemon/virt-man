@@ -101,11 +101,10 @@ await wait(1200);
 
 // ---- Guests get their own tab ---------------------------------------------
 
-check("Datacenter has Dashboard, Servers and Guests tabs", () => {
+check("Datacenter has Dashboard and Guests tabs, and no Servers tab", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs[0], "Dashboard", `Dashboard is the first tab (${tabs})`);
-  assert.ok(tabs.includes("Servers"), `Servers tab (${tabs})`);
-  assert.ok(tabs.includes("Guests"), `Guests tab (${tabs})`);
+  // Servers moved to the admin page's Daemons section.
+  assert.deepEqual(tabs, ["Dashboard", "Guests"], `tabs (${tabs})`);
   // The landing dashboard has no guest cards either; guests are their own tab.
   assert.equal(document.querySelectorAll("[data-dc-vm]").length, 0,
     "guests are not listed on the Dashboard tab");
@@ -193,15 +192,11 @@ check("console action jumps straight to the console tab", () => {
   assert.equal(active, "Console", `console tab active (got ${active})`);
 });
 
-// Server rows should still be clickable too (Servers tab).
+// Server rows on the dashboard open the server.
 document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(1200);
-[...document.querySelectorAll(".tabbar .tab")]
-  .find((t) => t.textContent.trim() === "Servers")
-  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(800);
+await wait(2500);
 check("server rows are selectable", () => {
-  const card = document.querySelector("tr[data-open-conn-row]");
+  const card = document.querySelector("[data-dc-dash-conn]");
   assert.ok(card, "server row is clickable");
   card.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 });

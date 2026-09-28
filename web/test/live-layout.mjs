@@ -92,12 +92,9 @@ check("the topbar action group hugs the window controls", () => {
   }
 });
 
-// The dashboard is the landing tab; these layout checks target the Servers
-// tab (Add Server action + the server table's action column).
-[...document.querySelectorAll(".tabbar .tab")]
-  .find((t) => t.textContent.trim() === "Servers")
-  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(800);
+// Tab-bar actions: a server's tab bar carries its Create action.
+document.querySelector(".tree-row.tree-group")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1500);
 
 check("tab-bar actions align with the content edge", () => {
   const actions = document.querySelector(".tabbar-actions");
@@ -113,18 +110,21 @@ check("tabs have clearance above the content", () => {
     `tab bar reserves space below it (${px(bar, "marginBottom")}px)`);
 });
 
-check("datacenter servers render as a list with icon action buttons", () => {
-  const rows = [...document.querySelectorAll("#content table.grid tr[data-open-conn-row]")];
+// Servers are listed on the admin Daemons page (the Datacenter tab is gone).
+document.querySelector("#admin-btn")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(600);
+document.querySelector('#tree [data-admin-section="daemons"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(900);
+check("servers render as a list with icon action buttons", () => {
+  const rows = [...document.querySelectorAll("#admin-area table.grid tr")].filter((r) => r.querySelector("[data-edit-conn]"));
   assert.ok(rows.length > 0, `${rows.length} server row(s)`);
-  assert.equal(document.querySelectorAll("#content .storage-card[data-open-conn-row]").length, 0, "no server cards");
-  const first = rows[0];
-  const actions = first.querySelector(".row-actions");
+  const actions = rows[0].querySelector(".row-actions");
   assert.ok(actions, "row actions share a row");
-  const buttons = [...actions.querySelectorAll(".btn")];
-  assert.ok(buttons.every((b) => b.classList.contains("icon")), "all server actions are icon buttons");
-  assert.ok(first.querySelector("[data-edit]"), "edit action present");
-  assert.ok(first.querySelector("[data-del]"), "delete action present");
+  assert.ok([...actions.querySelectorAll(".btn")].every((b) => b.classList.contains("icon")), "all server actions are icon buttons");
+  assert.ok(rows[0].querySelector("[data-del-conn]"), "delete action present");
 });
+document.querySelector("#admin-btn")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(600);
 
 // VM list: actions must mirror the datacenter table and gain edit + console.
 document.querySelector(".tree-row.tree-group")

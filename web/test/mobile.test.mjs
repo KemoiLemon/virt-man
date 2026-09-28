@@ -75,11 +75,29 @@ test("the drawer has a scrim to close it", () => {
 test("phone-only chrome is hidden by default and revealed in the query", () => {
   // The gate is one class: if a new phone-only control is added without it, the
   // control shows up on the desktop instead of failing loudly.
-  const hidden = css.indexOf(".mobile-only{display:none}");
-  const revealed = css.indexOf(".mobile-only{display:inline-flex}");
+  // The minifier merges equal rules (".hidden,.mobile-only,[hidden]{...}"), so
+  // find the selector inside any list rather than as the whole selector.
+  const at = (decl) => css.search(new RegExp(`[,}]\\.mobile-only[^{]*\\{${decl}\\}|\\.mobile-only(,[^{]*)?\\{${decl}\\}`));
+  const hidden = at("display:none!important");
+  const revealed = at("display:inline-flex!important");
   assert.ok(hidden >= 0, "hidden by default");
   assert.ok(revealed >= 0, "revealed inside the width query");
   assert.ok(hidden < revealed, "the reveal comes after the hide");
+});
+
+// The rule above was once present and still lost: `.btn` is inline-flex at the
+// same specificity, later in the bundle, so the drawer and palette buttons
+// showed on every desktop. Check the computed result on a real .btn, outside
+// the phone query (jsdom evaluates no media queries, which is what we want).
+test("phone-only buttons are hidden on a desktop", async () => {
+  const { JSDOM } = await import("jsdom");
+  const d = new JSDOM(`<style>${css}</style>
+    <button class="btn icon mobile-only" id="b"></button>
+    <div class="console-keys mobile-only" id="k"></div>`);
+  for (const id of ["b", "k"]) {
+    const shown = d.window.getComputedStyle(d.window.document.getElementById(id)).display;
+    assert.equal(shown, "none", `#${id} is hidden outside the phone query`);
+  }
 });
 
 test("the shell is sized to the dynamic viewport, not 100vh", () => {

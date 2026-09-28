@@ -106,7 +106,7 @@ let vmTab: "summary" | "hardware" | "options" | "network" | "console" | "xml" = 
 let summaryDiskSel: Record<string, string> = {};
 /// Which NIC the summary's Network card is graphing, per VM.
 let summaryNetSel: Record<string, string> = {};
-let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
+let dcTab: "dashboard" | "guests" = "dashboard";
 /// The admin page's open section, or null when it is not the view. A view of
 /// its own with its own sidebar, rather than a modal, so it has a URL and
 /// works as a page on a phone.
@@ -226,7 +226,11 @@ function applyRoute(r: Route) {
   // A non-admin who follows an /admin link lands on the datacenter.
   adminSection = r.view === "admin" && canAdmin() ? r.section : null;
   selectedConn = r.view === "dc" || r.view === "admin" ? null : r.conn;
-  if (r.view === "admin") return;
+  if (r.view === "admin") {
+    // Refused (not an admin): the datacenter, rather than a dead page.
+    if (!adminSection) dcTab = "dashboard";
+    return;
+  }
   if (r.view === "dc") dcTab = r.tab;
   else if (r.view === "conn") connTab = r.tab;
   else if (r.view === "vm") { selectedVm = r.vm; vmTab = r.tab; }
@@ -406,7 +410,6 @@ function openCommandPalette() {
   // Navigation. Every page with a URL is reachable, and the hint says where
   // it lives, so typing a server, guest, network or pool name finds it.
   add("nav-dc", "Datacenter", "Dashboard", ic.datacenter(), toDc("dashboard"));
-  add("nav-dc-servers", "Datacenter — Servers", "/servers", ic.server(), toDc("servers"));
   add("nav-dc-guests", "Datacenter — Guests", "/guests", ic.vms(), toDc("guests"));
   const connTabs: [typeof connTab, string, string][] = [
     ["dashboard", "Dashboard", ic.datacenter()],
@@ -451,8 +454,9 @@ function openCommandPalette() {
   );
   if (canAdmin()) {
     add("admin-panel", "Administration", "Users, groups, permissions, resources, limits", ic.admin(), () => openAdmin());
-    for (const [sec, label] of [["groups", "Groups"], ["permissions", "Permissions"], ["resources", "Resources"],
-      ["quotas", "Quotas"], ["ips", "IP Addresses"], ["daemons", "Daemons"], ["activity", "Activity"]] as const) {
+    for (const [sec, label] of [["users", "Users"], ["groups", "Groups"], ["permissions", "Permissions"],
+      ["resources", "Resources"], ["quotas", "Quotas"], ["ips", "IP Addresses"], ["daemons", "Daemons"],
+      ["activity", "Activity"]] as const) {
       add(`admin-${sec}`, `Administration — ${label}`, `/admin/${sec}`, ic.admin(), () => openAdmin(sec));
     }
   }
@@ -1244,7 +1248,9 @@ async function refreshTreeVms() {
     renderTree();
     // The Datacenter view lists the same guests, so keep it in step; without
     // this its Guests table stays empty until another action redraws it.
-    if (!selectedConn && !selectedVm) renderDc();
+    // Not on the admin page: it has no server selected either, and
+    // repainting the datacenter over it threw the user off it.
+    if (!selectedConn && !selectedVm && !adminSection) renderDc();
     // Network/pool pages poll their own data; the tree refresh above is what
     // keeps the sidebar counts and states live.
   }
@@ -1269,11 +1275,7 @@ function renderDc() {
   // Actions live on the tab bar itself, right-aligned after the tabs.
   const tabs = `<div class="tabbar">
       <button class="tab ${dcTab === "dashboard" ? "active" : ""}" data-dctab="dashboard">${ic.datacenter(14)} Dashboard</button>
-      <button class="tab ${dcTab === "servers" ? "active" : ""}" data-dctab="servers">${ic.server(14)} Servers</button>
       <button class="tab ${dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
-      ${dcTab === "servers"
-        ? `<div class="tabbar-actions"><button class="btn primary" id="dc-add">${ic.plus(14)} Add Server</button></div>`
-        : ""}
     </div>`;
   // Aggregate cards across every known server, from the tree's guest cache.
   const allVms = Object.values(treeVms).flat();
@@ -1324,23 +1326,6 @@ function renderDc() {
   let body: string;
   if (dcTab === "dashboard") {
     body = `<div id="dc-dash">${skeleton("dashboard")}</div>`;
-  } else if (dcTab === "servers") {
-    body = `${cards}<div class="section-title">Servers</div>
-       ${connections.length ? `<table class="grid">
-         <tr><th>Name</th><th>URL</th><th>Cert</th><th class="col-actions"></th></tr>
-         ${connections.map((c) => `
-           <tr class="row-open" tabindex="0" data-open-conn-row="${c.id}">
-             <td class="tname">${esc(c.name)}</td>
-             <td>${esc(c.url)}</td>
-             <td>${c.fingerprint ? `${esc(c.fingerprint.slice(0, 17))}…` : "—"}</td>
-             <td class="col-actions">
-               <div class="row-actions">
-                 <button class="btn icon" data-edit="${c.id}" title="Edit server">${ic.edit()}</button>
-                 <button class="btn danger icon" data-del="${c.id}" title="Remove server">${ic.trash()}</button>
-               </div>
-             </td>
-           </tr>`).join("")}
-       </table>` : emptyState("servers", "Add Server", "dc-server-create")}`;
   } else if (dcTab === "guests") {
     body = `${cards}<div class="section-title">Guests</div>
        ${guestCards ? `<div class="card-grid">${guestCards}</div>` : emptyState("guests", "Create Guest", "dc-guest-create")}`;
@@ -1353,8 +1338,6 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
 
   if (dcTab === "dashboard") void loadDcDashboard();
 
-  $("#dc-add")?.addEventListener("click", () => openConnectionDialog());
-  $("#dc-server-create")?.addEventListener("click", () => openConnectionDialog());
   $("#dc-guest-create")?.addEventListener("click", () => openCreateVm());
   content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
@@ -1362,31 +1345,6 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
       renderDc();
     };
   });
-  content.querySelectorAll("[data-edit]").forEach((b: Element) => {
-    (b as HTMLElement).onclick = (e) => {
-      e.stopPropagation();
-      openConnectionDialog((b as HTMLElement).dataset.edit!);
-    };
-  });
-  content.querySelectorAll("[data-del]").forEach((b: Element) => {
-    (b as HTMLElement).onclick = (e) => {
-      e.stopPropagation();
-      void deleteConnection((b as HTMLElement).dataset.del!);
-    };
-  });
-
-  // Selecting a server card opens that server's view (buttons stop propagation).
-  content.querySelectorAll("[data-open-conn-row]").forEach((r: Element) => {
-    (r as HTMLElement).onclick = (e) => {
-      if ((e.target as Element).closest?.("[data-edit], [data-del]")) return;
-      selectedConn = (r as HTMLElement).dataset.openConnRow!;
-      selectedVm = null;
-      connTab = "dashboard";
-      renderTree();
-      void renderConn();
-    };
-  });
-
   /// Open a guest from the Datacenter cards, switching server if needed.
   const openVm = (connId: string, vm: string, tab: typeof vmTab) => {
     leaveCurrentView();
@@ -1646,7 +1604,7 @@ async function loadDcDashboard() {
 // ----------------------------------------------------------- admin page
 
 /// Open the admin page at `section` (or where it was last).
-function openAdmin(section: AdminSection = adminSection ?? "users") {
+function openAdmin(section: AdminSection = adminSection ?? "dashboard") {
   if (!canAdmin()) return;
   if (!adminSection) lastNonAdminRoute = currentRoute();
   leaveCurrentView();
@@ -1686,6 +1644,7 @@ const adminCtx: AdminCtx = {
   relTime,
   me: () => user,
   connections: () => connections,
+  reloadConnections: () => loadConnections(),
   openConnectionDialog: (id) => openConnectionDialog(id),
   deleteConnection: (id) => deleteConnection(id),
   openResource: (kind, conn, name) => {
@@ -4161,7 +4120,8 @@ async function deleteConnection(id: string) {
     connections = await api.get<Connection[]>("/connections");
     if (selectedConn === id) selectedConn = null;
     renderTree();
-    renderDc();
+    // Whatever is on screen: removing a daemon from the admin page stays there.
+    renderView();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
@@ -4302,7 +4262,7 @@ function openConnectionDialog(editId?: string) {
 async function reloadConnections() {
   connections = await api.get<Connection[]>("/connections");
   renderTree();
-  renderDc();
+  if (!selectedConn) renderView();
   void refreshTreeVms();
 }
 
