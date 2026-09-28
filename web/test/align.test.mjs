@@ -134,3 +134,54 @@ test("the filter bar is a grid, so its columns hold from one row to the next", (
     "the search box earns two columns",
   );
 });
+
+/**
+ * The footer caption reuses `.dsub`, whose bottom margin belongs to stacked
+ * block sections. In a centre-aligned flex row the item's *margin box* is what
+ * gets centred, so a one-sided margin lifts the text by half of it — which is
+ * how it came to sit above the pager's middle.
+ */
+function footer() {
+  const dom = new JSDOM(
+    `<!doctype html><html data-theme="dark"><head><style>${raw}</style></head><body>` +
+      `<div class="modal wide al-modal"><div class="modal-body">` +
+      `<div class="al-foot">` +
+      `<span class="dsub" id="al-count">42 entries · kept 14 days</span>` +
+      `<span class="al-pager">` +
+      `<button class="btn icon" id="al-prev"></button><span id="al-pos">1 / 3</span>` +
+      `<button class="btn icon" id="al-next"></button></div>` +
+      `</div>` +
+      // A .dsub outside the footer: the override must not reach it.
+      `<div class="section"><div class="dsub" id="elsewhere">Storage pool</div></div>` +
+      `</div></div></body></html>`,
+    { url: "http://localhost/", pretendToBeVisual: true },
+  );
+  const { window } = dom;
+  return (sel) => window.getComputedStyle(window.document.querySelector(sel));
+}
+
+test("the footer caption centres against the pager, not above it", () => {
+  const cs = footer();
+  assert.equal(cs(".al-foot").alignItems, "center", "the row centres its items");
+  assert.equal(
+    cs("#al-count").marginBottom,
+    "0px",
+    "a bottom-only margin would lift the caption by half of it",
+  );
+  assert.equal(cs(".al-foot").paddingTop, "12px", "and the row keeps its gap from the table");
+});
+
+test("the footer caption is a step up from .dsub's own size", () => {
+  const cs = footer();
+  const caption = parseFloat(cs("#al-count").fontSize);
+  const plain = parseFloat(cs("#elsewhere").fontSize);
+  assert.ok(caption > plain, `caption ${caption}px should exceed a plain .dsub at ${plain}px`);
+});
+
+test("that override is scoped to the footer", () => {
+  // .dsub is shared by a dozen block sections where the margin is wanted, so
+  // the fix must not have been made on .dsub itself.
+  const cs = footer();
+  assert.equal(cs("#elsewhere").marginBottom, "14px", ".dsub keeps its margin elsewhere");
+  assert.equal(cs("#elsewhere").fontSize, "11px", "…and its size");
+});

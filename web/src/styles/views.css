@@ -230,5 +230,11 @@ th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding-top: 12px;
 }
+/* The count line reuses .dsub, whose bottom margin is meant for stacked block
+   sections. In a centre-aligned flex row the item's margin box is what gets
+   centred, so a one-sided margin lifted the text by half of it — it sat above
+   the pager's middle. It is a footer caption rather than body copy, so it is
+   also a step up from .dsub's 11px. */
+.al-foot .dsub { margin-bottom: 0; font-size: 12px; }
 .al-pager { display: flex; align-items: center; gap: 6px; }
 .al-live.on { border-color: var(--bad); color: var(--bad); }
