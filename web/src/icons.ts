@@ -5,6 +5,7 @@
 import ArrowDown from "@phosphor-icons/core/assets/fill/arrow-down-fill.svg?raw";
 import ArrowLeft from "@phosphor-icons/core/assets/fill/arrow-left-fill.svg?raw";
 import ArrowLeftRight from "@phosphor-icons/core/assets/fill/arrows-left-right-fill.svg?raw";
+import ArrowRight from "@phosphor-icons/core/assets/fill/arrow-right-fill.svg?raw";
 import ArrowUp from "@phosphor-icons/core/assets/fill/arrow-up-fill.svg?raw";
 import Camera from "@phosphor-icons/core/assets/fill/camera-fill.svg?raw";
 import ChevronDown from "@phosphor-icons/core/assets/fill/caret-down-fill.svg?raw";
@@ -130,6 +131,9 @@ export const ic = {
   up: svg(ArrowUp),
   bidir: svg(ArrowLeftRight),
   back: svg(ArrowLeft),
+  /// Pairs with `back` for a pager: back steps towards newer, forward towards
+  /// older.
+  forward: svg(ArrowRight),
   // Console toolbar
   zoomIn: svg(ZoomIn),
   zoomOut: svg(ZoomOut),

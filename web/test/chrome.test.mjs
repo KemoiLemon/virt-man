@@ -49,6 +49,23 @@ test("icons honour a requested size without restyling the svg", () => {
   assert.match(icons.ic.close(), /width:16px;height:16px/, "defaults to 16px");
 });
 
+// The access-log pager's two buttons step through pages in opposite
+// directions, so they must be different glyphs pointing opposite ways. The
+// older-page button used to draw a caret-down, which reads as a dropdown
+// rather than "next page", and nothing caught it because both buttons are
+// icon-only and therefore textless.
+test("the pager arrows point opposite ways", () => {
+  const glyph = (raw) => /d="([^"]+)"/.exec(raw)[1];
+  const shipped = (name) =>
+    glyph(readFileSync(
+      `node_modules/@phosphor-icons/core/assets/fill/${name}-fill.svg`, "utf8"));
+  const back = /d="([^"]+)"/.exec(icons.ic.back())[1];
+  const forward = /d="([^"]+)"/.exec(icons.ic.forward())[1];
+  assert.equal(back, shipped("arrow-left"), "newer-page is a left arrow");
+  assert.equal(forward, shipped("arrow-right"), "older-page is a right arrow");
+  assert.notEqual(forward, back, "the two buttons must not share one glyph");
+});
+
 // The listbox popover is display:flex, which overrides the UA's [hidden]
 // display:none (author styles beat UA styles). Without this rule a parked
 // popover stays laid out and shows as a stray box — most visibly on screens

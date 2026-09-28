@@ -2647,7 +2647,7 @@ function openAccessLogs(conn: string, vm = "") {
         <span class="al-pager">
           <button class="btn icon" id="al-prev" ${f.page ? "" : "disabled"} title="Newer page">${ic.back()}</button>
           <span>${f.page + 1} / ${pages}</span>
-          <button class="btn icon" id="al-next" ${f.page + 1 < pages ? "" : "disabled"} title="Older page">${ic.chevron()}</button>
+          <button class="btn icon" id="al-next" ${f.page + 1 < pages ? "" : "disabled"} title="Older page">${ic.forward()}</button>
           <button class="btn icon" id="al-reload" title="Refresh">${ic.reboot()}</button>
         </span>
       </div>`);

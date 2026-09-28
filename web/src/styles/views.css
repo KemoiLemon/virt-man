@@ -224,6 +224,11 @@ table.grid + .actions { margin-top: 12px; }
 .al-dir.al-out { color: var(--accent); }
 th.al-sort { cursor: pointer; user-select: none; }
 th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
-.al-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* The count line and pager sit below the table, which has a border of its own,
+   so they need a gap to read as a separate row rather than part of it. */
+.al-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding-top: 12px;
+}
 .al-pager { display: flex; align-items: center; gap: 6px; }
 .al-live.on { border-color: var(--bad); color: var(--bad); }
