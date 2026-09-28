@@ -16,6 +16,8 @@
 
 use std::collections::HashSet;
 use virt::connect::Connect;
+use virt::storage_pool::StoragePool;
+use virt::storage_vol::StorageVol;
 
 /// A disk's backing store, from the domain XML.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,32 @@ impl DiskSource {
             DiskSource::Volume { pool, volume } => format!("{pool}/{volume}"),
         }
     }
+}
+
+/// The absolute path behind a pool+volume reference, when libvirt can resolve
+/// it.
+fn volume_path(c: &Connect, pool: &str, volume: &str) -> Option<String> {
+    let p = StoragePool::lookup_by_name(c, pool).ok()?;
+    let v = StorageVol::lookup_by_name(&p, volume).ok()?;
+    v.get_path().ok().filter(|s| !s.is_empty())
+}
+
+/// Every label a reference answers to: its own, plus the file label of the
+/// same backing store when it is a volume.
+///
+/// Both forms mean one file, and guests defined before paths were used still
+/// name their disks as pool+volume. Without this, deleting a volume would
+/// happily remove a running guest's disk because that guest spells it another
+/// way — the exact corruption the in-use check exists to prevent. Volume
+/// lookups cost a libvirt round trip, so this is only for the delete paths.
+fn labels(c: &Connect, source: &DiskSource) -> Vec<String> {
+    let mut out = vec![source.label()];
+    if let DiskSource::Volume { pool, volume } = source
+        && let Some(path) = volume_path(c, pool, volume)
+    {
+        out.push(DiskSource::Path(path).label());
+    }
+    out
 }
 
 /// Why a disk was deliberately left on the host.
@@ -189,22 +217,36 @@ pub struct Cleanup {
 
 /// Decide what may be removed for one domain's definition.
 ///
-/// `used_elsewhere` holds `DiskSource::label()`s still referenced by other
-/// domains, as produced by [`sources_used_elsewhere`].
-pub fn plan_cleanup(xml: &str, used_elsewhere: &HashSet<String>) -> Cleanup {
+/// `used_elsewhere` holds the labels still referenced by other domains, as
+/// produced by [`sources_used_elsewhere`]. `expand` maps a source to every
+/// label it answers to, which is what makes the two ways of naming one file
+/// comparable — a guest holding a disk by path and one holding it as
+/// pool+volume must count as the same backing store, or a delete would take a
+/// file that is still in use. Tests pass [`as_written`].
+pub fn plan_cleanup(
+    xml: &str,
+    used_elsewhere: &HashSet<String>,
+    expand: impl Fn(&DiskSource) -> Vec<String>,
+) -> Cleanup {
     let mut plan = Cleanup::default();
     for r in disk_refs(xml) {
         if let Some(reason) = is_guest_storage(&r) {
             plan.kept.push((r.source.describe(), reason));
             continue;
         }
-        if used_elsewhere.contains(&r.source.label()) {
+        if expand(&r.source).iter().any(|l| used_elsewhere.contains(l)) {
             plan.kept.push((r.source.describe(), KeepReason::InUse));
             continue;
         }
         plan.removable.push(r.source);
     }
     plan
+}
+
+/// [`plan_cleanup`] against a live connection, so a volume reference and the
+/// file it points at are recognised as one backing store.
+pub fn plan_cleanup_connected(c: &Connect, xml: &str, used_elsewhere: &HashSet<String>) -> Cleanup {
+    plan_cleanup(xml, used_elsewhere, |s| labels(c, s))
 }
 
 /// Every backing store referenced by a domain other than `excluding`.
@@ -227,7 +269,7 @@ pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<S
         }
         if let Ok(xml) = d.get_xml_desc(0) {
             for r in disk_refs(&xml) {
-                used.insert(r.source.label());
+                used.extend(labels(c, &r.source));
             }
         }
     }
@@ -237,6 +279,7 @@ pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<S
 /// Names of domains that reference `target`, for refusing a direct volume
 /// delete with a clear reason.
 pub fn referencing_domains(c: &Connect, target: &DiskSource) -> Vec<String> {
+    let wanted = labels(c, target);
     let mut out = Vec::new();
     let Ok(domains) = c.list_all_domains(0) else {
         return out;
@@ -245,7 +288,10 @@ pub fn referencing_domains(c: &Connect, target: &DiskSource) -> Vec<String> {
         let Ok(xml) = d.get_xml_desc(0) else {
             continue;
         };
-        if disk_refs(&xml).iter().any(|r| &r.source == target) {
+        let held = disk_refs(&xml)
+            .iter()
+            .any(|r| labels(c, &r.source).iter().any(|l| wanted.contains(l)));
+        if held {
             out.push(d.get_name().unwrap_or_default());
         }
     }
@@ -274,7 +320,7 @@ mod tests {
 
     #[test]
     fn an_attached_iso_is_never_deleted_with_its_guest() {
-        let plan = plan_cleanup(GUEST, &empty());
+        let plan = plan_cleanup(GUEST, &empty(), |s| vec![s.label()]);
         assert_eq!(
             plan.removable,
             vec![DiskSource::Volume {
@@ -303,7 +349,7 @@ mod tests {
               <target dev='vda' bus='virtio'/>
             </disk>
         </devices></domain>"#;
-        let plan = plan_cleanup(xml, &empty());
+        let plan = plan_cleanup(xml, &empty(), |s| vec![s.label()]);
         assert!(
             plan.removable.is_empty(),
             "not removed: {:?}",
@@ -320,7 +366,7 @@ mod tests {
               <readonly/>
             </disk>
         </devices></domain>"#;
-        let plan = plan_cleanup(xml, &empty());
+        let plan = plan_cleanup(xml, &empty(), |s| vec![s.label()]);
         assert!(plan.removable.is_empty());
         assert_eq!(plan.kept[0].1, KeepReason::ReadOnly);
     }
@@ -339,7 +385,7 @@ mod tests {
         </devices></domain>"#;
         let mut busy = HashSet::new();
         busy.insert("volume:default/shared.qcow2".to_string());
-        let plan = plan_cleanup(xml, &busy);
+        let plan = plan_cleanup(xml, &busy, |s| vec![s.label()]);
         assert_eq!(
             plan.removable,
             vec![DiskSource::Volume {
@@ -364,6 +410,44 @@ mod tests {
         }
         .label();
         assert_ne!(file, vol);
+    }
+
+    #[test]
+    fn one_file_is_recognised_however_each_guest_spells_it() {
+        // Disks we write now name the file by path; a guest defined earlier
+        // still names it as pool+volume. Both mean one file, so a delete must
+        // see the reference whichever way round the two guests spell it.
+        //
+        // The equivalence itself lives in `labels`, which needs a live
+        // connection to resolve a volume, so what is pinned here is the wiring
+        // it feeds: a resolver that unifies the two spellings keeps the disk,
+        // and the as-written view alone does not — which is the case that
+        // would have deleted a running guest's disk.
+        let xml = r#"<domain><devices>
+            <disk type='volume' device='disk'>
+              <source pool='default' volume='shared.qcow2'/>
+            </disk>
+        </devices></domain>"#;
+        let file = DiskSource::Path("/p/shared.qcow2".into()).label();
+        let mut busy = HashSet::new();
+        busy.insert(file.clone());
+
+        let unaware = plan_cleanup(xml, &busy, |s| vec![s.label()]);
+        assert_eq!(
+            unaware.removable.len(),
+            1,
+            "as-written labels alone cannot see the other guest's path"
+        );
+
+        let resolved = plan_cleanup(xml, &busy, |s| match s {
+            DiskSource::Volume { .. } => vec![s.label(), file.clone()],
+            DiskSource::Path(_) => vec![s.label()],
+        });
+        assert!(resolved.removable.is_empty(), "the disk is still in use");
+        assert_eq!(
+            resolved.kept,
+            vec![("default/shared.qcow2".to_string(), KeepReason::InUse)]
+        );
     }
 
     #[test]
@@ -402,6 +486,9 @@ mod tests {
             </disk>
         </devices></domain>"#;
         assert!(disk_refs(xml).is_empty());
-        assert_eq!(plan_cleanup(xml, &empty()), Cleanup::default());
+        assert_eq!(
+            plan_cleanup(xml, &empty(), |s| vec![s.label()]),
+            Cleanup::default()
+        );
     }
 }

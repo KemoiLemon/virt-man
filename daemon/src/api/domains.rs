@@ -144,7 +144,7 @@ async fn delete(
         // other guest. Only the guest's own disks are candidates — an attached
         // ISO, a read-only disk, or anything another guest references is kept.
         let plan = if remove_storage {
-            disks::plan_cleanup(&xml, &disks::sources_used_elsewhere(c, Some(&name)))
+            disks::plan_cleanup_connected(c, &xml, &disks::sources_used_elsewhere(c, Some(&name)))
         } else {
             disks::Cleanup::default()
         };
