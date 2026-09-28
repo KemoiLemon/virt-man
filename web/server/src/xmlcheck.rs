@@ -191,7 +191,9 @@ const NVRAM_TEMPLATES: &[&str] = &[
 const NVRAM_DIR: &str = "/var/lib/libvirt/qemu/nvram/";
 
 fn check_os(os: Node, name: &str) -> Result<(), String> {
-    attrs_only(os, &[])?;
+    // `firmware='efi'` is libvirt's autoselection; it picks from the host's
+    // own firmware descriptors, so it names no file.
+    attrs_only(os, &["firmware"])?;
     for c in elements(os) {
         match c.tag_name().name() {
             "type" => {
@@ -205,6 +207,16 @@ fn check_os(os: Node, name: &str) -> Result<(), String> {
                 one_of(c, "dev", &["hd", "cdrom", "network", "fd"])?;
             }
             "bootmenu" => plain(c, &["enable", "timeout"])?,
+            // Which autoselected firmware features to require.
+            "firmware" => {
+                attrs_only(c, &[])?;
+                for f in elements(c) {
+                    if f.tag_name().name() != "feature" {
+                        return Err(refuse("that firmware setting"));
+                    }
+                    plain(f, &["enabled", "name"])?;
+                }
+            }
             "loader" => {
                 plain(c, &["readonly", "type", "format", "secure"])?;
                 if !FIRMWARE.contains(&text(c).as_str()) {
@@ -212,7 +224,7 @@ fn check_os(os: Node, name: &str) -> Result<(), String> {
                 }
             }
             "nvram" => {
-                plain(c, &["template", "format"])?;
+                plain(c, &["template", "templateFormat", "format"])?;
                 let t = attr(c, "template");
                 if !t.is_empty() && !NVRAM_TEMPLATES.contains(&t) {
                     return Err(refuse("a custom NVRAM template"));
@@ -407,11 +419,28 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                     }
                 }
             }
-            "video" | "input" | "sound" | "watchdog" | "memballoon" | "controller" => {
-                // Guest-side emulated hardware, no host resources named.
+            // `audio type='none'` is what libvirt adds to every guest with a
+            // display; any other backend writes to a host sound server.
+            "audio" => {
+                plain(d, &["id", "type"])?;
+                one_of(d, "type", &["none"])?;
+            }
+            // Guest-side emulated hardware. Each is held to the types that
+            // name nothing on the host: an `evdev` or `passthrough` input
+            // reads a host input device, and no host path or source may
+            // appear anywhere beneath.
+            "input" => {
+                plain(d, &["type", "bus"])?;
+                one_of(d, "type", &["mouse", "keyboard", "tablet"])?;
+            }
+            "video" | "sound" | "watchdog" | "memballoon" | "controller" => {
                 harmless_subtree(d)?;
-                if d.descendants().any(|x| x.tag_name().name() == "source") {
-                    return Err(refuse("a device with a host source"));
+                let host_ref = d.descendants().any(|x| {
+                    matches!(x.tag_name().name(), "source" | "backend" | "driver")
+                        || x.attributes().any(|a| a.value().starts_with('/'))
+                });
+                if host_ref {
+                    return Err(refuse("a device that names something on the host"));
                 }
             }
             "serial" | "console" => {
@@ -419,7 +448,15 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                 one_of(d, "type", &["pty"])?;
                 for c in elements(d) {
                     match c.tag_name().name() {
-                        "target" => plain(c, &["port", "type"])?,
+                        "target" => {
+                            attrs_only(c, &["port", "type"])?;
+                            for m in elements(c) {
+                                if m.tag_name().name() != "model" {
+                                    return Err(refuse("that serial target"));
+                                }
+                                plain(m, &["name"])?;
+                            }
+                        }
                         "alias" => plain(c, &["name"])?,
                         other => return Err(refuse(&format!("<{other}> in a serial port"))),
                     }
@@ -748,6 +785,21 @@ mod tests {
 
     fn with_device(dev: &str) -> String {
         form_domain().replace("<memballoon model=\"virtio\"/>", dev)
+    }
+
+    /// What libvirt hands back for guests defined through the forms, verbatim
+    /// from a real host (a UEFI guest, and a BIOS one read back after
+    /// creation). The hardware editor and the XML tab start from exactly this,
+    /// so it must pass as it is, or a non-admin could never save a change.
+    #[test]
+    fn libvirts_own_read_back_passes() {
+        for (file, name) in [
+            (include_str!("testdata/libvirt-uefi.xml"), "web"),
+            (include_str!("testdata/libvirt-readback.xml"), "bobvm"),
+        ] {
+            let s = check_domain(file).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(s.name, name);
+        }
     }
 
     #[test]
