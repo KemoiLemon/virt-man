@@ -22,18 +22,46 @@ before(async () => {
 
 // ---- pixel decode ----------------------------------------------------------
 
-test("BGRA from the guest becomes RGBA with opaque alpha", () => {
-  // One pixel, little-endian BGRX: blue=0x10, green=0x20, red=0x30.
+test("the daemon's RGBA payload is used as-is, never swapped again", () => {
+  // The daemon's framebuffer is already RGBA: its `raw_to_rgba` converts the
+  // guest's BGRX wire bytes once, and `next_update` copies it out unchanged.
+  // Swapping here converted a second time and rendered blue as red.
   const bin = String.fromCharCode(0x10, 0x20, 0x30, 0x00);
-  const px = con.bgraToRgba(bin, 1, 1);
-  assert.deepEqual([...px], [0x30, 0x20, 0x10, 255], "channels swap, alpha forced");
+  const px = con.frameToRgba(bin, 1, 1);
+  assert.deepEqual([...px], [0x10, 0x20, 0x30, 255], "r, g, b pass through; alpha forced");
+});
+
+test("a guest colour survives the daemon's conversion and this one", () => {
+  // Seam test, and the one that was missing. The daemon asks the guest for
+  // 32bpp BGRX (byte order B, G, R, X) and converts it to RGBA once, in
+  // `raw_to_rgba` — pinned by its own Rust test. The viewer must then show the
+  // colour the guest drew. Each side looked self-consistent, so no test of
+  // either module alone could see the double conversion; only the seam does.
+  const cases = [
+    [0x00, 0x00, 0xaa, "blue — the Debian installer, reported as red"],
+    [0xaa, 0x00, 0x00, "red"],
+    [0x12, 0x34, 0x56, "a colour with three different channels"],
+    [0x00, 0x00, 0x00, "black"],
+    [0xff, 0xff, 0xff, "white"],
+  ];
+  for (const [r, g, b, what] of cases) {
+    // What the guest puts on the wire, given the format we request.
+    const wire = String.fromCharCode(b, g, r, 0);
+    // What the daemon's raw_to_rgba makes of it: r = wire[2], g = wire[1], b = wire[0].
+    const payload = String.fromCharCode(
+      wire.charCodeAt(2), wire.charCodeAt(1), wire.charCodeAt(0), 255);
+    const px = con.frameToRgba(payload, 1, 1);
+    assert.deepEqual(
+      [...px], [r, g, b, 255],
+      `${what} (#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}) must reach the screen unchanged`);
+  }
 });
 
 test("every decoded pixel is fully opaque", () => {
-  // The guest sends BGRX, where the 4th byte is padding, not alpha. Trusting
-  // it would paint a fully transparent screen.
+  // The guest's 4th byte is BGRX padding, not alpha. Trusting it would paint a
+  // fully transparent screen.
   const bin = String.fromCharCode(...Array.from({ length: 16 }, () => 0));
-  const px = con.bgraToRgba(bin, 2, 2);
+  const px = con.frameToRgba(bin, 2, 2);
   for (let i = 3; i < px.length; i += 4) {
     assert.equal(px[i], 255, `pixel ${(i - 3) / 4} opaque`);
   }
@@ -41,13 +69,13 @@ test("every decoded pixel is fully opaque", () => {
 
 test("a short payload decodes to null instead of a torn image", () => {
   // A truncated frame must be dropped, not painted as garbage.
-  assert.equal(con.bgraToRgba("abc", 4, 4), null);
+  assert.equal(con.frameToRgba("abc", 4, 4), null);
 });
 
 test("decoded buffers are ImageData-compatible", () => {
   // ImageData rejects a SharedArrayBuffer-backed array; the decode must
   // always hand back a plain ArrayBuffer.
-  const px = con.bgraToRgba(String.fromCharCode(0, 0, 0, 0), 1, 1);
+  const px = con.frameToRgba(String.fromCharCode(0, 0, 0, 0), 1, 1);
   assert.ok(px.buffer instanceof ArrayBuffer, "backed by a plain ArrayBuffer");
   assert.equal(px.length, 4, "exactly one pixel");
 });

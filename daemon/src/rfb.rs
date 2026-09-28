@@ -6,8 +6,15 @@
 //!
 //! The daemon runs on the virtualisation host, so the socket to the guest's
 //! VNC port is local: the transport is tuned for latency rather than
-//! bandwidth, and the changed rectangle ships as raw BGRA with no image
+//! bandwidth, and the changed rectangle ships as raw RGBA with no image
 //! compression. Compressing cost more time than sending it uncompressed.
+//!
+//! **RGBA, not BGRA**, and that matters: `raw_to_rgba` already converts the
+//! guest's BGRX wire bytes once, and `Update::pixels` carries that framebuffer
+//! out unchanged, because RGBA is exactly what a canvas `ImageData` wants. A
+//! reader who believes the bytes are BGRA will "fix" the channels in the
+//! viewer and swap them a second time — which renders blue as red. Keep the
+//! vocabulary straight: BGRX is the wire, RGBA is ours.
 //!
 //! Encodings: Raw, CopyRect, and the DesktopSize pseudo-encoding so a guest
 //! resolution change is absorbed here instead of resizing anything locally.
@@ -74,13 +81,14 @@ impl Frame {
     }
 }
 
-/// One update ready for the viewer: raw BGRA pixels for `rect` only.
+/// One update ready for the viewer: raw RGBA pixels for `rect` only.
 pub struct Update {
     pub seq: u64,
     pub w: u16,
     pub h: u16,
     pub rect: Rect,
-    /// Row-major BGRA, `rect.w * rect.h * 4` bytes.
+    /// Row-major RGBA, `rect.w * rect.h * 4` bytes — already converted from the
+    /// guest's BGRX by `raw_to_rgba`, so a consumer must not convert again.
     pub pixels: Vec<u8>,
 }
 

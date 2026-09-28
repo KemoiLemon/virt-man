@@ -2,8 +2,13 @@
 //
 // Ported from vm-man's viewer. The RFB client itself lives in the daemon
 // (daemon/src/rfb.rs): it holds the guest framebuffer and hands out only the
-// rectangle that changed, as base64 BGRA. So there is no VNC client in the
+// rectangle that changed, as base64 RGBA. So there is no VNC client in the
 // browser at all — no noVNC, no WebSocket, just putImageData.
+//
+// RGBA, not BGRA: the daemon converts the guest's BGRX wire bytes once, so the
+// payload is already in the order ImageData wants and must be passed straight
+// through. Converting a second time here swaps red and blue — blue rendered as
+// red, which is what a viewer doing its own "BGRA to RGBA" will always do.
 //
 // Scaling contract (also from vm-man): the displayed size is computed from the
 // LOCAL stage box and devicePixelRatio, using the guest resolution purely as an
@@ -72,11 +77,18 @@ export function fitScale(guestW: number, guestH: number, stageW: number, stageH:
   return Math.min(stageW / guestW, stageH / guestH, 1);
 }
 
-/// Decode one base64 BGRA rectangle into RGBA for putImageData.
-/// The guest sends BGRX, so alpha is forced opaque.
+/// Decode one frame rectangle into RGBA for putImageData.
+///
+/// The bytes are *already* RGBA. The daemon asks the guest for 32bpp BGRX and
+/// converts it once, in `raw_to_rgba` (`daemon/src/rfb.rs`), then copies that
+/// framebuffer out verbatim — so there is nothing left to convert here, and
+/// swapping the channels again renders blue as red. That was the bug: two
+/// correct-looking conversions in a row, one on each side of the wire. The name
+/// records what the bytes are, precisely so nobody "fixes" the channels back.
+///
 // The ArrayBuffer parameter is load-bearing: TypeScript otherwise infers
 // ArrayBufferLike, which ImageData refuses because it could be shared.
-export function bgraToRgba(
+export function frameToRgba(
   bin: string,
   w: number,
   h: number,
@@ -85,9 +97,12 @@ export function bgraToRgba(
   if (bin.length < need) return null;
   const px = new Uint8ClampedArray(new ArrayBuffer(need));
   for (let i = 0; i < need; i += 4) {
-    px[i] = bin.charCodeAt(i + 2) & 255;
-    px[i + 1] = bin.charCodeAt(i + 1) & 255;
-    px[i + 2] = bin.charCodeAt(i) & 255;
+    px[i] = bin.charCodeAt(i);
+    px[i + 1] = bin.charCodeAt(i + 1);
+    px[i + 2] = bin.charCodeAt(i + 2);
+    // The daemon forces alpha opaque; forced again here because the guest's
+    // 4th byte is BGRX padding, and a transparent screen is worse than a
+    // wasted store.
     px[i + 3] = 255;
   }
   return px;
@@ -185,7 +200,7 @@ export async function attachConsole(
       applyScale();
     }
     if (u.w > 0 && u.h > 0 && u.pixels) {
-      const px = bgraToRgba(atob(u.pixels), u.w, u.h);
+      const px = frameToRgba(atob(u.pixels), u.w, u.h);
       if (px) {
         ctx ??= canvas.getContext("2d", { alpha: false });
         ctx?.putImageData(new ImageData(px, u.w, u.h), u.x, u.y);
