@@ -18,6 +18,7 @@ use virt::network::Network;
 
 use super::store::{self, Net, Store};
 use super::{dhcp, dns, xml};
+use crate::firewall;
 use crate::libvirt::with_conn;
 
 const SUPERVISE_SECS: u64 = 5;
@@ -240,6 +241,28 @@ pub async fn supervise_once(ipam: &Ipam) -> Result<(), String> {
         }
         if *s != before {
             ipam.save(&s)?;
+        }
+    }
+
+    // Let port forwards past libvirt's own per-network filter, which rejects
+    // the first packet of a forwarded connection because it is NEW rather than
+    // related/established. The accept has to sit inside libvirt's chain, so it
+    // is re-asserted every pass: starting or restarting a network, and a
+    // libvirtd restart, all make libvirt rewrite that chain without it.
+    let subnets: Vec<String> = {
+        let s = ipam.lock();
+        snap.nets
+            .iter()
+            .filter(|(name, x, _, _)| xml::is_managed(x) && s.networks.contains_key(name))
+            .filter_map(|(name, _, _, _)| {
+                let n = &s.networks[name];
+                firewall::network_prefix(&format!("{}/{}", n.gateway, n.prefix))
+            })
+            .collect()
+    };
+    for subnet in subnets {
+        if let Err(e) = firewall::allow_forwarded(&subnet).await {
+            tracing::warn!("ipam: {e}");
         }
     }
 

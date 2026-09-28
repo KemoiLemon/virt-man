@@ -226,7 +226,19 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
         })
         .collect();
     let script = firewall::render_ruleset(&rendered_nets, &rendered_vms);
-    firewall::apply_script(&script).await
+    firewall::apply_script(&script).await?;
+    // The script's own accepts cannot save a forwarded packet from libvirt's
+    // per-network reject — a verdict in one chain does not stop a later chain
+    // of the same hook from rejecting — so DNAT'd traffic is admitted inside
+    // libvirt's chain too. Done here so a rule change takes effect at once
+    // rather than on the supervisor's next pass; the supervisor re-asserts it
+    // because libvirt rewrites that chain on a network restart.
+    for n in &nets {
+        if let Err(e) = firewall::allow_forwarded(&n.subnet).await {
+            tracing::warn!("firewall: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// Every `<mac address='...'/>` in a domain XML, in document order.

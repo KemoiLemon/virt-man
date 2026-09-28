@@ -526,6 +526,102 @@ pub async fn apply_script(script: &str) -> Result<(), String> {
     }
 }
 
+/// libvirt's chain for traffic entering a network. It accepts replies to
+/// guest-initiated flows and then rejects everything else, per network.
+const LIBVIRT_NET_IN: &str = "LIBVIRT_FWI";
+
+/// The iptables arguments that admit a network's DNAT'd traffic through
+/// libvirt's filter. Pure, so the rule's shape is unit-testable.
+///
+/// `ctstate DNAT` is the whole point: it matches only connections that were
+/// destination-translated, i.e. exactly the port forwards, and leaves
+/// libvirt's filtering of everything else untouched.
+pub fn forward_accept_rule(subnet: &str) -> Vec<String> {
+    [
+        "-d",
+        subnet,
+        "-m",
+        "conntrack",
+        "--ctstate",
+        "DNAT",
+        "-j",
+        "ACCEPT",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Let a network's port forwards past libvirt's own firewall.
+///
+/// libvirt renders, per network, an accept for `related,established` traffic
+/// into the bridge followed by a reject of everything else:
+///
+/// ```text
+/// -A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+/// -A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
+/// ```
+///
+/// A forwarded connection's first packet is NEW, not established, so libvirt
+/// throws it away — *after* our own DNAT has rewritten it and our own rules
+/// have accepted it. The guest never sees the connection and the client is
+/// told "connection refused", because libvirt's REJECT answers with ICMP
+/// port-unreachable. Measured on a real host: libvirt's reject counter rises by
+/// exactly one per connection attempt, and the DNAT itself is fine.
+///
+/// Nothing in our own table can prevent that. A verdict in one chain does not
+/// stop a later chain of the same hook from rejecting, so accepting at
+/// `priority filter - 1` — which is what this table already does for its own
+/// rules — does not save the packet. The accept has to sit inside libvirt's
+/// chain, ahead of its reject. libvirt has no way to declare a port forward
+/// itself (`network.rng` has no such element), so there is nowhere else for it
+/// to go.
+///
+/// Idempotent, and safe to call on a timer: libvirt rewrites its chains when a
+/// network is (re)started or libvirtd restarts, which silently undoes this, so
+/// the caller re-asserts it rather than applying it once.
+pub async fn allow_forwarded(subnet: &str) -> Result<(), String> {
+    use tokio::process::Command;
+    let rule = forward_accept_rule(subnet);
+
+    // -C asks without changing anything, so re-asserting cannot stack copies.
+    let already = Command::new("iptables")
+        .arg("-C")
+        .arg(LIBVIRT_NET_IN)
+        .args(&rule)
+        .output()
+        .await;
+    let Ok(already) = already else {
+        // No iptables at all: libvirt's chains cannot exist either, so there
+        // is nothing to get past. Quiet, because the supervisor calls this
+        // every few seconds and a host without iptables is not an error here.
+        return Ok(());
+    };
+    if already.status.success() {
+        return Ok(());
+    }
+
+    let out = Command::new("iptables")
+        .arg("-I")
+        .arg(LIBVIRT_NET_IN)
+        .arg("1")
+        .args(&rule)
+        .output()
+        .await
+        .map_err(|e| format!("iptables: {e}"))?;
+    if out.status.success() {
+        tracing::info!("firewall: admitting DNAT'd traffic to {subnet} through libvirt");
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    // No such chain: this libvirt does not filter networks through iptables
+    // (so there is no reject to get past), or it is not installed here.
+    if err.contains("No chain") {
+        return Ok(());
+    }
+    Err(format!("iptables -I {LIBVIRT_NET_IN}: {}", err.trim()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +648,34 @@ mod tests {
     fn a_cidr_is_normalised_to_its_network_address() {
         assert_eq!(norm_cidr("192.168.167.1/24").unwrap(), "192.168.167.0/24");
         assert_eq!(norm_cidr("10.9.9.9/16").unwrap(), "10.9.0.0/16");
+    }
+
+    #[test]
+    fn the_forward_accept_admits_only_translated_traffic() {
+        // This rule goes inside libvirt's own chain, ahead of the reject that
+        // would otherwise drop a port forward's first packet. It must not
+        // widen libvirt's filtering beyond the connections we translated:
+        // scoped to the network, and to DNAT'd flows only.
+        let r = forward_accept_rule("10.74.0.0/24");
+        assert_eq!(
+            r,
+            vec![
+                "-d",
+                "10.74.0.0/24",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "DNAT",
+                "-j",
+                "ACCEPT"
+            ]
+        );
+        assert_eq!(LIBVIRT_NET_IN, "LIBVIRT_FWI", "libvirt's inbound chain");
+        assert!(
+            !r.iter().any(|a| a.contains("RELATED")),
+            "must not restate libvirt's established-traffic accept"
+        );
+        assert!(!r.iter().any(|a| a == "DROP" || a == "REJECT"));
     }
 
     #[test]
