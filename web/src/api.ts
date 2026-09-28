@@ -204,6 +204,8 @@ export interface AdminResource {
   capacity?: number;
   forward?: string;
   ip?: string;
+  bridge?: string;
+  allocation?: number;
 }
 
 export interface IpRow {

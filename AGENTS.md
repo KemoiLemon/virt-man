@@ -270,7 +270,23 @@ Things that bite:
   dashboard. The sidebar groups sections under
   `ADMIN_GROUPS`, and a new section must go in one. Its sections read on
   demand; the 1 s poll skips it. Servers are managed there (Daemons), not on
-  the Datacenter, and an old `/servers` link lands on that page.
+  the Datacenter, and an old `/servers` link lands on that page. VMs, Networks
+  and Storage Pools are separate sections, each tabbed by daemon
+  (`/admin/vms/<node>`; `route.ts` `DAEMON_TABBED`). Creating one for a user
+  opens the normal form over the admin page with an explicit `conn` and an
+  `after` callback, and never navigates away from it.
+
+**Owners share their own VMs** (`web/server/src/api/shares.rs`, `/shares`).
+It is a non-admin write to the ACL, so it is narrow on purpose: the owner or
+an admin only (decided by ownership, not by holding `VM.Allocate` -- the
+default role has that at `/`), to a user, on exactly that VM's path, not
+propagating, as `VMUser` or `VMAdmin` only. Neither can delete it or share it
+onward. A suspended VM cannot be shared by its owner.
+
+**`*.Allocate` means create on a collection and delete on a resource.** The
+default role grants it at `/` so users can create; `Store::privs` drops it on
+a resource path unless it comes from an admin, a grant below `/`, or
+ownership. Without that, any user could delete anyone's VM by name.
 
 **A long operation reports its own outcome.** `runTask` (`web/src/task.ts`)
 takes `{ done, notify: toast }` and toasts success or the server's reason once

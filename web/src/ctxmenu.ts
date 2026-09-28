@@ -119,4 +119,20 @@ document.addEventListener("click", (e) => {
 });
 window.addEventListener("resize", closeContextMenu);
 window.addEventListener("blur", closeContextMenu);
-document.addEventListener("scroll", () => closeContextMenu(), true);
+// A scroll behind the menu would leave it pointing at the wrong row, so it
+// closes -- but not a scroll of the menu itself. The listener captures, so it
+// also hears the menu's own list scrolling (it is overflow-y:auto), and a long
+// menu used to vanish the moment you scrolled down it.
+document.addEventListener("scroll", (e) => {
+  if (menu?.contains(e.target as globalThis.Node | null)) return;
+  closeContextMenu();
+}, true);
+// A wheel over a short menu scrolls nothing inside it and falls through to the
+// page behind, which then closed the menu. Keep it on the menu.
+document.addEventListener("wheel", (e) => {
+  if (menu?.contains(e.target as globalThis.Node | null)) {
+    const atTop = menu.scrollTop <= 0 && e.deltaY < 0;
+    const atEnd = menu.scrollTop + menu.clientHeight >= menu.scrollHeight - 1 && e.deltaY > 0;
+    if (atTop || atEnd) e.preventDefault();
+  }
+}, { passive: false, capture: true });

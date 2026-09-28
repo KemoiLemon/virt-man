@@ -111,6 +111,9 @@ select { display: none !important; }
   box-shadow: 0 12px 32px var(--shade);
   padding: 3px; display: flex; flex-direction: column; gap: 2px;
   max-height: min(420px, calc(100vh - 16px)); overflow-y: auto;
+  /* Reaching the end of the menu must not scroll the page behind it (which
+     would close the menu); touch has no wheel event to stop, so this is how. */
+  overscroll-behavior: contain;
 }
 .ctxmenu-item {
   width: 100%; display: flex; align-items: center; gap: 9px;
@@ -176,6 +179,10 @@ table.grid + .actions { margin-top: 12px; }
 /* One limit in a user's usage card: label, used / cap, and its own meter.
    Each resource is a separate limit, so each gets a separate meter. */
 .limit-spec .meter { margin-top: 6px; }
+/* Profile Resource Limits: one block per server (or one for a pooled limit). */
+.pf-limit { margin-bottom: 12px; }
+.pf-limit-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 6px; font-size: 12px; }
+.pf-limit .specs { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 /* Privilege chips in the roles and API key tables. */
 .priv-cell { white-space: normal; }
 .priv {

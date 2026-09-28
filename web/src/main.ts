@@ -1,7 +1,7 @@
 import { openCropDialog } from "./crop";
 import { api, cacheFirst, uploadWithProgress } from "./api";
 import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, StagedUpload, User, VolumeSummary } from "./api";
-import { adminTitle, adminTree, assignOwner, renderAdminSection, setCreateHandler, takePendingOwner, type AdminCtx } from "./admin";
+import { adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -458,7 +458,8 @@ function openCommandPalette() {
   if (canAdmin()) {
     add("admin-panel", "Administration", "Users, groups, permissions, resources, limits", ic.admin(), () => openAdmin());
     for (const [sec, label] of [["users", "Users"], ["groups", "Groups"], ["permissions", "Permissions"],
-      ["resources", "Resources"], ["quotas", "Quotas"], ["ips", "IP Addresses"], ["daemons", "Daemons"],
+      ["vms", "VMs"], ["networks", "Networks"], ["pools", "Storage Pools"],
+      ["quotas", "Quotas"], ["ips", "IP Addresses"], ["daemons", "Daemons"],
       ["activity", "Activity"]] as const) {
       add(`admin-${sec}`, `Administration — ${label}`, `/admin/${sec}`, ic.admin(), () => openAdmin(sec));
     }
@@ -996,6 +997,73 @@ async function downloadVv(connId: string, vm: string) {
   }
 }
 
+/// Whether the signed-in user may share this guest: its owner or an admin.
+/// Cosmetic, like `canAdmin`; the server checks the same rule.
+function canShareVm(connId: string, vmName: string): boolean {
+  const guest = (treeVms[connId] ?? []).find((v) => v.name === vmName);
+  return canAdmin() || (!!guest?.mine && !guest?.suspended);
+}
+
+/// Share one of your guests with other users, at a fixed level.
+async function openShareVm(connId: string, vmName: string) {
+  let data: { shares: { user: string; username: string; role: string }[]; roles: string[] };
+  let people: { id: string; username: string }[];
+  try {
+    const q = `conn=${encodeURIComponent(connId)}&vm=${encodeURIComponent(vmName)}`;
+    [data, people] = await Promise.all([
+      api.get<typeof data>(`/shares?${q}`),
+      api.get<typeof people>("/shares/users"),
+    ]);
+  } catch (e) {
+    return toast((e as Error).message, "bad");
+  }
+  const LEVEL: Record<string, string> = {
+    VMUser: "Use — console, start and stop",
+    VMAdmin: "Manage — also change its hardware and settings",
+  };
+  const el = openModal(
+    `Share — ${esc(vmName)}`,
+    `<p class="hint">People you share with see this VM in their list. They cannot delete it or share it onward.</p>
+     <div class="section-title">Shared with</div>
+     <table class="grid" id="sh-list">
+       <tr><th>User</th><th>Access</th><th class="col-actions"></th></tr>
+       ${data.shares.map((x) => `<tr><td class="tname">${esc(x.username)}</td><td>${esc(LEVEL[x.role] ?? x.role)}</td>
+         <td class="col-actions"><button class="btn danger icon" data-unshare="${esc(x.user)}" title="Stop sharing">${ic.trash()}</button></td></tr>`).join("")
+         || `<tr><td colspan="3" class="empty">Not shared with anyone.</td></tr>`}
+     </table>
+     <div class="section-title">Add someone</div>
+     <div class="grid2">
+       <label class="field"><span>User</span><select id="sh-user">
+         ${people.map((u) => `<option value="${esc(u.id)}">${esc(u.username)}</option>`).join("")}
+       </select></label>
+       <label class="field"><span>Access</span><select id="sh-role">
+         ${data.roles.map((r) => `<option value="${esc(r)}">${esc(LEVEL[r] ?? r)}</option>`).join("")}
+       </select></label>
+     </div>`,
+    `<button class="btn" id="sh-close">Close</button><button class="btn primary" id="sh-add">${ic.plus(14)} Share</button>`,
+  );
+  const body = { conn: connId, vm: vmName };
+  $("#sh-close", el).onclick = () => el.remove();
+  $("#sh-add", el).onclick = async () => {
+    try {
+      await api.put("/shares", { ...body, user: $("#sh-user", el).value, role: $("#sh-role", el).value });
+      toast(`${vmName} shared`);
+      el.remove();
+      void openShareVm(connId, vmName);
+    } catch (e) { toast((e as Error).message, "bad"); }
+  };
+  el.querySelectorAll<HTMLElement>("[data-unshare]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api.del("/shares", { ...body, user: b.dataset.unshare });
+        toast("Sharing stopped");
+        el.remove();
+        void openShareVm(connId, vmName);
+      } catch (e) { toast((e as Error).message, "bad"); }
+    };
+  });
+}
+
 function vmMenu(connId: string, vmName: string): CtxItem[] {
   const guest = (treeVms[connId] ?? []).find((v) => v.name === vmName);
   const running = guest?.active === true;
@@ -1027,9 +1095,12 @@ function vmMenu(connId: string, vmName: string): CtxItem[] {
     { label: "Options", icon: ic.options(), run: () => selectVmRow(connId, vmName, "options") },
     { label: "Network", icon: ic.network(), run: () => selectVmRow(connId, vmName, "network") },
     { label: "XML", icon: ic.xml(), run: () => selectVmRow(connId, vmName, "xml") },
+    ...(canShareVm(connId, vmName)
+      ? [{ label: "Share", icon: ic.perms(), separator: true, run: () => void openShareVm(connId, vmName) }]
+      : []),
     {
       // Renaming is libvirt-only for shut-off guests; offer it only then.
-      label: "Rename", icon: ic.edit(), separator: true, disabled: running,
+      label: "Rename", icon: ic.edit(), separator: !canShareVm(connId, vmName), disabled: running,
       run: () => { selectedConn = connId; void renameVm(vmName); },
     },
     {
@@ -1663,6 +1734,8 @@ const adminCtx: AdminCtx = {
     else selectPoolRow(conn, name);
   },
   go: (section, tab) => openAdmin(section, tab),
+  createVm: (conn, owner, after) => void openHardwareEditor({ conn, forUser: { owner, after } }),
+  createNetwork: (conn, owner, after) => openCreateNetwork(conn, { owner, after }),
   tab: () => adminTab,
   refreshMe: async () => {
     user = await api.get<User>("/auth/me");
@@ -1684,14 +1757,6 @@ function renderAdmin() {
   void renderAdminSection(adminCtx, $("#admin-area", content), adminSection, gen);
 }
 
-// "Create for a user" on the Resources page: the normal create flow on a
-// chosen daemon, then the result is handed to that user.
-setCreateHandler((kind) => {
-  adminSection = null;
-  renderTree();
-  if (kind === "vm") openCreateVm();
-  else withDaemon(() => openCreateNetwork());
-});
 
 /// Present a secret that the server will never show again.
 function showSecret(title: string, secret: string) {
@@ -2865,10 +2930,15 @@ async function openEditNetwork(name: string) {
   openNetworkForm(networkFormFromXml(xml), networkUuid(xml));
 }
 
-function openCreateNetwork() {
+/// `conn` defaults to the selected server. The admin page passes its own
+/// (with an owner and a callback), so creating a network for a user happens
+/// over the admin page instead of navigating away from it.
+function openCreateNetwork(conn = selectedConn, forUser?: { owner: string; after: () => void }) {
   openNetworkForm(
     { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "", dns: "", hosts: [] },
     "",
+    conn,
+    forUser,
   );
 }
 
@@ -2876,8 +2946,13 @@ function openCreateNetwork() {
 /// forward mode: bridge mode offers a bridge picker and no IP/DHCP/DNS (the
 /// bridge owns addressing); NAT offers IP, DHCP and DNS forwarders; isolated
 /// offers IP/DHCP but no bridge.
-function openNetworkForm(initial: NetworkForm, uuid: string) {
-  if (!selectedConn) return;
+function openNetworkForm(
+  initial: NetworkForm,
+  uuid: string,
+  conn: string | null = selectedConn,
+  forUser?: { owner: string; after: () => void },
+) {
+  if (!conn) return;
   const el = openModal(
     uuid ? `Edit network — ${esc(initial.name)}` : "Create network",
     `<div class="grid2">
@@ -2919,7 +2994,7 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
 
   // Bridge mode picks from the host's real bridge devices.
   const bridgeSelect = $("#net-bridge", el) as HTMLSelectElement;
-  api.get<string[]>(`/proxy/${selectedConn}/networks/bridges`)
+  api.get<string[]>(`/proxy/${conn}/networks/bridges`)
     .then((bridges) => {
       const current = initial.bridge;
       bridgeSelect.replaceChildren();
@@ -2955,14 +3030,17 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
     }
     el.remove();
     const xml = networkXml(form, uuid);
-    const conn = selectedConn!;
-    const owner = uuid ? null : takePendingOwner("network");
+    const owner = uuid ? null : forUser?.owner ?? null;
     void runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
       if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(initial.name)}/xml`, xml);
       else await api.postXml(`/proxy/${conn}/networks`, xml);
       if (owner) await assignOwner(conn, "network", form.name, owner);
     }, { done: `Network ${form.name} ${uuid ? "updated" : "created"}`, notify: toast })
-      .then(() => { void refreshTreeVms(); if (selectedConn === conn && !selectedVm) void renderConn(); });
+      .then(() => {
+        void refreshTreeVms();
+        if (forUser) forUser.after();
+        else if (selectedConn === conn && !selectedVm) void renderConn();
+      });
   };
 
   sync();
@@ -3140,6 +3218,7 @@ setHtml(content, `
         <button class="btn icon" id="vm-reset" title="Reset" ${running ? "" : "disabled"}>${ic.reset()}</button>
         <button class="btn icon" id="vm-destroy" title="Force stop" ${running ? "" : "disabled"}>${ic.forceStop()}</button>
         <button class="btn icon" id="vm-vv" title="Open in virt-viewer" ${running ? "" : "disabled"}>${ic.download()}</button>
+        ${canShareVm(selectedConn!, vm) ? `<button class="btn icon" id="vm-share" title="Share">${ic.perms()}</button>` : ""}
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
@@ -3168,6 +3247,8 @@ setHtml(content, `
   $("#vm-destroy").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/destroy`, "POST").then(refresh);
   $("#vm-reboot").onclick = () => act(`/proxy/${selectedConn}/domains/${encodeURIComponent(vm)}/reboot`, "POST").then(refresh);
   $("#vm-delete").onclick = () => deleteVm(vm);
+  const share = $("#vm-share");
+  if (share) share.onclick = () => void openShareVm(selectedConn!, vm);
   const vvConn = selectedConn;
   $("#vm-vv").onclick = () => void downloadVv(vvConn, vm);
   // XML is read-only, so painting a cached answer first is safe. Summary shows
@@ -4363,12 +4444,19 @@ async function createPendingVolumes(
 /// Proxmox-style hardware editor: device list on the LEFT, the selected
 /// device's form on the right. Used for both "Create VM" and editing an
 /// existing guest's hardware, so the two can never drift apart.
-async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) {
-  if (!selectedConn) return;
-  const conn = selectedConn;
+async function openHardwareEditor(opts: {
+  vm?: string;
+  inline?: boolean;
+  /// Create on this server instead of the selected one (the admin page).
+  conn?: string;
+  /// An admin creating the guest for someone else: who gets it, and what to
+  /// run once it exists (repaint the admin page, which stays open).
+  forUser?: { owner: string; after: () => void };
+} = {}) {
+  const conn = opts.conn ?? selectedConn;
+  if (!conn) return;
   const editing = !!opts.vm;
-  // Set when an admin is creating this guest for someone else.
-  const owner = editing ? null : takePendingOwner("vm");
+  const owner = editing ? null : opts.forUser?.owner ?? null;
   const inline = !!opts.inline;
 
   // Existing guest: read its current definition so the form starts populated.
@@ -4909,7 +4997,11 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
         await assignOwner(conn, "vm", form.name, owner);
       }
     }, { done: `VM ${form.name} created`, notify: toast })
-      .then(() => { void refreshTreeVms(); if (selectedConn === conn && !selectedVm) renderConn(); });
+      .then(() => {
+        void refreshTreeVms();
+        if (opts.forUser) opts.forUser.after();
+        else if (selectedConn === conn && !selectedVm) renderConn();
+      });
   };
 
   void render();
@@ -5536,7 +5628,9 @@ function openProfile() {
 
      <div class="section-title">API Keys</div>
      <div class="key-list" id="pf-keys"></div>
-     <div class="actions"><button class="btn" id="pf-newkey">${ic.key()} New API key</button></div>`,
+     <div class="actions"><button class="btn" id="pf-newkey">${ic.key()} New API key</button></div>
+
+     <div id="pf-limits"></div>`,
     // Save sits next to Cancel and only appears once something differs, so the
     // footer never offers a no-op. Cancel/Close is the same button relabelled:
     // with pending edits, closing discards them.
@@ -5545,6 +5639,7 @@ function openProfile() {
   );
   $("#pf-close", el).onclick = () => el.remove();
   $("#pf-avatar-btn", el).onclick = () => void changeAvatar(el);
+  void loadProfileLimits(el);
 
   // Show Save only when the form actually differs from the stored identity.
   const nickInput = $("#pf-nick", el) as HTMLInputElement;
@@ -5625,6 +5720,56 @@ setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done">
 }
 
 /// Repaint the card's identity header from the current user.
+/// The profile's Resource Limits section: what the user may use, and what
+/// they do. Each limit is its own meter. Per-daemon limits are shown for each
+/// daemon; pooled limits once, against the total across daemons.
+async function loadProfileLimits(el: Element) {
+  const box = $("#pf-limits", el);
+  if (!box) return;
+  type Used = { vms: number; vcpus: number; memory_mb: number; storage_bytes: number; networks: number };
+  let u: {
+    admin: boolean;
+    quota: import("./api").Quota;
+    total: Used;
+    daemons: (Used & { conn: string; name: string; online: boolean })[];
+  };
+  try {
+    u = await api.get<typeof u>("/me/usage");
+  } catch {
+    return; // the rest of the profile is still usable
+  }
+  if (!box.isConnected) return;
+  const title = `<div class="section-title">Resource Limits</div>`;
+  if (u.admin) {
+    setHtml(box, `${title}<p class="hint">Administrators have no resource limits.</p>`);
+    return;
+  }
+  const q = u.quota ?? { shared: false, default: {}, daemons: {} };
+  const any = (l: import("./api").Limit) => [l.vms, l.vcpus, l.memory_mb, l.storage_gb, l.networks].some((x) => x != null);
+  if (!any(q.default) && !Object.values(q.daemons ?? {}).some(any)) {
+    setHtml(box, `${title}<p class="hint">You have no resource limits.</p>`);
+    return;
+  }
+  const block = (name: string, used: Used, cap: import("./api").Limit, note = "") => `
+    <div class="pf-limit">
+      <div class="pf-limit-head"><b>${esc(name)}</b>${note ? `<span class="dim-note">${esc(note)}</span>` : ""}</div>
+      ${limitSpecs(used, cap)}
+    </div>`;
+  let html = "";
+  if (q.shared) html += block("All servers", u.total, q.default, "shared across servers");
+  for (const d of u.daemons) {
+    const own = q.daemons?.[d.conn];
+    // Pooled: a daemon appears only where it has its own extra cap.
+    if (q.shared && !own) continue;
+    if (!d.online) {
+      html += `<div class="pf-limit"><div class="pf-limit-head"><b>${esc(d.name)}</b><span class="dim-note">offline</span></div></div>`;
+      continue;
+    }
+    html += block(d.name, d, own ?? q.default, own ? "server-specific limit" : "");
+  }
+  setHtml(box, `${title}${html}`);
+}
+
 function refreshProfileCard(el: Element) {
   if (!user) return;
   const name = $("#pf-who-name", el);

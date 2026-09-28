@@ -40,6 +40,10 @@ export interface AdminCtx {
   go(section: AdminSection, tab?: AdminTab): void;
   /// The section's open tab, from the URL.
   tab(): AdminTab | undefined;
+  /// The normal create form, on `conn`, for `owner`, over the admin page;
+  /// `after` runs once the resource exists (to repaint this page).
+  createVm(conn: string, owner: string, after: () => void): void;
+  createNetwork(conn: string, owner: string, after: () => void): void;
   /// The identity changed (your own groups, roles): refresh it and re-render.
   refreshMe(): Promise<void>;
   /// Whether the pane still shows the render that started at `gen`.
@@ -53,7 +57,9 @@ const LABEL: Record<AdminSection, string> = {
   roles: "Roles",
   permissions: "Permissions",
   daemons: "Daemons",
-  resources: "Resources",
+  vms: "VMs",
+  networks: "Networks",
+  pools: "Storage Pools",
   quotas: "Quotas",
   ips: "IP Addresses",
   keys: "API Keys",
@@ -67,7 +73,9 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
   roles: ic.roles,
   permissions: ic.perms,
   daemons: ic.server,
-  resources: ic.vms,
+  vms: ic.vms,
+  networks: ic.network,
+  pools: ic.storage,
   quotas: ic.quota,
   ips: ic.ip,
   keys: ic.key,
@@ -78,7 +86,7 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
 /// live suite against ADMIN_SECTIONS), in the order they are listed.
 export const ADMIN_GROUPS: { label: string; sections: AdminSection[] }[] = [
   { label: "Access", sections: ["users", "groups", "roles", "permissions", "keys"] },
-  { label: "Infrastructure", sections: ["daemons", "resources", "ips"] },
+  { label: "Infrastructure", sections: ["daemons", "vms", "networks", "pools", "ips"] },
   { label: "Limits", sections: ["quotas"] },
   { label: "Audit", sections: ["activity"] },
 ];
@@ -551,92 +559,143 @@ const daemons_: Painter = async (ctx, area) => {
 
 // --------------------------------------------------------------- resources
 
-let resFilter = { kind: "", owner: "", conn: "" };
+/// Resources are split by kind -- VMs, Networks, Storage Pools -- and each is
+/// tabbed by daemon, so a page lists one kind on one server. Filtering by
+/// owner stays, since "what does this user have" is the other common ask.
+let resOwner = "";
 
-const resources_: Painter = async (ctx, area, gen) => {
-  const rows = await api.get<AdminResource[]>("/resources");
-  if (!ctx.stillCurrent(gen)) return;
-  const paint = () => {
-    const shown = rows.filter((r) =>
-      (!resFilter.kind || r.kind === resFilter.kind)
-      && (!resFilter.owner || r.owner === resFilter.owner)
-      && (!resFilter.conn || r.conn === resFilter.conn));
-    const ownable = (r: AdminResource) => r.kind !== "pool";
-    const size = (r: AdminResource) =>
-      r.kind === "vm" ? `${r.vcpus ?? "—"} vCPU · ${r.memory_mb ? fmtBytes(r.memory_mb * 1048576) : "—"}`
-        : r.kind === "network" ? esc(`${r.forward ?? ""} ${r.ip ?? ""}`)
-          : r.capacity != null ? fmtBytes(r.capacity) : "—";
-    ctx.setHtml(area, `
-      <div class="actions admin-filters">
-        <label class="field"><span>Kind</span><select id="rf-kind">
-          ${option("", "All", !resFilter.kind)}
-          ${["vm", "network", "pool", "volume"].map((k) => option(k, k === "vm" ? "VMs" : `${k[0].toUpperCase()}${k.slice(1)}s`, resFilter.kind === k)).join("")}
-        </select></label>
-        <label class="field"><span>Owner</span><select id="rf-owner">
-          ${option("", "Anyone", !resFilter.owner)}
-          ${users.map((u) => option(u.id, u.username, resFilter.owner === u.id)).join("")}
-        </select></label>
-        <label class="field"><span>Daemon</span><select id="rf-conn">
-          ${option("", "All", !resFilter.conn)}
-          ${ctx.connections().map((c) => option(c.id, c.name, resFilter.conn === c.id)).join("")}
-        </select></label>
-        <div class="tabbar-actions">
-          <button class="btn" id="res-new-vm">${ic.plus(14)} VM for user</button>
-          <button class="btn" id="res-new-net">${ic.plus(14)} Network for user</button>
+const KIND_SECTION: Record<"vm" | "network" | "pool", AdminSection> = { vm: "vms", network: "networks", pool: "pools" };
+
+function resourcePage(kind: "vm" | "network" | "pool"): Painter {
+  return async (ctx, area, gen) => {
+    const conns = ctx.connections();
+    const conn = ctx.tab() && conns.some((c) => c.id === ctx.tab()) ? ctx.tab()! : conns[0]?.id;
+    const section = KIND_SECTION[kind];
+    if (!conn) {
+      ctx.setHtml(area, `<div class="empty">No daemons yet. Add one under Infrastructure › Daemons.</div>`);
+      return;
+    }
+    const all = await api.get<AdminResource[]>("/resources");
+    if (!ctx.stillCurrent(gen)) return;
+    // Pools list their volumes beneath them.
+    const rows = all.filter((r) => r.conn === conn && (r.kind === kind || (kind === "pool" && r.kind === "volume")));
+    const counts = new Map(conns.map((c) => [c.id, all.filter((r) => r.conn === c.id && r.kind === kind).length]));
+    const tabs = `<div class="tabbar">
+      ${conns.map((c) => `<button class="tab ${c.id === conn ? "active" : ""}" data-res-tab="${esc(c.id)}">
+          ${c.online === false ? ic.offline(14) : ic.server(14)} ${esc(c.name)} <span class="tab-count">${counts.get(c.id) ?? 0}</span></button>`).join("")}
+      ${kind === "pool" ? "" : `<div class="tabbar-actions">
+        <button class="btn primary" id="res-new">${ic.plus(14)} ${kind === "vm" ? "VM" : "Network"} for user</button>
+      </div>`}
+    </div>`;
+
+    const paint = () => {
+      const shown = rows.filter((r) => !resOwner || r.kind === "pool" || r.owner === resOwner);
+      const actions = (r: AdminResource, i: number) => r.kind === "pool" ? "" : `
+        <div class="row-actions">
+          <button class="btn icon" data-owner-res="${i}" title="Change owner">${ic.user()}</button>
+          ${r.kind === "volume" ? "" : `
+            <button class="btn icon" data-share-res="${i}" title="Share">${ic.perms()}</button>
+            <button class="btn icon ${r.suspended ? "on" : ""}" data-suspend-res="${i}" title="${r.suspended ? "Restore access" : "Suspend access"}">${r.suspended ? ic.start() : ic.suspend()}</button>`}
+        </div>`;
+      const state = (r: AdminResource) => r.suspended
+        ? `<span class="state bad">Suspended</span>`
+        : `<span class="state ${r.state === "running" || r.state === "active" ? "on" : ""}">${esc(r.state ? r.state[0].toUpperCase() + r.state.slice(1) : "")}</span>`;
+      const name = (r: AdminResource, i: number) =>
+        `<td class="tname row-link" data-open-res="${i}">${esc(r.name)}</td>`;
+
+      let table: string;
+      if (kind === "vm") {
+        table = `<table class="grid">
+          <tr><th>Name</th><th>Owner</th><th>State</th><th>vCPUs</th><th>Memory</th><th class="col-actions"></th></tr>
+          ${shown.map((r, i) => `<tr class="${r.suspended ? "suspended" : ""}">
+            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}</td>
+            <td>${r.vcpus ?? "—"}</td><td>${r.memory_mb ? fmtBytes(r.memory_mb * 1048576) : "—"}</td>
+            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No VMs${resOwner ? " for this owner" : ""}.</td></tr>`}
+        </table>`;
+      } else if (kind === "network") {
+        table = `<table class="grid">
+          <tr><th>Name</th><th>Owner</th><th>State</th><th>Mode</th><th>Subnet</th><th>Bridge</th><th class="col-actions"></th></tr>
+          ${shown.map((r, i) => `<tr class="${r.suspended ? "suspended" : ""}">
+            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}</td>
+            <td>${esc(r.forward === "nat" ? "NAT" : r.forward === "bridge" ? "Bridge" : "Isolated")}</td>
+            <td class="mono">${esc(r.ip || "—")}</td><td class="mono">${esc(r.bridge || "—")}</td>
+            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">No networks${resOwner ? " for this owner" : ""}.</td></tr>`}
+        </table>`;
+      } else {
+        // A card per pool (as on the datacenter dashboard), its volumes below.
+        const pools = shown.filter((r) => r.kind === "pool");
+        table = pools.map((p) => {
+          const cap = p.capacity ?? 0;
+          const used = p.allocation ?? 0;
+          const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
+          const vols = shown.filter((v) => v.kind === "volume" && v.pool === p.name);
+          const pi = shown.indexOf(p);
+          return `<div class="storage-card ${p.state === "active" ? "ok" : ""}">
+            <div class="storage-card-head">
+              <span class="storage-card-icon">${ic.storage()}</span>
+              <span class="storage-card-title row-link" data-open-res="${pi}">${esc(p.name)}</span>
+              <span class="badge ${p.state === "active" ? "on" : ""}">${esc(p.state === "active" ? "Active" : "Inactive")}</span>
+              <span class="badge">${vols.length} volume${vols.length === 1 ? "" : "s"}</span>
+            </div>
+            <div class="meter"><div class="meter-fill ${pct > 85 ? "hot" : ""}" style="width:${pct.toFixed(1)}%"></div></div>
+            <div class="metric-foot"><span>${fmtBytes(used)} used</span><span>${fmtBytes(cap)} total</span></div>
+            ${vols.length ? `<table class="grid">
+              <tr><th>Volume</th><th>Owner</th><th>Size</th><th class="col-actions"></th></tr>
+              ${vols.map((v) => {
+                const i = shown.indexOf(v);
+                return `<tr><td class="tname">${esc(v.name)}</td><td>${esc(v.owner_name ?? "—")}</td>
+                  <td>${v.capacity != null ? fmtBytes(v.capacity) : "—"}</td><td class="col-actions">${actions(v, i)}</td></tr>`;
+              }).join("")}
+            </table>` : ""}
+          </div>`;
+        }).join("") || `<div class="empty">No storage pools on this daemon.</div>`;
+      }
+
+      ctx.setHtml(area, `${tabs}
+        <div class="actions admin-filters">
+          <label class="field"><span>Owner</span><select id="rf-owner">
+            ${option("", "Anyone", !resOwner)}
+            ${users.map((u) => option(u.id, u.username, resOwner === u.id)).join("")}
+          </select></label>
         </div>
-      </div>
-      <table class="grid">
-        <tr><th>Kind</th><th>Name</th><th>Daemon</th><th>Owner</th><th>State</th><th>Size</th><th class="col-actions"></th></tr>
-        ${shown.map((r, i) => `
-          <tr class="${r.suspended ? "suspended" : ""}">
-            <td>${r.kind === "vm" ? ic.vm() : r.kind === "network" ? ic.network() : r.kind === "pool" ? ic.storage() : ic.disk()}</td>
-            <td class="tname ${r.kind === "volume" ? "" : "row-link"}" ${r.kind === "volume" ? "" : `data-open-res="${i}"`}>${esc(r.pool ? `${r.pool}/${r.name}` : r.name)}</td>
-            <td>${esc(r.conn_name)}</td>
-            <td>${ownable(r) ? esc(r.owner_name ?? "—") : `<span class="dim-note">shared</span>`}</td>
-            <td>${r.suspended ? `<span class="state bad">Suspended</span>` : esc(r.state ?? "")}</td>
-            <td>${size(r)}</td>
-            <td class="col-actions"><div class="row-actions">
-              ${ownable(r) ? `<button class="btn icon" data-owner-res="${i}" title="Change owner">${ic.user()}</button>` : ""}
-              ${r.kind === "vm" || r.kind === "network" ? `
-                <button class="btn icon" data-share-res="${i}" title="Share">${ic.perms()}</button>
-                <button class="btn icon ${r.suspended ? "on" : ""}" data-suspend-res="${i}" title="${r.suspended ? "Restore access" : "Suspend access"}">${r.suspended ? ic.start() : ic.suspend()}</button>` : ""}
-            </div></td>
-          </tr>`).join("") || `<tr><td colspan="7" class="empty">Nothing matches.</td></tr>`}
-      </table>`);
-    for (const [id, key] of [["#rf-kind", "kind"], ["#rf-owner", "owner"], ["#rf-conn", "conn"]] as const) {
-      ctx.$(id, area).onchange = (e: Event) => {
-        resFilter = { ...resFilter, [key]: (e.target as HTMLSelectElement).value };
+        ${table}`);
+
+      area.querySelectorAll<HTMLElement>("[data-res-tab]").forEach((b) => {
+        b.onclick = () => ctx.go(section, b.dataset.resTab);
+      });
+      ctx.$("#rf-owner", area).onchange = (e: Event) => {
+        resOwner = (e.target as HTMLSelectElement).value;
         paint();
       };
-    }
-    ctx.$("#res-new-vm", area).onclick = () => createFor(ctx, "vm");
-    ctx.$("#res-new-net", area).onclick = () => createFor(ctx, "network");
-    bind(area, "data-open-res", (i) => {
-      const r = shown[Number(i)];
-      ctx.openResource(r.kind as "vm" | "network" | "pool", r.conn, r.name);
-    });
-    bind(area, "data-owner-res", (i) => void changeOwner(ctx, shown[Number(i)]));
-    bind(area, "data-share-res", (i) => {
-      const r = shown[Number(i)];
-      void openGrant(ctx, { path: `/nodes/${r.conn}/${r.kind === "vm" ? "vms" : "networks"}/${r.name}` });
-    });
-    bind(area, "data-suspend-res", async (i) => {
-      const r = shown[Number(i)];
-      const to = !r.suspended;
-      if (to && !await ctx.askConfirm("Suspend access",
-        `Suspend ${r.owner_name ?? "the owner"}'s access to ${r.name}? They keep read-only access; administrators are unaffected.`, "Suspend", true)) return;
-      try {
-        await api.put("/resources", { kind: r.kind, conn: r.conn, pool: r.pool ?? "", name: r.name, suspended: to });
-        r.suspended = to;
-        ctx.toast(to ? "Access suspended" : "Access restored");
-        paint();
-      } catch (e) { ctx.toast((e as Error).message, "bad"); }
-    });
+      const create = ctx.$("#res-new", area);
+      if (create) create.onclick = () => createFor(ctx, kind as "vm" | "network", conn, () => ctx.go(section, conn));
+      bind(area, "data-open-res", (i) => {
+        const r = shown[Number(i)];
+        ctx.openResource(r.kind as "vm" | "network" | "pool", r.conn, r.name);
+      });
+      bind(area, "data-owner-res", (i) => void changeOwner(ctx, shown[Number(i)], section));
+      bind(area, "data-share-res", (i) => {
+        const r = shown[Number(i)];
+        void openGrant(ctx, { path: `/nodes/${r.conn}/${r.kind === "vm" ? "vms" : "networks"}/${r.name}` });
+      });
+      bind(area, "data-suspend-res", async (i) => {
+        const r = shown[Number(i)];
+        const to = !r.suspended;
+        if (to && !await ctx.askConfirm("Suspend access",
+          `Suspend ${r.owner_name ?? "the owner"}'s access to ${r.name}? They keep read-only access; administrators are unaffected.`, "Suspend", true)) return;
+        try {
+          await api.put("/resources", { kind: r.kind, conn: r.conn, pool: r.pool ?? "", name: r.name, suspended: to });
+          r.suspended = to;
+          ctx.toast(to ? "Access suspended" : "Access restored");
+          paint();
+        } catch (e) { ctx.toast((e as Error).message, "bad"); }
+      });
+    };
+    paint();
   };
-  paint();
-};
+}
 
-async function changeOwner(ctx: AdminCtx, r: AdminResource) {
+async function changeOwner(ctx: AdminCtx, r: AdminResource, back: AdminSection) {
   const el = ctx.openModal(
     `Owner — ${esc(r.name)}`,
     `<label class="field"><span>Owner</span><select id="o-user">
@@ -651,46 +710,36 @@ async function changeOwner(ctx: AdminCtx, r: AdminResource) {
       await api.put("/resources", { kind: r.kind, conn: r.conn, pool: r.pool ?? "", name: r.name, owner: ctx.$("#o-user", el).value });
       el.remove();
       ctx.toast("Owner changed");
-      reload(ctx, "resources")();
+      ctx.go(back, r.conn);
     } catch (e) { ctx.toast((e as Error).message, "bad"); }
   };
 }
 
-/// Create a VM or network *for* someone: pick the owner, then use the normal
-/// create flow; the new resource is handed over once it exists. Admins are
-/// not held to the owner's limits.
-let pendingOwner: { kind: "vm" | "network"; owner: string } | null = null;
-
-export function takePendingOwner(kind: "vm" | "network"): string | null {
-  if (pendingOwner?.kind !== kind) return null;
-  const o = pendingOwner.owner;
-  pendingOwner = null;
-  return o;
-}
-
+/// Hand a resource to `owner` (used by the create-for-user forms).
 export async function assignOwner(conn: string, kind: "vm" | "network", name: string, owner: string) {
   await api.put("/resources", { kind, conn, pool: "", name, owner });
 }
 
-let onCreateFor: ((kind: "vm" | "network") => void) | null = null;
-export function setCreateHandler(run: (kind: "vm" | "network") => void) {
-  onCreateFor = run;
-}
-
-function createFor(ctx: AdminCtx, kind: "vm" | "network") {
+/// Create a VM or network *for* someone: pick the owner, then the normal
+/// create form opens over the admin page -- on the daemon tab you were on --
+/// and the result is handed to them. Admins are not held to their limits.
+function createFor(ctx: AdminCtx, kind: "vm" | "network", conn: string, after: () => void) {
+  const server = ctx.connections().find((c) => c.id === conn)?.name ?? "";
   const el = ctx.openModal(
     kind === "vm" ? "Create VM for a user" : "Create network for a user",
     `<label class="field"><span>Owner</span><select id="cf-user">
-       ${users.map((u) => option(u.id, u.username, false)).join("")}
+       ${users.filter((u) => !u.admin).concat(users.filter((u) => u.admin))
+         .map((u) => option(u.id, u.username, false)).join("")}
      </select></label>
-     <p class="hint">The ${kind === "vm" ? "VM" : "network"} is created with the usual form and then handed to this user.</p>`,
+     <p class="hint">On ${esc(server)}. The ${kind === "vm" ? "VM" : "network"} is created with the usual form, then handed to this user; you stay on this page.</p>`,
     `<button class="btn" id="cf-cancel">Cancel</button><button class="btn primary" id="cf-next">Continue</button>`,
   );
   ctx.$("#cf-cancel", el).onclick = () => el.remove();
   ctx.$("#cf-next", el).onclick = () => {
-    pendingOwner = { kind, owner: ctx.$("#cf-user", el).value };
+    const owner = ctx.$("#cf-user", el).value;
     el.remove();
-    onCreateFor?.(kind);
+    if (kind === "vm") ctx.createVm(conn, owner, after);
+    else ctx.createNetwork(conn, owner, after);
   };
 }
 
@@ -962,7 +1011,7 @@ const DASH_TABS: [AdminTab, string, (s?: number) => string][] = [
 /// resource is its own limit, so each gets its own meter; there is no single
 /// "how full is this user" figure, because a user at 100% of their vCPUs and
 /// 5% of their storage is not 100% of anything as a whole.
-function limitMeter(label: string, used: number, cap: number | null | undefined, fmt: (n: number) => string): string {
+export function limitMeter(label: string, used: number, cap: number | null | undefined, fmt: (n: number) => string): string {
   if (cap == null) {
     return `<div class="spec"><b>${esc(label)}</b><span>${fmt(used)} <span class="dim-note">· no limit</span></span></div>`;
   }
@@ -972,6 +1021,23 @@ function limitMeter(label: string, used: number, cap: number | null | undefined,
       <span>${fmt(used)} / ${fmt(cap)}</span>
       <div class="meter"><div class="meter-fill ${pct >= 100 ? "hot" : ""}" style="width:${pct.toFixed(1)}%"></div></div>
     </div>`;
+}
+
+/// A user's five limits as separate meters.
+export function limitSpecs(
+  used: { vms: number; vcpus: number; memory_mb: number; storage_bytes: number; networks: number },
+  cap: Limit,
+): string {
+  const count = (n: number) => String(n);
+  const mem = (m: number) => fmtBytes(m * 1048576);
+  const gib = (g: number) => `${Number.isInteger(g) ? g : g.toFixed(1)} GiB`;
+  return `<div class="specs">
+    ${limitMeter("VMs", used.vms, cap.vms, count)}
+    ${limitMeter("vCPUs", used.vcpus, cap.vcpus, count)}
+    ${limitMeter("Memory", used.memory_mb, cap.memory_mb, mem)}
+    ${limitMeter("Storage", used.storage_bytes / 1073741824, cap.storage_gb, gib)}
+    ${limitMeter("Networks", used.networks, cap.networks, count)}
+  </div>`;
 }
 
 /// The admin page's landing view, built from the datacenter dashboard's own
@@ -1005,7 +1071,6 @@ const dashboard_: Painter = async (ctx, area, gen) => {
       || Object.keys(u.quota?.daemons ?? {}).length > 0;
   });
   const mem = (m: number) => fmtBytes(m * 1048576);
-  const count = (n: number) => String(n);
 
   const card = (icon: string, n: number | string, label: string, tone: string, go: AdminSection) =>
     `<div class="card ${tone} admin-card-link" data-go="${go}" tabindex="0" role="link">
@@ -1038,9 +1103,9 @@ const dashboard_: Painter = async (ctx, area, gen) => {
         ${panel(ic.server(), "Daemons", `${online}/${conns.length}`, conns.length ? (online / conns.length) * 100 : 0,
           `${online} online`, `${conns.length - online} offline`, "daemons")}
         ${panel(ic.vms(), "VMs", String(vms.length), vms.length ? (running / vms.length) * 100 : 0,
-          `${running} running`, `${ownedByUsers} owned by users`, "resources")}
+          `${running} running`, `${ownedByUsers} owned by users`, "vms")}
         ${panel(ic.network(), "Networks", String(nets.length), nets.length ? (activeNets / nets.length) * 100 : 0,
-          `${activeNets} active`, `${vols.length} volumes`, "resources")}
+          `${activeNets} active`, `${vols.length} volumes`, "networks")}
         ${panel(ic.autostart(), "Activity today", String(today.length),
           today.length ? (failedToday / today.length) * 100 : 0,
           `${today.length - failedToday} done`, `${failedToday} failed`, "activity")}
@@ -1054,7 +1119,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
               `<tr class="row-open" tabindex="0" data-go="daemons"><td class="tname">Daemon offline</td><td>${esc(c.name)}</td>
                 <td class="task-msg">${esc(c.offline_error ?? "not answering")}</td></tr>`),
             ...suspended.map((r) =>
-              `<tr class="row-open" tabindex="0" data-go="resources"><td class="tname">Suspended ${r.kind === "vm" ? "VM" : r.kind}</td>
+              `<tr class="row-open" tabindex="0" data-go="${r.kind === "vm" ? "vms" : "networks"}"><td class="tname">Suspended ${r.kind === "vm" ? "VM" : r.kind}</td>
                 <td>${esc(r.name)} · ${esc(r.conn_name)}</td><td>owned by ${esc(r.owner_name ?? "—")}</td></tr>`),
             ...act.entries.filter((e) => e.status === "failed").slice(0, 5).map((e) =>
               `<tr class="row-open" tabindex="0" data-go="activity"><td class="tname">Failed: ${esc(e.label)}</td>
@@ -1074,13 +1139,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
           <span class="badge">${u.quota?.shared ? "Pooled" : "Per daemon"}</span>
           ${over ? `<span class="badge">+${over} override${over > 1 ? "s" : ""}</span>` : ""}
         </div>
-        <div class="specs">
-          ${limitMeter("VMs", u.vms, d.vms, count)}
-          ${limitMeter("vCPUs", u.vcpus, d.vcpus, count)}
-          ${limitMeter("Memory", u.memory_mb, d.memory_mb, mem)}
-          ${limitMeter("Storage", u.storage_bytes / 1073741824, d.storage_gb, (g) => `${Number.isInteger(g) ? g : g.toFixed(1)} GiB`)}
-          ${limitMeter("Networks", u.networks, d.networks, count)}
-        </div>
+        ${limitSpecs(u, d)}
       </div>`;
     }).join("")}</div>`
       : `<div class="empty">No user has limits. Set them under Limits › Quotas.</div>`;
@@ -1133,8 +1192,8 @@ const dashboard_: Painter = async (ctx, area, gen) => {
   });
   area.querySelectorAll<HTMLElement>("[data-owner]").forEach((el) => {
     el.onclick = () => {
-      resFilter = { kind: "", owner: el.dataset.owner ?? "", conn: "" };
-      ctx.go("resources");
+      resOwner = el.dataset.owner ?? "";
+      ctx.go("vms");
     };
   });
   area.querySelectorAll<HTMLElement>("[data-quota-user]").forEach((el) => {
@@ -1152,7 +1211,9 @@ const SECTIONS: Record<AdminSection, Painter> = {
   roles: roles_,
   permissions: permissions_,
   daemons: daemons_,
-  resources: resources_,
+  vms: resourcePage("vm"),
+  networks: resourcePage("network"),
+  pools: resourcePage("pool"),
   quotas: quotas_,
   ips: ips_,
   keys: keys_,

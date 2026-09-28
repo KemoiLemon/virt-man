@@ -113,6 +113,8 @@ test("an old /vms/<vm>/firewall link opens the Network tab", () => {
 // for a tabbed section: /admin/dashboard, /admin/dashboard/usage, ...
 test("the admin page round-trips through the URL", () => {
   for (const section of r.ADMIN_SECTIONS) {
+    // Daemon-tabbed sections take a daemon as their tab (tested below).
+    if (r.DAEMON_TABBED.includes(section)) continue;
     const tabs = r.ADMIN_TABS[section];
     for (const tab of tabs ?? [undefined]) {
       const route = tab ? { view: "admin", section, tab } : { view: "admin", section };
@@ -133,4 +135,25 @@ test("the admin page round-trips through the URL", () => {
   assert.deepEqual(r.parsePath("/servers", nodes), { view: "admin", section: "daemons" });
   // A server named "admin" must not shadow the admin page.
   assert.equal(r.nodeSegment("c9", [{ id: "c9", name: "admin" }]), "c9");
+});
+
+// VMs, Networks and Storage Pools are tabbed by daemon: the tab is the
+// daemon, written by its node segment (name, or id when ambiguous).
+test("admin resource pages are tabbed by daemon", () => {
+  for (const section of r.DAEMON_TABBED) {
+    for (const n of nodes) {
+      const route = { view: "admin", section, tab: n.id };
+      assert.deepEqual(r.parsePath(r.routeToPath(route, nodes), nodes), route, `${section}/${n.name}`);
+    }
+    // The first daemon is the bare section path.
+    assert.equal(r.routeToPath({ view: "admin", section, tab: "c1" }, nodes), `/admin/${section}`);
+    assert.equal(r.routeToPath({ view: "admin", section, tab: "c2" }, nodes), `/admin/${section}/lab%20box`);
+    assert.deepEqual(r.parsePath(`/admin/${section}`, nodes), { view: "admin", section, tab: "c1" });
+    // An unknown daemon falls back to the first.
+    assert.deepEqual(r.parsePath(`/admin/${section}/gone`, nodes), { view: "admin", section, tab: "c1" });
+    // No daemons at all: the section still opens.
+    assert.deepEqual(r.parsePath(`/admin/${section}`, []), { view: "admin", section });
+  }
+  // Resources split by kind; an old link lands on VMs.
+  assert.deepEqual(r.parsePath("/admin/resources", nodes), { view: "admin", section: "vms", tab: "c1" });
 });

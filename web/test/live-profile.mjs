@@ -307,7 +307,7 @@ check("the admin sidebar groups its sections under the dashboard root", () => {
   // Every section, once, each after its group label.
   const order = [...tree.children].map((el) => el.classList.contains("admin-group") ? `#${el.textContent.trim()}` : el.dataset.adminSection);
   assert.deepEqual(order, ["dashboard", "#Access", "users", "groups", "roles", "permissions", "keys",
-    "#Infrastructure", "daemons", "resources", "ips", "#Limits", "quotas", "#Audit", "activity"]);
+    "#Infrastructure", "daemons", "vms", "networks", "pools", "ips", "#Limits", "quotas", "#Audit", "activity"]);
   assert.ok(!tree.querySelector("#dc-row"), "the resource tree is replaced, not appended to");
 });
 
@@ -367,14 +367,20 @@ check("the admin button stays put and becomes a return button", () => {
 });
 
 // Every section renders from the live API without an error panel.
-for (const sec of ["users", "groups", "roles", "permissions", "daemons", "resources", "quotas", "ips", "keys", "activity"]) {
+for (const sec of ["users", "groups", "roles", "permissions", "daemons", "vms", "networks", "pools", "quotas", "ips", "keys", "activity"]) {
   click(document.querySelector(`#tree [data-admin-section="${sec}"]`));
-  await wait(sec === "resources" || sec === "ips" || sec === "permissions" ? 2500 : 900);
+  await wait(["vms", "networks", "pools", "ips", "permissions"].includes(sec) ? 2500 : 900);
   check(`admin section ${sec} renders and has its own URL`, () => {
     assert.equal(window.location.pathname, `/admin/${sec}`);
     assert.equal(document.querySelector("#tree .tree-row.sel")?.dataset.adminSection, sec, "sidebar follows");
     const area = document.querySelector("#admin-area");
-    assert.ok(area.querySelector("table.grid"), `${sec}: a table (got ${area.textContent.slice(0, 120)})`);
+    assert.ok(area.querySelector(sec === "pools" ? ".storage-card, .empty" : "table.grid"),
+      `${sec}: rendered (got ${area.textContent.slice(0, 120)})`);
+    if (["vms", "networks", "pools"].includes(sec)) {
+      const tabs = [...area.querySelectorAll("[data-res-tab]")];
+      assert.ok(tabs.length >= 1, `${sec}: one tab per daemon`);
+      assert.equal(area.querySelector(".tab.active")?.dataset.resTab, tabs[0].dataset.resTab, `${sec}: first daemon open`);
+    }
     assert.ok(!area.querySelector(":scope > .empty"), `${sec}: no error panel`);
     // Add / create buttons sit at the right of their row. jsdom does no
     // layout, so check the computed rule the layout comes from.

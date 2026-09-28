@@ -22,16 +22,21 @@ export type ConnTab = "dashboard" | "vms" | "networks" | "storage" | "firewall";
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 export type AdminSection =
   | "dashboard" | "users" | "groups" | "roles" | "permissions" | "daemons"
-  | "resources" | "quotas" | "ips" | "keys" | "activity";
-/// Sections with tabs of their own. Every admin page follows the rest of the
-/// app's pattern: a section is a path segment, and so is its tab.
-export type AdminTab = "overview" | "usage" | "ownership" | "activity";
+  | "vms" | "networks" | "pools" | "quotas" | "ips" | "keys" | "activity";
+/// A tabbed section's tab. For the dashboard it is one of ADMIN_TABS; for the
+/// VMs, Networks and Storage Pools sections it is a daemon (connection id),
+/// written in the URL by its node segment like every other server link.
+export type AdminTab = string;
+/// Sections with fixed tabs. Every admin page follows the rest of the app's
+/// pattern: a section is a path segment, and so is its tab.
 export const ADMIN_TABS: Partial<Record<AdminSection, AdminTab[]>> = {
   dashboard: ["overview", "usage", "ownership", "activity"],
 };
+/// Sections tabbed by daemon: one tab per server.
+export const DAEMON_TABBED: AdminSection[] = ["vms", "networks", "pools"];
 export const ADMIN_SECTIONS: AdminSection[] = [
   "dashboard", "users", "groups", "roles", "permissions", "daemons",
-  "resources", "quotas", "ips", "keys", "activity",
+  "vms", "networks", "pools", "quotas", "ips", "keys", "activity",
 ];
 
 export type Route =
@@ -51,7 +56,7 @@ export interface NodeRef {
 export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
   "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
-  "groups", "acl", "resources", "ips", "usage",
+  "groups", "acl", "resources", "ips", "usage", "shares",
   "servers", "guests", "admin",
 ]);
 
@@ -76,6 +81,12 @@ export function routeToPath(r: Route, nodes: NodeRef[]): string {
   if (r.view === "admin") {
     // Every section has its own path, the dashboard included; the first tab
     // of a tabbed section is its bare path, as a server's Dashboard is.
+    if (DAEMON_TABBED.includes(r.section)) {
+      const first = nodes[0]?.id;
+      return r.tab && r.tab !== first
+        ? `/admin/${r.section}/${enc(nodeSegment(r.tab, nodes))}`
+        : `/admin/${r.section}`;
+    }
     const first = ADMIN_TABS[r.section]?.[0];
     return r.tab && r.tab !== first ? `/admin/${r.section}/${r.tab}` : `/admin/${r.section}`;
   }
@@ -111,7 +122,14 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
   const [first, section, name, tab] = parts;
   if (!first) return { view: "dc", tab: "dashboard" };
   if (first === "admin" && parts.length <= 3) {
-    const s = ADMIN_SECTIONS.includes(section as AdminSection) ? (section as AdminSection) : "dashboard";
+    // Resources was one page before it split by kind; keep old links working.
+    const alias = section === "resources" ? "vms" : section;
+    const s = ADMIN_SECTIONS.includes(alias as AdminSection) ? (alias as AdminSection) : "dashboard";
+    if (DAEMON_TABBED.includes(s)) {
+      // No daemons yet: the section still opens, with nothing to tab.
+      const conn = (name && resolveNode(name, nodes)) || nodes[0]?.id;
+      return conn ? { view: "admin", section: s, tab: conn } : { view: "admin", section: s };
+    }
     const tabs = ADMIN_TABS[s];
     if (!tabs) return { view: "admin", section: s };
     // An unknown tab lands on the section's first, like a mistyped server tab.

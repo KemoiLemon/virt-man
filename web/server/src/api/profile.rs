@@ -20,6 +20,7 @@ pub fn routes(state: &AppState) -> Router<AppState> {
     // after the auth layer so it stays unauthenticated.
     Router::new()
         .route("/me", axum::routing::put(update_me))
+        .route("/me/usage", axum::routing::get(my_usage))
         .route("/me/password", post(change_password))
         .route("/me/avatar", post(upload_avatar))
         .layer(middleware::from_fn(auth::require_user(state.clone())))
@@ -164,4 +165,44 @@ async fn serve_avatar(State(state): State<AppState>, Path(file): Path<String>) -
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// The caller's limits next to what they use, per daemon and in total, for
+/// their profile card. Read live, like the quota check, so the two agree.
+/// Administrators have no limits and get an empty answer.
+async fn my_usage(
+    State(state): State<AppState>,
+    axum::extract::Extension(me): axum::extract::Extension<User>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (admin, conns) = {
+        let s = state.read();
+        (s.is_admin(&me), s.connections.clone())
+    };
+    let mut daemons = vec![];
+    let mut total = crate::perm::Usage::default();
+    if !admin {
+        for c in &conns {
+            // An unreachable daemon is shown as such rather than as zero.
+            match crate::guard::usage_on(&state, c, &me.id).await {
+                Ok(u) => {
+                    total = total.add(u);
+                    daemons.push(serde_json::json!({
+                        "conn": c.id, "name": c.name, "online": true,
+                        "vms": u.vms, "vcpus": u.vcpus, "memory_mb": u.memory_mb,
+                        "storage_bytes": u.storage_bytes, "networks": u.networks,
+                    }));
+                }
+                Err(_) => daemons.push(serde_json::json!({ "conn": c.id, "name": c.name, "online": false })),
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "admin": admin,
+        "quota": me.quota,
+        "total": {
+            "vms": total.vms, "vcpus": total.vcpus, "memory_mb": total.memory_mb,
+            "storage_bytes": total.storage_bytes, "networks": total.networks,
+        },
+        "daemons": daemons,
+    })))
 }
