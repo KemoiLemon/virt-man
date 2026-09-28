@@ -7,6 +7,7 @@ import DOMPurify from "dompurify";
 import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
+import { attachLongPress, isCoarsePointer } from "./touch";
 import { parsePath, routeToPath, type Route } from "./route";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
@@ -62,6 +63,17 @@ function setHtml(el: Element, html: string) {
   // Every render path funnels through here, so this is the one place that has
   // to swap native <select> elements for the themed listbox.
   enhanceSelects(el);
+  // iOS capitalises the first letter of a field and autocorrects as you type,
+  // which quietly mangles hostnames, tokens, IP addresses and pool names. Done
+  // here, after sanitising, because this is the single point every field in the
+  // app is rendered through -- login, setup, Add Server and every modal and
+  // form included. `autocomplete` is deliberately left alone, so password
+  // managers and the login flow keep working.
+  for (const f of el.querySelectorAll("input, textarea")) {
+    f.setAttribute("autocapitalize", "off");
+    f.setAttribute("autocorrect", "off");
+    f.setAttribute("spellcheck", "false");
+  }
 }
 
 /// What an empty list shows: a line saying so, and a small button to create
@@ -179,11 +191,31 @@ let restoringRoute = false;
 function syncUrl() {
   const path = routeToPath(currentRoute(), connections);
   if (location.pathname === path) return;
+  // A real navigation scrolled the drawer away with the page it belonged to.
+  // Closing it HERE and nowhere else is deliberate: this function is the one
+  // funnel every way of navigating passes through (tree, cards, tabs, context
+  // menu, palette, Back/Forward), and the early return above -- which exists so
+  // the 1s poll adds no history -- is also what keeps that poll from shutting a
+  // drawer the user just opened. A closer in each call site would go stale the
+  // first time someone adds a way to navigate.
+  closeDrawer();
   // Restoring a URL (boot, Back/Forward) may normalise it -- a deleted node
   // falls back to "/". That must replace the entry: pushing would add a
   // duplicate at boot and discard the forward history on Back.
   if (restoringRoute) history.replaceState(null, "", path);
   else history.pushState(null, "", path);
+}
+
+// ----------------------------------------------------------- phone shell
+// The sidebar is an off-canvas drawer below 820px; mobile.css does the layout
+// and this is the only state that drives it.
+
+function toggleDrawer(open: boolean) {
+  document.body.classList.toggle("nav-open", open);
+}
+
+function closeDrawer() {
+  toggleDrawer(false);
 }
 
 /// Adopt the view named by the URL. Used at start-up and on Back/Forward.
@@ -594,9 +626,11 @@ function renderApp() {
   const app = $("#app");
 setHtml(app, `
     <div class="topbar">
+      <button class="btn icon mobile-only" id="nav-btn" title="Servers and guests">${ic.menu()}</button>
       <span class="brand">virt-<span>man</span></span>
       <span class="host">web${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
       <span class="topbar-quick">
+        <button class="btn icon mobile-only" id="palette-btn" title="Commands">${ic.logs()}</button>
         <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
         ${canAdmin() ? `<button class="btn icon" id="admin-btn" title="Admin panel">${ic.admin()}</button>` : ""}
         ${authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign out">${ic.logout()}</button>`}
@@ -610,8 +644,13 @@ setHtml(app, `
       <div class="pane">
         <div class="detail" id="content"></div>
       </div>
-    </div>`);
+    </div>
+    <div class="nav-scrim" id="nav-scrim"></div>`);
 
+  closeDrawer();
+  $("#nav-btn").onclick = () => toggleDrawer(true);
+  $("#nav-scrim").onclick = closeDrawer;
+  $("#palette-btn").onclick = openCommandPalette;
   $("#theme-btn").onclick = toggleTheme;
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
   if ($("#admin-btn")) $("#admin-btn").onclick = openAdmin;
@@ -1111,24 +1150,40 @@ function contentMenuItems(target: Element): CtxItem[] | null {
   return null;
 }
 
-/// Right-click opens the actions for whatever resource is under the cursor:
-/// any row in the sidebar, and the cards, dashboard rows, tabs and page header
-/// in the content pane. Delegated from `document` so re-rendering never stacks
-/// listeners. Anywhere else the native menu is left alone, so copy/paste still
-/// works in the XML and log panes and in every form field.
-document.addEventListener("contextmenu", (e) => {
-  const target = e.target as Element | null;
-  if (!target?.closest) return;
+/// Open the actions for whatever resource is under `target`, at viewport
+/// coordinates. Returns whether anything was offered.
+///
+/// This is the whole of the right-click behaviour, and touch reuses it: a
+/// long press on a phone has to open the SAME menu, built by the same `*Menu`
+/// functions, or every action would need a second, touch-only definition.
+function menuAt(target: Element | null, x: number, y: number): boolean {
+  if (!target?.closest) return false;
   let items: CtxItem[] | null = null;
   if (target.closest(".list-pane")) {
     items = treeMenuItems(target.closest(".tree-row") as HTMLElement | null);
   } else if (target.closest("#content")) {
     items = contentMenuItems(target);
   }
-  if (!items) return;
-  e.preventDefault();
-  openContextMenu(e.clientX, e.clientY, items);
+  if (!items) return false;
+  openContextMenu(x, y, items);
+  return true;
+}
+
+/// Right-click opens the actions for whatever resource is under the cursor:
+/// any row in the sidebar, and the cards, dashboard rows, tabs and page header
+/// in the content pane. Delegated from `document` so re-rendering never stacks
+/// listeners. Anywhere else the native menu is left alone, so copy/paste still
+/// works in the XML and log panes and in every form field.
+document.addEventListener("contextmenu", (e) => {
+  if (menuAt(e.target as Element | null, e.clientX, e.clientY)) e.preventDefault();
 });
+
+// A long press is the phone's right-click. iOS WebKit never fires
+// `contextmenu` at all, so without this NOTHING in the sidebar or on a card is
+// reachable on a phone — Start, Stop, Delete and Add Resource have no other
+// surface. The handler returning false leaves the press to the platform, which
+// is what keeps the copy callout in the XML and log panes.
+attachLongPress(document, (x, y, target) => menuAt(target, x, y));
 
 /// Refresh the guest list backing the tree for the selected server.
 async function refreshTreeVms() {
@@ -2721,23 +2776,22 @@ function fwOpt(list: string[], sel: string, labels?: Record<string, string>): st
 /// once per editor open and read lazily by the suggesters, so the list can
 /// arrive after the rule table has already painted.
 async function collectIpCandidates(conn: string): Promise<string[]> {
-  const out = new Set<string>();
   const nets = await api.get<NetworkSummary[]>(`/proxy/${conn}/networks`).catch(() => []);
   if (!Array.isArray(nets)) return [];
-  await Promise.all(nets.map(async (n) => {
+  // Each network contributes the addresses a rule might name; the callback
+  // returns them rather than adding to an outer Set, so every arm of it
+  // returns a value (array-callback-return).
+  const found = await Promise.all(nets.map(async (n) => {
     const base = `/proxy/${conn}/networks/${encodeURIComponent(n.name)}`;
     const [ipam, hosts] = await Promise.all([
       api.get<IpamInfo>(`${base}/ipam`).catch(() => null),
       api.get<{ hosts: IpamHost[] }>(`${base}/hosts`).catch(() => null),
     ]);
-    if (ipam) {
-      out.add(ipam.gateway);
-      out.add(ipam.range_start);
-      out.add(ipam.range_end);
-    }
-    for (const h of hosts?.hosts ?? []) out.add(h.ip);
+    const addrs = (hosts?.hosts ?? []).map((h) => h.ip);
+    if (ipam) addrs.push(ipam.gateway, ipam.range_start, ipam.range_end);
+    return addrs;
   }));
-  return [...out].sort();
+  return [...new Set(found.flat())].sort();
 }
 
 /// Offer IP suggestions on a rule table's source/dest inputs. Called after
@@ -3497,6 +3551,13 @@ async function renderVmBody(vm: string) {
           m.textContent = msg ?? "";
           m.classList.toggle("hidden", !msg);
         }
+      }, (z) => {
+        // A pinch changes the zoom without going near the toolbar, so the
+        // label and the Ctrl+wheel stepping base have to follow it rather than
+        // sit on whatever the last button click left behind.
+        consoleZoom = z;
+        const b = $("#con-zoom-reset");
+        if (b) b.textContent = zoomLabel(z);
       });
 
       if (!con) {
@@ -3510,7 +3571,9 @@ async function renderVmBody(vm: string) {
         return;
       }
 
-      setHint("Click the screen to grab input. Ctrl+wheel zooms.");
+      setHint(isCoarsePointer()
+        ? "Tap to click, drag to drag, two-finger to scroll, pinch to zoom."
+        : "Click the screen to grab input. Ctrl+wheel zooms.");
 
       const setZoomLabel = () => {
         const b = $("#con-zoom-reset");
@@ -3726,13 +3789,14 @@ async function renderVmBody(vm: string) {
             api.get<{ hosts: IpamHost[] }>(`${base}/hosts`),
           ]);
           netIpam.set(name, { ipam, hosts: h.hosts });
-          return;
-        } catch { /* not served here (no IPv4 subnet): no IPAM for it */ }
-        // Both this and the return in the try are for array-callback-return,
-        // which wants a return on each arm of the try/catch. Nothing consumes
-        // the value; the outer return alone would run the same at runtime, so
-        // do not "tidy" the one above away.
-        return;
+          return null;
+        } catch {
+          // Not served here (no IPv4 subnet): no IPAM for it. Both this and the
+          // return in the try are for array-callback-return, which wants a
+          // return on each arm of the try/catch; nothing consumes the value,
+          // so do not "tidy" one of them away.
+          return null;
+        }
       }));
     } catch (e) {
       setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);

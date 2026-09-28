@@ -22,6 +22,7 @@ import HardDrive from "@phosphor-icons/core/assets/fill/hard-drive-fill.svg?raw"
 import KeyRound from "@phosphor-icons/core/assets/fill/key-fill.svg?raw";
 import Keyboard from "@phosphor-icons/core/assets/fill/keyboard-fill.svg?raw";
 import LayoutDashboard from "@phosphor-icons/core/assets/fill/squares-four-fill.svg?raw";
+import List from "@phosphor-icons/core/assets/fill/list-fill.svg?raw";
 import ListSearch from "@phosphor-icons/core/assets/fill/list-magnifying-glass-fill.svg?raw";
 import Lock from "@phosphor-icons/core/assets/fill/lock-fill.svg?raw";
 import LogOut from "@phosphor-icons/core/assets/fill/sign-out-fill.svg?raw";
@@ -106,6 +107,8 @@ export const ic = {
   chevron: svg(ChevronDown),
   // Resource tree + dashboard
   datacenter: svg(LayoutDashboard),
+  /// Phone-only: opens the sidebar drawer.
+  menu: svg(List),
   server: svg(Server),
   logs: svg(ListSearch),
   offline: svg(Plugs),

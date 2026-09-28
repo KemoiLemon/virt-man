@@ -1,8 +1,10 @@
 /* Ordered theme layer, mirroring vm-man's stylesheet order:
    base (variables + primitives) -> views (tree/tabbar/listbox) ->
-   dashboard (widgets) -> density (sizing overrides, loaded last). */
+   dashboard (widgets) -> density (sizing overrides) -> mobile (phone
+   layout, loaded last). */
 @import "./styles/base.css";
 @import "./styles/views.css";
 @import "./styles/dashboard.css";
 @import "./styles/hardware.css";
 @import "./styles/density.css";
+@import "./styles/mobile.css";

@@ -65,6 +65,16 @@ html[data-theme="light"] {
 
 html, body { height: 100%; }
 
+/* Safe-area insets, declared once so CSS and JS read the same number (touch.ts
+   subtracts the bottom one when clamping a popover). All 0 unless the viewport
+   meta carries `viewport-fit=cover`. */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
 body {
   background: var(--bg);
   color: var(--fg);
@@ -74,9 +84,24 @@ body {
   overflow: hidden;
   -webkit-user-select: none;
   user-select: none;
+  /* Touch hygiene, for every viewport. The highlight box is the OS painting a
+     grey rounded rectangle over our square UI, and `manipulation` is what
+     stops a stray double-tap from zooming the page; it keeps pinch-zoom, and
+     an element that needs the raw gesture (the console, the crop stage)
+     overrides it with `touch-action: none`.
+     Deliberately NOT `-webkit-touch-callout: none`: that would also kill the
+     native long-press copy callout in the XML and log panes, which are
+     supposed to keep it. The resource surfaces that own the long press
+     instead are listed in mobile.css. */
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 #app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .hidden { display: none !important; }
+/* Chrome that only exists on a phone (the drawer button, the palette button,
+   the console's on-screen keys). mobile.css reveals it; here it is inert, so
+   there is no second place to remember when adding one. */
+.mobile-only { display: none; }
 /* The `hidden` attribute must beat layout display (the listbox popover is
    display:flex), or a parked popover still lays out and shows as a stray box.
    Same rule as vm-man's console.css. */
@@ -425,6 +450,10 @@ table.grid tr:hover td { background: var(--hover); }
   position: relative;
   outline: none;
   border: 1px solid var(--line);
+  /* The viewer claims every gesture on the screen. Without this, WebKit takes a
+     pinch for page zoom and a drag for scrolling, and neither reaches the guest
+     -- and a page zoom cannot be undone by the page. */
+  touch-action: none;
 }
 /* The viewer owns the canvas' pixel size; margin centres it in the stage. */
 .console-stage canvas { display: block; margin: auto; }

@@ -182,3 +182,103 @@ test("zoom stepping clamps and round-trips through fit", () => {
   for (let i = 0; i < 100; i++) z = step(z, -1);
   assert.equal(z, 0.25, "clamps at 25%");
 });
+
+// ---- touch press state machine --------------------------------------------
+//
+// The phone's gesture vocabulary, as a pure reducer. These are the bugs that
+// are invisible in review and infuriating in use: a press sent before the
+// gesture is known is a phantom click in someone's desktop, and a press never
+// released is a button stuck down until they notice.
+//
+// Run: pnpm test
+
+const P = (x, y) => ({ x, y });
+
+test("a touch sends nothing until the gesture is known", () => {
+  // The whole reason for deferring: a press at pointerdown would click before
+  // we can tell a tap from a drag from a right-click.
+  const held = con.touchDown(P(10, 10));
+  assert.equal(held.phase, "held");
+  assert.deepEqual(con.touchMove(held, P(11, 11)).sends, [],
+    "a move inside the slop stays silent");
+});
+
+test("a tap is one press and one release at the same point", () => {
+  const r = con.touchUp(con.touchDown(P(10, 10)), P(10, 10));
+  assert.equal(r.tap, true);
+  assert.deepEqual(r.sends, [
+    { x: 10, y: 10, buttons: 1 },
+    { x: 10, y: 10, buttons: 0 },
+  ]);
+});
+
+test("a drag presses once, at the point the finger landed", () => {
+  // Not at the point the slop was crossed: the guest's drag has to start where
+  // the user aimed.
+  const r = con.touchMove(con.touchDown(P(10, 10)), P(40, 10));
+  assert.equal(r.state.phase, "dragging");
+  assert.deepEqual(r.sends, [
+    { x: 10, y: 10, buttons: 1 },
+    { x: 40, y: 10, buttons: 1 },
+  ]);
+
+  const r2 = con.touchMove(r.state, P(50, 10));
+  assert.deepEqual(r2.sends, [{ x: 50, y: 10, buttons: 1 }], "then it follows");
+
+  assert.deepEqual(con.touchUp(r2.state, P(50, 10)).sends,
+    [{ x: 50, y: 10, buttons: 0 }], "and releases where it stopped");
+});
+
+test("a drag presses button 1 exactly once, at the start point", () => {
+  // A second press at the start point mid-drag is a dropped selection in the
+  // guest, and a press that is not at the start point starts the drag in the
+  // wrong place.
+  let s = con.touchDown(P(0, 0));
+  const presses = [];
+  for (const x of [5, 20, 40, 60, 90]) {
+    const r = con.touchMove(s, P(x, 0));
+    s = r.state;
+    presses.push(...r.sends.filter((p) => p.buttons === 1));
+  }
+  assert.equal(presses.filter((p) => p.x === 0).length, 1,
+    "the press lands at the start point once");
+  assert.deepEqual(presses.map((p) => p.x), [0, 20, 40, 60, 90],
+    "everything after it just follows the finger");
+});
+
+test("a long press is a right-click and ends the gesture", () => {
+  const r = con.touchLongPress(con.touchDown(P(7, 9)));
+  assert.deepEqual(r.sends, [
+    { x: 7, y: 9, buttons: 4 },
+    { x: 7, y: 9, buttons: 0 },
+  ]);
+
+  // Nothing after it: the finger is still down, and a stray press or a
+  // released-click is a phantom interaction.
+  assert.deepEqual(con.touchMove(r.state, P(80, 80)).sends, []);
+  const up = con.touchUp(r.state, P(80, 80));
+  assert.deepEqual(up.sends, []);
+  assert.equal(up.tap, false, "and it is not also a click");
+});
+
+test("only a resting finger is a long press", () => {
+  // A finger that travelled already became a drag, so the timer must not
+  // convert it into a right-click on top of that.
+  const dragging = con.touchMove(con.touchDown(P(0, 0)), P(60, 0)).state;
+  assert.deepEqual(con.touchLongPress(dragging).sends, []);
+});
+
+test("an abandoned gesture releases a held button", () => {
+  // Two fingers arriving mid-drag, or a pointercancel: the guest must not be
+  // left holding button 1.
+  const dragging = con.touchMove(con.touchDown(P(0, 0)), P(60, 0)).state;
+  assert.deepEqual(con.touchUp(dragging, P(60, 0)).sends,
+    [{ x: 60, y: 0, buttons: 0 }]);
+});
+
+test("the button mask is the RFB one, not the DOM's", () => {
+  // 1 left, 4 right (bit 2). The DOM's MouseEvent.button numbers are a
+  // different scheme, and mixing them up is a right-click that clicks.
+  assert.deepEqual(con.touchUp(con.touchDown(P(1, 1)), P(1, 1)).sends[0].buttons, 1);
+  assert.deepEqual(con.touchLongPress(con.touchDown(P(1, 1))).sends[0].buttons, 4);
+});

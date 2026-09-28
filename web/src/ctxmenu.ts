@@ -5,6 +5,8 @@
 // Built from DOM nodes (like the themed listbox) so labels are assigned via
 // textContent, never interpolated into markup.
 
+import { visualHeight } from "./touch";
+
 export interface CtxItem {
   label: string;
   /** Icon markup from `ic`, already an SVG string. */
@@ -100,7 +102,10 @@ export function openContextMenu(x: number, y: number, items: CtxItem[]) {
 
   const r = el.getBoundingClientRect();
   const left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4));
-  const top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4));
+  // Bounded by the box that is actually visible, not innerHeight: on a phone
+  // the keyboard does not change innerHeight, and the home bar overlays the
+  // page rather than shortening it.
+  const top = Math.max(4, Math.min(y, visualHeight() - r.height - 4));
   el.style.left = `${left}px`;
   el.style.top = `${top}px`;
 

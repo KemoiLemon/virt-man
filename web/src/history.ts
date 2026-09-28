@@ -63,7 +63,7 @@ export function bindChartHover(doc: Document = document) {
   let tip: HTMLElement | null = null;
   let mark: HTMLElement | null = null;
   const hide = () => { tip?.remove(); mark?.remove(); tip = mark = null; };
-  doc.addEventListener("pointermove", (e) => {
+  const show = (e: PointerEvent) => {
     const svg = (e.target as Element | null)?.closest?.("svg.spark") as SVGElement | null;
     if (!svg) return hide();
     const values = (svg.dataset.v ?? "").split(",").map((s) => (s === "" ? null : Number(s)));
@@ -91,7 +91,12 @@ export function bindChartHover(doc: Document = document) {
     const left = Math.max(4, Math.min(doc.documentElement.clientWidth - w - 4, x - w / 2));
     tip.style.left = `${left}px`;
     tip.style.top = `${Math.max(4, box.top - tip.offsetHeight - 6)}px`;
-  });
+  };
+  // pointerdown as well as pointermove: a touch device has no hover, so a tap
+  // is the only way to read a point. Tapping away (the `!svg` branch above)
+  // dismisses it again.
+  doc.addEventListener("pointermove", show);
+  doc.addEventListener("pointerdown", show);
   doc.addEventListener("pointerleave", hide);
   doc.addEventListener("scroll", hide, true);
 }

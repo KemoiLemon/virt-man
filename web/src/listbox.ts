@@ -6,6 +6,7 @@
 // `(el as HTMLSelectElement).value` read/write in the app works unchanged.
 
 import { chevronSvg } from "./icons";
+import { visualHeight } from "./touch";
 
 interface Enhanced extends HTMLSelectElement {
   _trigger?: HTMLButtonElement;
@@ -66,7 +67,10 @@ function openSelect(select: HTMLSelectElement, trigger: HTMLButtonElement) {
   const p = getPopover();
   const r = trigger.getBoundingClientRect();
   p.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 200))}px`;
-  p.style.top = `${Math.min(r.bottom + 3, window.innerHeight - 50)}px`;
+  // visualHeight, not innerHeight: innerHeight does not shrink while the iOS
+  // keyboard is up, so a select near the bottom of a phone screen would be
+  // positioned behind it.
+  p.style.top = `${Math.min(r.bottom + 3, visualHeight() - 50)}px`;
   p.style.minWidth = `${r.width}px`;
 
   for (const opt of Array.from(select.options)) {

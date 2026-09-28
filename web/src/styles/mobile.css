@@ -1,0 +1,163 @@
+/* Phone layout, loaded LAST so it can override the sizing layers.
+   Read MOBILE.md before changing anything here — every number below is tied to
+   a measured iOS behavior, not a taste.
+
+   The breakpoint is 820px, not 375-600px, because landscape on an iPhone 12
+   mini is 812 CSS px wide: a narrower one would silently drop the phone layout
+   — and the usable single-column content pane with it — when the phone is
+   turned sideways. */
+@media (max-width: 820px) {
+  /* 100vh on iOS is the LARGE viewport (toolbars retracted), so a full-height
+     shell is clipped whenever the toolbar is showing. dvh tracks what is
+     actually visible. */
+  html { height: 100dvh; }
+  body {
+    /* The notch and the home bar. Insets are often 0 in portrait and real in
+       landscape, which is why this is env() rather than a constant. */
+    padding: var(--safe-top) var(--safe-right)
+             var(--safe-bottom) var(--safe-left);
+    font-size: 14px;
+  }
+
+  /* ---------------------------------------------------------- the drawer */
+  /* One column: the sidebar leaves the flow and becomes an overlay, or the
+     300px minimum in density.css eats a 375px screen whole. */
+  .layout { grid-template-columns: 1fr; }
+  .list-pane {
+    position: fixed;
+    z-index: 40;
+    inset: 0 auto 0 0;
+    width: min(88vw, 320px);
+    transform: translateX(-100%);
+    transition: transform .18s ease-out;
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+    box-shadow: none;
+  }
+  body.nav-open .list-pane { transform: none; box-shadow: 0 0 40px var(--shade); }
+  .nav-scrim {
+    position: fixed; inset: 0; z-index: 39;
+    background: var(--shade); display: none;
+  }
+  body.nav-open .nav-scrim { display: block; }
+
+  /* On a phone the sidebar is an overlay, so the two buttons that live there
+     on desktop move to the topbar. */
+  .mobile-only { display: inline-flex; }
+
+  /* ------------------------------------------------------------ topbar */
+  .topbar { gap: 8px; padding: 0 10px; }
+  .brand { font-size: 13px; letter-spacing: 1px; }
+  .host { font-size: 10px; }
+
+  /* ---------------------------------------------------------- content */
+  .detail { padding: 14px 12px; overflow-x: auto; }
+  .dtitle { font-size: 16px; }
+  .actions { gap: 6px; }
+  .tabbar { margin-bottom: 14px; }
+  .tab { padding: 10px 11px; }
+
+  /* Wide tables scroll sideways rather than squeezing cells into unreadable
+     columns; `.detail` and `.modal-body` above and below are the scrollers. */
+  table.grid td, table.grid th { white-space: nowrap; }
+  .al-filters { grid-template-columns: 1fr 1fr; }
+  .al-filters .al-grow { grid-column: span 2; }
+
+  /* Fixed-column grids collapse. The auto-fit ones (minmax(260px,1fr) etc.)
+     already fall to one column at this width and are left alone. */
+  .grid2, .fw-policy, .hw-body, .add-hw-body, .vm-top, .vm-mid { grid-template-columns: 1fr; }
+  .card-grid { grid-template-columns: 1fr; }
+  .create-resource-grid { grid-template-columns: 1fr 1fr; }
+  /* The hardware table's label column is minmax(150px,210px): there is no room
+     for a label beside a control, so they stack. */
+  .hwtable .hwrow { grid-template-columns: 20px 1fr; }
+  .hwtable .hwrow .hwctl { grid-column: 2; }
+  .crop-stage { height: 200px; }
+
+  /* ----------------------------------------------------------- modals */
+  /* inset() on the flex container also insets the modal it centres, so a
+     dialog cannot land under the notch or the home bar. */
+  .modal-back {
+    padding: var(--safe-top) var(--safe-right)
+             var(--safe-bottom) var(--safe-left);
+  }
+  .modal, .al-modal, .hw-modal, .add-hw-modal, .action-modal {
+    width: 100%; max-width: 100vw;
+  }
+  .modal { max-height: 100dvh; }
+  .hw-modal, .add-hw-modal { height: auto; max-height: 100dvh; }
+  .modal-body { overflow-x: auto; }
+  .modal-foot { flex-wrap: wrap; }
+  .tayne-back { padding-top: max(8vh, var(--safe-top)); }
+  .tayne { max-height: 70dvh; }
+
+  /* ---------------------------------------------------------- console */
+  .console-bar { gap: 8px; padding-bottom: 8px; }
+  /* The guest screen is what matters; the toolbar and hint are overhead, so
+     the stage takes most of what is left whatever the orientation. */
+  .console-stage { height: clamp(160px, calc(100dvh - 250px), 900px); }
+  .console-keys {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding-top: 8px; padding-bottom: var(--safe-bottom);
+    font-size: 11px; letter-spacing: 1px;
+  }
+  /* Sticky keys read as pressed; a momentary key is a normal button. */
+  .console-key.on { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+}
+
+/* ------------------------------------------------------- touch pointers
+   Deliberately not limited to the width breakpoint: a tablet or a phone in
+   landscape is a coarse pointer at any width, and the 16px field size is a
+   platform requirement rather than a layout choice. */
+@media (pointer: coarse) {
+  /* Below 16px iOS zooms the page when a field is focused and does not zoom
+     back: one tap leaves the whole app stuck at 1.3x, with the layout wider
+     than the screen for the rest of the session. This is the single most
+     important rule in this file. */
+  input, textarea, .select-trigger { font-size: 16px; }
+  /* Touch targets: 24px is fiddly, ~44px is the guideline. */
+  .btn { min-height: 36px; }
+  .btn.icon { min-width: 36px; }
+  .tree-row { padding-top: 11px; padding-bottom: 11px; }
+  .tab { padding-top: 12px; padding-bottom: 12px; }
+  .ctxmenu-item, .select-option { padding-top: 10px; padding-bottom: 10px; }
+  .x { padding: 8px; }
+  /* The toast dock sits over the home bar otherwise. */
+  #toast-dock { bottom: calc(16px + var(--safe-bottom)); }
+  /* Hover-revealed chrome is dead weight on a touch device; the alt text the
+     title attribute provides is not. Nothing here relied on hover for
+     function, only for polish, and the focus rings cover keyboard use. */
+  .toast { max-width: min(320px, calc(100vw - 32px)); }
+
+  /* iOS shows its own long-press callout over a rendered element. On the
+     surfaces where the app owns the long press (the sidebar rows and the
+     content-pane resources and tabs -- exactly the set `menuAt`'s
+     `contentMenuItems` matches) that callout would land on top of our menu, so
+     it is suppressed there and ONLY there. The XML and log panes, and every
+     field, keep the native callout, so copy/paste still works in them. */
+  .tree-row, .dhead, .tab,
+  [data-open], [data-vm-open], [data-dc-vm], [data-net-open], [data-dash-net],
+  [data-pool-open], [data-dash-pool], [data-open-conn-row], [data-dc-dash-conn],
+  tr.row-open { -webkit-touch-callout: none; }
+}
+
+/* --------------------------------------------------- console soft keyboard
+   The field that raises the iOS keyboard. Deliberately 1px and transparent
+   rather than `display: none` or `visibility: hidden`, both of which make iOS
+   decline to show a keyboard at all. It is never read from: keys are still
+   reported by the console's keydown/keyup listeners, which preventDefault every
+   one of them, so nothing accumulates here and there is no second reporting
+   path to keep in sync.
+
+   Not inside a media query: it is created only when a coarse pointer is
+   detected, and a tablet in landscape is a coarse pointer above this file's
+   width breakpoint too. */
+.console-kbd {
+  position: absolute; top: 0; left: 0;
+  width: 1px; height: 1px; min-height: 0;
+  padding: 0; margin: 0; border: 0;
+  opacity: 0; resize: none; pointer-events: none;
+  /* Below 16px iOS zooms the page on focus, which would be a zoom of OUR page
+     rather than of the guest -- the one thing this element must not do. */
+  font-size: 16px;
+}
