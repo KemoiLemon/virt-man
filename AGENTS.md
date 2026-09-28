@@ -396,36 +396,47 @@ DNS (gateway `:53`, UDP+TCP) for each active managed network, and prunes.
 **Port forwards must be admitted past libvirt's own network filter.**
 (`daemon/src/firewall.rs` `allow_forwarded`.) Our DNAT is correct on its own
 and still does not work, because libvirt renders, per network, a chain that
-accepts only replies to guest-initiated flows and rejects everything else:
+accepts only replies to guest-initiated flows and rejects everything else. On
+its **iptables** backend that is `LIBVIRT_FWI`:
 
 ```text
 -A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 -A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
 ```
 
+and on its **nftables** backend the same two rules live in
+`ip libvirt_network guest_input` (`oif "virbr1" ... ct state established,related accept`
+followed by `oif "virbr1" ... reject`). Which backend a host uses is not
+visible from our config — `/etc/libvirt/network.conf` leaves `firewall_backend`
+commented and libvirt picks — and the two hosts that have run this both differ:
+one is iptables, the local host is nftables. So `allow_forwarded` tries both.
+
 A forward's first packet is NEW, not established, so libvirt throws it away
 after our DNAT already rewrote it — the guest never sees the connection and
-the client is told "connection refused", since the REJECT answers with ICMP
-port-unreachable. Two things make this hard to read from the symptom:
+the client is told "connection refused", since the reject answers with ICMP
+port-unreachable. Three things make this hard to read from the symptom:
 
 - **Nothing in our own table can fix it.** A verdict in one chain does not stop
-  a later chain of the same hook from rejecting. Measured: an `accept` in our
-  `vm-forward` (`priority filter - 1`) does not save the packet, and neither
-  does a DNAT with it. The accept has to sit *inside libvirt's chain*, ahead of
-  its reject — and libvirt has no way to declare a port forward of ours
-  (`network.rng` has no such element), so nowhere else will do.
-- **"Permission denied"-style symptoms mislead.** A capture filtered to the
-  forward's own port shows only the inbound SYN, no reply at all, because the
-  answer is ICMP. Attribute it with libvirt's own counter instead: the reject
-  rule counts packets, and it rises by exactly one per connection attempt
-  (34 → 37 → 39 across five attempts, measured).
+  a later chain of the same hook from rejecting. Measured on both backends: an
+  `accept` in our `vm-forward` (`priority filter - 1`) does not save the packet,
+  and neither does a DNAT with it. The accept has to sit *inside libvirt's
+  chain*, ahead of its reject — and libvirt has no way to declare a port forward
+  of ours (`network.rng` has no such element), so nowhere else will do.
+- **A packet capture misleads.** Filtered to the forward's own port it shows
+  only the inbound SYN and no reply at all, because the answer is ICMP.
+  Attribute it with libvirt's own counter instead: the reject rule counts
+  packets, and it rises by exactly one per connection attempt (34 → 37 → 39
+  across five attempts on the iptables host; 0 → 3 locally on nftables).
+- **The two backends spell the matcher differently.** nftables wants
+  `ct status dnat` and refuses `ct state dnat` ("Could not parse conntrack
+  state"); iptables takes `--ctstate DNAT`. Do not unify them.
 
-So `allow_forwarded` inserts an accept scoped to `ctstate DNAT` — exactly the
-connections we translated, leaving libvirt's filtering of everything else
-intact. It runs on every firewall apply, and the supervisor re-asserts it every
-pass, because **starting or restarting a network, and a libvirtd restart, make
-libvirt rewrite that chain without it**. Anything that recreates
-`LIBVIRT_FWI` silently re-breaks forwarding until the next pass.
+`allow_forwarded` inserts an accept scoped to translated traffic only — `ct
+status dnat`/`--ctstate DNAT`, exactly the connections we DNAT'd, leaving
+libvirt's filtering of everything else intact. It runs on every firewall apply,
+and the supervisor re-asserts it every pass, because **starting or restarting a
+network, and a libvirtd restart, make libvirt rewrite those chains without it**.
+Anything that recreates them silently re-breaks forwarding until the next pass.
 
 **Access logs record every guest connection, cheaply.** (`daemon/src/ipam/flows.rs`,
 `web/server/src/access.rs`.) The daemon subscribes to conntrack NEW/DESTROY

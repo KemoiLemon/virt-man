@@ -526,14 +526,30 @@ pub async fn apply_script(script: &str) -> Result<(), String> {
     }
 }
 
-/// libvirt's chain for traffic entering a network. It accepts replies to
-/// guest-initiated flows and then rejects everything else, per network.
+/// libvirt's chain for traffic entering a network, on its **iptables**
+/// backend. It accepts replies to guest-initiated flows and then rejects
+/// everything else, per network.
 const LIBVIRT_NET_IN: &str = "LIBVIRT_FWI";
+
+/// Where libvirt's **nftables** backend keeps the same filter: a table of its
+/// own, with the entering-traffic rules in `guest_input`.
+const LIBVIRT_NFT_TABLE: &str = "libvirt_network";
+const LIBVIRT_NFT_CHAIN: &str = "guest_input";
+
+/// Marks the rules we insert, so re-asserting cannot stack copies and a later
+/// reader can tell ours from libvirt's own.
+const OUR_MARK: &str = "virt-man dnat";
+
+/// What one libvirt firewall backend had to say:
+/// - `Ok(true)`  — this backend is in use and forwards are now admitted;
+/// - `Ok(false)` — this backend is not in use here, so nothing to do;
+/// - `Err`       — the backend is in use and could not be satisfied.
+type Backend = Result<bool, String>;
 
 /// The iptables arguments that admit a network's DNAT'd traffic through
 /// libvirt's filter. Pure, so the rule's shape is unit-testable.
 ///
-/// `ctstate DNAT` is the whole point: it matches only connections that were
+/// `--ctstate DNAT` is the whole point: it matches only connections that were
 /// destination-translated, i.e. exactly the port forwards, and leaves
 /// libvirt's filtering of everything else untouched.
 pub fn forward_accept_rule(subnet: &str) -> Vec<String> {
@@ -552,53 +568,56 @@ pub fn forward_accept_rule(subnet: &str) -> Vec<String> {
     .collect()
 }
 
-/// Let a network's port forwards past libvirt's own firewall.
+/// The nftables arguments for the same job. Pure, so it is unit-testable.
 ///
-/// libvirt renders, per network, an accept for `related,established` traffic
-/// into the bridge followed by a reject of everything else:
-///
-/// ```text
-/// -A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-/// -A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
-/// ```
-///
-/// A forwarded connection's first packet is NEW, not established, so libvirt
-/// throws it away — *after* our own DNAT has rewritten it and our own rules
-/// have accepted it. The guest never sees the connection and the client is
-/// told "connection refused", because libvirt's REJECT answers with ICMP
-/// port-unreachable. Measured on a real host: libvirt's reject counter rises by
-/// exactly one per connection attempt, and the DNAT itself is fine.
-///
-/// Nothing in our own table can prevent that. A verdict in one chain does not
-/// stop a later chain of the same hook from rejecting, so accepting at
-/// `priority filter - 1` — which is what this table already does for its own
-/// rules — does not save the packet. The accept has to sit inside libvirt's
-/// chain, ahead of its reject. libvirt has no way to declare a port forward
-/// itself (`network.rng` has no such element), so there is nowhere else for it
-/// to go.
-///
-/// Idempotent, and safe to call on a timer: libvirt rewrites its chains when a
-/// network is (re)started or libvirtd restarts, which silently undoes this, so
-/// the caller re-asserts it rather than applying it once.
-pub async fn allow_forwarded(subnet: &str) -> Result<(), String> {
+/// The matcher is spelled `ct status dnat` here, not `ct state dnat`:
+/// nftables keeps the translation flags in the conntrack *status* field, and
+/// rejects `ct state dnat` outright ("Could not parse conntrack state"), where
+/// iptables accepts it as a pseudo-state. Same meaning, different spelling, so
+/// it is worth pinning: this one fails loudly when wrong, but a reader
+/// "unifying" the two spellings would break it.
+pub fn forward_accept_nft(subnet: &str) -> Vec<String> {
+    [
+        "insert",
+        "rule",
+        "ip",
+        LIBVIRT_NFT_TABLE,
+        LIBVIRT_NFT_CHAIN,
+        "ip",
+        "daddr",
+        subnet,
+        "ct",
+        "status",
+        "dnat",
+        "counter",
+        "accept",
+        "comment",
+        OUR_MARK,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Admit a network's DNAT'd traffic into libvirt's **iptables** filter.
+async fn allow_via_iptables(subnet: &str) -> Backend {
     use tokio::process::Command;
     let rule = forward_accept_rule(subnet);
 
     // -C asks without changing anything, so re-asserting cannot stack copies.
-    let already = Command::new("iptables")
+    match Command::new("iptables")
         .arg("-C")
         .arg(LIBVIRT_NET_IN)
         .args(&rule)
         .output()
-        .await;
-    let Ok(already) = already else {
-        // No iptables at all: libvirt's chains cannot exist either, so there
-        // is nothing to get past. Quiet, because the supervisor calls this
-        // every few seconds and a host without iptables is not an error here.
-        return Ok(());
-    };
-    if already.status.success() {
-        return Ok(());
+        .await
+    {
+        // Already there: the common case on every pass after the first.
+        Ok(o) if o.status.success() => return Ok(true),
+        // Ran, but has no such rule (and possibly no such chain).
+        Ok(_) => {}
+        // No iptables at all, so libvirt's chains cannot exist either.
+        Err(_) => return Ok(false),
     }
 
     let out = Command::new("iptables")
@@ -610,16 +629,98 @@ pub async fn allow_forwarded(subnet: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("iptables: {e}"))?;
     if out.status.success() {
-        tracing::info!("firewall: admitting DNAT'd traffic to {subnet} through libvirt");
-        return Ok(());
+        tracing::info!("firewall: admitting DNAT'd traffic to {subnet} through libvirt's iptables");
+        return Ok(true);
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    // No such chain: this libvirt does not filter networks through iptables
-    // (so there is no reject to get past), or it is not installed here.
+    // No such chain: this host's libvirt does not filter through iptables —
+    // most likely it uses the nftables backend, which the other path handles.
     if err.contains("No chain") {
-        return Ok(());
+        return Ok(false);
     }
     Err(format!("iptables -I {LIBVIRT_NET_IN}: {}", err.trim()))
+}
+
+/// Admit a network's DNAT'd traffic into libvirt's **nftables** filter.
+async fn allow_via_nftables(subnet: &str) -> Backend {
+    use tokio::process::Command;
+
+    // Reading the chain serves twice over: it says whether this host uses the
+    // nftables backend at all, and whether our rule is already in place.
+    let Ok(current) = Command::new("nft")
+        .args(["list", "chain", "ip", LIBVIRT_NFT_TABLE, LIBVIRT_NFT_CHAIN])
+        .output()
+        .await
+    else {
+        return Ok(false);
+    };
+    if !current.status.success() {
+        return Ok(false);
+    }
+    if String::from_utf8_lossy(&current.stdout).contains(OUR_MARK) {
+        return Ok(true);
+    }
+
+    // Plain `insert` prepends, putting ours ahead of libvirt's reject.
+    let out = Command::new("nft")
+        .args(forward_accept_nft(subnet))
+        .output()
+        .await
+        .map_err(|e| format!("nft: {e}"))?;
+    if out.status.success() {
+        tracing::info!("firewall: admitting DNAT'd traffic to {subnet} through libvirt's nftables");
+        return Ok(true);
+    }
+    Err(format!(
+        "nft insert into {LIBVIRT_NFT_TABLE}/{LIBVIRT_NFT_CHAIN}: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    ))
+}
+
+/// Let a network's port forwards past libvirt's own firewall.
+///
+/// libvirt renders, per network, an accept for `related,established` traffic
+/// into the bridge followed by a reject of everything else. On its iptables
+/// backend that is `LIBVIRT_FWI`:
+///
+/// ```text
+/// -A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+/// -A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
+/// ```
+///
+/// and on its nftables backend the same two rules live in
+/// `ip libvirt_network guest_input`. A forwarded connection's first packet is
+/// NEW, not established, so libvirt throws it away — *after* our own DNAT has
+/// rewritten it and our own rules have accepted it. The guest never sees the
+/// connection and the client is told "connection refused", because the reject
+/// answers with ICMP port-unreachable. Measured on real hosts, on both
+/// backends: libvirt's reject counter rises by exactly one per connection
+/// attempt, while the DNAT itself is correct.
+///
+/// Nothing in our own table can prevent that. A verdict in one chain does not
+/// stop a later chain of the same hook from rejecting, so accepting at
+/// `priority filter - 1` — which is what this table already does for its own
+/// rules — does not save the packet. The accept has to sit inside libvirt's
+/// chain, ahead of its reject. libvirt has no way to declare a port forward
+/// itself (`network.rng` has no such element), so there is nowhere else for it
+/// to go.
+///
+/// Both backends are attempted and whichever is in use is satisfied — a host
+/// uses one or the other, so the other reports that it is not present.
+/// Idempotent, and safe to call on a timer: libvirt rewrites those chains when
+/// a network is (re)started or libvirtd restarts, which silently undoes this,
+/// so the caller re-asserts it rather than applying it once.
+pub async fn allow_forwarded(subnet: &str) -> Result<(), String> {
+    let iptables = allow_via_iptables(subnet).await;
+    let nftables = allow_via_nftables(subnet).await;
+    match (iptables, nftables) {
+        // Neither backend in use: nothing to get past.
+        (Ok(false), Ok(false)) => Ok(()),
+        // One of them is in use and now admits the traffic.
+        (Ok(true), _) | (_, Ok(true)) => Ok(()),
+        // In use and unsatisfied: say so rather than pretend it worked.
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -652,8 +753,8 @@ mod tests {
 
     #[test]
     fn the_forward_accept_admits_only_translated_traffic() {
-        // This rule goes inside libvirt's own chain, ahead of the reject that
-        // would otherwise drop a port forward's first packet. It must not
+        // These rules go inside libvirt's own chains, ahead of the reject that
+        // would otherwise drop a port forward's first packet. They must not
         // widen libvirt's filtering beyond the connections we translated:
         // scoped to the network, and to DNAT'd flows only.
         let r = forward_accept_rule("10.74.0.0/24");
@@ -676,6 +777,45 @@ mod tests {
             "must not restate libvirt's established-traffic accept"
         );
         assert!(!r.iter().any(|a| a == "DROP" || a == "REJECT"));
+    }
+
+    #[test]
+    fn the_forward_accept_is_spelled_for_each_backend() {
+        // The two backends name the same concept differently. nftables keeps
+        // translation in the conntrack *status* field and refuses
+        // `ct state dnat`; iptables takes DNAT as a pseudo-state. Pinning both
+        // spellings stops a later "unification" that would parse-error on a
+        // host using the other backend.
+        let nft = forward_accept_nft("10.74.0.0/24");
+        let joined = nft.join(" ");
+        assert!(
+            joined.contains("ct status dnat"),
+            "nftables' spelling: {joined}"
+        );
+        assert!(
+            !joined.contains("ct state dnat"),
+            "which nft refuses to parse"
+        );
+        assert!(
+            joined.starts_with("insert rule"),
+            "prepended, so it beats the reject"
+        );
+        assert!(
+            joined.contains("ip daddr 10.74.0.0/24"),
+            "scoped to the network"
+        );
+        assert!(
+            joined.contains(OUR_MARK),
+            "marked, so re-asserting is idempotent"
+        );
+        assert_eq!(LIBVIRT_NFT_TABLE, "libvirt_network");
+        assert_eq!(LIBVIRT_NFT_CHAIN, "guest_input");
+
+        let iptables = forward_accept_rule("10.74.0.0/24").join(" ");
+        assert!(
+            iptables.contains("--ctstate DNAT"),
+            "iptables' spelling: {iptables}"
+        );
     }
 
     #[test]
