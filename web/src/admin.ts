@@ -1082,8 +1082,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
           ${limitMeter("Networks", u.networks, d.networks, count)}
         </div>
       </div>`;
-    }).join("")}</div>
-    ${usage.length > limited.length ? `<p class="hint">${usage.length - limited.length} user(s) have no limits and are not shown. Administrators are never limited.</p>` : ""}`
+    }).join("")}</div>`
       : `<div class="empty">No user has limits. Set them under Limits › Quotas.</div>`;
   } else if (dashTab === "ownership") {
     const byOwner = new Map<string, { name: string; vms: number; nets: number; vols: number; vcpus: number; mem: number }>();
