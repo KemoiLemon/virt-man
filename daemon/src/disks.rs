@@ -16,7 +16,6 @@
 
 use std::collections::HashSet;
 use virt::connect::Connect;
-use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
 
 /// A disk's backing store, from the domain XML.
@@ -51,7 +50,7 @@ impl DiskSource {
 /// The absolute path behind a pool+volume reference, when libvirt can resolve
 /// it.
 fn volume_path(c: &Connect, pool: &str, volume: &str) -> Option<String> {
-    let p = StoragePool::lookup_by_name(c, pool).ok()?;
+    let p = crate::libvirt::pool(c, pool).ok()?;
     let v = StorageVol::lookup_by_name(&p, volume).ok()?;
     v.get_path().ok().filter(|s| !s.is_empty())
 }

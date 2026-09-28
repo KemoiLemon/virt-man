@@ -5,7 +5,6 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use virt::domain::Domain;
-use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
 
 use super::ApiError;
@@ -50,17 +49,13 @@ fn domain_summary(d: &Domain) -> Value {
         .unwrap_or("unknown");
     let info = d.get_info().ok();
     // Display title: <title> metadata, if the guest set one.
-    let mut title = None;
-    if let Ok(xml) = d.get_xml_desc(0)
-        && let Some(i) = xml.find("<title>")
-    {
-        let rest = &xml[i + 7..];
-        if let Some(j) = rest.find("</title>") {
-            title = Some(rest[..j].trim().to_string());
-        }
-    }
+    let title = d
+        .get_xml_desc(0)
+        .ok()
+        .and_then(|x| crate::libvirt::title_of(&x));
     json!({
         "name": d.get_name().unwrap_or_default(),
+        "uuid": d.get_uuid_string().unwrap_or_default(),
         "title": title,
         "id": d.get_id().unwrap_or(0),
         "state": state,
@@ -73,7 +68,7 @@ fn domain_summary(d: &Domain) -> Value {
 
 async fn get_one(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         Ok(json!({
             "name": d.get_name().unwrap_or_default(),
             "uuid": d.get_uuid_string().unwrap_or_default(),
@@ -90,7 +85,7 @@ async fn get_one(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn get_xml(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         Ok(json!({"name": d.get_name().unwrap_or_default(), "xml": d.get_xml_desc(0)?}))
     })
     .await
@@ -137,7 +132,7 @@ async fn delete(
         .map(|v| v == "true")
         .unwrap_or(false);
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         let xml = d.get_xml_desc(0)?;
         // Decide the cleanup BEFORE undefining: the disk list comes from this
         // definition, and the in-use check must still be able to see every
@@ -163,7 +158,7 @@ async fn delete(
                 disks::DiskSource::Path(path) => {
                     StorageVol::lookup_by_path(c, path).and_then(|vol| vol.delete(0))
                 }
-                disks::DiskSource::Volume { pool, volume } => StoragePool::lookup_by_name(c, pool)
+                disks::DiskSource::Volume { pool, volume } => crate::libvirt::pool(c, pool)
                     .and_then(|p| StorageVol::lookup_by_name(&p, volume))
                     .and_then(|vol| vol.delete(0)),
             };
@@ -192,7 +187,7 @@ async fn delete(
 
 async fn get_state(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         let (state, reason) = d.get_state()?;
         Ok(json!({"name": d.get_name().unwrap_or_default(), "state": domain_state_name(state), "reason": reason}))
     })
@@ -209,7 +204,7 @@ async fn get_state(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 /// delta by elapsed wall time and the vCPU count.
 async fn get_stats(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         let info = d.get_info()?;
         let node = c.get_node_info()?;
         // Balloon stats are only available for running guests with a working
@@ -304,7 +299,7 @@ fn source_network(frag: &str) -> Option<String> {
 
 async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         // Live XML: a running guest carries its `target dev` (e.g. vnet0),
         // which interface_stats needs; inactive XML omits it, and a shut-off
         // guest has no counters anyway.
@@ -348,7 +343,7 @@ async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiErro
 
 async fn get_graphics(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         let xml = d.get_xml_desc(0)?;
         Ok(json!({"name": d.get_name().unwrap_or_default(), "graphics": parse_graphics(&xml)}))
     })
@@ -359,7 +354,7 @@ async fn get_graphics(Path(name): Path<String>) -> Result<Json<Value>, ApiError>
 
 async fn start(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         d.create()?;
         Ok(json!({"name": name, "started": true}))
     })
@@ -370,7 +365,7 @@ async fn start(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn shutdown(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         d.shutdown()?;
         Ok(json!({"name": name, "shutdown": true}))
     })
@@ -381,7 +376,7 @@ async fn shutdown(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn reboot(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         d.reboot(0)?;
         Ok(json!({"name": name, "rebooted": true}))
     })
@@ -392,7 +387,7 @@ async fn reboot(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn destroy(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         d.destroy()?;
         Ok(json!({"name": name, "destroyed": true}))
     })
@@ -403,7 +398,7 @@ async fn destroy(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn reset(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         d.reset()?;
         Ok(json!({"name": name, "reset": true}))
     })
@@ -428,7 +423,7 @@ async fn rename(
 ) -> Result<Json<Value>, ApiError> {
     let new_name = req.name.trim().to_string();
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         if d.get_state()?.0 != virt::sys::VIR_DOMAIN_SHUTOFF {
             return Err(format!("rename requires '{name}' to be shut off").into());
         }

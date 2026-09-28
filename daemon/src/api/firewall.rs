@@ -99,7 +99,7 @@ async fn put_network(
     // silently persist but never apply. Fail fast instead.
     let n = name.clone();
     crate::libvirt::with_conn(move |c| {
-        virt::network::Network::lookup_by_name(c, &n).map(|_| ())?;
+        crate::libvirt::network(c, &n).map(|_| ())?;
         Ok(())
     })
     .await
@@ -140,7 +140,7 @@ async fn put_vm(
     // persist but never apply. Fail fast instead.
     let n = name.clone();
     crate::libvirt::with_conn(move |c| {
-        virt::domain::Domain::lookup_by_name(c, &n).map(|_| ())?;
+        crate::libvirt::domain(c, &n).map(|_| ())?;
         Ok(())
     })
     .await

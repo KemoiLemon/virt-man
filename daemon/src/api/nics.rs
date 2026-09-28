@@ -211,7 +211,7 @@ async fn add(
         None => None,
     };
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         let live = d.is_active().unwrap_or(false);
         let mac_xml = mac
             .as_deref()
@@ -242,7 +242,7 @@ async fn remove(
 ) -> Result<Json<Value>, ApiError> {
     let mac = normalize_mac(&mac).map_err(ApiError::bad_request)?;
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         let live = d.is_active().unwrap_or(false);
         // Detach by the definition's own block, so libvirt matches it exactly.
         let config = d.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)?;
@@ -288,7 +288,7 @@ async fn set_bandwidth(
     let rx = check_rate(req.rx_mbps, "RX limit").map_err(ApiError::bad_request)?;
     let tx = check_rate(req.tx_mbps, "TX limit").map_err(ApiError::bad_request)?;
     let v = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &name)?;
+        let d = crate::libvirt::domain(c, &name)?;
         let live = d.is_active().unwrap_or(false);
         // Edit the persistent block: it is the one that survives a restart,
         // and update-device matches the live NIC by its MAC.

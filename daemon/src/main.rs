@@ -6,6 +6,7 @@ mod firewall;
 mod ipam;
 mod libvirt;
 mod rfb;
+mod titles;
 mod tls;
 
 use std::os::unix::fs::PermissionsExt;

@@ -18,7 +18,6 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
-use virt::domain::Domain;
 
 use super::ApiError;
 use crate::libvirt::{Graphics, parse_all_graphics, parse_graphics, with_conn};
@@ -43,7 +42,7 @@ pub fn routes() -> Router {
 async fn graphics_of(name: &str) -> Result<Graphics, ApiError> {
     let n = name.to_string();
     with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &n)?;
+        let d = crate::libvirt::domain(c, &n)?;
         let xml = d.get_xml_desc(0)?;
         Ok(parse_graphics(&xml))
     })
@@ -207,7 +206,7 @@ async fn vv_file(
 ) -> Result<Response, ApiError> {
     let n = name.clone();
     let all = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &n)?;
+        let d = crate::libvirt::domain(c, &n)?;
         if !d.is_active().unwrap_or(false) {
             return Err("the guest is not running".to_string().into());
         }

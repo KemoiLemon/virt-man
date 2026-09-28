@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
-use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
 use virt::stream::Stream;
 
@@ -28,7 +27,7 @@ pub fn routes() -> Router {
 
 async fn list(Path(pool): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let p = crate::libvirt::pool(c, &pool)?;
         // Report the filesystem as it is, not as libvirt last cached it, so a
         // file that appeared outside the volume API is listed. See
         // `pools::refresh_for_read`.
@@ -59,7 +58,7 @@ async fn list(Path(pool): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn get_one(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let p = crate::libvirt::pool(c, &pool)?;
         let v = StorageVol::lookup_by_name(&p, &vol)?;
         Ok(json!({
             "name": v.get_name().unwrap_or_default(),
@@ -83,7 +82,7 @@ async fn create(
     Json(body): Json<VolCreate>,
 ) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let p = crate::libvirt::pool(c, &pool)?;
         let vol = StorageVol::create_xml(&p, &body.xml, 0)?;
         Ok(json!({
             "name": vol.get_name().unwrap_or_default(),
@@ -118,7 +117,7 @@ async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>
     }
 
     let v = with_conn(move |c| {
-        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let p = crate::libvirt::pool(c, &pool)?;
         let v = StorageVol::lookup_by_name(&p, &vol)?;
         v.delete(0)?;
         Ok(json!({"name": vol, "deleted": true}))
@@ -162,7 +161,7 @@ fn sha256_file(path: &str) -> Result<(String, u64), LvError> {
 /// bytes elsewhere can prove the transfer completed.
 async fn hash(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let p = crate::libvirt::pool(c, &pool)?;
         let vol = StorageVol::lookup_by_name(&p, &vol)?;
         let name = vol.get_name().unwrap_or_default();
         let path = vol.get_path().unwrap_or_default();
@@ -263,7 +262,7 @@ async fn upload(
 
     let tmp_path = tmp.clone();
     let v = with_conn(move |c| {
-        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let p = crate::libvirt::pool(c, &pool)?;
         let vol = match &create_name {
             Some(name) => StorageVol::create_xml(&p, &volume_xml(name, total), 0)?,
             None => StorageVol::lookup_by_name(&p, &vol)?,

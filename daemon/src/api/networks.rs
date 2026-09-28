@@ -58,6 +58,8 @@ fn net_json(n: &Network) -> Value {
     let ip = ip_cidr(&xml);
     json!({
         "name": n.get_name().unwrap_or_default(),
+        "uuid": n.get_uuid_string().unwrap_or_default(),
+        "title": crate::libvirt::title_of(&xml),
         "bridge": n.get_bridge_name().unwrap_or_default(),
         "active": n.is_active().unwrap_or(false),
         "persistent": n.is_persistent().unwrap_or(false),
@@ -144,7 +146,7 @@ fn netmask_bits(mask: &str) -> u32 {
 
 async fn get_one(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
+        let n = crate::libvirt::network(c, &name)?;
         Ok(net_json(&n))
     })
     .await
@@ -176,7 +178,7 @@ async fn get_xml(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let n2 = name.clone();
-    let xml = with_conn(move |c| Ok(Network::lookup_by_name(c, &n2)?.get_xml_desc(0)?))
+    let xml = with_conn(move |c| Ok(crate::libvirt::network(c, &n2)?.get_xml_desc(0)?))
         .await
         .map_err(ApiError::internal)?;
     let stored = ipam.lock().networks.get(&name).cloned();
@@ -215,7 +217,7 @@ async fn put_xml(
     }
     let old_name = name.clone();
     let v = with_conn(move |c| {
-        let existing = Network::lookup_by_name(c, &old_name).ok();
+        let existing = crate::libvirt::network(c, &old_name).ok();
         let was_active = existing.as_ref().is_some_and(|n| n.is_active().unwrap_or(false));
         let before = existing
             .as_ref()
@@ -363,7 +365,7 @@ async fn create(State(ipam): State<Ipam>, body: String) -> Result<Json<Value>, A
 
 async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
+        let n = crate::libvirt::network(c, &name)?;
         if n.is_active().unwrap_or(false) {
             n.destroy()?;
         }
@@ -377,7 +379,7 @@ async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn start(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
+        let n = crate::libvirt::network(c, &name)?;
         n.create()?;
         Ok(json!({"name": name, "started": true}))
     })
@@ -388,7 +390,7 @@ async fn start(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn stop(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
+        let n = crate::libvirt::network(c, &name)?;
         n.destroy()?;
         Ok(json!({"name": name, "stopped": true}))
     })
@@ -407,7 +409,7 @@ async fn set_autostart(
     Json(req): Json<AutostartReq>,
 ) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let n = Network::lookup_by_name(c, &name)?;
+        let n = crate::libvirt::network(c, &name)?;
         n.set_autostart(req.autostart)?;
         Ok(json!({"name": name, "autostart": req.autostart}))
     })

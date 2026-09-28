@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
 
 use super::ApiError;
@@ -164,7 +163,7 @@ async fn start(
     // pool, or a volume that already exists (never overwritten).
     let (p, n) = (pool.clone(), name.clone());
     let exists = with_conn(move |c| {
-        let pool = StoragePool::lookup_by_name(c, &p)?;
+        let pool = crate::libvirt::pool(c, &p)?;
         super::pools::refresh_for_read(&pool);
         Ok(StorageVol::lookup_by_name(&pool, &n).is_ok())
     })
@@ -355,7 +354,7 @@ async fn finish(
     };
     let path = spool.to_path_buf();
     let written = with_conn(move |c| {
-        let p = StoragePool::lookup_by_name(c, &pool)?;
+        let p = crate::libvirt::pool(c, &pool)?;
         let vol = StorageVol::create_xml(&p, &super::volumes::volume_xml(&name, size), 0)?;
         match super::volumes::upload_from_file(c, &vol, &path, size) {
             Ok(sha) => Ok(sha),

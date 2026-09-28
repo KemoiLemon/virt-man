@@ -25,7 +25,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use virt::domain::Domain;
 
 use super::ApiError;
 use crate::libvirt::with_conn;
@@ -129,7 +128,7 @@ async fn start(
     let filter = body.map(|Json(f)| f).unwrap_or_default();
     let n = name.clone();
     let taps = with_conn(move |c| {
-        let d = Domain::lookup_by_name(c, &n)?;
+        let d = crate::libvirt::domain(c, &n)?;
         if !d.is_active().unwrap_or(false) {
             return Err("the guest is not running".to_string().into());
         }

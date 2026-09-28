@@ -330,7 +330,7 @@ async fn take_over(ipam: &Ipam, name: &str, x: &str, active: bool) -> Result<(),
         }
         // The change takes effect on restart. Guests keep their addresses
         // (they are all reservations now) and are plugged straight back in.
-        if let Ok(old) = Network::lookup_by_name(c, &name)
+        if let Ok(old) = crate::libvirt::network(c, &name)
             && old.is_active().unwrap_or(false)
         {
             old.destroy()?;
