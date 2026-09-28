@@ -1,5 +1,7 @@
 //! What guests connect to: one record per connection, from the kernel's
 //! connection tracker, joined with the names they looked up through our DNS.
+//! Both directions: the connections a guest opened, and the ones that reach it
+//! (a port forward, the host itself), told apart by `dir`.
 //!
 //! Cheap by construction. NAT already makes the kernel track every guest
 //! connection; subscribing to its NEW/DESTROY events costs one netlink message
@@ -65,6 +67,13 @@ pub struct Event {
     pub dst: Ipv4Addr,
     pub sport: u16,
     pub dport: u16,
+    /// Source of the reply tuple. For an outbound connection that is the
+    /// remote end again; for one that arrives, DNAT has rewritten the
+    /// destination into a guest, so the guest appears here instead.
+    pub reply_src: Option<Ipv4Addr>,
+    /// The guest's own port on an inbound connection (the service behind a
+    /// port forward), 0 when the reply tuple has none.
+    pub reply_sport: u16,
     /// Only on destroy, and only with accounting on.
     pub bytes_out: u64,
     pub bytes_in: u64,
@@ -122,6 +131,19 @@ fn tuple(b: &[u8]) -> Option<(u8, Ipv4Addr, Ipv4Addr, u16, u16)> {
     Some((proto, src, dst, sport, dport))
 }
 
+/// Source address and port of one tuple, leniently: only the address is
+/// required. An event missing a reply port is still worth recording, so
+/// nothing here may fail the whole event.
+fn tuple_src(b: &[u8]) -> (Option<Ipv4Addr>, u16) {
+    let a = attrs(b);
+    let ip = attrs(get(&a, CTA_TUPLE_IP).unwrap_or(&[]));
+    let p = attrs(get(&a, CTA_TUPLE_PROTO).unwrap_or(&[]));
+    (
+        get(&ip, CTA_IP_V4_SRC).and_then(be32).map(Ipv4Addr::from),
+        get(&p, CTA_PROTO_SRC_PORT).and_then(be16).unwrap_or(0),
+    )
+}
+
 fn counters(b: Option<&[u8]>) -> (u64, u64) {
     let Some(b) = b else { return (0, 0) };
     let a = attrs(b);
@@ -163,9 +185,10 @@ pub fn parse(mut d: &[u8]) -> Vec<Event> {
 fn event(body: &[u8], destroy: bool) -> Option<Event> {
     let a = attrs(body);
     let (proto, src, dst, sport, dport) = tuple(get(&a, CTA_TUPLE_ORIG)?)?;
-    // The reply tuple is where the translated address shows; not needed, but
-    // its presence is what makes this a complete entry.
-    get(&a, CTA_TUPLE_REPLY)?;
+    // The reply tuple is where the translated address shows: its source is a
+    // guest when the connection came *in*, and its presence is what makes
+    // this a complete entry.
+    let (reply_src, reply_sport) = tuple_src(get(&a, CTA_TUPLE_REPLY)?);
     let (bytes_out, packets_out) = counters(get(&a, CTA_COUNTERS_ORIG));
     let (bytes_in, packets_in) = counters(get(&a, CTA_COUNTERS_REPLY));
     Some(Event {
@@ -176,6 +199,8 @@ fn event(body: &[u8], destroy: bool) -> Option<Event> {
         dst,
         sport,
         dport,
+        reply_src,
+        reply_sport,
         bytes_out,
         bytes_in,
         packets_out,
@@ -202,6 +227,11 @@ pub struct Flow {
     pub mac: Option<String>,
     pub vm: Option<String>,
     pub vm_name: Option<String>,
+    /// "out": the guest opened the connection. "in": someone reached the
+    /// guest. Either way `src`/`sport` are the guest's end and `dst`/`dport`
+    /// the remote one, so a reader never has to check the direction to know
+    /// which address the guest is.
+    pub dir: String,
     pub proto: u8,
     pub src: Ipv4Addr,
     pub sport: u16,
@@ -267,10 +297,21 @@ impl Flows {
         }
     }
 
-    /// Fold one conntrack event in. `owner` says whose guest `src` is; events
-    /// for other sources are ignored.
-    pub fn record_event(&self, e: &Event, owner: impl FnOnce(Ipv4Addr) -> Option<Owner>, now: u64) {
-        let Some(o) = owner(e.src) else { return };
+    /// Fold one conntrack event in. Events with no guest at either end are
+    /// ignored.
+    pub fn record_event(&self, e: &Event, owner: impl Fn(Ipv4Addr) -> Option<Owner>, now: u64) {
+        // A guest at the original source opened the connection. Otherwise it
+        // can still be the destination -- the host, or a port forward whose
+        // DNAT put the guest in the reply tuple's source. Everything else is
+        // other people's traffic and not ours to log.
+        let (o, dir) = match owner(e.src) {
+            Some(o) => (o, "out"),
+            None => match e.reply_src.and_then(&owner) {
+                Some(o) => (o, "in"),
+                None => return,
+            },
+        };
+        let inbound = dir == "in";
         let mut s = self.lock();
         let opened = if e.destroy {
             s.open.remove(&e.id).unwrap_or(now)
@@ -279,14 +320,43 @@ impl Flows {
             now
         };
         // DNS to our own resolver is logged by the resolver, with the name.
-        if e.dport == 53 && e.dst == o.gateway {
+        // Only the guest's own lookups: a connection *arriving* on port 53 is
+        // someone using the guest as a server, not a lookup.
+        if !inbound && e.dport == 53 && e.dst == o.gateway {
             return;
         }
+        // The row reads guest -> remote in both directions, so an inbound
+        // connection has its tuple the other way round: the remote end is the
+        // one that dialled, and the guest's port is the forwarded-to one.
+        // Careful with the ports -- in the inbound tuple `e.dport` is the
+        // *guest's* port (the WAN one, before DNAT), so the remote's port is
+        // `e.sport`, and the guest's is the reply tuple's.
+        let (src, sport, dst, dport) = if inbound {
+            (
+                e.reply_src.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                if e.reply_sport != 0 {
+                    e.reply_sport
+                } else {
+                    e.dport
+                },
+                e.src,
+                e.sport,
+            )
+        } else {
+            (e.src, e.sport, e.dst, e.dport)
+        };
         let domain = s
             .names
-            .get(&(e.src, e.dst))
+            .get(&(src, dst))
             .filter(|(_, at)| now.saturating_sub(*at) < NAME_TTL_MS)
             .map(|(n, _)| n.clone());
+        // The kernel counts per conntrack direction, not per guest: on an
+        // inbound connection the reply direction is the one the guest sent.
+        let (bytes_out, packets_out, bytes_in, packets_in) = if inbound {
+            (e.bytes_in, e.packets_in, e.bytes_out, e.packets_out)
+        } else {
+            (e.bytes_out, e.packets_out, e.bytes_in, e.packets_in)
+        };
         let f = Flow {
             seq: 0,
             ct_id: e.id,
@@ -296,16 +366,17 @@ impl Flows {
             mac: Some(o.mac),
             vm: o.vm,
             vm_name: o.vm_name,
+            dir: dir.into(),
             proto: e.proto,
-            src: e.src,
-            sport: e.sport,
-            dst: e.dst,
-            dport: e.dport,
+            src,
+            sport,
+            dst,
+            dport,
             domain,
-            bytes_out: e.bytes_out,
-            bytes_in: e.bytes_in,
-            packets_out: e.packets_out,
-            packets_in: e.packets_in,
+            bytes_out,
+            bytes_in,
+            packets_out,
+            packets_in,
         };
         push(&mut s, f);
     }
@@ -354,6 +425,7 @@ fn dns_flow(l: &Lookup, o: Owner, now: u64) -> Flow {
         mac: Some(o.mac),
         vm: o.vm,
         vm_name: o.vm_name,
+        dir: "out".into(),
         proto: 17,
         src: l.client,
         sport: 0,
@@ -477,6 +549,14 @@ mod tests {
     /// Captured from this host's kernel (7.2): a NEW for a TCP connection to
     /// port 80, and a DESTROY for a UDP lookup, with accounting on.
     const NEW_TCP: &str = "c400000000010006000000000000000002000000340001801400018008000100c0a8007708000200ac429ded1c000280050001000600000006000200de6e00000600030000500000340002801400018008000100ac429ded08000200c0a800771c0002800500010006000000060002000050000006000300de6e000008000c00ce26f9c208000300000001880800070000000078300004802c0001800500010001000000050002000a000000050003000000000006000400030000000600050000000000";
+    /// Captured from this host's kernel: the host opening a connection *to*
+    /// a guest on a managed network. The guest is the original destination,
+    /// and -- the fact this test exists for -- the reply tuple's source, which
+    /// is what tells the daemon the connection came in rather than went out.
+    /// Note the ports: the tuple's `dport` is the guest's port, so reading the
+    /// incoming tuple the obvious way puts the guest's port on both ends.
+    const NEW_INBOUND: &str = "c400000000010006000000000000000002000000340001801400018008000100c0a8a70108000200c0a8a7021c0002800500010006000000060002009e98000006000300270f0000340002801400018008000100c0a8a70208000200c0a8a7011c000280050001000600000006000200270f0000060003009e98000008000c00ce12ec5d08000300000001880800070000000078300004802c0001800500010001000000050002000a000000050003000000000006000400030000000600050000000000";
+
     const DESTROY_UDP: &str = "c400000002010000000000000000000002000000340001801400018008000100c0a8007708000200c0a8000b1c000280050001001100000006000200df0600000600030000350000340002801400018008000100c0a8000b08000200c0a800771c0002800500010011000000060002000035000006000300df06000008000c00717af7a8080003000000038a1c0009800c00010000000000000000010c00020000000000000000501c000a800c00010000000000000000010c0002000000000000000070";
 
     #[test]
@@ -490,6 +570,12 @@ mod tests {
         assert_eq!(e.dst, "172.66.157.237".parse::<Ipv4Addr>().unwrap());
         assert_eq!(e.sport, 0xde6e);
         assert_ne!(e.id, 0);
+        // The reply tuple of an outbound connection is the remote answering:
+        // no guest there, so this one is an "out" row.
+        assert_eq!(
+            (e.reply_src.unwrap().to_string(), e.reply_sport),
+            ("172.66.157.237".to_string(), 80)
+        );
     }
 
     #[test]
@@ -539,6 +625,10 @@ mod tests {
             dst: dst.parse().unwrap(),
             sport: 40000,
             dport,
+            // What the kernel reports for an outbound connection: the reply
+            // tuple is the remote end answering.
+            reply_src: Some(dst.parse().unwrap()),
+            reply_sport: dport,
             bytes_out: 100,
             bytes_in: 5000,
             packets_out: 2,
@@ -583,6 +673,90 @@ mod tests {
             f.since(2, 100).0.len(),
             1,
             "a cursor skips what was already pulled"
+        );
+    }
+
+    #[test]
+    fn an_inbound_connection_reads_guest_first_like_an_outbound_one() {
+        let f = Flows::default();
+        // A port forward: the stranger dials the host's WAN address, and the
+        // reply tuple carries the guest DNAT rewrote it to. The remote's port
+        // is the one it dialled from; the guest's is the reply tuple's.
+        let mut e = ev(false, 9, "203.0.113.5", "192.0.2.1", 2222);
+        e.sport = 51_000;
+        e.reply_src = Some("10.9.0.7".parse().unwrap());
+        e.reply_sport = 22;
+        f.record_event(&e, owner, 5_000);
+        let (all, _, _) = f.since(0, 10);
+        let row = &all[0];
+        assert_eq!(row.dir, "in");
+        assert_eq!(row.vm_name.as_deref(), Some("web"));
+        assert_eq!(
+            (row.src.to_string(), row.sport),
+            ("10.9.0.7".into(), 22),
+            "the guest end is the source, with its own port"
+        );
+        assert_eq!(
+            (row.dst.to_string(), row.dport),
+            ("203.0.113.5".into(), 51_000),
+            "…and the remote end the destination, on the port it dialled from"
+        );
+        // The kernel counts per conntrack direction: what the guest sent is
+        // the reply direction here, so the counters cannot be copied across.
+        assert_eq!((row.bytes_out, row.bytes_in), (5000, 100));
+        // A connection arriving on 53 is somebody using the guest as a
+        // resolver, not the guest's own lookup.
+        let mut dns = ev(false, 10, "203.0.113.9", "10.9.0.1", 53);
+        dns.reply_src = Some("10.9.0.7".parse().unwrap());
+        f.record_event(&dns, owner, 6_000);
+        assert_eq!(f.since(0, 10).0.len(), 2);
+    }
+
+    #[test]
+    fn a_real_inbound_event_is_parsed_as_arriving() {
+        let e = &parse(&hex(NEW_INBOUND))[0];
+        assert!(!e.destroy);
+        assert_eq!((e.proto, e.sport, e.dport), (6, 40600, 9999));
+        assert_eq!(
+            (e.src.to_string(), e.dst.to_string()),
+            ("192.168.167.1".to_string(), "192.168.167.2".to_string()),
+            "the host dialled the guest"
+        );
+        // The guest is the reply tuple's source, which is what marks it inbound.
+        assert_eq!(e.reply_src.unwrap().to_string(), "192.168.167.2");
+        assert_eq!(e.reply_sport, 9999);
+
+        // …and folding it in reads guest-first, with the counters the right
+        // way round, exactly as the outbound case does. Only the guest's own
+        // address belongs to a guest here; the host dialling it does not.
+        let f = Flows::default();
+        let guest = |ip: Ipv4Addr| {
+            (ip.to_string() == "192.168.167.2").then(|| Owner {
+                network: "internet".into(),
+                gateway: "192.168.167.1".parse().unwrap(),
+                mac: "52:54:00:82:de:19".into(),
+                vm: Some("uuid".into()),
+                vm_name: Some("alpine".into()),
+            })
+        };
+        f.record_event(e, guest, 42);
+        let (all, _, _) = f.since(0, 10);
+        let row = &all[0];
+        assert_eq!(row.dir, "in");
+        assert_eq!(
+            (
+                row.src.to_string(),
+                row.sport,
+                row.dst.to_string(),
+                row.dport
+            ),
+            (
+                "192.168.167.2".to_string(),
+                9999,
+                "192.168.167.1".to_string(),
+                40600
+            ),
+            "guest first, on the port it was reached on"
         );
     }
 
