@@ -3726,7 +3726,13 @@ async function renderVmBody(vm: string) {
             api.get<{ hosts: IpamHost[] }>(`${base}/hosts`),
           ]);
           netIpam.set(name, { ipam, hosts: h.hosts });
+          return;
         } catch { /* not served here (no IPv4 subnet): no IPAM for it */ }
+        // Both this and the return in the try are for array-callback-return,
+        // which wants a return on each arm of the try/catch. Nothing consumes
+        // the value; the outer return alone would run the same at runtime, so
+        // do not "tidy" the one above away.
+        return;
       }));
     } catch (e) {
       setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -4082,8 +4088,10 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           nicMac ? loadHistory(api.get, { ...q, kind: "nic", sub: nicMac }) : none,
         ]);
         ({ a: cpu, b: mem, timing } = hv);
-        if (hd) ({ a: diskHist, timing: diskTiming } = hd);
-        if (hn) ({ a: rx, b: tx, timing: netTiming } = hn);
+        // Braced, not `if (hd) ({ ... } = hd)`: the unbraced form is a
+        // destructuring assignment that reads as a mistyped comparison.
+        if (hd) { ({ a: diskHist, timing: diskTiming } = hd); }
+        if (hn) { ({ a: rx, b: tx, timing: netTiming } = hn); }
       } catch { /* keep the live minute */ }
       if (range().key !== shown || !stillCurrentVm(conn, vm, "summary")) return;
     }
