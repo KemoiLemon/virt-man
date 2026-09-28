@@ -4578,10 +4578,14 @@ async function createPendingVolumes(
     const format = (d.fields.format ?? "qcow2") === "raw" ? "raw" : "qcow2";
     const name = `${vmName}-disk${i + 1}-${sizeGb}gb.${format}`;
     set(`creating ${sizeGb} GB volume ${name}`);
-    await api.post(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`, {
-      xml: volumeXml({ name, capacity_gb: sizeGb, format }),
+    const vol = await api.post<{ name: string; path: string }>(
+      `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`,
+      { xml: volumeXml({ name, capacity_gb: sizeGb, format }),
     });
     d.fields.volume = name;
+    // Address it by path as well: the reference form is not resolvable on
+    // every libvirt, and an unresolvable disk keeps the guest from starting.
+    if (vol.path) d.fields.path = vol.path;
     delete d.fields.mode;
   }
 }
@@ -4641,19 +4645,38 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
 
   const { pools, nets } = await loadFormData(conn);
   // Volumes per pool, fetched lazily and cached for the device forms.
-  const volCache: Record<string, string[]> = {};
-  const volumes = async (pool: string): Promise<string[]> => {
+  const volCache: Record<string, VolumeSummary[]> = {};
+  const volumes = async (pool: string): Promise<VolumeSummary[]> => {
     if (!pool) return [];
     if (!volCache[pool]) {
       try {
-        const v = await api.get<VolumeSummary[]>(
+        volCache[pool] = await api.get<VolumeSummary[]>(
           `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`);
-        volCache[pool] = v.map((x) => x.name);
       } catch {
         volCache[pool] = [];
       }
     }
     return volCache[pool];
+  };
+  /// Point a disk at its volume's path, so the definition refers to the file
+  /// rather than to a pool+volume pair. libvirt cannot resolve a volume source
+  /// on every host it ships on, and a disk it cannot resolve never reaches the
+  /// guest's AppArmor profile — so qemu is refused permission and the guest
+  /// will not start. Cleared when the volume is unknown, which keeps the
+  /// reference form for a definition we cannot account for.
+  const resolveDevicePath = async (d: HwDevice) => {
+    const name = (d.fields.volume ?? "").trim();
+    const pool = (d.fields.pool ?? "").trim();
+    const found = name ? (await volumes(pool)).find((v) => v.name === name) : undefined;
+    if (!found?.path) {
+      delete d.fields.path;
+      return;
+    }
+    d.fields.path = found.path;
+    // The volume list carries no format, so it comes from the name: we name
+    // our own volumes after their format, and getting this wrong would make
+    // qemu parse the file as the wrong image type.
+    d.fields.format = /\.raw$/i.test(found.name) ? "raw" : "qcow2";
   };
   // Pools that contain at least one ISO. The cdrom pool dropdown hides
   // every other pool, so a pool with no bootable media never appears.
@@ -4662,7 +4685,7 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
     if (isoPoolsCache) return isoPoolsCache;
     const out: string[] = [];
     for (const p of pools) {
-      if ((await volumes(p.name)).some((v) => v.toLowerCase().endsWith(".iso"))) {
+      if ((await volumes(p.name)).some((v) => v.name.toLowerCase().endsWith(".iso"))) {
         out.push(p.name);
       }
     }
@@ -4755,6 +4778,8 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
           d.fields.pool = withIsos[0];
         }
       }
+      // After the pool is settled, so the path is looked up in the right one.
+      if (d.kind === "disk" || d.kind === "cdrom") await resolveDevicePath(d);
       const fields = await Promise.all(t.fields.map(async (f) => {
         const val = d.fields[f.key] ?? f.value ?? "";
         if (f.type === "select") {
@@ -4762,7 +4787,7 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
           if (f.key === "pool") list = d.kind === "cdrom" ? await isoPools() : pools.map((p) => p.name);
           if (f.key === "network") list = nets.map((n) => n.name);
           if (f.key === "volume") {
-            list = await volumes(d.fields.pool ?? pools[0]?.name ?? "");
+            list = (await volumes(d.fields.pool ?? pools[0]?.name ?? "")).map((v) => v.name);
             // The cdrom picks an ISO; a disk may pick any volume.
             if (d.kind === "cdrom") list = list.filter((v) => v.toLowerCase().endsWith(".iso"));
           }
@@ -4919,7 +4944,7 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
             const pool = kind === "cdrom"
               ? (draft.pool ?? (await isoPools())[0] ?? "")
               : (draft.pool ?? pools[0]?.name ?? "");
-            list = await volumes(pool);
+            list = (await volumes(pool)).map((v) => v.name);
             // The cdrom picks an ISO; a disk may pick any volume.
             if (kind === "cdrom") list = list.filter((v) => v.toLowerCase().endsWith(".iso"));
           }
@@ -5077,9 +5102,14 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
     modal?.remove();
     runTask(`Create VM ${form.name}`, async (set) => {
       set(`creating ${newDisk.size_gb} GB volume`);
-      await api.post(`/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`, {
-        xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }),
-      });
+      const disk = await api.post<{ name: string; path: string }>(
+        `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
+        { xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+      // Refer to the disk by its absolute path rather than by pool+volume: the
+      // reference form cannot be resolved by every libvirt, and a disk libvirt
+      // cannot resolve never reaches the guest's AppArmor profile, so qemu is
+      // refused permission to open it and the guest will not start.
+      form.disk_path = disk.path;
       // Create any additional "new volume" disks before defining the domain.
       await createPendingVolumes(conn, form.name, devices, set);
       set("defining domain");

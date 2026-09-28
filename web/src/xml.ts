@@ -58,6 +58,12 @@ export interface DomainForm {
   new_disk: boolean;
   disk_size_gb: number;
   disk_format: "raw" | "qcow2";
+  /// Absolute path of the disk to attach, when it is known. Preferred over
+  /// the pool+volume pair: a guest whose disks are addressed by path starts on
+  /// a libvirt that cannot resolve volume sources. See `hardware.ts`.
+  disk_path?: string;
+  /// Absolute path of the ISO to attach as a cdrom, when known.
+  iso_path?: string;
   pool: string;
   // ISO / cdrom
   iso: string; // volume name in selected pool, or empty
@@ -75,7 +81,19 @@ export function domainXml(f: DomainForm): string {
   const graphicsPort = f.graphics === "spice" ? "5901" : "5900";
 
   let disks = "";
-  if (f.new_disk) {
+  if (f.disk_path) {
+    // File-backed, by absolute path. libvirt 11.3 cannot translate a
+    // pool+volume source into a path, and a disk it cannot resolve never
+    // reaches the guest's AppArmor profile — so qemu is refused permission to
+    // open it and the guest will not start. A path resolves everywhere.
+    const fmt = f.disk_format === "raw" ? "raw" : "qcow2";
+    disks += `
+    <disk type="file" device="disk">
+      <driver name="qemu" type="${fmt}"/>
+      <source file="${esc(f.disk_path)}"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>`;
+  } else if (f.new_disk) {
     const fmt = f.disk_format === "qcow2" ? "qcow2" : "raw";
     disks += `
     <disk type="file" device="disk">
@@ -91,7 +109,15 @@ export function domainXml(f: DomainForm): string {
       <target dev="vda" bus="virtio"/>
     </disk>`;
   }
-  if (f.iso) {
+  if (f.iso_path) {
+    disks += `
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="${esc(f.iso_path)}"/>
+      <target dev="sda" bus="sata"/>
+      <readonly/>
+    </disk>`;
+  } else if (f.iso) {
     disks += `
     <disk type="volume" device="cdrom">
       <driver name="qemu" type="raw"/>

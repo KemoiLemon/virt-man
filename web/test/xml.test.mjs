@@ -233,6 +233,52 @@ test("withFirmware swaps loader/nvram in place and strips on BIOS", () => {
   assert.equal((back.match(/<nvram/g) || []).length, 1, "exactly one nvram after switching back");
 });
 
+test("a new guest's disk and ISO are addressed by path, not by pool+volume", () => {
+  // A pool+volume source cannot be resolved by every libvirt (11.3 fails with
+  // "missing storage backend for 'volume' storage"), and a disk libvirt cannot
+  // resolve never reaches the guest's AppArmor profile — so qemu is refused
+  // permission to open it and the guest will not start. An absolute path is
+  // resolved the same way everywhere, so the SPA hands it the path the volume
+  // API reported.
+  const out = xml.domainXml({
+    name: "newbox", cpus: 2, memory_mb: 2048, graphics: "vnc",
+    existing_volume: "newbox.qcow2", new_disk: false, disk_size_gb: 10, disk_format: "qcow2",
+    disk_path: "/mnt/data/VMs/images/newbox.qcow2",
+    iso: "debian.iso", iso_pool: "ISOs",
+    iso_path: "/mnt/data/VMs/images/debian.iso",
+    pool: "default", network: "", bridge: "",
+  });
+  assert.match(out, /<disk type="file" device="disk">/);
+  assert.match(out, /<source file="\/mnt\/data\/VMs\/images\/newbox\.qcow2"\/>/);
+  assert.match(out, /<disk type="file" device="cdrom">/);
+  assert.match(out, /<source file="\/mnt\/data\/VMs\/images\/debian\.iso"\/>/);
+  assert.doesNotMatch(out, /type="volume"/, "no volume reference is emitted");
+  assert.doesNotMatch(out, /pool=/, "nor a pool reference");
+});
+
+test("without a path the disk falls back to the volume reference", () => {
+  // A definition we cannot account for keeps the reference form rather than
+  // having a path invented for it.
+  const out = xml.domainXml({
+    name: "old", cpus: 1, memory_mb: 512, graphics: "vnc",
+    existing_volume: "old.qcow2", new_disk: false, disk_size_gb: 10, disk_format: "qcow2",
+    pool: "default", iso: "", iso_pool: "", network: "", bridge: "",
+  });
+  assert.match(out, /<disk type="volume" device="disk">/);
+  assert.match(out, /pool="default" volume="old\.qcow2"/);
+  assert.doesNotMatch(out, /<source file=/, "no path was invented");
+});
+
+test("a raw disk keeps raw as its driver type", () => {
+  const out = xml.domainXml({
+    name: "rawbox", cpus: 1, memory_mb: 512, graphics: "vnc",
+    existing_volume: "", new_disk: false, disk_size_gb: 10, disk_format: "raw",
+    disk_path: "/p/rawbox.raw", pool: "default", iso: "", iso_pool: "",
+    network: "", bridge: "",
+  });
+  assert.match(out, /<driver name="qemu" type="raw"\/>/);
+});
+
 test("withFirmware leaves no dangling close tags on libvirt single-quoted XML", () => {
   // libvirt stores paired loader/nvram with single-quoted attributes and the
   // closing tags on their own lines; an over-eager opening-tag strip left

@@ -210,21 +210,41 @@ export function deviceXml(d: HwDevice, index = 1): string {
   switch (d.kind) {
     case "disk": {
       const bus = f("bus") || "virtio";
+      const target = `<target dev="${diskTarget(bus, index)}" bus="${esc(bus)}"/>`;
+      // A disk whose path we know is written as file-backed. libvirt 11.3
+      // cannot translate a pool+volume source into a path, and a disk it
+      // cannot resolve never reaches the guest's AppArmor profile — so qemu is
+      // refused permission to open it and the guest will not start at all.
+      // An absolute path is resolved the same way by every libvirt.
+      const path = f("path");
+      if (path) {
+        return `<disk type="file" device="disk">
+      <driver name="qemu" type="${f("format") === "raw" ? "raw" : "qcow2"}"/>
+      <source file="${esc(path)}"/>
+      ${target}
+    </disk>`;
+      }
+      // No path known (a definition we did not write): keep the reference form
+      // rather than guessing a path for someone else's volume.
       const newMode = (d.fields.mode ?? "existing") === "new";
       const vol = newMode ? `(new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"})` : f("volume");
       return `<disk type="volume" device="disk">
       <driver name="qemu" type="qcow2"/>
       <source pool="${esc(f("pool"))}" volume="${esc(vol)}"/>
-      <target dev="${diskTarget(bus, index)}" bus="${esc(bus)}"/>
+      ${target}
     </disk>`;
     }
     case "cdrom": {
-      // No volume = an empty drive (a tray with no disc), which libvirt
-      // models as a file-backed cdrom with no <source>. Keep it valid so a
-      // default drive can be added before the user picks an ISO.
+      // No media = an empty drive (a tray with no disc), which libvirt models
+      // as a file-backed cdrom with no <source>. Keep it valid so a default
+      // drive can be added before the user picks an ISO.
+      const path = f("path");
       const vol = f("volume");
-      const src = vol ? `<source pool="${esc(f("pool"))}" volume="${esc(vol)}"/>` : "";
-      return `<disk type="${vol ? "volume" : "file"}" device="cdrom">
+      const src = path
+        ? `<source file="${esc(path)}"/>`
+        : vol ? `<source pool="${esc(f("pool"))}" volume="${esc(vol)}"/>` : "";
+      const kind = !path && vol ? "volume" : "file";
+      return `<disk type="${kind}" device="cdrom">
       <driver name="qemu" type="raw"/>
       ${src}${src ? "\n      " : ""}<target dev="sd${String.fromCharCode(96 + index)}" bus="sata"/>
       <readonly/>
@@ -276,12 +296,16 @@ export function deviceSummary(d: HwDevice): string {
   const f = (k: string) => (d.fields[k] ?? "").trim();
   switch (d.kind) {
     case "disk": {
+      const path = f("path");
+      if (path) return `${path.split("/").pop()} (${f("bus") || "virtio"})`;
       if ((d.fields.mode ?? "existing") === "new") {
         return `${f("pool")}/new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"}`;
       }
       return `${f("pool")}/${f("volume")} (${f("bus") || "virtio"})`;
     }
     case "cdrom": {
+      const path = f("path");
+      if (path) return path.split("/").pop() ?? path;
       const vol = f("volume");
       return vol ? `${f("pool")}/${vol}` : "empty";
     }
@@ -307,13 +331,16 @@ export function validateDevice(d: HwDevice): string | null {
   };
   switch (d.kind) {
     case "disk": {
+      // A disk addressed by path needs nothing else: it is already complete.
+      if ((d.fields.path ?? "").trim()) return null;
       if ((d.fields.mode ?? "existing") === "new") {
         return need(["pool", "size_gb"], "A new disk");
       }
       return need(["pool", "volume"], "A hard disk");
     }
     case "cdrom":
-      // An empty drive is fine; a volume requires its pool.
+      // An empty drive is fine, and so is media addressed by path.
+      if ((d.fields.path ?? "").trim()) return null;
       if ((d.fields.volume ?? "").trim() && !(d.fields.pool ?? "").trim()) {
         return "A CD/DVD drive requires a pool";
       }
@@ -370,20 +397,31 @@ export function devicesFromXml(xml: string): HwDevice[] {
     const block = m[0];
     const src = block.match(/<source\b[^>]*>/)?.[0] ?? "";
     const tgt = block.match(/<target\b[^>]*>/)?.[0] ?? "";
+    const drv = block.match(/<driver\b[^>]*>/)?.[0] ?? "";
     const pool = attr(src, "pool");
     const volume = attr(src, "volume");
+    const path = attr(src, "file");
+    const format = attr(drv, "type");
+    const bus = attr(tgt, "bus");
+    const kind = m[1] === "cdrom" ? "cdrom" : "disk";
     // An empty cdrom has no <source>: keep it as an empty drive so editing
     // round-trips it instead of silently dropping it.
-    if (m[1] === "cdrom" && !volume) {
-      out.push({ kind: "cdrom", fields: { pool, volume } });
+    if (m[1] === "cdrom" && !volume && !path) {
+      out.push({ kind, fields: { pool, volume } });
       continue;
     }
-    // Only volume-backed disks round-trip; file-backed ones stay untouched.
+    // A path-addressed disk round-trips through its path. These used to be
+    // skipped here, which silently dropped them: the caller strips every
+    // <disk> block and re-adds only what this function returns, so a disk
+    // missing from this list disappears when hardware is saved.
+    if (path) {
+      out.push({ kind, fields: { path, format, bus } });
+      continue;
+    }
+    // Anything else is a pool+volume reference: keep it as one rather than
+    // inventing a path for a volume whose location we cannot confirm.
     if (!pool || !volume) continue;
-    out.push({
-      kind: m[1] === "cdrom" ? "cdrom" : "disk",
-      fields: { pool, volume, bus: attr(tgt, "bus") },
-    });
+    out.push({ kind, fields: { pool, volume, format, bus } });
   }
   for (const m of xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)) {
     const block = m[0];

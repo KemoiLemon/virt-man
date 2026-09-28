@@ -131,13 +131,42 @@ test("devices parse back out of a real domain XML", () => {
   assert.equal(nic.fields.network, "internal");
 });
 
-test("file-backed disks are left alone rather than mangled", () => {
+test("a file-backed disk round-trips through its path rather than being dropped", () => {
+  // The caller strips every <disk> block out of the definition and re-adds
+  // only what devicesFromXml returns, so a disk this function does not claim
+  // is silently deleted when hardware is saved. File-backed disks used to be
+  // skipped here — which lost them — so claiming them by path is what makes
+  // them survive. A path is also what every libvirt can resolve, unlike a
+  // pool+volume reference.
   const xml = `<domain><devices><disk type="file" device="disk">
+    <driver name="qemu" type="qcow2"/>
     <source file="/var/lib/libvirt/images/x.qcow2"/><target dev="vda" bus="virtio"/>
   </disk></devices></domain>`;
-  const got = hw.devicesFromXml(xml);
-  assert.equal(got.filter((d) => d.kind === "disk").length, 0,
-    "a non-volume disk is not claimed by the editor");
+  const disks = hw.devicesFromXml(xml).filter((d) => d.kind === "disk");
+  assert.equal(disks.length, 1, "the disk is claimed, not dropped");
+  assert.equal(disks[0].fields.path, "/var/lib/libvirt/images/x.qcow2");
+  assert.equal(disks[0].fields.format, "qcow2", "the driver type is carried, not assumed");
+  assert.equal(disks[0].fields.bus, "virtio");
+  assert.equal(hw.validateDevice(disks[0]), null, "a path-addressed disk needs no pool");
+  const back = hw.deviceXml(disks[0], 1);
+  assert.match(back, /<disk type="file" device="disk">/);
+  assert.match(back, /<source file="\/var\/lib\/libvirt\/images\/x\.qcow2"\/>/);
+  assert.doesNotMatch(back, /volume=/, "never re-emitted as a volume reference");
+});
+
+test("a raw file disk keeps raw as its driver type", () => {
+  // Guessing qcow2 for a raw image makes qemu parse it as the wrong type and
+  // the guest fails to start, so the format travels with the disk.
+  const xml = hw.deviceXml({ kind: "disk", fields: { path: "/p/x.raw", format: "raw" } }, 1);
+  assert.match(xml, /<driver name="qemu" type="raw"\/>/);
+});
+
+test("a cdrom addressed by path serialises as a file disk", () => {
+  const xml = hw.deviceXml({ kind: "cdrom", fields: { path: "/p/inst.iso" } }, 1);
+  assert.match(xml, /<disk type="file" device="cdrom">/);
+  assert.match(xml, /<source file="\/p\/inst\.iso"\/>/);
+  assert.match(xml, /<readonly\/>/);
+  assert.equal(hw.validateDevice({ kind: "cdrom", fields: { path: "/p/inst.iso" } }), null);
 });
 
 test("an empty cdrom serialises as a source-less drive", () => {
