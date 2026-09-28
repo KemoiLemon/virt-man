@@ -188,6 +188,11 @@ per glyph so only the icons in use reach the bundle.
 Native OS chrome is avoided throughout (custom listbox, no `window.prompt`)
 so the controls match the square, monospace theme instead of the host OS.
 
+It is one SPA for desktop and phone, not two products: below 820 px the same
+DOM gets a single-column shell, an off-canvas sidebar, and touch gestures that
+map onto the existing mouse and keyboard paths rather than replacing them. See
+`MOBILE.md` for that viewport's decisions and the iOS behaviours behind them.
+
 ## State and storage
 
 JSON files, not a database. The web backend keeps users, connections, and keys

@@ -16,7 +16,7 @@ Two parts, one product:
 ## Commands
 
 ```bash
-# frontend: typecheck, build, unit tests (70)
+# frontend: typecheck, build, unit tests (213, incl. the mobile CSS contract)
 cd web && npx tsc --noEmit && npx vite build && pnpm test
 
 # web backend (24 tests: permissions/roles/key caps + redirect URL building)
@@ -259,6 +259,37 @@ just the buttons we happen to render. A failed deletion keeps the daemon's own
 reason, so "who deleted this volume, and did it work" is answerable after the
 fact. Volume deletions previously left no trace at all, which made a missing
 ISO impossible to explain.
+
+## Phone support
+
+One SPA, one code path. The phone layout is a media query on `max-width:
+820px` (landscape on a 12 mini is 812 px, so a narrower breakpoint drops the
+mobile layout when the phone is turned sideways), and **`MOBILE.md` explains
+why** — read it before changing anything below.
+
+- **`web/src/styles/mobile.css` loads last, after `density.css`.** Sizing
+  overrides belong in that layer; a rule added to an earlier file loses the
+  cascade and the tweak silently does nothing.
+- **The drawer closes in `syncUrl()` and nowhere else.** That function already
+  returns early unless the path changed, which is the only reason a closer
+  there cannot fight the 1 s poll. Closing it per call site goes stale the first
+  time someone adds a way to navigate.
+- **A long press opens the *same* menu a right-click does.** iOS WebKit never
+  fires `contextmenu`, so `touch.ts`'s long press is the only route to Start,
+  Stop, Delete and Add Resource on a phone. Build menus in the `*Menu`
+  functions and reach them through `menuAt()`; a new action added straight to
+  the `contextmenu` listener is invisible on a phone.
+- **The console's touch input is deferred, not classified up front.** Nothing
+  is sent at `pointerdown`; a press is sent only once the gesture is known. A
+  press sent early is a phantom click in a guest.
+- **16 px is the minimum field size under `(pointer: coarse)`.** Below it iOS
+  zooms the page on focus and does not zoom back, leaving the whole app stuck
+  at 1.3× from one tap. Fields reach 16 px only through `mobile.css`.
+- **Key reporting stays on the `keydown` path in `console.ts`.** The soft
+  keyboard is raised by a transparent textarea inside `.console-stage` that is
+  never read from; a second reporting path would double-send.
+- **`viewport-fit=cover` is required** for `env(safe-area-inset-*)` to report
+  anything, and portrait insets are often `0` while landscape insets are real.
 
 ## Testing rules
 
