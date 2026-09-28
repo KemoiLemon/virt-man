@@ -309,6 +309,7 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
             seen.push((Kind::Vm, c.id.clone(), String::new(), name.clone()));
             out.push(json!({
                 "kind": "vm", "conn": c.id, "conn_name": c.name, "name": name,
+                "uuid": d["uuid"], "title": d["title"],
                 "state": d["state"], "vcpus": d["vcpus"], "memory_mb": d["memory_mb"],
             }));
         }
@@ -317,6 +318,7 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
             seen.push((Kind::Network, c.id.clone(), String::new(), name.clone()));
             out.push(json!({
                 "kind": "network", "conn": c.id, "conn_name": c.name, "name": name,
+                "uuid": n["uuid"], "title": n["title"],
                 "state": if n["active"].as_bool() == Some(true) { "active" } else { "inactive" },
                 "forward": n["forward"], "bridge": n["bridge"], "ip": n["ip"],
             }));
@@ -325,6 +327,7 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
             let pool = p["name"].as_str().unwrap_or("").to_string();
             out.push(json!({
                 "kind": "pool", "conn": c.id, "conn_name": c.name, "name": pool,
+                "uuid": p["uuid"], "title": p["title"],
                 "state": if p["active"].as_bool() == Some(true) { "active" } else { "inactive" },
                 "capacity": p["capacity"], "allocation": p["allocation"],
             }));

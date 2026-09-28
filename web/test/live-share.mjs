@@ -117,10 +117,12 @@ setVal(admin, "#net-ip", "10.91.0.1/24");
 admin.click(admin.$("#net-save"));
 await admin.wait(5000);
 const nets = (await admin.json(`/proxy/${conn}/networks`)).body;
-check("…the network exists, owned by bob", () => {
-  const n = nets.find((x) => x.name === "share-net");
-  assert.ok(n, `created (${admin.toasts.map((t) => t.text)})`);
-  assert.equal(n.owner, bobId);
+// Named by a fresh UUID in libvirt; what was typed is its title.
+const shareNet = nets.find((x) => x.title === "share-net");
+check("…the network exists, named by its UUID, titled, owned by bob", () => {
+  assert.ok(shareNet, `created (${admin.toasts.map((t) => t.text)})`);
+  assert.equal(shareNet.name, shareNet.uuid, "libvirt name is the UUID");
+  assert.equal(shareNet.owner, bobId);
 });
 check("…and the admin is still on the admin page, which repainted", () => {
   assert.equal(admin.w.location.pathname, "/admin/networks");
@@ -132,7 +134,7 @@ check("…and the admin is still on the admin page, which repainted", () => {
 const bob = await session(BOB);
 const vmXml = `<domain type="kvm"><name>share-vm</name><memory unit="KiB">262144</memory><vcpu>1</vcpu>
   <os><type arch="x86_64" machine="q35">hvm</type></os><devices><emulator>/usr/bin/qemu-system-x86_64</emulator>
-  <interface type="network"><source network="share-net"/><model type="virtio"/></interface>
+  <interface type="network"><source network="${shareNet?.name}"/><model type="virtio"/></interface>
   <graphics type="vnc" port="-1" autoport="yes" listen="127.0.0.1"/></devices></domain>`;
 const made = await bob.w.fetch(`/proxy/${conn}/domains?start=false`, { method: "POST", body: vmXml });
 check("bob creates a guest", () => assert.equal(made.status, 200));
@@ -217,7 +219,7 @@ check("an administrator's profile says they have no limits", () => {
 
 // ---- cleanup
 await bob.w.fetch(`/proxy/${conn}/domains/share-vm`, { method: "DELETE" });
-await bob.w.fetch(`/proxy/${conn}/networks/share-net`, { method: "DELETE" });
+await bob.w.fetch(`/proxy/${conn}/networks/${shareNet?.uuid}`, { method: "DELETE" });
 
 for (const [s, m] of results) console.log(`${s === "pass" ? "✔" : "✖"} ${m}`);
 const fails = results.filter(([s]) => s === "FAIL");

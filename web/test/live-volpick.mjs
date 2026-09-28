@@ -127,7 +127,13 @@ set("#g-cpus", "1");
 await wait(300);
 click(d.querySelector("#hw-save"));
 await wait(5000);
-const xml = (await json(`/proxy/${conn}/domains/pick-vm/xml`)).body.xml ?? "";
+// Named by a fresh UUID; "pick-vm" is its title.
+const pickVm = (await json(`/proxy/${conn}/domains`)).body.find((d) => d.title === "pick-vm");
+const xml = pickVm ? (await json(`/proxy/${conn}/domains/${pickVm.uuid}/xml`)).body.xml ?? "" : "";
+check("the guest is named by its UUID, titled pick-vm", () => {
+  assert.ok(pickVm, "found by title");
+  assert.equal(pickVm.name, pickVm.uuid);
+});
 check("the guest is created from the chosen volume, as qcow2", () => {
   assert.ok(toasts.some((t) => !t.bad && /VM pick-vm created/.test(t.text)), JSON.stringify(toasts));
   assert.ok(xml.includes(`<source file='${mine.path}'/>`), `boots from ${mine.path}`);
@@ -135,11 +141,11 @@ check("the guest is created from the chosen volume, as qcow2", () => {
 });
 const volsAfter = (await json(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`)).body;
 check("no second disk was created", () => {
-  assert.ok(!volsAfter.some((v) => v.name === "pick-vm.qcow2"), "no pick-vm.qcow2");
+  assert.ok(!volsAfter.some((v) => v.name === `${pickVm?.uuid}.qcow2`), "no UUID-named disk");
 });
 
 // cleanup: the guest (with its storage -- the chosen volume), then the net.
-await w.fetch(`/proxy/${conn}/domains/pick-vm?remove_storage=true`, { method: "DELETE" });
+if (pickVm) await w.fetch(`/proxy/${conn}/domains/${pickVm.uuid}?remove_storage=true`, { method: "DELETE" });
 await w.fetch(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/pick-disk.qcow2`, { method: "DELETE" });
 await w.fetch(`/proxy/${conn}/networks/pick-net`, { method: "DELETE" });
 

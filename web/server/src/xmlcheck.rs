@@ -24,6 +24,8 @@ use std::collections::HashSet;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DomainSpec {
     pub name: String,
+    /// The `<uuid>`, if the definition gives one.
+    pub uuid: Option<String>,
     pub vcpus: u64,
     pub memory_mb: u64,
     pub networks: Vec<String>,
@@ -50,6 +52,7 @@ pub struct DiskSpec {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct NetworkSpec {
     pub name: String,
+    pub uuid: Option<String>,
     /// "nat", "bridge" or "none" (isolated).
     pub forward: String,
     pub bridge: Option<String>,
@@ -539,6 +542,10 @@ pub fn check_domain(xml: &str) -> Result<DomainSpec, String> {
         }
         match tag {
             "name" => spec.name = text(c),
+            "uuid" => {
+                leaf(c)?;
+                spec.uuid = Some(text(c));
+            }
             "memory" => spec.memory_mb = to_mb(c)?,
             "currentMemory" => {
                 attrs_only(c, &["unit"])?;
@@ -563,6 +570,7 @@ pub fn check_domain(xml: &str) -> Result<DomainSpec, String> {
     if spec.name.is_empty() {
         return Err("the guest has no name".into());
     }
+    uuid_name_agrees(&spec.name, spec.uuid.as_deref(), "guest")?;
     if let Some(os) = elements(root).find(|c| c.tag_name().name() == "os") {
         check_os(os, &spec.name)?;
     }
@@ -586,7 +594,12 @@ pub fn check_network(xml: &str) -> Result<NetworkSpec, String> {
     for c in elements(root) {
         match c.tag_name().name() {
             "name" => spec.name = text(c),
-            "uuid" => leaf(c)?,
+            "uuid" => {
+                leaf(c)?;
+                spec.uuid = Some(text(c));
+            }
+            // The display name of a network named by its UUID.
+            "title" => leaf(c)?,
             "forward" => {
                 attrs_only(c, &["mode", "dev"])?;
                 // `route` and `open` put the network straight onto the host's
@@ -649,10 +662,31 @@ pub fn check_network(xml: &str) -> Result<NetworkSpec, String> {
     if spec.name.is_empty() {
         return Err("the network has no name".into());
     }
+    uuid_name_agrees(&spec.name, spec.uuid.as_deref(), "network")?;
     if spec.forward == "bridge" && spec.bridge.is_none() {
         return Err("a bridge network must name its bridge".into());
     }
     Ok(spec)
+}
+
+/// A resource named like a UUID must be named by *its own* UUID.
+///
+/// Guests and networks are named by their UUID now, and the UUID is what the
+/// web server's records and a URL rely on. A name that merely looks like one
+/// -- someone else's UUID, say -- would make a link, a grant or an ownership
+/// record by UUID point at the wrong thing. So a UUID-shaped name is only
+/// accepted with a matching `<uuid>`, and one without a `<uuid>` is refused
+/// (libvirt would give it a different, random one).
+fn uuid_name_agrees(name: &str, uuid: Option<&str>, what: &str) -> Result<(), String> {
+    if !crate::guard::is_uuid(name) {
+        return Ok(());
+    }
+    match uuid {
+        Some(u) if u.eq_ignore_ascii_case(name) => Ok(()),
+        _ => Err(format!(
+            "a {what} named like a UUID must be named by its own <uuid>"
+        )),
+    }
 }
 
 pub fn check_volume(xml: &str) -> Result<VolumeSpec, String> {
@@ -948,6 +982,45 @@ mod tests {
         ] {
             assert!(check_network(xml).is_err(), "{why} allowed");
         }
+    }
+
+    /// What the forms write now: named by a fresh UUID, the display name as
+    /// the title. A name that only looks like a UUID -- not its own -- is
+    /// refused, so a record keyed by UUID can never point at the wrong thing.
+    #[test]
+    fn a_resource_named_by_its_uuid_passes_and_a_borrowed_one_does_not() {
+        const U: &str = "ea15249b-a713-41dc-a808-05619e42eb2a";
+        const OTHER: &str = "6f4d2a3b-0c9e-4d8f-b2a1-3e4c5d6e7f80";
+        let dom = form_domain()
+            .replace(
+                "<name>web</name>",
+                &format!("<name>{U}</name>\n  <uuid>{U}</uuid>\n  <title>My Web</title>"),
+            )
+            .replace("web_VARS.fd", &format!("{U}_VARS.fd"));
+        let s = check_domain(&dom).unwrap();
+        assert_eq!((s.name.as_str(), s.uuid.as_deref()), (U, Some(U)));
+        let borrowed = dom.replacen(
+            &format!("<uuid>{U}</uuid>"),
+            &format!("<uuid>{OTHER}</uuid>"),
+            1,
+        );
+        assert!(
+            check_domain(&borrowed).is_err(),
+            "someone else's UUID as the name"
+        );
+        let unanchored = dom.replacen(&format!("<uuid>{U}</uuid>"), "", 1);
+        assert!(
+            check_domain(&unanchored).is_err(),
+            "a UUID name with no <uuid>"
+        );
+        // A plain name needs no <uuid>, as before.
+        assert!(check_domain(&form_domain()).is_ok());
+
+        let net = format!("<network><name>{U}</name><uuid>{U}</uuid><title>Lab</title><forward mode='nat'/></network>");
+        assert_eq!(check_network(&net).unwrap().name, U);
+        let borrowed =
+            format!("<network><name>{U}</name><uuid>{OTHER}</uuid><forward mode='nat'/></network>");
+        assert!(check_network(&borrowed).is_err());
     }
 
     #[test]

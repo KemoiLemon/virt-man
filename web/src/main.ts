@@ -22,7 +22,7 @@ import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
-import { autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
+import { autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
@@ -179,10 +179,53 @@ async function fastLoad(load: () => Promise<unknown>) {
 function currentRoute(): Route {
   if (adminSection) return { view: "admin", section: adminSection, tab: adminTab };
   if (!selectedConn) return { view: "dc", tab: dcTab };
-  if (selectedVm) return { view: "vm", conn: selectedConn, vm: selectedVm, tab: vmTab };
-  if (selectedNet) return { view: "net", conn: selectedConn, net: selectedNet };
-  if (selectedPool) return { view: "pool", conn: selectedConn, pool: selectedPool };
-  return { view: "conn", conn: selectedConn, tab: connTab };
+  // URLs name a guest, network or pool by its UUID, which never changes or
+  // repeats; the selection itself stays the libvirt name, which every daemon
+  // route accepts too. A resource the lists have not loaded yet keeps its
+  // name in the URL until they do.
+  const c = selectedConn;
+  if (selectedVm) return { view: "vm", conn: c, vm: uuidOf(treeVms[c], selectedVm), tab: vmTab };
+  if (selectedNet) return { view: "net", conn: c, net: uuidOf(treeNets[c], selectedNet) };
+  if (selectedPool) return { view: "pool", conn: c, pool: uuidOf(treePools[c], selectedPool) };
+  return { view: "conn", conn: c, tab: connTab };
+}
+
+/// Whether `s` is a UUID in libvirt's canonical form: a guest, network or pool
+/// named by its identity rather than by what people call it.
+function isUuid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+/// Put `title` in a definition's `<title>`, replacing one or adding it after
+/// `<name>` (libvirt wants it there).
+function withTitle(xml: string, title: string): string {
+  const t = `<title>${esc(title)}</title>`;
+  if (/<title>[^<]*<\/title>/.test(xml)) return xml.replace(/<title>[^<]*<\/title>/, t);
+  return xml.replace(/(<name>[^<]*<\/name>)/, `$1\n  ${t}`);
+}
+
+/// Undo XML's five escapes, for text read out of a definition.
+function unescapeXml(s: string): string {
+  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
+
+/// A resource's UUID from a loaded list, or `name` if it is not there.
+function uuidOf(list: { name: string; uuid?: string }[] | undefined, name: string): string {
+  return list?.find((x) => x.name === name)?.uuid || name;
+}
+
+/// The libvirt name for what a URL named: a UUID, or (old links) a name.
+function nameOf(list: { name: string; uuid?: string }[] | undefined, id: string): string {
+  const low = id.toLowerCase();
+  return list?.find((x) => x.uuid?.toLowerCase() === low)?.name ?? id;
+}
+
+/// What people call a guest, network or pool: its title, else its libvirt
+/// name. The libvirt name is a UUID for anything made or migrated since
+/// UUIDs, so it is never shown when there is a title.
+function displayName(list: { name: string; title?: string | null }[] | undefined, name: string): string {
+  return list?.find((x) => x.name === name)?.title || name;
 }
 
 /// Put the current view in the address bar, so a reload returns to it. Called
@@ -236,9 +279,9 @@ function applyRoute(r: Route) {
   }
   if (r.view === "dc") dcTab = r.tab;
   else if (r.view === "conn") connTab = r.tab;
-  else if (r.view === "vm") { selectedVm = r.vm; vmTab = r.tab; }
-  else if (r.view === "net") selectedNet = r.net;
-  else selectedPool = r.pool;
+  else if (r.view === "vm") { selectedVm = nameOf(treeVms[r.conn], r.vm); vmTab = r.tab; }
+  else if (r.view === "net") selectedNet = nameOf(treeNets[r.conn], r.net);
+  else selectedPool = nameOf(treePools[r.conn], r.pool);
 }
 
 /// Render whatever the selection state names. The view renderers do the
@@ -273,7 +316,11 @@ function renderOffline() {
   beginRender();
   syncUrl();
   const c = connections.find((x) => x.id === selectedConn);
-  const title = selectedVm ?? selectedNet ?? selectedPool ?? c?.name ?? "";
+  const sc = selectedConn;
+  const title = selectedVm ? displayName(treeVms[sc], selectedVm)
+    : selectedNet ? displayName(treeNets[sc], selectedNet)
+    : selectedPool ? displayName(treePools[sc], selectedPool)
+    : c?.name ?? "";
   const content = $("#content");
   setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.offline(20)}</span><span class="dtitle">${esc(title)}</span>
     ${selectedVm || selectedNet || selectedPool ? `<span class="badge">${esc(c?.name ?? "")}</span>` : ""}</div>
@@ -800,7 +847,7 @@ function renderTree() {
       <button class="tree-row tree-res tree-net ${selectedNet === n.name && selectedConn === c.id ? "sel" : ""}"
         data-net="${esc(n.name)}" data-net-conn="${c.id}">
         <span class="tree-ic ${n.active ? "on" : ""}">${ic.network()}</span>
-        <span class="tree-label">${esc(n.name)}</span>
+        <span class="tree-label">${esc(n.title || n.name)}</span>
         <span class="tree-state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span>
       </button>`,
             )
@@ -813,7 +860,7 @@ function renderTree() {
       <button class="tree-row tree-res tree-pool ${selectedPool === p.name && selectedConn === c.id ? "sel" : ""}"
         data-pool="${esc(p.name)}" data-pool-conn="${c.id}">
         <span class="tree-ic ${p.active ? "on" : ""}">${ic.storage()}</span>
-        <span class="tree-label">${esc(p.name)}</span>
+        <span class="tree-label">${esc(p.title || p.name)}</span>
         <span class="tree-state ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
       </button>`,
             )
@@ -1367,6 +1414,19 @@ async function refreshTreeVms() {
   }
   // Only re-render when something actually moved, so the tree does not
   // flicker or fight the user's clicks on every poll.
+  // A link opened before the lists loaded holds a UUID where the selection
+  // wants a name; now that the lists are here, swap it for the name.
+  const sc = selectedConn;
+  if (sc) {
+    const was = [selectedVm, selectedNet, selectedPool];
+    if (selectedVm) selectedVm = nameOf(treeVms[sc], selectedVm);
+    if (selectedNet) selectedNet = nameOf(treeNets[sc], selectedNet);
+    if (selectedPool) selectedPool = nameOf(treePools[sc], selectedPool);
+    if (was.some((x, i) => x !== [selectedVm, selectedNet, selectedPool][i])) {
+      changed = true;
+      renderView();
+    }
+  }
   if (changed) {
     syncVmActions();
     renderTree();
@@ -1925,7 +1985,7 @@ async function renderNetPage() {
     setHtml(content, `
       <div class="dhead">
         <span class="dhead-ic">${ic.network(20)}</span>
-        <span class="dtitle">${esc(name)}</span>
+        <span class="dtitle">${esc(displayName(treeNets[selectedConn!], name))}</span>
         <span class="badge ${net.active ? "on" : ""}">${net.active ? "Active" : "Inactive"}</span>
       </div>
       <div class="actions" style="margin-top:12px">
@@ -2121,7 +2181,7 @@ async function renderPoolPage() {
     setHtml(content, `
       <div class="dhead">
         <span class="dhead-ic">${ic.storage(20)}</span>
-        <span class="dtitle">${esc(name)}</span>
+        <span class="dtitle">${esc(displayName(treePools[selectedConn!], name))}</span>
         <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
       </div>
       <div class="dsub">Storage pool</div>
@@ -2350,7 +2410,7 @@ async function loadDashboard() {
         <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-dash-pool="${esc(p.name)}" data-dash-conn="${selectedConn}">
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
-            <span class="storage-card-title">${esc(p.name)}</span>
+            <span class="storage-card-title">${esc(p.title || p.name)}</span>
             <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
           </div>
           <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
@@ -2897,7 +2957,7 @@ async function loadNetworks() {
       <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open tabindex="0" data-net-open="${esc(n.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.network()}</span>
-          <span class="storage-card-title">${esc(n.name)}</span>
+          <span class="storage-card-title">${esc(n.title || n.name)}</span>
           <span class="badge">${esc(typeLabel(n))}</span>
           <span class="badge ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span>
         </div>
@@ -2974,7 +3034,10 @@ async function openEditNetwork(name: string) {
   } catch (e) {
     return toast((e as Error).message, "bad");
   }
-  openNetworkForm(networkFormFromXml(xml), networkUuid(xml));
+  // `name` is the libvirt name (a UUID, for any network made or migrated
+  // since UUIDs); the form edits the display name. Carried separately so an
+  // edit keeps the libvirt name and changes only the title.
+  openNetworkForm(networkFormFromXml(xml), networkUuid(xml), selectedConn, undefined, name);
 }
 
 /// `conn` defaults to the selected server. The admin page passes its own
@@ -2998,6 +3061,7 @@ function openNetworkForm(
   uuid: string,
   conn: string | null = selectedConn,
   forUser?: { owner: string; after: () => void },
+  libvirtName = "",
 ) {
   if (!conn) return;
   const el = openModal(
@@ -3076,12 +3140,16 @@ function openNetworkForm(
       return toast("Select a bridge", "bad");
     }
     el.remove();
-    const xml = networkXml(form, uuid);
+    // Editing keeps the network's libvirt name and identity; a new network
+    // is named by a fresh UUID, with the name typed here as its title.
+    const id = uuid || newUuid();
+    const libvirt = uuid ? (libvirtName || initial.name) : id;
+    const xml = networkXml(form, id, libvirt);
     const owner = uuid ? null : forUser?.owner ?? null;
     void runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
-      if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(initial.name)}/xml`, xml);
+      if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(libvirt)}/xml`, xml);
       else await api.postXml(`/proxy/${conn}/networks`, xml);
-      if (owner) await assignOwner(conn, "network", form.name, owner);
+      if (owner) await assignOwner(conn, "network", libvirt, owner);
     }, { done: `Network ${form.name} ${uuid ? "updated" : "created"}`, notify: toast })
       .then(() => {
         void refreshTreeVms();
@@ -3111,7 +3179,7 @@ async function loadPools() {
       <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-pool-open="${esc(p.name)}" data-pool-card="${cssId(p.name)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.storage()}</span>
-          <span class="storage-card-title">${esc(p.name)}</span>
+          <span class="storage-card-title">${esc(p.title || p.name)}</span>
           <span class="badge" data-pool-active>${p.active ? "Active" : "Inactive"}</span>
         </div>
         <div class="metric-value" data-pool-pct>${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
@@ -4524,7 +4592,8 @@ async function openHardwareEditor(opts: {
       baseXml = xml;
       devices = devicesFromXml(xml);
       general = {
-        name: opts.vm,
+        // The display name: the title when the guest has one.
+        name: unescapeXml(xml.match(/<title>([^<]*)<\/title>/)?.[1] ?? "") || opts.vm,
         cpus: +(xml.match(/<vcpu[^>]*>(\d+)<\/vcpu>/)?.[1] ?? 2),
         memory_mb: Math.round(+(xml.match(/<memory[^>]*>(\d+)<\/memory>/)?.[1] ?? 2097152) / 1024),
         firmware: /pflash|OVMF/i.test(xml) ? "uefi" : "bios",
@@ -4986,7 +5055,12 @@ async function openHardwareEditor(opts: {
 
     if (editing && opts.vm) {
       const oldName = opts.vm;
-      const renamed = general.name.trim() && general.name.trim() !== oldName;
+      // A guest named by its UUID is renamed by its title: its libvirt name
+      // is its identity and never changes. An older guest, named by what
+      // people call it, is renamed in libvirt as before.
+      const byUuid = isUuid(oldName);
+      const shown = general.name.trim();
+      const renamed = !byUuid && shown && shown !== oldName;
       // Close only the modal; the inline editor stays visible and the
       // post-task renderVm() below refreshes it from the new definition.
       modal?.remove();
@@ -5024,9 +5098,11 @@ async function openHardwareEditor(opts: {
           .replace(/<memory([^>]*)>\d+<\/memory>/, `<memory$1>${general.memory_mb * 1024}</memory>`)
           .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`)
           .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
+        // The display name lives in the title for a UUID-named guest.
+        const titled = byUuid ? withTitle(stripped, shown || target) : stripped;
         set("defining domain");
         await api.putXml(`/proxy/${conn}/domains/${encodeURIComponent(target)}/xml`,
-          withFirmware(withDevices(stripped, devices), general.firmware, target));
+          withFirmware(withDevices(titled, devices), general.firmware, target));
         await refreshTreeVms();
       }, { done: "Hardware saved", notify: toast }).then(() => void renderVm());
       return;
@@ -5039,7 +5115,13 @@ async function openHardwareEditor(opts: {
       void render();
       return toast("Choose a volume for the hard disk, or create a new one", "bad");
     }
+    // A new guest is named by a fresh UUID in libvirt, with the name typed
+    // here as its title, so two guests may share a display name. Its disk and
+    // variable store are named after the UUID too: that name is unique on the
+    // host, a display name is not.
+    const vmUuid = newUuid();
     const form: DomainForm = {
+      uuid: vmUuid,
       name: general.name.trim(),
       cpus: general.cpus,
       memory_mb: general.memory_mb,
@@ -5077,7 +5159,7 @@ async function openHardwareEditor(opts: {
         set(`creating ${newDisk.size_gb} GB volume`);
         disk = await api.post<{ name: string; path: string }>(
           `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
-          { xml: volumeXml({ name: `${form.name}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+          { xml: volumeXml({ name: `${vmUuid}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
         // Only a volume made here is deleted again if the create is refused;
         // a chosen one was the user's before and stays theirs.
         made.push({ pool: newDisk.pool, name: disk.name });
@@ -5088,7 +5170,7 @@ async function openHardwareEditor(opts: {
       // refused permission to open it and the guest will not start.
       form.disk_path = disk.path;
       // Create any additional "new volume" disks before defining the domain.
-      await createPendingVolumes(conn, form.name, devices, set, made);
+      await createPendingVolumes(conn, vmUuid, devices, set, made);
       set("defining domain");
       // Defined shut off: creating a guest must not also boot it, so a
       // mis-sized or mis-configured VM cannot start eating resources before
@@ -5107,7 +5189,7 @@ async function openHardwareEditor(opts: {
       }
       if (owner) {
         set("assigning owner");
-        await assignOwner(conn, "vm", form.name, owner);
+        await assignOwner(conn, "vm", vmUuid, owner);
       }
     }, { done: `VM ${form.name} created`, notify: toast })
       .then(() => {
@@ -5266,7 +5348,10 @@ function openCreatePool() {
     if (!form.name || !form.target) return toast("Name and target are required", "bad");
     el.remove();
     void runTask(`Create pool ${form.name}`, async () => {
-      await api.postXml(`/proxy/${selectedConn}/pools`, poolXml(form));
+      // Named by a fresh UUID; a pool has no <title>, so its display name
+      // goes as ?title= and the daemon keeps it.
+      await api.postXml(`/proxy/${selectedConn}/pools?title=${encodeURIComponent(form.name)}`,
+        poolXml(form, newUuid()));
     }, { done: `Pool ${form.name} created`, notify: toast })
       .then(() => { void refreshTreeVms(); renderConn(); });
   };

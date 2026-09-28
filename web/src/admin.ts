@@ -634,7 +634,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
         ? `<span class="state bad">Suspended</span>`
         : `<span class="state ${r.state === "running" || r.state === "active" ? "on" : ""}">${esc(r.state ? r.state[0].toUpperCase() + r.state.slice(1) : "")}</span>`;
       const name = (r: AdminResource, i: number) =>
-        `<td class="tname row-link" data-open-res="${i}">${esc(r.name)}</td>`;
+        `<td class="tname row-link" data-open-res="${i}">${esc(r.title || r.name)}</td>`;
 
       let table: string;
       if (kind === "vm") {
@@ -666,7 +666,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
           return `<div class="storage-card ${p.state === "active" ? "ok" : ""}">
             <div class="storage-card-head">
               <span class="storage-card-icon">${ic.storage()}</span>
-              <span class="storage-card-title row-link" data-open-res="${pi}">${esc(p.name)}</span>
+              <span class="storage-card-title row-link" data-open-res="${pi}">${esc(p.title || p.name)}</span>
               <span class="badge ${p.state === "active" ? "on" : ""}">${esc(p.state === "active" ? "Active" : "Inactive")}</span>
               <span class="badge">${vols.length} volume${vols.length === 1 ? "" : "s"}</span>
             </div>
@@ -715,7 +715,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
         const r = shown[Number(i)];
         const to = !r.suspended;
         if (to && !await ctx.askConfirm("Suspend access",
-          `Suspend ${r.owner_name ?? "the owner"}'s access to ${r.name}? They keep read-only access; administrators are unaffected.`, "Suspend", true)) return;
+          `Suspend ${r.owner_name ?? "the owner"}'s access to ${r.title || r.name}? They keep read-only access; administrators are unaffected.`, "Suspend", true)) return;
         try {
           await api.put("/resources", { kind: r.kind, conn: r.conn, pool: r.pool ?? "", name: r.name, suspended: to });
           r.suspended = to;
@@ -730,7 +730,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
 
 async function changeOwner(ctx: AdminCtx, r: AdminResource, back: AdminSection) {
   const el = ctx.openModal(
-    `Owner — ${esc(r.name)}`,
+    `Owner — ${esc(r.title || r.name)}`,
     `<label class="field"><span>Owner</span><select id="o-user">
        ${users.map((u) => option(u.id, u.username, u.id === r.owner)).join("")}
      </select></label>
@@ -1153,7 +1153,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
                 <td class="task-msg">${esc(c.offline_error ?? "not answering")}</td></tr>`),
             ...suspended.map((r) =>
               `<tr class="row-open" tabindex="0" data-go="${r.kind === "vm" ? "vms" : "networks"}"><td class="tname">Suspended ${r.kind === "vm" ? "VM" : r.kind}</td>
-                <td>${esc(r.name)} · ${esc(r.conn_name)}</td><td>owned by ${esc(r.owner_name ?? "—")}</td></tr>`),
+                <td>${esc(r.title || r.name)} · ${esc(r.conn_name)}</td><td>owned by ${esc(r.owner_name ?? "—")}</td></tr>`),
             ...act.entries.filter((e) => e.status === "failed").slice(0, 5).map((e) =>
               `<tr class="row-open" tabindex="0" data-go="activity"><td class="tname">Failed: ${esc(e.label)}</td>
                 <td>${esc(e.username)} · ${esc(ctx.relTime(e.at_ms))}</td><td class="task-msg">${esc(e.message || "—")}</td></tr>`),

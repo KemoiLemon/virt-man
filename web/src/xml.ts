@@ -47,7 +47,12 @@ export function withFirmware(
 }
 
 export interface DomainForm {
+  /// What the user calls it. Becomes the `<title>`: the libvirt name is the
+  /// UUID (`uuid` below), so two guests may share a display name.
   name: string;
+  /// libvirt's identity, generated for a new guest. When set, the guest is
+  /// defined with `<name>` = this UUID and `<title>` = `name`.
+  uuid?: string;
   cpus: number;
   memory_mb: number;
   graphics: "vnc" | "spice";
@@ -73,11 +78,18 @@ export interface DomainForm {
 }
 
 export function domainXml(f: DomainForm): string {
-  const name = esc(f.name);
+  // Named by UUID when it has one, with the display name as the title; a
+  // form without a UUID (tests, an older caller) keeps the old behaviour.
+  const libvirtName = f.uuid ?? f.name;
+  const name = esc(libvirtName);
+  const identity = f.uuid
+    ? `\n  <uuid>${esc(f.uuid)}</uuid>\n  <title>${esc(f.name)}</title>`
+    : "";
   const mem = Math.max(128, f.memory_mb) * 1024; // KiB
   const cpus = Math.max(1, f.cpus);
   const arch = "x86_64";
-  const loader = firmwareXml(f.firmware, f.name);
+  // The UEFI variable store is named after the libvirt name, like libvirt's.
+  const loader = firmwareXml(f.firmware, libvirtName);
   const graphicsPort = f.graphics === "spice" ? "5901" : "5900";
 
   let disks = "";
@@ -136,7 +148,7 @@ export function domainXml(f: DomainForm): string {
     : "";
 
   return `<domain type="kvm">
-  <name>${name}</name>
+  <name>${name}</name>${identity}
   <memory unit="KiB">${mem}</memory>
   <vcpu>${cpus}</vcpu>
   <os>
@@ -182,6 +194,7 @@ export interface DhcpHost {
 }
 
 export interface NetworkForm {
+  /// What the user calls it; the `<title>` when the network is named by UUID.
   name: string;
   forward: "nat" | "bridge" | "none";
   bridge: string;
@@ -194,9 +207,13 @@ export interface NetworkForm {
 
 /** Optional uuid from an existing definition, preserved so editing/renaming
  *  updates the network in place instead of defining a duplicate. */
-export function networkXml(f: NetworkForm, uuid = ""): string {
-  const name = esc(f.name);
+export function networkXml(f: NetworkForm, uuid = "", libvirtName = ""): string {
+  // A network is named by its UUID (a new one: `libvirtName` = its UUID) with
+  // the display name as the title. An existing network keeps whatever libvirt
+  // name it has -- renaming one restarts it -- so the title is what changes.
+  const name = esc(libvirtName || f.name);
   const id = uuid ? `<uuid>${esc(uuid)}</uuid>` : "";
+  const title = libvirtName && libvirtName !== f.name ? `<title>${esc(f.name)}</title>` : "";
   let forward = "";
   if (f.forward === "nat") {
     forward = `<forward mode="nat"><nat><port start="1024" end="65535"/></nat></forward>`;
@@ -237,6 +254,7 @@ export function networkXml(f: NetworkForm, uuid = ""): string {
   return `<network>
   <name>${name}</name>
   ${id}
+  ${title}
   ${forward}
   ${bridge}
   ${dns}
@@ -329,7 +347,9 @@ export function networkFormFromXml(xml: string): NetworkForm {
     }))
     .filter((h) => h.mac && h.ip);
   return {
-    name: tag(xml, "name"),
+    // The display name: the title when there is one, since a network named
+    // by its UUID keeps what people call it there.
+    name: tag(xml, "title") || tag(xml, "name"),
     forward,
     bridge: attr(elem(xml, "bridge"), "name"),
     ip: cidr,
@@ -463,14 +483,17 @@ export interface PoolForm {
   source_format: string;
 }
 
-export function poolXml(f: PoolForm): string {
-  const name = esc(f.name);
+/// A pool has no `<title>` (libvirt drops one), so its display name travels
+/// separately, as `?title=` on create; `uuid` becomes its libvirt name.
+export function poolXml(f: PoolForm, uuid = ""): string {
+  const name = esc(uuid || f.name);
+  const id = uuid ? `\n  <uuid>${esc(uuid)}</uuid>` : "";
   const source = f.source
     ? `<source><device path="${esc(f.source)}"/><format type="${esc(f.source_format || "auto")}"/></source>`
     : "";
   const target = `<target><path>${esc(f.target || "")}</path></target>`;
   return `<pool type="${f.type}">
-  <name>${name}</name>
+  <name>${name}</name>${id}
   ${source}
   ${target}
 </pool>`;
@@ -511,4 +534,10 @@ export function autoVolumeName(
 ): string | null {
   if (current.trim() !== "" && current !== previousAutoName) return null;
   return volumeNameFromFile(fileName);
+}
+
+/// A fresh random UUID (v4), for a new guest, network or pool: its libvirt
+/// name and its identity, so display names need not be unique.
+export function newUuid(): string {
+  return crypto.randomUUID();
 }

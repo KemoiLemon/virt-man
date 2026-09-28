@@ -193,7 +193,11 @@ export interface AdminResource {
   kind: "vm" | "network" | "pool" | "volume";
   conn: string;
   conn_name: string;
+  /// The libvirt name (a UUID for anything made since UUIDs).
   name: string;
+  uuid?: string;
+  /// What people call it; shown instead of `name` when set.
+  title?: string | null;
   pool?: string;
   owner?: string;
   owner_name?: string | null;
@@ -253,6 +257,8 @@ export interface ApiKey {
 
 export interface DomainSummary {
   name: string;
+  /// libvirt's identity, and what a URL names the guest by.
+  uuid?: string;
   title?: string;
   id: number;
   state: string;
@@ -274,6 +280,9 @@ export interface Graphics {
 
 export interface NetworkSummary {
   name: string;
+  uuid?: string;
+  /// The display name; the libvirt name may be a UUID.
+  title?: string;
   bridge: string;
   active: boolean;
   persistent: boolean;
@@ -310,6 +319,8 @@ export interface FirewallPolicy {
 
 export interface PoolSummary {
   name: string;
+  uuid?: string;
+  title?: string;
   active: boolean;
   persistent: boolean;
   capacity: number | null;

@@ -39,8 +39,16 @@ const wait = (w, ms) => new Promise((r) => w.setTimeout(r, ms));
 
 const node = (await (await fetch(base + "/connections")).json())[0].name;
 const conn = (await (await fetch(base + "/connections")).json())[0].id;
-const net = (await (await fetch(`${base}/proxy/${conn}/networks`)).json())[0]?.name;
-const pool = (await (await fetch(`${base}/proxy/${conn}/pools`)).json())[0]?.name;
+const netRow = (await (await fetch(`${base}/proxy/${conn}/networks`)).json())[0];
+const poolRow = (await (await fetch(`${base}/proxy/${conn}/pools`)).json())[0];
+const net = netRow?.name;
+const pool = poolRow?.name;
+// A resource's page is addressed by its UUID, which never changes or
+// repeats; it shows its title (else its libvirt name).
+const netId = netRow?.uuid ?? net;
+const poolId = poolRow?.uuid ?? pool;
+const netShown = netRow?.title || net;
+const poolShown = poolRow?.title || pool;
 const enc = encodeURIComponent;
 
 try {
@@ -50,6 +58,9 @@ try {
     [`/${enc(node)}`, (w) => title(w) === node && /Dashboard/.test(activeTab(w))],
     [`/${enc(node)}/networks`, (w) => /Networks/.test(activeTab(w))],
     [`/${enc(node)}/storage`, (w) => /Storage/.test(activeTab(w))],
+    // A reload of a UUID link, and of an old name link, both open the page.
+    ...(netId ? [[`/${enc(node)}/networks/${enc(netId)}`, (w) => title(w) === netShown]] : []),
+    ...(net ? [[`/${enc(node)}/networks/${enc(net)}`, (w) => title(w) === netShown]] : []),
     [`/${enc(node)}/vms/${enc(vmName)}`, (w) => /Summary/.test(activeTab(w))],
     [`/${enc(node)}/vms/${enc(vmName)}/console`, (w) => /Console/.test(activeTab(w))],
     [`/${enc(node)}/vms/${enc(vmName)}/hardware`, (w) => /Hardware/.test(activeTab(w))],
@@ -74,11 +85,11 @@ try {
     const card = w.document.querySelector(`#pools-list .storage-card[data-pool-open="${pool}"]`);
     check("pool cards are openable (hover highlight applies)", !!card?.hasAttribute("data-open"));
     click(w, card?.querySelector(".storage-card-title")); await wait(w, 800);
-    check("a pool card opens its pool page", w.location.pathname === `/${enc(node)}/storage/${enc(pool)}` && title(w) === pool, w.location.pathname);
+    check("a pool card opens its pool page, by UUID", w.location.pathname === `/${enc(node)}/storage/${enc(poolId)}` && title(w) === poolShown, `${w.location.pathname} ${title(w)}`);
     w.history.back(); await wait(w, 800);
     check("Back restores the storage tab", w.location.pathname === `/${enc(node)}/storage` && /Storage/.test(activeTab(w)), w.location.pathname);
     w.history.forward(); await wait(w, 800);
-    check("Forward restores the pool page", title(w) === pool, `${w.location.pathname} ${title(w)}`);
+    check("Forward restores the pool page", title(w) === poolShown, `${w.location.pathname} ${title(w)}`);
   }
   if (net) {
     click(w, w.document.querySelector(".tree-row[data-conn]")); await wait(w, 400);
@@ -89,7 +100,7 @@ try {
     check("a card's own button does not navigate", w.location.pathname === before, w.location.pathname);
     w.document.querySelectorAll(".modal-backdrop, .modal").forEach((m) => m.remove());
     click(w, card?.querySelector(".specs")); await wait(w, 800);
-    check("a network card opens its network page", w.location.pathname === `/${enc(node)}/networks/${enc(net)}` && title(w) === net, w.location.pathname);
+    check("a network card opens its network page, by UUID", w.location.pathname === `/${enc(node)}/networks/${enc(netId)}` && title(w) === netShown, `${w.location.pathname} ${title(w)}`);
   }
   const len = w.history.length; await wait(w, 2500);
   check("the 1s poll adds no history entries", w.history.length === len, `${len} -> ${w.history.length}`);

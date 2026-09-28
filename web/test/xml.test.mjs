@@ -346,3 +346,57 @@ test("a NAT network keeps its bridge name through the editor", () => {
   const created = xml.networkXml({ name: "x", forward: "nat", bridge: "", ip: "10.1.0.1/24", dhcp_start: "", dhcp_end: "", dns: "", hosts: [] });
   assert.doesNotMatch(created, /<bridge/, "a new network still lets libvirt pick one");
 });
+
+// Named by UUID: a new guest, network or pool is named in libvirt by its UUID,
+// with what the user typed as its title, so two can share a display name.
+test("a guest with a UUID is named by it, titled by its display name", () => {
+  const u = "ea15249b-a713-41dc-a808-05619e42eb2a";
+  const out = xml.domainXml({
+    uuid: u, name: "My <Web> Box", cpus: 1, memory_mb: 512, graphics: "vnc", firmware: "uefi",
+    existing_volume: "", new_disk: false, disk_size_gb: 0, disk_format: "qcow2",
+    disk_path: `/img/${u}.qcow2`, pool: "default", iso: "", iso_pool: "", network: "", bridge: "",
+  });
+  assert.match(out, new RegExp(`<name>${u}</name>`));
+  assert.match(out, new RegExp(`<uuid>${u}</uuid>`));
+  assert.match(out, /<title>My &lt;Web&gt; Box<\/title>/, "display name escaped into the title");
+  assert.match(out, new RegExp(`nvram/${u}_VARS\\.fd`), "variable store named by the UUID, which is unique");
+  assert.ok(!out.includes("<name>My"), "the display name is not the libvirt name");
+});
+
+test("a guest without a UUID keeps the old shape", () => {
+  const out = xml.domainXml({
+    name: "web", cpus: 1, memory_mb: 512, graphics: "vnc", firmware: "bios",
+    existing_volume: "", new_disk: false, disk_size_gb: 0, disk_format: "qcow2",
+    pool: "default", iso: "", iso_pool: "", network: "", bridge: "",
+  });
+  assert.match(out, /<name>web<\/name>/);
+  assert.ok(!out.includes("<title>"), "no title");
+});
+
+test("a network is named by its UUID and titled; an edit keeps its libvirt name", () => {
+  const u = "6f4d2a3b-0c9e-4d8f-b2a1-3e4c5d6e7f80";
+  const form = { name: "Lab LAN", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "", dns: "", hosts: [] };
+  const created = xml.networkXml(form, u, u);
+  assert.match(created, new RegExp(`<name>${u}</name>`));
+  assert.match(created, /<title>Lab LAN<\/title>/);
+  // Editing an older network named "lan": it stays "lan"; the title changes.
+  const edited = xml.networkXml(form, u, "lan");
+  assert.match(edited, /<name>lan<\/name>/);
+  assert.match(edited, /<title>Lab LAN<\/title>/);
+  // The editor reads the title back as the name it shows.
+  assert.equal(xml.networkFormFromXml(created).name, "Lab LAN");
+  assert.equal(xml.networkFormFromXml("<network><name>lan</name></network>").name, "lan", "no title: the name");
+});
+
+test("a pool is named by its UUID; its title travels separately", () => {
+  const u = "3d9f1e2a-7b6c-4d5e-9f8a-1b2c3d4e5f60";
+  const out = xml.poolXml({ name: "Fast SSD", type: "dir", target: "/srv/vm", source: "", source_format: "auto" }, u);
+  assert.match(out, new RegExp(`<name>${u}</name>`));
+  assert.match(out, new RegExp(`<uuid>${u}</uuid>`));
+  assert.ok(!out.includes("Fast SSD"), "libvirt drops a pool <title>, so it is not sent");
+});
+
+test("new UUIDs are canonical v4", () => {
+  const re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  for (let i = 0; i < 20; i++) assert.match(xml.newUuid(), re);
+});
