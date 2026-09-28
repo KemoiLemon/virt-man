@@ -26,6 +26,12 @@ body { font-size: 14px; }
 .section-title { font-size: 12px; margin-bottom: 9px; }
 input, select, textarea { font-size: 13px; padding: 7px 9px; }
 .select-trigger { font-size: 13px; padding: 7px 9px; }
+/* A button inside a filter bar is a control standing among the fields, so it
+   takes their metrics rather than .btn's smaller ones. This has to live in
+   this layer: a rule in views.css has higher specificity than `.btn` here, so
+   sizing it there silently won the cascade and left the buttons ~3 px shorter
+   than the selects beside them — twice. */
+.al-filters > .btn { font-size: 13px; padding: 7px 9px; letter-spacing: normal; }
 .select-option { font-size: 13px; }
 .field > span { font-size: 11px; }
 .modal-head { font-size: 13px; }
