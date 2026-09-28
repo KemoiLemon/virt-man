@@ -383,13 +383,17 @@ per-connection cursor (reset when a daemon restarts and its sequence drops).
   view turns it off).
 
 **Live packet capture exists only while someone watches.**
-(`daemon/src/api/capture.rs`.) `POST /domains/{vm}/capture` opens one
-`AF_PACKET` socket per guest tap; the SPA polls `…/capture/{id}?after=N`
-(no streaming through the proxy, same pattern as the console). A session
-stops when not polled for 20 s, after 30 min regardless, or on `DELETE`; at
-most 8 run at once, each holding at most 5000 packets truncated to 1600
-bytes. `…/pcap` returns what is held as a pcap file. Nothing is stored.
-Rows go into the capture table as a whole `<table>` through `setHtml`: bare
+(`daemon/src/api/capture.rs`.) The daemon side is complete and still served:
+`POST /domains/{vm}/capture` opens one `AF_PACKET` socket per guest tap, the
+caller polls `…/capture/{id}?after=N` (no streaming through the proxy, same
+pattern as the console), a session stops when not polled for 20 s, after 30 min
+regardless, or on `DELETE`, at most 8 run at once, each holding at most 5000
+packets truncated to 1600 bytes, and `…/pcap` returns what is held as a pcap
+file. Nothing is stored. **The SPA panel for it was removed** — the button that
+opened it, and `openPacketCapture` with its `CaptureLine` type and `.pc-*`
+styles, are in this file's history if it is wanted back.
+
+Rows go into a capture table as a whole `<table>` through `setHtml`: bare
 `<tr>` markup is dropped by the sanitizer outside a table, which once showed a
 capture counting packets while displaying none.
 

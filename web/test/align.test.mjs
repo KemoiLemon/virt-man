@@ -64,8 +64,8 @@ test("buttons still centre their own contents", () => {
 });
 
 /**
- * The access-log filter bar, as the two dialogs build it: fields, a themed
- * select, and the Live / Packet capture buttons.
+ * The access-log filter bar, as the dialog builds it: fields, a themed
+ * select, and the Live button.
  *
  * Measured through getComputedStyle, not by reading declarations: the bug this
  * guards against twice was a rule in views.css out-specifying the one in
@@ -86,7 +86,6 @@ function filterBar() {
       `<label class="field"><span>Port</span><input id="al-port"></label>` +
       `<label class="field al-grow"><span>Domain or IP</span><input id="al-q"></label>` +
       `<button class="btn" id="al-live">Live</button>` +
-      `<button class="btn" id="al-capture">Packet capture</button>` +
       `</div></div></div></body></html>`,
     { url: "http://localhost/", pretendToBeVisual: true },
   );
@@ -111,7 +110,6 @@ test("a filter-bar button is exactly as tall as the fields beside it", () => {
   const select = bar.vertical(".select-trigger");
   assert.deepEqual(field, select, "the fields agree with each other first");
   assert.deepEqual(bar.vertical("#al-live"), field, "Live follows the fields");
-  assert.deepEqual(bar.vertical("#al-capture"), field, "Packet capture follows the fields");
 });
 
 test("a control's border is declared once for buttons and fields alike", () => {

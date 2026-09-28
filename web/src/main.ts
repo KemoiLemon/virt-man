@@ -2605,16 +2605,16 @@ function openAccessLogs(conn: string, vm = "") {
       table = skeleton("table");
     } else if (f.group) {
       table = `<table class="grid al-table">
-        <tr>${th("key", esc(GROUP_LABEL[f.group].replace(/^(Most accessed |Most used |Busiest )/, "")))}${th("count", "Connections")}${th("bytes", "Traffic")}<th>VMs</th>${th("time", "Last")}</tr>
+        <tr>${th("key", esc(GROUP_LABEL[f.group].replace(/^(Most accessed |Most used |Busiest )/, "")))}${th("count", "Connections")}<th>VMs</th>${th("time", "Last")}</tr>
         ${(data.groups ?? []).map((g) => `
           <tr class="row-open" tabindex="0" data-al-drill="${esc(g.key)}">
-            <td>${esc(g.key || "(no name)")}</td><td>${g.count}</td><td>${fmtBytes(g.bytes)}</td>
+            <td>${esc(g.key || "(no name)")}</td><td>${g.count}</td>
             <td>${g.vms}</td><td>${fmtWhen(g.last_ms)}</td></tr>`).join("")
-          || `<tr><td colspan="5" class="empty">Nothing logged for this filter.</td></tr>`}
+          || `<tr><td colspan="4" class="empty">Nothing logged for this filter.</td></tr>`}
       </table>`;
     } else {
       table = `<table class="grid al-table">
-        <tr>${th("time", "Time")}${f.vm ? "" : th("vm", "VM")}<th>Dir</th>${th("proto", "Proto")}${th("domain", "Domain")}${th("ip", "Remote")}${th("port", "Port")}${th("bytes", "Traffic")}</tr>
+        <tr>${th("time", "Time")}${f.vm ? "" : th("vm", "VM")}<th>Dir</th>${th("proto", "Proto")}${th("domain", "Domain")}${th("ip", "Remote")}${th("port", "Port")}</tr>
         ${(data.rows ?? []).map((r) => `
           <tr>
             <td>${fmtWhen(r.opened_ms)}</td>
@@ -2624,9 +2624,8 @@ function openAccessLogs(conn: string, vm = "") {
             <td class="al-domain">${esc(r.domain ?? "—")}</td>
             <td><code>${esc(r.dst)}</code></td>
             <td>${r.dport || "—"}</td>
-            <td>${r.kind === "dns" ? "—" : r.closed_ms ? `↑${fmtBytes(r.bytes_out)} ↓${fmtBytes(r.bytes_in)}` : "…"}</td>
           </tr>`).join("")
-          || `<tr><td colspan="${f.vm ? 7 : 8}" class="empty">Nothing logged for this filter.</td></tr>`}
+          || `<tr><td colspan="${f.vm ? 6 : 7}" class="empty">Nothing logged for this filter.</td></tr>`}
       </table>`;
     }
     const restore = holdFocus(body, "[data-al-sort], [data-al-drill], select, input");
@@ -2641,7 +2640,6 @@ function openAccessLogs(conn: string, vm = "") {
         <label class="field"><span>Period</span><select id="al-range">${opt([["1h", "Last hour"], ["24h", "Last 24 h"], ["7d", "Last 7 days"], ["14d", "Last 14 days"]], f.range)}</select></label>
         <label class="field"><span>Records</span><select id="al-kind">${opt(Object.entries(KIND_LABEL) as [string, string][], f.kind)}</select></label>
         <button class="btn al-live ${live ? "on" : ""}" id="al-live" title="Show new entries as they arrive">${ic.circleDot(14)} Live</button>
-        <button class="btn" id="al-capture" title="Watch a VM's packets as they happen">${ic.logs(14)} Packet capture</button>
       </div>
       ${table}
       <div class="al-foot">
@@ -2675,7 +2673,6 @@ function openAccessLogs(conn: string, vm = "") {
       startLive();
       void load();
     };
-    ($("#al-capture", body) as HTMLButtonElement).onclick = () => openPacketCapture(conn, f.vm || vm);
     // Typing filters as you go, after a pause, instead of on every key.
     let timer = 0;
     for (const [id, key] of [["#al-q", "q"], ["#al-port", "port"]] as const) {
@@ -2700,156 +2697,12 @@ function openAccessLogs(conn: string, vm = "") {
   void load();
 }
 
-/// Live packet capture on one VM: every packet it sends or receives, as it
-/// happens, while this window is open. The daemon captures only while this
-/// polls, and stops by itself a few seconds after it is closed.
-function openPacketCapture(conn: string, vmHint: string) {
-  const vms = (treeVms[conn] ?? []).filter((v) => v.active).map((v) => v.name);
-  let vm = vms.includes(vmHint) ? vmHint : vms[0] ?? "";
-  let session: string | null = null;
-  let after = 0;
-  let lines: CaptureLine[] = [];
-  let paused = false;
-  let dropped = 0;
-  let timer = 0;
-  const KEEP = 2000; // lines kept on screen; the daemon holds more for the pcap
-  const el = openModal("Packet capture", `
-    <div class="al-filters">
-      <label class="field"><span>VM</span><select id="pc-vm">${vms.map((v) =>
-        `<option value="${esc(v)}" ${v === vm ? "selected" : ""}>${esc(v)}</option>`).join("") || `<option value="">No running VMs</option>`}</select></label>
-      <label class="field"><span>Protocol</span><select id="pc-proto">
-        <option value="">Any</option><option value="tcp">TCP</option><option value="udp">UDP</option>
-        <option value="dns">DNS</option><option value="icmp">ICMP</option><option value="arp">ARP</option></select></label>
-      <label class="field"><span>Port</span><input id="pc-port" placeholder="any" inputmode="numeric"></label>
-      <label class="field al-grow"><span>Host IP</span><input id="pc-host" placeholder="any"></label>
-      <button class="btn primary" id="pc-start">${ic.start(14)} Start</button>
-      <button class="btn" id="pc-pause" disabled>Pause</button>
-      <button class="btn" id="pc-pcap" disabled title="Download what was captured, for Wireshark">${ic.download(14)} .pcap</button>
-    </div>
-    <div class="dsub" id="pc-status">Captures only while this window is open; nothing is stored.</div>
-    <div class="pc-scroll" id="pc-scroll"></div>`, "");
-  el.querySelector(".modal")?.classList.add("wide", "al-modal");
-  const status = $("#pc-status", el) as HTMLElement;
-  const scroller = $("#pc-scroll", el) as HTMLElement;
-  const startBtn = $("#pc-start", el) as HTMLButtonElement;
-  const pauseBtn = $("#pc-pause", el) as HTMLButtonElement;
-  const pcapBtn = $("#pc-pcap", el) as HTMLButtonElement;
-  const base = () => `/proxy/${conn}/domains/${encodeURIComponent(vm)}/capture`;
-  queueMicrotask(() => repaint());
-
-  const hostPort = (h: string, p: number | null) => (p == null ? esc(h) : `${esc(h)}:${p}`);
-  const row = (l: CaptureLine) => `<tr class="pc-${l.dir}">
-    <td>${fmtWhen(l.ts_us / 1000).split(" ")[1]}.${String(Math.floor((l.ts_us % 1_000_000) / 1000)).padStart(3, "0")}</td>
-    <td>${l.dir === "out" ? "→" : "←"}</td><td>${esc(l.proto)}</td>
-    <td>${hostPort(l.src, l.sport)}</td><td>${hostPort(l.dst, l.dport)}</td>
-    <td>${l.len}</td><td>${esc(l.info)}</td></tr>`;
-  const head = `<tr><th>Time</th><th>Dir</th><th>Proto</th><th>Source</th><th>Destination</th><th>Len</th><th>Info</th></tr>`;
-  const repaint = () => {
-    // Follow the newest line unless the user scrolled up to read.
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
-    // The whole table, not rows into an existing one: setHtml sanitizes out
-    // of context, and a bare <tr> outside a <table> is dropped, which left
-    // the capture counting packets while showing none.
-    setHtml(scroller, `<table class="grid al-table pc-table" id="pc-table">${head}${
-      lines.map(row).join("") || `<tr><td colspan="7" class="empty">No packets yet.</td></tr>`}</table>`);
-    if (atBottom) scroller.scrollTop = scroller.scrollHeight;
-  };
-
-  const stop = async () => {
-    window.clearInterval(timer);
-    const id = session;
-    session = null;
-    setHtml(startBtn, `${ic.start(14)} Start`);
-    pauseBtn.disabled = true;
-    if (id) await api.del(`${base()}/${id}`).catch(() => {});
-  };
-  const poll = async () => {
-    if (!session) return;
-    if (!el.isConnected) return void stop();
-    try {
-      const r = await api.get<{ lines: CaptureLine[]; last: number; dropped: number }>(`${base()}/${session}?after=${after}`);
-      after = r.last;
-      dropped = r.dropped;
-      if (!paused && r.lines.length) {
-        lines = [...lines, ...r.lines].slice(-KEEP);
-        repaint();
-      }
-      status.textContent = `Capturing on ${vm} — ${after} packets${dropped ? `, ${dropped} oldest dropped from the buffer` : ""}${paused ? " (display paused)" : ""}.`;
-    } catch (e) {
-      status.textContent = `Capture ended: ${(e as Error).message}`;
-      window.clearInterval(timer);
-      session = null;
-      setHtml(startBtn, `${ic.start(14)} Start`);
-      pauseBtn.disabled = true;
-    }
-  };
-
-  startBtn.onclick = async () => {
-    if (session) return void stop();
-    if (!vm) return toast("No running VM to capture", "bad");
-    const port = ($("#pc-port", el) as HTMLInputElement).value.trim();
-    const host = ($("#pc-host", el) as HTMLInputElement).value.trim();
-    try {
-      const r = await api.post<{ id: string; interfaces: string[] }>(base(), {
-        proto: ($("#pc-proto", el) as HTMLSelectElement).value || undefined,
-        port: /^\d+$/.test(port) ? Number(port) : undefined,
-        host: host || undefined,
-      });
-      session = r.id;
-      after = 0;
-      lines = [];
-      paused = false;
-      repaint();
-      setHtml(startBtn, `${ic.stop(14)} Stop`);
-      pauseBtn.disabled = false;
-      pauseBtn.textContent = "Pause";
-      pcapBtn.disabled = false;
-      status.textContent = `Capturing on ${vm} (${r.interfaces.join(", ")})…`;
-      timer = window.setInterval(() => void poll(), 1000);
-    } catch (e) {
-      toast((e as Error).message, "bad");
-    }
-  };
-  pauseBtn.onclick = () => {
-    paused = !paused;
-    pauseBtn.textContent = paused ? "Resume" : "Pause";
-  };
-  pcapBtn.onclick = async () => {
-    if (!session) return toast("Start a capture first; a finished one is gone", "bad");
-    try {
-      const res = await fetch(`${base()}/${session}/pcap`, { credentials: "same-origin" });
-      if (!res.ok) throw new Error(res.statusText);
-      const url = URL.createObjectURL(await res.blob());
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${vm}-${new Date().toISOString().replace(/[:.]/g, "-")}.pcap`;
-      document.body.append(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    } catch (e) { toast((e as Error).message, "bad"); }
-  };
-  ($("#pc-vm", el) as HTMLSelectElement).addEventListener("change", (e) => {
-    void stop().then(() => { vm = (e.target as HTMLSelectElement).value; });
-  });
-  // Closing the window stops the capture at once rather than waiting for the
-  // daemon's idle timeout.
-  new MutationObserver((_, obs) => {
-    if (!el.isConnected) { obs.disconnect(); void stop(); }
-  }).observe(document.body, { childList: true });
-}
-
-interface CaptureLine {
-  seq: number; ts_us: number; dir: "in" | "out"; iface: string; len: number; proto: string;
-  src: string; dst: string; sport: number | null; dport: number | null; info: string;
-}
-
 interface AccessRow {
   opened_ms: number; closed_ms: number; vm: string | null; proto: string; dst: string; dport: number;
-  domain: string | null; bytes_out: number; bytes_in: number; dir: FlowDir;
+  domain: string | null; dir: FlowDir;
   kind: "dns" | "connection";
 }
-interface AccessGroup { key: string; count: number; bytes: number; vms: number; last_ms: number }
+interface AccessGroup { key: string; count: number; vms: number; last_ms: number }
 
 /// Rules + port-forward editor for one network.
 /// Shared firewall-editor helpers: option lists, row templates, and reading

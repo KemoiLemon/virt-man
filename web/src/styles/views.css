@@ -226,10 +226,4 @@ th.al-sort { cursor: pointer; user-select: none; }
 th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
 .al-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .al-pager { display: flex; align-items: center; gap: 6px; }
-/* Packet capture: a fixed-height scroll box that follows the newest line. */
-.pc-scroll { max-height: 55vh; overflow: auto; border: 1px solid var(--line); }
-.pc-table { margin: 0; font-size: 12px; }
-.pc-table td { padding-top: 3px; padding-bottom: 3px; }
-.pc-table tr.pc-in td:nth-child(2) { color: var(--ok); }
-.pc-table tr.pc-out td:nth-child(2) { color: var(--accent); }
 .al-live.on { border-color: var(--bad); color: var(--bad); }
