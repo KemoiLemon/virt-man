@@ -66,7 +66,8 @@ export const api = {
   get: <T>(url: string) => request<T>("GET", url),
   post: <T>(url: string, body?: unknown) => request<T>("POST", url, body),
   put: <T>(url: string, body?: unknown) => request<T>("PUT", url, body),
-  del: <T>(url: string) => request<T>("DELETE", url),
+  // A body only where the route names its target in it (`DELETE /acl`).
+  del: <T>(url: string, body?: unknown) => request<T>("DELETE", url, body),
   postRaw: <T = unknown>(url: string, body: Blob | ArrayBuffer | Uint8Array, contentType = "application/octet-stream") =>
     fetch(url, {
       method: "POST",
@@ -137,23 +138,85 @@ function sendXml<T>(method: string, url: string, xml: string): Promise<T> {
 
 // ---------------------------------------------------------------- types
 
-export type Permission = "read" | "write" | "none";
+export interface Limit {
+  vms?: number | null;
+  vcpus?: number | null;
+  memory_mb?: number | null;
+  storage_gb?: number | null;
+  networks?: number | null;
+}
+
+/// Per-user resource limits: `default` on every daemon separately, or pooled
+/// across all of them when `shared`; `daemons` overrides one daemon.
+export interface Quota {
+  shared: boolean;
+  default: Limit;
+  daemons: Record<string, Limit>;
+}
 
 export interface User {
   id: string;
-  /// Role name, resolved against the stored roles. Custom roles are allowed,
-  /// so this is a plain string rather than the old three-value union.
-  role: string;
   username: string;
   nickname: string;
   avatar: string | null;
-  scopes: Record<string, Permission>;
+  /// Only on /auth/me: what this user may do at `/`. Cosmetic -- the API
+  /// checks every call itself.
+  admin?: boolean;
+  privs?: string[];
+  quota?: Quota;
+  /// Only on the admin user list.
+  groups?: string[];
 }
 
 export interface RoleDef {
   name: string;
   builtin: boolean;
-  scopes: Record<string, Permission>;
+  privs: string[];
+}
+
+export interface GroupDef {
+  name: string;
+  comment: string;
+  members: string[];
+}
+
+export interface AclEntry {
+  path: string;
+  ugid: string;
+  role: string;
+  propagate: boolean;
+  label?: string;
+}
+
+/// A row of the admin Resources page.
+export interface AdminResource {
+  kind: "vm" | "network" | "pool" | "volume";
+  conn: string;
+  conn_name: string;
+  name: string;
+  pool?: string;
+  owner?: string;
+  owner_name?: string | null;
+  suspended?: boolean;
+  state?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  capacity?: number;
+  forward?: string;
+  ip?: string;
+}
+
+export interface IpRow {
+  conn: string;
+  conn_name: string;
+  network: string;
+  mac: string;
+  ip: string;
+  name?: string | null;
+  dynamic?: boolean;
+  vm_name?: string | null;
+  owner?: string;
+  owner_name?: string | null;
 }
 
 export interface Connection {
@@ -182,7 +245,7 @@ export interface ApiKey {
   name: string;
   prefix: string;
   user_id?: string;
-  scopes?: Record<string, Permission>;
+  privs?: string[];
   key?: string;
 }
 
@@ -195,6 +258,10 @@ export interface DomainSummary {
   persistent: boolean;
   vcpus: number;
   memory_mb: number;
+  /// Set by the web server's proxy: who owns it, and whether it is the caller.
+  owner_name?: string;
+  mine?: boolean;
+  suspended?: boolean;
 }
 
 export interface Graphics {

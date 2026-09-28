@@ -74,6 +74,12 @@ window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
 const px = (el, prop) => parseFloat(window.getComputedStyle(el)[prop]) || 0;
 const results = [];
+// Print whatever was collected if the script dies part-way, so a crash does
+// not hide the checks that explain it.
+process.on("exit", (code) => {
+  if (code && !printed) for (const [s, m] of results) console.log(`${s === "pass" ? "✔" : "✖"} ${m}`);
+});
+let printed = false;
 const check = (name, fn) => {
   try {
     fn();
@@ -247,7 +253,8 @@ check("topbar order is theme, admin, sign out — all icon-only", () => {
   assert.ok(quick, ".topbar-quick group exists");
   // Browser build must not offer Connect to WebUI at all.
   assert.ok(!document.querySelector("#webui-btn"), "no WebUI button in the browser build");
-  const ids = [...quick.querySelectorAll("button")].map((b) => b.id);
+  // The phone-only palette button is hidden on desktop; it is not part of this order.
+  const ids = [...quick.querySelectorAll("button:not(.mobile-only)")].map((b) => b.id);
   assert.deepEqual(ids, ["theme-btn", "admin-btn", "logout-btn"], `order is theme, admin, sign out (got ${ids})`);
   for (const id of ids) {
     const b = document.querySelector(`#${id}`);
@@ -258,151 +265,184 @@ check("topbar order is theme, admin, sign out — all icon-only", () => {
   }
 });
 
-document.querySelector("#admin-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(900);
+// A missing element is a failed check, not a crash that hides every result.
+const click = (el) => el
+  ? el.dispatchEvent(new window.MouseEvent("click", { bubbles: true }))
+  : results.push(["FAIL", `clicked a missing element (after: ${results.at(-1)?.[1]})`]);
+const topModal = () => [...document.querySelectorAll(".modal-back.open")].pop();
+const beforeAdmin = { html: document.querySelector("#admin-btn").innerHTML, path: window.location.pathname };
 
-check("admin panel opens with Users, Roles and API keys", () => {
-  const modal = document.querySelector(".modal-back.open");
-  assert.ok(modal, "admin modal open");
-  const tabs = [...modal.querySelectorAll("[data-admintab]")];
-  assert.deepEqual(tabs.map((t) => t.dataset.admintab), ["users", "roles", "keys"]);
-  // "Users & permissions" was renamed to just "Users".
-  assert.equal(tabs[0].textContent.trim(), "Users", "first tab is titled Users");
-  assert.ok(modal.querySelector("#admin-area table.grid"), "user table rendered from the live API");
-  assert.ok(modal.querySelector("#add-user"), "add user button");
-  assert.ok(modal.querySelector("[data-edituser]"), "per-user edit (role + permissions)");
-});
-
-check("the add-user button is spaced away from the table above it", () => {
-  const actions = document.querySelector("#admin-area table.grid + .actions");
-  assert.ok(actions, "actions row follows the table");
-  const mt = px(actions, "marginTop");
-  assert.ok(mt >= 8, `table and its action row are separated (margin-top ${mt}px)`);
-});
-
-check("role choices are spaced apart in the picker", () => {
-  // Open the per-user editor, then its role select: the themed listbox popover
-  // renders the role options; a small gap keeps adjacent role names from
-  // reading as one block. (The popover only exists once a select is opened.)
-  document.querySelector("[data-edituser]")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  const roleSelect = document.querySelector("#eu-role");
-  assert.ok(roleSelect, "role select present in the edit modal");
-  const trigger = roleSelect.nextElementSibling;
-  assert.ok(trigger?.classList.contains("select-trigger"), "listbox trigger rendered");
-  trigger.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  const pop = document.querySelector(".select-popover");
-  assert.ok(pop, "select popover exists in the DOM");
-  const gap = px(pop, "gap");
-  assert.ok(gap > 0 && gap <= 4, `options have a tiny gap (${gap}px)`);
-  // Close only the per-user editor, leaving the admin panel open for the
-  // Roles tab checks that follow.
-  document.querySelector("#eu-cancel")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-});
-
-// ---- Roles tab: create a custom role, then clean it up.
-
-document.querySelector('[data-admintab="roles"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(900);
-
-check("roles tab lists built-ins as a scope matrix", () => {
-  const rows = [...document.querySelectorAll("#admin-area table.grid tr")];
-  const names = rows.map((r) => r.querySelector(".tname")?.textContent?.trim()).filter(Boolean);
-  for (const want of ["admin", "operator", "viewer"]) {
-    assert.ok(names.some((n) => n.startsWith(want)), `${want} listed (${names})`);
-  }
-  // Header carries one column per enforced scope, from the backend.
-  const heads = [...document.querySelectorAll("#admin-area table.grid th")].map((h) => h.textContent.trim());
-  for (const scope of ["users", "vms", "networks", "storage", "settings", "connections"]) {
-    assert.ok(heads.includes(scope), `${scope} column present (${heads})`);
-  }
-  // The scope list must come from the server, so it cannot offer a scope that
-  // nothing enforces ("domains" used to be offered and silently ignored).
-  assert.ok(!heads.includes("domains"), "no unenforced 'domains' scope");
-  assert.ok(document.querySelector("#add-role"), "new role button");
-  // Built-ins are editable but not deletable.
-  const adminRow = [...document.querySelectorAll("#admin-area table.grid tr")]
-    .find((r) => r.querySelector(".tname")?.textContent?.trim().startsWith("admin"));
-  assert.ok(adminRow.querySelector("[data-editrole]"), "built-in role is editable");
-  assert.ok(!adminRow.querySelector("[data-delrole]"), "built-in role has no delete");
-});
-
-document.querySelector("#add-role").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(400);
-
-check("the role editor offers every enforced scope", () => {
-  const modal = [...document.querySelectorAll(".modal-back.open")].pop();
-  assert.ok(modal.querySelector("#er-name"), "name field");
-  const scopes = [...modal.querySelectorAll("[data-rolescope]")].map((s) => s.dataset.rolescope);
-  assert.deepEqual(scopes.sort(), ["connections", "networks", "settings", "storage", "users", "vms"].sort());
-});
-
-document.querySelector("#er-name").value = "probe-role";
-document.querySelector("#er-save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+click(document.querySelector("#admin-btn"));
 await wait(1200);
 
-const rolesAfter = await window.fetch("/roles").then((r) => r.json());
-check("creating a custom role persists it", () => {
-  assert.ok(rolesAfter.roles.some((r) => r.name === "probe-role"), "probe-role created");
-  const probe = rolesAfter.roles.find((r) => r.name === "probe-role");
-  assert.equal(probe.builtin, false, "custom role is not builtin");
+check("the admin button opens a page, not a modal", () => {
+  assert.ok(!document.querySelector(".modal-back.open"), "no modal opened");
+  assert.equal(window.location.pathname, "/admin", "URL is the admin page");
+  assert.match(document.querySelector("#content .dtitle").textContent, /Users/, "content pane shows Users");
+  assert.ok(document.querySelector("#admin-area table.grid"), "user table rendered from the live API");
 });
 
-const cleanup = await window.fetch("/roles/probe-role", { method: "DELETE" });
-check("a custom role can be deleted again", () => {
-  assert.equal(cleanup.status, 200, "probe-role removed");
+check("the admin page has its own sidebar of sections", () => {
+  const rows = [...document.querySelectorAll("#tree [data-admin-section]")].map((r) => r.dataset.adminSection);
+  assert.deepEqual(rows, ["users", "groups", "roles", "permissions", "daemons", "resources", "quotas", "ips", "keys", "activity"]);
+  assert.ok(!document.querySelector("#tree #dc-row"), "the resource tree is replaced, not appended to");
+  assert.equal(document.querySelector("#tree .tree-row.sel")?.dataset.adminSection, "users", "Users selected");
 });
 
-// ---- API keys tab: create one with its own permissions.
-
-document.querySelector('[data-admintab="keys"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(900);
-
-check("keys tab can mint a key with its own permissions", () => {
-  assert.ok(document.querySelector("#add-key"), "new API key button in the admin panel");
-  document.querySelector("#add-key").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  const modal = [...document.querySelectorAll(".modal-back.open")].pop();
-  assert.ok(modal.querySelector("#nk-name"), "key name field");
-  assert.ok(modal.querySelector("#nk-owner"), "owner picker");
-  const scopes = [...modal.querySelectorAll("[data-keyscope]")].map((s) => s.dataset.keyscope);
-  assert.deepEqual(scopes.sort(), ["connections", "networks", "settings", "storage", "users", "vms"].sort());
-  // Each scope must offer "inherit owner" plus the three levels.
-  const first = modal.querySelector("[data-keyscope]");
-  const vals = [...first.querySelectorAll("option")].map((o) => o.value);
-  assert.deepEqual(vals, ["", "write", "read", "none"], "inherit + write/read/none");
-  // A name is optional: blank asks the server to generate one.
-  assert.match(modal.querySelector("#nk-name").placeholder, /blank/i,
-    "name field says it can be left blank");
-  assert.ok(!modal.querySelector("#nk-name").required, "name is not required");
+check("the admin button stays put and becomes a return button", () => {
+  const quick = [...document.querySelectorAll(".topbar-quick button")].map((b) => b.id);
+  assert.deepEqual(quick.filter((id) => id !== "palette-btn"), ["theme-btn", "admin-btn", "logout-btn"], "same slot");
+  const b = document.querySelector("#admin-btn");
+  assert.equal(b.title, "Return", "tooltip says Return");
+  assert.notEqual(b.innerHTML, beforeAdmin.html, "icon changed");
+  assert.ok(b.classList.contains("on"), "highlighted while the admin page is open");
 });
 
-// Creating with a blank name must succeed and come back named.
-document.querySelector("#nk-create").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(1200);
-
-const mintedKeys = await window.fetch("/keys").then((r) => r.json());
-check("a key created with no name gets a readable generated one", () => {
-  assert.ok(mintedKeys.length, "at least one key exists now");
-  const named = mintedKeys.map((k) => k.name);
-  // adjective-noun-hex4, e.g. brisk-otter-4f2a.
-  const generated = named.filter((n) => /^[a-z]+-[a-z]+-[0-9a-f]{4}$/.test(n));
-  assert.ok(generated.length, `a generated name is present (${named})`);
-});
-
-check("the new key is shown once in a dismissable dialog", () => {
-  const secret = document.querySelector(".secret-value");
-  assert.ok(secret, "secret shown in a dialog, not a toast that times out");
-  assert.match(secret.textContent, /^vm_[0-9a-f]+$/, "looks like a real key");
-  const modal = [...document.querySelectorAll(".modal-back.open")].pop();
-  assert.match(modal.querySelector(".modal-head").textContent, /API key/, "dialog names the key");
-  // Clean up: revoke every key this run created.
-  modal.querySelector("#sv-done").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-});
-
-for (const k of mintedKeys) {
-  await window.fetch(`/keys/${k.id}`, { method: "DELETE" });
+// Every section renders from the live API without an error panel.
+for (const sec of ["groups", "roles", "permissions", "daemons", "resources", "quotas", "ips", "keys", "activity"]) {
+  click(document.querySelector(`#tree [data-admin-section="${sec}"]`));
+  await wait(sec === "resources" || sec === "ips" || sec === "permissions" ? 2500 : 900);
+  check(`admin section ${sec} renders and has its own URL`, () => {
+    assert.equal(window.location.pathname, `/admin/${sec}`);
+    assert.equal(document.querySelector("#tree .tree-row.sel")?.dataset.adminSection, sec, "sidebar follows");
+    const area = document.querySelector("#admin-area");
+    assert.ok(area.querySelector("table.grid"), `${sec}: a table (got ${area.textContent.slice(0, 120)})`);
+    assert.ok(!area.querySelector(":scope > .empty"), `${sec}: no error panel`);
+  });
 }
 
-const fails = results.filter(([s]) => s === "FAIL");
+// ---- Roles: privilege-based; a custom role round-trips through the editor.
+click(document.querySelector('#tree [data-admin-section="roles"]'));
+await wait(900);
+check("roles list the built-ins with their privileges, fixed", () => {
+  const names = [...document.querySelectorAll("#admin-area .tname")].map((t) => t.textContent.trim().split(" ")[0]);
+  for (const want of ["Administrator", "User", "VMUser", "NoAccess"]) assert.ok(names.includes(want), `${want} in ${names}`);
+  assert.ok(document.querySelector('#admin-area [data-view-role="User"]'), "built-in opens read-only");
+  assert.ok(!document.querySelector('#admin-area [data-del-role="User"]'), "built-in has no delete");
+});
+click(document.querySelector("#add-role"));
+await wait(300);
+check("the role editor offers every enforced privilege as a checkbox", () => {
+  const privs = [...topModal().querySelectorAll("[data-priv]")].map((c) => c.dataset.priv);
+  for (const want of ["VM.Allocate", "VM.Audit", "VM.PowerMgmt", "Network.Use", "Bridge.Use", "Datastore.AllocateSpace"]) {
+    assert.ok(privs.includes(want), `${want} offered`);
+  }
+});
+topModal().querySelector("#r-name").value = "ProbeRole";
+topModal().querySelector('[data-priv="VM.Audit"]').checked = true;
+topModal().querySelector('[data-priv="VM.Console"]').checked = true;
+click(topModal().querySelector("#r-save"));
+await wait(1500);
+const rolesAfter = await window.fetch("/roles").then((r) => r.json());
+check("a custom role persists with exactly the ticked privileges", () => {
+  const probe = rolesAfter.roles.find((r) => r.name === "ProbeRole");
+  assert.ok(probe, "created");
+  assert.deepEqual(probe.privs, ["VM.Audit", "VM.Console"]);
+});
+
+// ---- Groups and grants: a group, granted a role on a path.
+await window.fetch("/groups", { method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ name: "probe-group", comment: "live test", members: [] }) });
+click(document.querySelector('#tree [data-admin-section="permissions"]'));
+await wait(2500);
+click(document.querySelector("#add-acl"));
+await wait(2500);
+check("adding a permission picks a path from the daemons' real resources", () => {
+  const m = topModal();
+  const paths = [...m.querySelectorAll("#a-path option")].map((o) => o.value);
+  assert.ok(paths.includes("/") && paths.some((p) => /^\/nodes\/[^/]+\/vms\/.+/.test(p)), `paths: ${paths.slice(0, 8)}`);
+  assert.ok([...m.querySelectorAll("#a-ugid option")].some((o) => o.value === "group:probe-group"), "groups offered");
+});
+{
+  const m = topModal();
+  m.querySelector("#a-path").value = "/nodes";
+  m.querySelector("#a-ugid").value = "group:probe-group";
+  m.querySelector("#a-role").value = "ProbeRole";
+  click(m.querySelector("#a-save"));
+}
+await wait(2000);
+const aclAfter = await window.fetch("/acl").then((r) => r.json());
+check("the grant is stored on the chosen path", () => {
+  assert.ok(aclAfter.some((e) => e.path === "/nodes" && e.ugid === "group:probe-group" && e.role === "ProbeRole"), JSON.stringify(aclAfter));
+});
+await window.fetch("/acl", { method: "DELETE", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ path: "/nodes", ugid: "group:probe-group", role: "ProbeRole" }) });
+await window.fetch("/groups/probe-group", { method: "DELETE" });
+const cleanup = await window.fetch("/roles/ProbeRole", { method: "DELETE" });
+check("probe role, group and grant cleaned up", () => assert.equal(cleanup.status, 200));
+
+// ---- Quotas editor: per-daemon vs pooled, and per-daemon overrides.
+click(document.querySelector('#tree [data-admin-section="quotas"]'));
+await wait(900);
+click(document.querySelector("#admin-area [data-quota]"));
+await wait(300);
+check("the limits editor offers mode, five limits and per-daemon overrides", () => {
+  const m = topModal();
+  assert.deepEqual([...m.querySelectorAll("#q-mode option")].map((o) => o.value), ["per", "shared"]);
+  assert.deepEqual([...m.querySelectorAll("[data-ql]")].map((i) => i.dataset.ql), ["vms", "vcpus", "memory_mb", "storage_gb", "networks"]);
+  assert.ok(m.querySelector("[data-qd-on]"), "a daemon override toggle");
+  click(m.querySelector("#q-cancel"));
+});
+
+// ---- API keys: create one limited to a privilege list, shown once.
+click(document.querySelector('#tree [data-admin-section="keys"]'));
+await wait(900);
+click(document.querySelector("#add-key"));
+await wait(300);
+check("a key can be limited to privileges; the name may be blank", () => {
+  const m = topModal();
+  assert.ok(m.querySelector("#k-owner"), "owner picker");
+  assert.ok(m.querySelector('[data-kpriv="VM.Audit"]'), "privilege checkboxes");
+  assert.match(m.querySelector("#k-name").placeholder, /blank/i);
+  m.querySelector('[data-kpriv="Sys.Audit"]').checked = true;
+});
+click(topModal().querySelector("#k-save"));
+await wait(1500);
+const mintedKeys = await window.fetch("/keys").then((r) => r.json());
+check("the key is shown once, generated name, limited privileges", () => {
+  const secret = document.querySelector(".secret-value");
+  assert.ok(secret, "secret shown in a dialog");
+  assert.match(secret.textContent, /^vm_[0-9a-f]+$/);
+  const k = mintedKeys.find((x) => /^[a-z]+-[a-z]+-[0-9a-f]{4}$/.test(x.name));
+  assert.ok(k, `generated name (${mintedKeys.map((x) => x.name)})`);
+  assert.deepEqual(k.privs, ["Sys.Audit"]);
+  click(topModal().querySelector("#sv-done"));
+});
+for (const k of mintedKeys) await window.fetch(`/keys/${k.id}`, { method: "DELETE" });
+
+// ---- A reload of an admin URL lands on that section.
+check("an admin URL parses to its section", () => {
+  assert.equal(window.location.pathname, "/admin/keys");
+});
+
+// ---- Return.
+click(document.querySelector("#admin-btn"));
+await wait(900);
+check("return goes back to where the admin page was opened from", () => {
+  assert.equal(window.location.pathname, beforeAdmin.path, "back to the previous view");
+  assert.ok(document.querySelector("#tree #dc-row"), "resource tree is back");
+  const b = document.querySelector("#admin-btn");
+  assert.equal(b.title, "Administration");
+  assert.equal(b.innerHTML, beforeAdmin.html, "icon restored");
+});
+
+// ---- Phone: the admin sidebar is the drawer, and choosing a section closes it.
+window.innerWidth = 390;
+click(document.querySelector("#admin-btn"));
+await wait(900);
+click(document.querySelector("#nav-btn"));
+check("on a phone the admin sections live in the drawer", () => {
+  assert.ok(document.body.classList.contains("nav-open"), "drawer opens");
+  assert.ok(document.querySelector("#tree [data-admin-section]"), "drawer holds the admin sections");
+});
+click(document.querySelector('#tree [data-admin-section="groups"]'));
+await wait(900);
+check("choosing a section closes the drawer", () => {
+  assert.equal(window.location.pathname, "/admin/groups");
+  assert.ok(!document.body.classList.contains("nav-open"), "drawer closed by the navigation");
+});
+click(document.querySelector("#admin-btn"));
+await wait(600);
 
 check("users no longer duplicated as a Datacenter tab", () => {
   assert.ok(!document.querySelector('[data-dctab="users"]'), "Datacenter has no Users tab");
@@ -427,7 +467,7 @@ if (LOW_USER && LOW_PASS) {
   const keysStatus = (await window.fetch("/keys")).status;
 
   check("a non-admin gets no admin button, and the API refuses them anyway", () => {
-    assert.notEqual(who.role, "admin", `signed in as a non-admin (${who.username}/${who.role})`);
+    assert.equal(who.admin, false, `signed in as a non-admin (${who.username})`);
     assert.ok(!document.querySelector("#admin-btn"), "admin button hidden");
     assert.ok(document.querySelector("#theme-btn"), "theme button still shown");
     assert.ok(document.querySelector("#logout-btn"), "sign out still shown");
@@ -436,17 +476,30 @@ if (LOW_USER && LOW_PASS) {
     assert.equal(keysStatus, 403, "GET /keys forbidden");
   });
 
+  const adminPage = (await window.fetch("/acl")).status;
+  check("an /admin link does not open the admin page for a non-admin", () => {
+    assert.equal(adminPage, 403, "GET /acl forbidden");
+    window.history.pushState(null, "", "/admin/users");
+    window.dispatchEvent(new window.PopStateEvent("popstate"));
+    assert.ok(!document.querySelector("#tree [data-admin-section]"), "no admin sidebar");
+    assert.ok(document.querySelector("#tree #dc-row"), "resource tree shown instead");
+  });
+
   check("the command palette hides the admin command from a non-admin", () => {
     document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
     const labels = [...document.querySelectorAll(".tayne-row .tayne-label")].map((e) => e.textContent);
     assert.ok(labels.length, "palette rendered commands");
-    assert.ok(!labels.some((l) => /Admin panel/.test(l)), "no Admin panel command");
+    assert.ok(!labels.some((l) => /Administration/.test(l)), "no Administration command");
     document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   });
 } else {
   results.push(["info", "set VM_LOW_USER/VM_LOW_PASS to also check the non-admin case"]);
 }
 
+// Counted after every check has run: counting earlier let the non-admin
+// checks below it fail without failing the suite.
+const fails = results.filter(([s]) => s === "FAIL");
+printed = true;
 for (const [s, msg] of results) {
   console.log(`${s === "pass" ? "✔" : s === "info" ? "·" : "✖"} ${msg}`);
 }

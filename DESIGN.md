@@ -64,41 +64,72 @@ needs another privileged bind, another firewall hole, and it still would not
 help the person who typed the port number — which is the actual mistake being
 made. 308 rather than 302 so a redirected POST keeps its method and body.
 
-## Auth and RBAC
+## Auth and permissions
 
-Scope-based. A role maps each scope to write / read / none, and a per-user
-override sits on top. The shipped defaults:
+Proxmox-style (`web/server/src/perm.rs`). A **privilege** is one action
+(`VM.PowerMgmt`, `Network.Use`, `Datastore.AllocateSpace`, `Bridge.Use`, ...);
+a **role** is a set of them; an **ACL entry** grants one role to one user or
+group at one path. Paths form a tree, and everything a daemon has lives under
+its node, so one grant on `/nodes/<conn>` covers a whole server:
 
-| Role | vms / networks / storage / connections | users / settings |
-| --- | --- | --- |
-| Admin | write | write |
-| Operator | write | none |
-| Viewer | read | none |
+```
+/                                       everything
+/nodes/<conn>                           one daemon
+/nodes/<conn>/{vms,networks,storage,bridges}[/<name>]
+```
 
-Roles are **stored data, not an enum**: admins can add their own and retune
-these three. Built-ins cannot be renamed or deleted, and are re-seeded on every
-load, so a store always resolves and a `role` string never dangles. Permissions
-fail closed — a scope a role omits, or a role that no longer exists, is denied
-rather than defaulted.
+The **deepest** path carrying an entry for the user decides, and at one level
+the user's own entries beat their groups'. So "admin at `/`, NoAccess on this
+guest" is expressible, as is carving one user out of a group grant. Entries
+propagate down unless told not to. Anything not granted is denied.
 
-"Administrator" is **derived from `users:write`**, not from the name "admin".
-So a custom role granting it is a real admin, and the last-admin guards hold by
-simulating the change and checking an admin survives — which catches lockout by
-role change, by scope override, and by retuning a role.
+**Ownership** sits on top of the ACL. Whoever creates a VM, network or volume
+owns it (`Store::resources`) and holds every privilege on it. That is what lets
+the default `User` role grant *create* (`VM.Allocate`) without *read*
+(`VM.Audit`): a user sees exactly what they made, and sharing is an ACL entry
+on the resource's path. Anything a daemon has with no record — guests from
+before ownership, or made outside the app — belongs to the first administrator.
+A **suspended** resource leaves everyone but administrators read-only,
+including its owner.
 
-A per-user scope entry beats the role, so an admin can be deliberately
-restricted. `enforce(state, user, scope, write)` is the single check, and the
-proxy derives the scope from the request path — so a new daemon endpoint is
-governed automatically rather than needing its own rule. The scope vocabulary
-lives in `store::SCOPES` and is served to the UI, so the editor cannot offer a
-scope nothing enforces (it once offered `domains`, which the proxy calls `vms`,
-so that override silently did nothing).
+"Administrator" is **derived from `Permissions.Modify` at `/`**, not from a
+role name. Managing accounts, groups, roles and grants is deliberately that one
+privilege: anyone who can edit accounts can reset an admin's password, so a
+narrower-looking "User.Modify" would be a lie. Every change that could remove
+the last administrator (a grant, a group membership, a role edit) is simulated
+and refused if none survives. Built-in roles are fixed and re-seeded on load;
+custom access goes in a custom role.
 
-An API key carries its own per-scope ceiling, intersected with its owner's:
-`effective = min(key, owner)`. A key can narrow its owner but never exceed
-them, so a leaked key cannot outrank the account and demoting the owner weakens
-their keys. Keys may be created unnamed; the server generates a readable
-`adjective-noun-hex4` label, which reads better in a list than a bare id.
+**The proxy classifies every daemon route** (`routes.rs`) to one privilege at
+one path, and **refuses a route it does not know** — the reverse of the old
+path-prefix mapping, where a new daemon endpoint was reachable by default.
+Lists (guests, networks, pools, bridges) are filtered per user, including
+answers served from the read cache.
+
+**What a non-admin may ask libvirt to define is an allowlist**
+(`xmlcheck.rs`). libvirt defines as root, so guest XML is a request to the
+host: a `<hostdev>` hands over a device, a `<disk>` can name `/etc/shadow`, a
+`<qemu:commandline>` runs anything. So non-admin XML may contain only what the
+app's own forms write, and everything it names must be the user's to use
+(`guard.rs`): networks need `Network.Use`; a writable disk must be a volume
+they own, a read-only one any volume in a pool they can read (ISOs); and a disk
+may be qcow2 only if it was created empty here — a qcow2 header can name any
+host file as its backing store, and qemu opens it. A bridge-mode network needs
+`Bridge.Use` on that bridge. Pools are defined by administrators; users
+allocate space in them. Administrators skip these checks: they have all of
+libvirt, as before.
+
+**Limits** (`perm::Quota`): VMs, vCPUs, memory, storage and networks, applied
+per daemon or pooled across all of them, with per-daemon overrides. Usage is
+read live from the daemons at check time, so a guest resized outside the app is
+counted as it is.
+
+An API key carries an optional privilege list, intersected with its owner's:
+a key can narrow its owner but never exceed them. Keys may be created unnamed;
+the server generates a readable `adjective-noun-hex4` label.
+
+A store from before the ACL migrates once (`Store::migrate`): each user keeps
+their old access at `/`, as their built-in role or a `legacy-<name>` role.
 
 The local loopback mode (`VIRT_MAN_WEB_LOOPBACK_HTTP=1`) disables auth
 exactly because a single-user loopback instance gains nothing from a login

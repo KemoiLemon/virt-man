@@ -158,24 +158,25 @@ check("themed dialog opens instead of native window.prompt", () => {
   conn.remove();
 });
 
-// Admin panel: the activity log lives there now, and the old bottom-right
+// Admin page: the activity log lives there now, and the old bottom-right
 // task dock is gone.
 {
-  document.querySelector("#admin-btn")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const click = (el) => el?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  click(document.querySelector("#admin-btn"));
   await wait(900);
-  const modal = document.querySelector(".modal-back.open");
-  check("admin panel offers an Activity tab", () => {
-    assert.ok(modal, "admin panel opened");
-    const tabs = [...modal.querySelectorAll("[data-admintab]")].map((b) => b.dataset.admintab);
-    assert.ok(tabs.includes("activity"), `activity tab present (${tabs})`);
+  const openActivity = async () => {
+    click(document.querySelector('#tree [data-admin-section="activity"]'));
+    await wait(900);
+  };
+  check("the admin page offers an Activity section", () => {
+    assert.ok(document.querySelector("#tree [data-admin-section]"), "admin page opened");
+    assert.ok(document.querySelector('#tree [data-admin-section="activity"]'), "activity section present");
     assert.equal(document.querySelector("#tasks"), null, "the old task dock is gone");
   });
 
-  modal?.querySelector('[data-admintab="activity"]')
-    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await wait(900);
-  check("Activity tab renders the server log with a clear action", () => {
-    const area = modal.querySelector("#admin-area");
+  await openActivity();
+  check("Activity renders the server log with a clear action", () => {
+    const area = document.querySelector("#admin-area");
     assert.ok(area, "admin area rendered");
     // Either recorded rows, or the explicit empty state — never a blank pane.
     assert.ok(area.querySelector("table.grid"), "activity table rendered");
@@ -189,12 +190,9 @@ check("themed dialog opens instead of native window.prompt", () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ label: "live-suite probe", status: "done", message: "recorded" }),
   });
-  modal.querySelector('[data-admintab="activity"]')
-    .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await wait(900);
+  await openActivity();
   check("a recorded action appears in the Activity log", () => {
-    const area = modal.querySelector("#admin-area");
-    assert.match(area.textContent, /live-suite probe/, "recorded entry listed");
+    assert.match(document.querySelector("#admin-area").textContent, /live-suite probe/, "recorded entry listed");
   });
 
   // NOTE: deliberately does NOT click #act-clear. That action clears the
@@ -203,7 +201,8 @@ check("themed dialog opens instead of native window.prompt", () => {
   // missing volume. The cost of leaving one "live-suite probe" row behind is
   // far smaller than destroying the log this panel exists to display, and the
   // button's presence is already asserted above.
-  document.querySelectorAll(".modal-back.open").forEach((m) => m.remove());
+  click(document.querySelector("#admin-btn")); // return to the resource tree
+  await wait(900);
 }
 
 check("sidebar renders a nested resource tree", () => {

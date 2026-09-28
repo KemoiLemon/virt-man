@@ -11,7 +11,7 @@ Two parts, one product:
 | Path | Build | Role |
 | --- | --- | --- |
 | `daemon/` | `cargo` | Rust + axum over libvirt (`qemu:///system`). Runs on the hypervisor host. Token auth, HTTPS `[::]:8443`. |
-| `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, RBAC, API keys, TLS-pinned daemon proxy). HTTPS `[::]:8006`. |
+| `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, ACL permissions, ownership, quotas, API keys, TLS-pinned daemon proxy). HTTPS `[::]:8006`. |
 
 ## Commands
 
@@ -225,7 +225,7 @@ that lists current work.
 **Activity is server-side and per-user.** Long operations report their outcome
 to `POST /activity`, stored in `store.json` so it survives restarts. A
 non-admin sees only their own rows; an admin sees all, and the attribution
-cannot be forged without the `users` scope. Progress during an operation is
+cannot be forged by a non-admin. Progress during an operation is
 still hand-rolled per call site (`runTask`'s `set`); there is intentionally no
 client-side task list to keep in sync.
 
@@ -249,6 +249,23 @@ dashboards and the VM summary; Live stays the page's own 1 s poll.
 - Hover is one document-level handler (`bindChartHover`); the chart's values,
   first timestamp and step ride on the SVG's data attributes, so it survives
   the 1 s re-render.
+
+**Permissions are Proxmox-style; read DESIGN.md "Auth and permissions".**
+Things that bite:
+
+- **Every daemon route must be in `web/server/src/routes.rs`.** A route it
+  does not classify is refused (403), by design. Adding a daemon endpoint
+  without a line there makes it unreachable, not open.
+- **Non-admin XML is an allowlist** (`xmlcheck.rs`), in step with what
+  `xml.ts`/`hardware.ts` write. A new form field that emits a new element or
+  attribute works for admins and fails for everyone else until it is added
+  there — with a test that the form's output passes.
+- **Ownership is recorded by the proxy** when the daemon accepts a create
+  (`guard::after`), and renames carry it and the grants. Anything made outside
+  the app belongs to the first administrator.
+- **The admin page is a view** (`/admin/<section>`, `web/src/admin.ts`), not a
+  modal: it replaces the sidebar, and the admin button becomes its return
+  button. Its sections read on demand; the 1 s poll skips it.
 
 **Destructive daemon calls are logged by the proxy, not the SPA.** Every
 `DELETE` proxied to the daemon is recorded with a human label, its outcome, and
@@ -544,7 +561,7 @@ Transitions go to the activity log as `system`.
 server. The download spools to `/var/tmp` and is written into a new volume
 only once complete: short of `Content-Length`, empty, or failing an optional
 SHA-256, it stores nothing, and a write that fails deletes the volume. Existing
-volumes are never overwritten (409). `/fetches` is `storage` scope in the proxy.
+volumes are never overwritten (409). A fetch needs `Datastore.AllocateSpace` on the pool, and is refused to a user with a storage limit (its size is unknown up front).
 
 **Console frames are long-polled.** `GET …/console/frame` parks in the daemon
 until pixels exist. Do not add a client-side fetch timeout, and do not

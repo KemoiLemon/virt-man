@@ -1,6 +1,7 @@
 import { openCropDialog } from "./crop";
 import { api, cacheFirst, uploadWithProgress } from "./api";
-import type { ActivityEntry, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, Permission, PoolSummary, RoleDef, StagedUpload, User, VolumeSummary } from "./api";
+import type { Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, StagedUpload, User, VolumeSummary } from "./api";
+import { adminTitle, adminTree, assignOwner, renderAdminSection, setCreateHandler, takePendingOwner, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -8,7 +9,7 @@ import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
-import { parsePath, routeToPath, type Route } from "./route";
+import { parsePath, routeToPath, type AdminSection, type Route } from "./route";
 import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
@@ -106,13 +107,12 @@ let summaryDiskSel: Record<string, string> = {};
 /// Which NIC the summary's Network card is graphing, per VM.
 let summaryNetSel: Record<string, string> = {};
 let dcTab: "dashboard" | "servers" | "guests" = "dashboard";
-/// Which section of the admin panel modal is showing.
-let adminTab: "users" | "roles" | "keys" | "activity" = "users";
-/// Scope vocabulary and roles, fetched with the admin panel. The backend is
-/// the source of truth for scope names, so the editor can never offer one
-/// that nothing enforces.
-let adminScopes: string[] = [];
-let adminRoles: RoleDef[] = [];
+/// The admin page's open section, or null when it is not the view. A view of
+/// its own with its own sidebar, rather than a modal, so it has a URL and
+/// works as a page on a phone.
+let adminSection: AdminSection | null = null;
+/// Where the return button goes: the last view before the admin page.
+let lastNonAdminRoute: Route | null = null;
 let pollTimer: number | null = null;
 /// Retries for a daemon saved while unreachable: re-fetches its cert every
 /// second until it is up, then pins it.
@@ -175,6 +175,7 @@ async function fastLoad(load: () => Promise<unknown>) {
 /// The view on screen, as a route. Derived from the selection state rather
 /// than stored beside it, so the two cannot disagree.
 function currentRoute(): Route {
+  if (adminSection) return { view: "admin", section: adminSection };
   if (!selectedConn) return { view: "dc", tab: dcTab };
   if (selectedVm) return { view: "vm", conn: selectedConn, vm: selectedVm, tab: vmTab };
   if (selectedNet) return { view: "net", conn: selectedConn, net: selectedNet };
@@ -222,7 +223,10 @@ function closeDrawer() {
 function applyRoute(r: Route) {
   leaveCurrentView();
   clearResourceSelection();
-  selectedConn = r.view === "dc" ? null : r.conn;
+  // A non-admin who follows an /admin link lands on the datacenter.
+  adminSection = r.view === "admin" && canAdmin() ? r.section : null;
+  selectedConn = r.view === "dc" || r.view === "admin" ? null : r.conn;
+  if (r.view === "admin") return;
   if (r.view === "dc") dcTab = r.tab;
   else if (r.view === "conn") connTab = r.tab;
   else if (r.view === "vm") { selectedVm = r.vm; vmTab = r.tab; }
@@ -245,6 +249,7 @@ function renderCurrent() {
 }
 
 function renderView() {
+  if (adminSection) return renderAdmin();
   if (selectedConn && isOffline(selectedConn)) return renderOffline();
   if (!selectedConn) renderDc();
   else if (selectedVm) void renderVm();
@@ -445,7 +450,11 @@ function openCommandPalette() {
     toggleTheme,
   );
   if (canAdmin()) {
-    add("admin-panel", "Admin panel", "Users, roles, API keys, activity", ic.admin(), () => openAdmin());
+    add("admin-panel", "Administration", "Users, groups, permissions, resources, limits", ic.admin(), () => openAdmin());
+    for (const [sec, label] of [["groups", "Groups"], ["permissions", "Permissions"], ["resources", "Resources"],
+      ["quotas", "Quotas"], ["ips", "IP Addresses"], ["daemons", "Daemons"], ["activity", "Activity"]] as const) {
+      add(`admin-${sec}`, `Administration — ${label}`, `/admin/${sec}`, ic.admin(), () => openAdmin(sec));
+    }
   }
   if (!authDisabled) add("logout", "Sign out", "End this session", ic.logout(), () => void logout());
 
@@ -525,7 +534,7 @@ async function boot() {
   const status = await api.get<{ needs_setup: boolean; auth_disabled?: boolean }>("/auth/status");
   if (status.auth_disabled) {
     authDisabled = true;
-    user = { id: "local", username: "local", role: "admin", nickname: "local", avatar: null, scopes: {} };
+    user = { id: "local", username: "local", nickname: "local", avatar: null, admin: true, privs: [] };
     await loadConnections();
     applyRoute(parsePath(location.pathname, connections));
     renderApp();
@@ -632,7 +641,7 @@ setHtml(app, `
       <span class="topbar-quick">
         <button class="btn icon mobile-only" id="palette-btn" title="Commands">${ic.logs()}</button>
         <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
-        ${canAdmin() ? `<button class="btn icon" id="admin-btn" title="Admin panel">${ic.admin()}</button>` : ""}
+        ${canAdmin() ? `<button class="btn icon" id="admin-btn"></button>` : ""}
         ${authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign out">${ic.logout()}</button>`}
       </span>
     </div>
@@ -653,7 +662,7 @@ setHtml(app, `
   $("#palette-btn").onclick = openCommandPalette;
   $("#theme-btn").onclick = toggleTheme;
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
-  if ($("#admin-btn")) $("#admin-btn").onclick = openAdmin;
+  if ($("#admin-btn")) $("#admin-btn").onclick = () => (adminSection ? leaveAdmin() : openAdmin());
 
   renderProfileBtn();
   renderCurrent();
@@ -666,15 +675,11 @@ setHtml(app, `
   void pollUploads();
 }
 
-/// Whether to offer the admin panel. Mirrors the backend's `permission()`
-/// for the "users" scope: an explicit per-user override wins, otherwise the
-/// role decides. Hiding the button is cosmetic — the API enforces the same
-/// rule, so a non-admin poking at /users still gets 403.
+/// Whether to offer the admin page: `Permissions.Modify` at `/`, as the
+/// server reports it in /auth/me. Hiding the button is cosmetic -- the API
+/// refuses every admin call from anyone else.
 function canAdmin(): boolean {
-  if (!user) return false;
-  const override = user.scopes?.users;
-  if (override) return override === "write";
-  return user.role === "admin";
+  return !!user?.admin;
 }
 
 // ---------------------------------------------------------------- downtime
@@ -740,6 +745,16 @@ async function refreshHealth() {
 function renderTree() {
   const tree = $("#tree");
   if (!tree) return;
+  syncAdminButton();
+  if (adminSection) {
+    const restore = holdFocus(tree, ".tree-row.sel");
+    setHtml(tree, adminTree(adminSection));
+    restore();
+    tree.querySelectorAll("[data-admin-section]").forEach((row: Element) => {
+      (row as HTMLElement).onclick = () => openAdmin((row as HTMLElement).dataset.adminSection as AdminSection);
+    });
+    return;
+  }
 
   const serverRows = connections
     .map((c) => {
@@ -1241,7 +1256,7 @@ function renderProfileBtn() {
   el.onclick = openProfile;
   setHtml(el, `
     <div class="avatar">${avatarHtml()}</div>
-    <div class="who"><b>${esc(user.nickname)}</b><span>${user.role}</span></div>`);
+    <div class="who"><b>${esc(user.nickname)}</b><span>${user.admin ? "administrator" : "user"}</span></div>`);
 }
 
 // ---------------------------------------------------------------- datacenter
@@ -1628,288 +1643,86 @@ async function loadDcDashboard() {
   });
 }
 
-// ----------------------------------------------------------- admin panel
+// ----------------------------------------------------------- admin page
 
-/// Admin panel: users, permissions and API keys, plus room for the misc
-/// server-wide settings that do not belong to any one daemon. Lives in a
-/// modal rather than a Datacenter tab so it is reachable from any view.
-function openAdmin() {
+/// Open the admin page at `section` (or where it was last).
+function openAdmin(section: AdminSection = adminSection ?? "users") {
   if (!canAdmin()) return;
-  const el = openModal(
-    "Admin panel",
-     `<div class="tabbar">
-       <button class="tab" data-admintab="users">${ic.users(14)} Users</button>
-       <button class="tab" data-admintab="roles">${ic.admin(14)} Roles</button>
-       <button class="tab" data-admintab="keys">${ic.key(14)} API Keys</button>
-       <button class="tab" data-admintab="activity">${ic.autostart(14)} Activity</button>
-     </div>
-     <div id="admin-area">${skeleton("table")}</div>`,
-    `<button class="btn" id="ad-close">Close</button>`,
-  );
-  (el.querySelector(".modal") as HTMLElement).classList.add("wide");
-  $("#ad-close", el).onclick = () => el.remove();
-
-  const paint = () => {
-    el.querySelectorAll("[data-admintab]").forEach((b: Element) => {
-      const tab = (b as HTMLElement).dataset.admintab as typeof adminTab;
-      (b as HTMLElement).classList.toggle("active", tab === adminTab);
-      (b as HTMLElement).onclick = () => {
-        adminTab = tab;
-        paint();
-      };
-    });
-    void loadAdmin(el);
-  };
-  paint();
+  if (!adminSection) lastNonAdminRoute = currentRoute();
+  leaveCurrentView();
+  clearResourceSelection();
+  selectedConn = null;
+  adminSection = section;
+  renderTree();
+  renderAdmin();
 }
 
-/// One <select> of permission choices. `current` of "" means inherit, which
-/// the caller only offers where inheriting is meaningful.
-function permSelect(attr: string, name: string, current: string, inheritLabel?: string): string {
-  const opt = (v: string, label: string) =>
-    `<option value="${v}" ${v === current ? "selected" : ""}>${esc(label)}</option>`;
-  return `<select ${attr}="${esc(name)}">
-    ${inheritLabel ? opt("", inheritLabel) : ""}
-    ${opt("write", "write")}${opt("read", "read")}${opt("none", "none")}
-  </select>`;
+/// The return button: back to the view the admin page was opened from, or
+/// the datacenter when /admin was the first page loaded.
+function leaveAdmin() {
+  applyRoute(lastNonAdminRoute ?? { view: "dc", tab: "dashboard" });
+  adminSection = null;
+  renderCurrent();
 }
 
-/// Short permission marker for the roles overview table.
-function permMark(p: Permission | undefined): string {
-  if (p === "write") return `<span class="perm w">W</span>`;
-  if (p === "read") return `<span class="perm r">R</span>`;
-  return `<span class="perm n">—</span>`;
+/// The admin button stays where it is and becomes a return button while the
+/// admin page is open.
+function syncAdminButton() {
+  const b = $("#admin-btn");
+  if (!b) return;
+  b.title = adminSection ? "Return" : "Administration";
+  b.setAttribute("aria-label", b.title);
+  b.classList.toggle("on", !!adminSection);
+  setHtml(b, adminSection ? ic.ret() : ic.admin());
 }
 
-async function loadAdmin(root: Element) {
-  const area = $("#admin-area", root);
-  if (!area) return;
-  try {
-    // Roles and the scope vocabulary drive both the users and roles tabs.
-    const meta = await api.get<{ roles: RoleDef[]; scopes: string[] }>("/roles");
-    adminRoles = meta.roles;
-    adminScopes = meta.scopes;
+const adminCtx: AdminCtx = {
+  setHtml,
+  $,
+  openModal,
+  askConfirm,
+  toast,
+  showSecret,
+  relTime,
+  me: () => user,
+  connections: () => connections,
+  openConnectionDialog: (id) => openConnectionDialog(id),
+  deleteConnection: (id) => deleteConnection(id),
+  openResource: (kind, conn, name) => {
+    adminSection = null;
+    if (kind === "vm") selectVmRow(conn, name);
+    else if (kind === "network") selectNetRow(conn, name);
+    else selectPoolRow(conn, name);
+  },
+  go: (section) => openAdmin(section),
+  refreshMe: async () => {
+    user = await api.get<User>("/auth/me");
+    await loadConnections();
+    if (!canAdmin()) adminSection = null;
+    renderApp();
+  },
+  stillCurrent: (gen) => stillCurrent(gen),
+};
 
-    if (adminTab === "activity") {
-      const res = await api.get<{ entries: ActivityEntry[]; all_users: boolean }>("/activity");
-      // Admins see every user's history, so the User column only earns its
-      // place for them; a non-admin's rows already belong to one account.
-      const cols = res.all_users ? 5 : 4;
-      setHtml(area, `
-        <table class="grid">
-          <tr><th>When</th>${res.all_users ? "<th>User</th>" : ""}<th>Action</th><th>Result</th><th>Detail</th></tr>
-          ${res.entries.map((e) => `
-            <tr>
-              <td class="host">${esc(relTime(e.at_ms))}</td>
-              ${res.all_users ? `<td>${esc(e.username)}</td>` : ""}
-              <td class="tname">${esc(e.label)}</td>
-              <td><span class="state ${e.status === "done" ? "on" : ""}">${esc(capLabel(e.status))}</span></td>
-              <td class="task-msg">${esc(e.message || "—")}</td>
-            </tr>`).join("") || `<tr><td colspan="${cols}" class="empty">No activity recorded yet.</td></tr>`}
-        </table>
-        <div class="actions">
-          <button class="btn danger" id="act-clear">${ic.trash(14)} Clear ${res.all_users ? "all activity" : "my activity"}</button>
-        </div>`);
-      $("#act-clear", area).onclick = async () => {
-        const what = res.all_users ? "every user's activity history" : "your activity history";
-        if (!await askConfirm("Clear activity log", `Delete ${what}?`, "Clear", true)) return;
-        try {
-          await api.del("/activity");
-          toast("Activity log cleared");
-          void loadAdmin(root);
-        } catch (e) { toast((e as Error).message, "bad"); }
-      };
-      return;
-    }
-
-    if (adminTab === "keys") {
-      const [keys, users] = await Promise.all([
-        api.get<import("./api").ApiKey[]>("/keys"),
-        api.get<User[]>("/users"),
-      ]);
-      const owner = (id?: string) => users.find((u) => u.id === id)?.username ?? "—";
-setHtml(area, `<table class="grid">
-          <tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Permissions</th><th class="col-actions"></th></tr>
-          ${keys.map((k) => {
-            const listed = Object.keys(k.scopes ?? {});
-            return `<tr>
-              <td>${esc(k.name)}</td>
-              <td>${esc(owner(k.user_id))}</td>
-              <td>${esc(k.prefix)}…</td>
-              <td>${listed.length
-                ? listed.map((s) => `<span class="perm-pair">${esc(s)}${permMark(k.scopes?.[s])}</span>`).join("")
-                : `<span class="dim-note">Inherits Owner</span>`}</td>
-              <td class="col-actions"><button class="btn danger icon" data-delkey="${k.id}" title="Revoke">${ic.trash()}</button></td>
-            </tr>`;
-          }).join("") || `<tr><td colspan="5" class="empty">No keys.</td></tr>`}
-        </table>
-        <div class="actions"><button class="btn primary" id="add-key">${ic.plus(14)} New API key</button></div>`);
-      $("#add-key", area).onclick = () => openAddKey(users, root);
-      area.querySelectorAll("[data-delkey]").forEach((b: Element) => {
-        (b as HTMLElement).onclick = async () => {
-          const id = (b as HTMLElement).dataset.delkey!;
-          try { await api.del(`/keys/${id}`); toast("Key revoked"); void loadAdmin(root); }
-          catch (e) { toast((e as Error).message, "bad"); }
-        };
-      });
-      return;
-    }
-
-    if (adminTab === "roles") {
-setHtml(area, `<table class="grid">
-          <tr><th>Role</th>${adminScopes.map((s) => `<th>${esc(s)}</th>`).join("")}<th class="col-actions"></th></tr>
-          ${adminRoles.map((r) => `
-            <tr>
-              <td class="tname">${esc(r.name)}${r.builtin ? ` <span class="badge">built-in</span>` : ""}</td>
-              ${adminScopes.map((s) => `<td>${permMark(r.scopes?.[s])}</td>`).join("")}
-              <td class="col-actions"><div class="row-actions">
-                <button class="btn icon" data-editrole="${esc(r.name)}" title="Edit permissions">${ic.edit()}</button>
-                ${r.builtin ? "" : `<button class="btn danger icon" data-delrole="${esc(r.name)}" title="Delete role">${ic.trash()}</button>`}
-              </div></td>
-            </tr>`).join("")}
-        </table>
-        <div class="actions"><button class="btn primary" id="add-role">${ic.plus(14)} New role</button></div>`);
-      $("#add-role", area).onclick = () => openEditRole(null, root);
-      area.querySelectorAll("[data-editrole]").forEach((b: Element) => {
-        (b as HTMLElement).onclick = () => {
-          const name = (b as HTMLElement).dataset.editrole!;
-          const r = adminRoles.find((x) => x.name === name);
-          if (r) openEditRole(r, root);
-        };
-      });
-      area.querySelectorAll("[data-delrole]").forEach((b: Element) => {
-        (b as HTMLElement).onclick = async () => {
-          const name = (b as HTMLElement).dataset.delrole!;
-          if (!await askConfirm("Delete role", `Delete the role "${name}"?`, "Delete", true)) return;
-          try { await api.del(`/roles/${encodeURIComponent(name)}`); toast("Role deleted"); void loadAdmin(root); }
-          catch (e) { toast((e as Error).message, "bad"); }
-        };
-      });
-      return;
-    }
-
-    const users = await api.get<User[]>("/users");
-setHtml(area, `<table class="grid">
-        <tr><th>Username</th><th>Display Name</th><th>Role</th><th class="col-actions"></th></tr>
-        ${users.map((u) => `
-          <tr>
-            <td>${esc(u.username)}${u.id === user?.id ? ` <span class="badge">you</span>` : ""}</td>
-            <td>${esc(u.nickname)}</td>
-            <td><span class="role-tag">${esc(u.role)}</span>${Object.keys(u.scopes ?? {}).length
-              ? ` <span class="badge">overrides</span>` : ""}</td>
-            <td class="col-actions"><div class="row-actions">
-              <button class="btn icon" data-edituser="${u.id}" title="Edit role and permissions">${ic.edit()}</button>
-              <button class="btn danger icon" data-deluser="${u.id}" title="Delete user">${ic.trash()}</button>
-            </div></td>
-          </tr>`).join("")}
-      </table>
-      <div class="actions"><button class="btn primary" id="add-user">${ic.plus(14)} Add user</button></div>`);
-    $("#add-user", area).onclick = () => openAddUser(root);
-    area.querySelectorAll("[data-edituser]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => {
-        const id = (b as HTMLElement).dataset.edituser!;
-        const u = users.find((x) => x.id === id);
-        if (u) openEditUser(u, root);
-      };
-    });
-    area.querySelectorAll("[data-deluser]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = async () => {
-        const id = (b as HTMLElement).dataset.deluser!;
-        const u = users.find((x) => x.id === id);
-        if (!await askConfirm("Delete user", `Delete ${u?.username ?? "this user"}? Their API keys and sessions go too.`, "Delete", true)) return;
-        try { await api.del(`/users/${id}`); toast("User removed"); void loadAdmin(root); }
-        catch (e) { toast((e as Error).message, "bad"); }
-      };
-    });
-  } catch (e) {
-setHtml(area, `<div class="empty">${esc((e as Error).message)}</div>`);
-  }
+function renderAdmin() {
+  if (!adminSection) return;
+  const gen = beginRender();
+  syncUrl();
+  const content = $("#content");
+  setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.admin(20)}</span>
+      <span class="dtitle">${esc(adminTitle(adminSection))}</span></div>
+    <div id="admin-area"></div>`);
+  void renderAdminSection(adminCtx, $("#admin-area", content), adminSection, gen);
 }
 
-/// Create or retune a role. `role` is null when adding a new one.
-function openEditRole(role: RoleDef | null, root: Element) {
-  const builtin = role?.builtin ?? false;
-  const el = openModal(
-    role ? `Role — ${esc(role.name)}` : "New role",
-    `<label class="field"><span>Name</span>
-       <input id="er-name" value="${esc(role?.name ?? "")}" placeholder="backup-operator" ${builtin ? "disabled" : ""}></label>
-     <div class="section-title">Permissions</div>
-     <div class="grid2 perm-grid">
-       ${adminScopes.map((s) => `
-         <label class="field"><span>${esc(s)}</span>
-           ${permSelect("data-rolescope", s, role?.scopes?.[s] ?? "none")}</label>`).join("")}
-     </div>`,
-    `<button class="btn" id="er-cancel">Cancel</button>
-     <button class="btn primary" id="er-save">Save</button>`,
-  );
-  $("#er-cancel", el).onclick = () => el.remove();
-  $("#er-save", el).onclick = async () => {
-    const scopes: Record<string, string> = {};
-    el.querySelectorAll("[data-rolescope]").forEach((s: Element) => {
-      scopes[(s as HTMLElement).dataset.rolescope!] = (s as HTMLSelectElement).value;
-    });
-    const name = $("#er-name", el).value.trim();
-    if (!name) return toast("Role name is required", "bad");
-    try {
-      if (role) await api.put(`/roles/${encodeURIComponent(role.name)}`, { name, scopes });
-      else await api.post("/roles", { name, scopes });
-      toast(role ? "Role updated" : "Role created");
-      el.remove();
-      // Retuning a role can change your own effective permissions.
-      user = await api.get<User>("/auth/me");
-      if (!canAdmin()) {
-        renderApp();
-        return;
-      }
-      void loadAdmin(root);
-    } catch (e) { toast((e as Error).message, "bad"); }
-  };
-}
-
-/// Mint an API key for any user, with its own permission ceiling.
-function openAddKey(users: User[], root: Element) {
-  const el = openModal(
-    "New API key",
-    `<div class="grid2">
-       <label class="field"><span>Name</span>
-         <input id="nk-name" placeholder="leave blank for a random name">
-         </label>
-       <label class="field"><span>Owner</span><select id="nk-owner">
-         ${users.map((u) => `<option value="${u.id}" ${u.id === user?.id ? "selected" : ""}>${esc(u.username)}</option>`).join("")}
-       </select></label>
-     </div>
-     <div class="section-title">Permissions</div>
-     <div class="grid2 perm-grid">
-       ${adminScopes.map((s) => `
-         <label class="field"><span>${esc(s)}</span>
-           ${permSelect("data-keyscope", s, "", "inherit owner")}</label>`).join("")}
-     </div>`,
-    `<button class="btn" id="nk-cancel">Cancel</button>
-     <button class="btn primary" id="nk-create">Create</button>`,
-  );
-  $("#nk-cancel", el).onclick = () => el.remove();
-  $("#nk-create", el).onclick = async () => {
-    const scopes: Record<string, string> = {};
-    el.querySelectorAll("[data-keyscope]").forEach((s: Element) => {
-      const v = (s as HTMLSelectElement).value;
-      if (v) scopes[(s as HTMLElement).dataset.keyscope!] = v;
-    });
-    // Blank is allowed: the server generates a readable name.
-    const name = $("#nk-name", el).value.trim();
-    try {
-      const k = await api.post<import("./api").ApiKey>("/keys", {
-        name,
-        user_id: ($("#nk-owner", el) as HTMLSelectElement).value,
-        scopes,
-      });
-      el.remove();
-      // Shown once and never again, so give it its own dismissable dialog
-      // rather than a toast that disappears on a timer.
-      showSecret(`API key — ${k.name}`, k.key ?? "");
-      void loadAdmin(root);
-    } catch (e) { toast((e as Error).message, "bad"); }
-  };
-}
+// "Create for a user" on the Resources page: the normal create flow on a
+// chosen daemon, then the result is handed to that user.
+setCreateHandler((kind) => {
+  adminSection = null;
+  renderTree();
+  if (kind === "vm") openCreateVm();
+  else withDaemon(() => openCreateNetwork());
+});
 
 /// Present a secret that the server will never show again.
 function showSecret(title: string, secret: string) {
@@ -1928,86 +1741,6 @@ function showSecret(title: string, secret: string) {
     } catch {
       toast("Could not copy — select the text instead", "bad");
     }
-  };
-}
-
-function openEditUser(u: User, root: Element) {
-  const el = openModal(
-    `Edit — ${esc(u.username)}`,
-    `<div class="grid2">
-       <label class="field"><span>Display Name</span><input id="eu-nick" value="${esc(u.nickname)}"></label>
-       <label class="field"><span>Role</span><select id="eu-role">
-         ${adminRoles.map((r) =>
-           `<option value="${esc(r.name)}" ${r.name === u.role ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
-       </select></label>
-     </div>
-     <label class="field"><span>Reset Password (blank = leave unchanged)</span>
-       <input id="eu-pass" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
-     <div class="section-title">Permission Overrides</div>
-     <div class="grid2 perm-grid">
-       ${adminScopes.map((s) => `
-         <label class="field"><span>${esc(s)}</span>
-           ${permSelect("data-scope", s, u.scopes?.[s] ?? "", "inherit from role")}</label>`).join("")}
-     </div>`,
-    `<button class="btn" id="eu-cancel">Cancel</button>
-     <button class="btn primary" id="eu-save">Save</button>`,
-  );
-  $("#eu-cancel", el).onclick = () => el.remove();
-  $("#eu-save", el).onclick = async () => {
-    const scopes: Record<string, string> = {};
-    el.querySelectorAll("[data-scope]").forEach((s: Element) => {
-      const v = (s as HTMLSelectElement).value;
-      if (v) scopes[(s as HTMLElement).dataset.scope!] = v;
-    });
-    const body: Record<string, unknown> = {
-      nickname: $("#eu-nick", el).value,
-      role: $("#eu-role", el).value,
-      scopes,
-    };
-    const pass = $("#eu-pass", el).value;
-    if (pass) body.password = pass;
-    try {
-      await api.put(`/users/${u.id}`, body);
-      toast("User updated");
-      el.remove();
-      // Editing yourself can change your own role, so refresh the identity
-      // the topbar and admin-button visibility are derived from.
-      if (u.id === user?.id) {
-        user = await api.get<User>("/auth/me");
-        renderApp();
-      } else {
-        void loadAdmin(root);
-      }
-    } catch (e) { toast((e as Error).message, "bad"); }
-  };
-}
-
-function openAddUser(root: Element) {
-  const el = openModal(
-    "Add user",
-    `<div class="grid2">
-      <label class="field"><span>Username</span><input id="nu-name" autocomplete="username"></label>
-      <label class="field"><span>Password (min 8)</span><input id="nu-pass" type="password" autocomplete="new-password"></label>
-      <label class="field"><span>Display Name</span><input id="nu-nick"></label>
-      <label class="field"><span>Role</span><select id="nu-role">
-        ${adminRoles.map((r) =>
-          `<option value="${esc(r.name)}" ${r.name === "viewer" ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
-      </select></label>
-    </div>`,
-    `<button class="btn primary" id="nu-create">Create</button>`,
-  );
-  $("#nu-create", el).onclick = async () => {
-    try {
-      await api.post("/users", {
-        username: $("#nu-name", el).value,
-        password: $("#nu-pass", el).value,
-        nickname: $("#nu-nick", el).value,
-        role: $("#nu-role", el).value,
-      });
-      toast("User created");
-      el.remove();
-      void loadAdmin(root);
-    } catch (e) { toast((e as Error).message, "bad"); }
   };
 }
 
@@ -3253,9 +2986,12 @@ function openNetworkForm(initial: NetworkForm, uuid: string) {
     }
     el.remove();
     const xml = networkXml(form, uuid);
+    const conn = selectedConn!;
+    const owner = uuid ? null : takePendingOwner("network");
     runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
-      if (uuid) await api.putXml(`/proxy/${selectedConn}/networks/${encodeURIComponent(initial.name)}/xml`, xml);
-      else await api.postXml(`/proxy/${selectedConn}/networks`, xml);
+      if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(initial.name)}/xml`, xml);
+      else await api.postXml(`/proxy/${conn}/networks`, xml);
+      if (owner) await assignOwner(conn, "network", form.name, owner);
     });
     toast(`${uuid ? "Update" : "Creation"} started`);
     setTimeout(() => void renderConn(), 600);
@@ -4661,6 +4397,8 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
   if (!selectedConn) return;
   const conn = selectedConn;
   const editing = !!opts.vm;
+  // Set when an admin is creating this guest for someone else.
+  const owner = editing ? null : takePendingOwner("vm");
   const inline = !!opts.inline;
 
   // Existing guest: read its current definition so the form starts populated.
@@ -5185,6 +4923,10 @@ async function openHardwareEditor(opts: { vm?: string; inline?: boolean } = {}) 
       // here rewrote the network definition, which restarted it and
       // disconnected every other guest on it.)
       await api.postXml(`/proxy/${conn}/domains?start=false`, withDevices(domainXml(form), devices));
+      if (owner) {
+        set("assigning owner");
+        await assignOwner(conn, "vm", form.name, owner);
+      }
     });
     toast("VM created");
     renderConn();
@@ -5794,7 +5536,7 @@ function openProfile() {
        </button>
        <div class="who">
          <b id="pf-who-name">${esc(user.nickname)}</b>
-         <span id="pf-who-user">@${esc(user.username)} · ${esc(user.role)}</span>
+         <span id="pf-who-user">@${esc(user.username)} · ${user.admin ? "administrator" : "user"}</span>
        </div>
      </div>
 
@@ -5910,7 +5652,7 @@ function refreshProfileCard(el: Element) {
   const name = $("#pf-who-name", el);
   if (name) name.textContent = user.nickname;
   const who = $("#pf-who-user", el);
-  if (who) who.textContent = `@${user.username} · ${user.role}`;
+  if (who) who.textContent = `@${user.username} · ${user.admin ? "administrator" : "user"}`;
   const av = $("#pf-avatar-btn .avatar", el);
   if (av) setHtml(av, avatarHtml());
 }
@@ -5946,6 +5688,9 @@ function startPolling() {
   pollTimer = window.setInterval(() => {
     if (!user) return;
     void refreshHealth();
+    // The admin page reads on demand; re-reading every daemon's resources
+    // each second would be the costliest poll in the app for no gain.
+    if (adminSection) return;
     // A down server's views show the offline panel; polling its daemon would
     // only fail again and paint the raw error over it.
     if (isOffline(selectedConn)) return;

@@ -8,6 +8,7 @@
 //   /<node>/vms/<vm>/<tab>         console | hardware | options | network | xml
 //   /<node>/networks/<net>         network page
 //   /<node>/storage/<pool>         pool page
+//   /admin[/<section>]             administration (users, groups, ...)
 //
 // A node is named by its connection name. The web server answers its own API
 // on top-level paths (/users, /activity, ...), so a node whose name is one of
@@ -17,13 +18,21 @@
 export type DcTab = "dashboard" | "servers" | "guests";
 export type ConnTab = "dashboard" | "vms" | "networks" | "storage" | "firewall";
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
+export type AdminSection =
+  | "users" | "groups" | "roles" | "permissions" | "daemons"
+  | "resources" | "quotas" | "ips" | "keys" | "activity";
+export const ADMIN_SECTIONS: AdminSection[] = [
+  "users", "groups", "roles", "permissions", "daemons",
+  "resources", "quotas", "ips", "keys", "activity",
+];
 
 export type Route =
   | { view: "dc"; tab: DcTab }
   | { view: "conn"; conn: string; tab: ConnTab }
   | { view: "vm"; conn: string; vm: string; tab: VmTab }
   | { view: "net"; conn: string; net: string }
-  | { view: "pool"; conn: string; pool: string };
+  | { view: "pool"; conn: string; pool: string }
+  | { view: "admin"; section: AdminSection };
 
 export interface NodeRef {
   id: string;
@@ -34,7 +43,8 @@ export interface NodeRef {
 export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
   "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
-  "servers", "guests",
+  "groups", "acl", "resources", "ips",
+  "servers", "guests", "admin",
 ]);
 
 const CONN_TABS: ConnTab[] = ["vms", "networks", "storage", "firewall"];
@@ -55,6 +65,7 @@ const enc = encodeURIComponent;
 
 export function routeToPath(r: Route, nodes: NodeRef[]): string {
   if (r.view === "dc") return r.tab === "dashboard" ? "/" : `/${r.tab}`;
+  if (r.view === "admin") return r.section === "users" ? "/admin" : `/admin/${r.section}`;
   const node = `/${enc(nodeSegment(r.conn, nodes))}`;
   switch (r.view) {
     case "conn":
@@ -86,6 +97,10 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
   }
   const [first, section, name, tab] = parts;
   if (!first) return { view: "dc", tab: "dashboard" };
+  if (first === "admin" && parts.length <= 2) {
+    const s = ADMIN_SECTIONS.includes(section as AdminSection) ? (section as AdminSection) : "users";
+    return { view: "admin", section: s };
+  }
   if (parts.length === 1 && (first === "servers" || first === "guests")) {
     return { view: "dc", tab: first };
   }

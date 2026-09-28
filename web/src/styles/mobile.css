@@ -66,6 +66,9 @@
   /* Fixed-column grids collapse. The auto-fit ones (minmax(260px,1fr) etc.)
      already fall to one column at this width and are left alone. */
   .grid2, .fw-policy, .hw-body, .add-hw-body, .vm-top, .vm-mid { grid-template-columns: 1fr; }
+  /* Admin page: limits two per row, filters full width. */
+  .limit-grid { grid-template-columns: 1fr 1fr; }
+  .admin-filters .field { flex: 1 1 100%; }
   .card-grid { grid-template-columns: 1fr; }
   .create-resource-grid { grid-template-columns: 1fr 1fr; }
   /* The hardware table's label column is minmax(150px,210px): there is no room

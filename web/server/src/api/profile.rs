@@ -71,7 +71,9 @@ async fn update_me(
     }
     let me = me.clone();
     store.save(&state.data_dir)?;
-    Ok(Json(auth::user_json(&me)))
+    // The SPA replaces its identity with this answer, so it must carry what
+    // /auth/me does, or saving a profile hides the admin button.
+    Ok(Json(auth::me_json(&store, &me)))
 }
 
 #[derive(Deserialize)]
@@ -103,7 +105,9 @@ async fn change_password(
     me.password_hash = auth::hash_password(&req.new)?;
     let me = me.clone();
     store.save(&state.data_dir)?;
-    Ok(Json(auth::user_json(&me)))
+    // The SPA replaces its identity with this answer, so it must carry what
+    // /auth/me does, or saving a profile hides the admin button.
+    Ok(Json(auth::me_json(&store, &me)))
 }
 
 /// Accept raw image bytes; `?ext=` selects the stored extension.
@@ -139,7 +143,7 @@ async fn upload_avatar(
     u.avatar = Some(path.file_name().unwrap().to_string_lossy().into_owned());
     let user = u.clone();
     store.save(&state.data_dir)?;
-    Ok(Json(auth::user_json(&user)))
+    Ok(Json(auth::me_json(&store, &user)))
 }
 
 async fn serve_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {

@@ -162,6 +162,32 @@ table.grid + .actions { margin-top: 12px; }
 .perm.r { color: var(--warn); }
 .perm.n { color: var(--dim); font-weight: 400; }
 .perm-pair { display: inline-flex; align-items: center; gap: 4px; margin-right: 9px; font-size: 11px; color: var(--dim); }
+/* The admin page's sidebar header: a label, not a link, so it does not take
+   the hover and pointer of the rows beneath it. */
+.admin-root, .admin-root:hover { cursor: default; background: none; }
+/* Privilege chips in the roles and API key tables. */
+.priv-cell { white-space: normal; }
+.priv {
+  display: inline-block; margin: 0 5px 3px 0; padding: 1px 6px;
+  border: 1px solid var(--line); font-size: 11px; color: var(--dim);
+}
+/* Checkbox lists: privileges, group members. They wrap into columns. */
+.check-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 7px 14px; margin-bottom: 14px;
+}
+/* Limit fields: five small numbers side by side. */
+.limit-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.quota-daemon { border-top: 1px solid var(--line); padding-top: 9px; margin-top: 9px; }
+.quota-daemon .limit-grid { margin-top: 9px; }
+/* Filter row on the admin tables. Fields sit on the row with their labels;
+   the create buttons are pushed right, as on a tab bar. */
+.admin-filters { align-items: flex-end; flex-wrap: wrap; }
+.admin-filters .field { min-width: 150px; margin: 0; }
+.row-link { cursor: pointer; }
+.row-link:hover { color: var(--accent); }
+tr.suspended td { color: var(--dim); }
+.mono { font-family: inherit; letter-spacing: .3px; }
 .dim-note { color: var(--dim); font-size: 11px; }
 /* A one-time secret: selectable, wrapped, and visually distinct. */
 .secret-value { -webkit-user-select: all; user-select: all; color: var(--accent); margin-bottom: 0; }

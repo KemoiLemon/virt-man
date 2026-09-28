@@ -109,3 +109,15 @@ test("an old /vms/<vm>/firewall link opens the Network tab", () => {
   assert.deepEqual(r.parsePath("/Main/vms/web1/firewall", nodes), { view: "vm", conn: "c1", vm: "web1", tab: "network" });
   assert.equal(r.routeToPath({ view: "vm", conn: "c1", vm: "web1", tab: "network" }, nodes), "/Main/vms/web1/network");
 });
+
+// The admin page is a view of its own, with a URL per section.
+test("the admin page round-trips through the URL", () => {
+  for (const section of r.ADMIN_SECTIONS) {
+    const route = { view: "admin", section };
+    assert.deepEqual(r.parsePath(r.routeToPath(route, nodes), nodes), route, section);
+  }
+  assert.equal(r.routeToPath({ view: "admin", section: "users" }, nodes), "/admin");
+  assert.deepEqual(r.parsePath("/admin/bogus", nodes), { view: "admin", section: "users" });
+  // A server named "admin" must not shadow the admin page.
+  assert.equal(r.nodeSegment("c9", [{ id: "c9", name: "admin" }]), "c9");
+});

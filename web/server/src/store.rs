@@ -201,7 +201,9 @@ impl Store {
             let mut scopes = legacy(&u.role);
             scopes.extend(u.scopes.clone());
             let privs = privs_of(&scopes);
-            let full = perm::PRIVILEGES.iter().all(|p| privs.iter().any(|x| x == p));
+            let full = perm::PRIVILEGES
+                .iter()
+                .all(|p| privs.iter().any(|x| x == p));
             let role = if full {
                 perm::ADMIN_ROLE.to_string()
             } else if u.scopes.is_empty() && !is_old_builtin(&u.role) {
@@ -584,7 +586,11 @@ mod tests {
         let v = |id: &str| s.users.iter().find(|u| u.id == id).unwrap().clone();
         assert!(s.is_admin(&v("a")));
         let root = s.acl.iter().find(|e| e.ugid == "user:a").unwrap();
-        assert_eq!(root.role, perm::ADMIN_ROLE, "a full admin gets the real role");
+        assert_eq!(
+            root.role,
+            perm::ADMIN_ROLE,
+            "a full admin gets the real role"
+        );
         assert!(!s.is_admin(&v("o")));
         assert!(
             s.can(&v("o"), "/nodes/c/vms/x", "VM.Config"),

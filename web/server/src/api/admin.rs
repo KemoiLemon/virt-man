@@ -21,8 +21,8 @@ pub fn routes(state: &AppState) -> Router<AppState> {
         .route("/groups", get(groups).post(create_group))
         .route("/groups/{name}", put(update_group).delete(delete_group))
         .route("/acl", get(acl).put(add_acl).delete(remove_acl))
-        .route("/admin/resources", get(resources).put(set_resource))
-        .route("/admin/ips", get(ips))
+        .route("/resources", get(resources).put(set_resource))
+        .route("/ips", get(ips))
         .layer(middleware::from_fn(auth::require_priv(
             state.clone(),
             "/",

@@ -7,6 +7,7 @@ import ArrowLeft from "@phosphor-icons/core/assets/fill/arrow-left-fill.svg?raw"
 import ArrowLeftRight from "@phosphor-icons/core/assets/fill/arrows-left-right-fill.svg?raw";
 import ArrowRight from "@phosphor-icons/core/assets/fill/arrow-right-fill.svg?raw";
 import ArrowUp from "@phosphor-icons/core/assets/fill/arrow-up-fill.svg?raw";
+import ArrowUUpLeft from "@phosphor-icons/core/assets/fill/arrow-u-up-left-fill.svg?raw";
 import Camera from "@phosphor-icons/core/assets/fill/camera-fill.svg?raw";
 import ChevronDown from "@phosphor-icons/core/assets/fill/caret-down-fill.svg?raw";
 import Circle from "@phosphor-icons/core/assets/fill/circle-fill.svg?raw";
@@ -46,7 +47,14 @@ import SunMoon from "@phosphor-icons/core/assets/fill/circle-half-fill.svg?raw";
 import Timer from "@phosphor-icons/core/assets/fill/timer-fill.svg?raw";
 import Trash2 from "@phosphor-icons/core/assets/fill/trash-fill.svg?raw";
 import Upload from "@phosphor-icons/core/assets/fill/upload-simple-fill.svg?raw";
+import User from "@phosphor-icons/core/assets/fill/user-fill.svg?raw";
 import Users from "@phosphor-icons/core/assets/fill/users-fill.svg?raw";
+import UsersThree from "@phosphor-icons/core/assets/fill/users-three-fill.svg?raw";
+import Gauge from "@phosphor-icons/core/assets/fill/gauge-fill.svg?raw";
+import Globe from "@phosphor-icons/core/assets/fill/globe-fill.svg?raw";
+import PauseCircle from "@phosphor-icons/core/assets/fill/pause-circle-fill.svg?raw";
+import LockKey from "@phosphor-icons/core/assets/fill/lock-key-fill.svg?raw";
+import IdCard from "@phosphor-icons/core/assets/fill/identification-card-fill.svg?raw";
 import X from "@phosphor-icons/core/assets/fill/x-fill.svg?raw";
 import ZoomIn from "@phosphor-icons/core/assets/fill/magnifying-glass-plus-fill.svg?raw";
 import ZoomOut from "@phosphor-icons/core/assets/fill/magnifying-glass-minus-fill.svg?raw";
@@ -120,6 +128,15 @@ export const ic = {
   cpu: svg(Cpu),
   memory: svg(MemoryStick),
   users: svg(Users),
+  user: svg(User),
+  groups: svg(UsersThree),
+  roles: svg(IdCard),
+  perms: svg(LockKey),
+  quota: svg(Gauge),
+  ip: svg(Globe),
+  suspend: svg(PauseCircle),
+  /// The admin button turns into this while the admin page is open.
+  ret: svg(ArrowUUpLeft),
   edit: svg(Pencil),
   key: svg(KeyRound),
   lock: svg(Lock),
