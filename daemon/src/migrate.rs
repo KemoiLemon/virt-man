@@ -328,13 +328,29 @@ pub enum Renamed {
     Pool { old: String, new: String },
 }
 
+/// Limit the pass to names starting with `VIRT_MAN_MIGRATE_ONLY`, when set.
+/// A test aid: it lets the real daemon migrate throwaway resources on a host
+/// that has others. Unset, everything is migrated.
+fn only_prefixed(name: &str) -> bool {
+    std::env::var("VIRT_MAN_MIGRATE_ONLY").map_or(true, |p| name.starts_with(&p))
+}
+
 /// Migrate forever: a pass now, then one every `PASS_SECS`.
 pub async fn run(ipam: crate::ipam::server::Ipam) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(PASS_SECS));
+    let secs = std::env::var("VIRT_MAN_MIGRATE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(PASS_SECS);
+    let filter: Filter = if std::env::var("VIRT_MAN_MIGRATE_ONLY").is_ok() {
+        only_prefixed
+    } else {
+        everything
+    };
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        match pass(&ipam, everything).await {
+        match pass(&ipam, filter).await {
             Ok(done) if !done.is_empty() => {
                 tracing::info!("migrate: renamed {} to UUID names", done.len())
             }

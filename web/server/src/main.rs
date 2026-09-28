@@ -8,6 +8,7 @@ mod health;
 mod history;
 mod httpsredirect;
 mod perm;
+mod rekey;
 mod routes;
 mod state;
 mod store;
@@ -60,6 +61,8 @@ async fn run() -> Result<(), String> {
     tokio::spawn(history::collect(state.clone()));
     tokio::spawn(health::watch(state.clone()));
     tokio::spawn(access::collect(state.clone()));
+    // Ownership and grants follow a daemon renaming resources to UUIDs.
+    tokio::spawn(rekey::watch(state.clone()));
 
     let index = cfg.dist_dir.join("index.html");
     let app = api::build(state.clone())

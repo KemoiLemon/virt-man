@@ -276,6 +276,29 @@ Things that bite:
   opens the normal form over the admin page with an explicit `conn` and an
   `after` callback, and never navigates away from it.
 
+**Guests, networks and pools are named by their UUID.** A new one's
+libvirt name is its UUID and what the user typed is its `<title>` (a pool
+cannot hold a title: the daemon keeps pool titles in
+`/etc/virt-man/titles.json`). URLs name them by UUID; old name links still
+work. Things that bite:
+
+- **Every daemon route takes a UUID or a name.** A middleware
+  (`daemon/src/api/mod.rs` `resolve_uuids`) swaps a UUID segment for the name
+  before routing, so handlers and their name-keyed records are unchanged.
+- **The web proxy resolves a UUID to its name before the permission check**
+  (`api/proxy.rs` `canonical_path`). Grants, ownership and suspension are keyed
+  by name; checking the UUID path instead let a user carved out of a guest
+  reach it by UUID. `test/live-uuid.mjs` pins it.
+- **The daemon migrates existing resources itself** (`daemon/src/migrate.rs`):
+  a guest only while shut off, a network only when no running guest uses it, a
+  pool only when no guest names it; the old name becomes the title. It is gated
+  by `VIRT_MAN_MIGRATE_UUIDS=1` (off by default). `VIRT_MAN_MIGRATE_ONLY=<prefix>`
+  limits it to matching names, for testing on a host that has real guests.
+- **The web server follows the renames** (`web/server/src/rekey.rs`, every
+  30 s): it remembers each UUID's name, and moves ownership and grants when the
+  name changes. A rename it did not see is matched by title, but only for a
+  resource named by its own UUID, never while the old name is still live.
+
 **Owners share their own VMs** (`web/server/src/api/shares.rs`, `/shares`).
 It is a non-admin write to the ACL, so it is narrow on purpose: the owner or
 an admin only (decided by ownership, not by holding `VM.Allocate` -- the

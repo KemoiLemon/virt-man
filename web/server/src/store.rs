@@ -111,6 +111,10 @@ pub struct Store {
     /// Who owns each VM, network and volume made through this app.
     #[serde(default)]
     pub resources: Vec<Resource>,
+    /// Per daemon, what each resource was last called: "vm:<uuid>" -> name.
+    /// How a rename is told apart from a delete-and-recreate (see `rekey`).
+    #[serde(default)]
+    pub known_names: HashMap<String, HashMap<String, String>>,
     /// Bumped when the permission model changes shape, so migration runs once.
     #[serde(default)]
     pub perm_version: u32,
