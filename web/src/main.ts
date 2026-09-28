@@ -779,7 +779,7 @@ function renderTree() {
       </button>`,
             )
             .join("")
-        : `<div class="tree-empty tree-res-empty">No networks.</div>`;
+        : "";
       const poolRows = pools.length
         ? pools
             .map(
@@ -792,7 +792,7 @@ function renderTree() {
       </button>`,
             )
             .join("")
-        : `<div class="tree-empty tree-res-empty">No pools.</div>`;
+        : "";
       // Offline: the guest, network and pool states below are last known,
       // not current, so they are greyed rather than shown as live.
       return `

@@ -114,7 +114,6 @@ test("sidebar networks and pools align with the guests", () => {
   const vm = last(".tree-vm");
   assert.ok(vm > 0, "guest indent found");
   assert.equal(last(".tree-res"), vm, "network/pool rows");
-  assert.equal(last(".tree-res-empty"), vm, "'No networks.' / 'No pools.' placeholders");
 });
 
 test("keyboard focus is visible on buttons, rows and cards", () => {

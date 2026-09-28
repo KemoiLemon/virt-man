@@ -16,7 +16,6 @@
 /* Networks and storage pools nest one level deeper than guests, with no
    section label — they simply continue the server's resource list. */
 .tree-res { padding-left: 26px; }
-.tree-res-empty { padding-left: 26px; font-size: 10px; }
 .tree-ic { width: 16px; height: 16px; flex: 0 0 16px; color: var(--dim); }
 .tree-ic.on { color: var(--ok); }
 .tree-row.sel .tree-ic { color: var(--accent); }
