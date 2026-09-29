@@ -258,7 +258,7 @@ const users_: Painter = async (ctx, area) => {
 
 function quotaSummary(q?: Quota): string {
   const d = q?.default ?? {};
-  const set = [d.vms, d.vcpus, d.memory_mb, d.storage_gb, d.networks].some((x) => x != null);
+  const set = [d.vms, d.vcpus, d.memory_mb, d.storage_gb, d.networks, d.forwards].some((x) => x != null);
   const over = Object.keys(q?.daemons ?? {}).length;
   if (!set && !over) return `<span class="dim-note">Unlimited</span>`;
   const parts = [
@@ -266,6 +266,7 @@ function quotaSummary(q?: Quota): string {
     d.vcpus != null ? `${d.vcpus} vCPU` : "",
     d.memory_mb != null ? fmtBytes(d.memory_mb * 1048576) : "",
     d.storage_gb != null ? `${d.storage_gb} GiB disk` : "",
+    d.forwards != null ? `${d.forwards} forward${d.forwards === 1 ? "" : "s"}` : "",
   ].filter(Boolean);
   return `${esc(parts.join(" · ") || "—")}${q?.shared ? ` <span class="badge">pooled</span>` : ""}${over ? ` <span class="badge">+${over} daemon</span>` : ""}`;
 }
@@ -792,7 +793,7 @@ const quotas_: Painter = async (ctx, area) => {
   ctx.setHtml(area, `
     <p class="hint">Limits apply to what a user owns. "Per daemon" applies the limits on each daemon separately; "Pooled" shares them across all daemons. A daemon override replaces the per-daemon limits there, or further caps the pool. Administrators are not limited.</p>
     <table class="grid">
-      <tr><th>User</th><th>Mode</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Storage</th><th>Networks</th><th>Overrides</th><th class="col-actions"></th></tr>
+      <tr><th>User</th><th>Mode</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Storage</th><th>Networks</th><th>Forwards</th><th>Overrides</th><th class="col-actions"></th></tr>
       ${users.map((u) => {
         const d = u.quota?.default ?? {};
         const n = Object.keys(u.quota?.daemons ?? {}).length;
@@ -802,6 +803,7 @@ const quotas_: Painter = async (ctx, area) => {
           <td>${fmtLimit(d.vms)}</td><td>${fmtLimit(d.vcpus)}</td>
           <td>${d.memory_mb == null ? "∞" : fmtBytes(d.memory_mb * 1048576)}</td>
           <td>${fmtLimit(d.storage_gb, " GiB")}</td><td>${fmtLimit(d.networks)}</td>
+          <td>${fmtLimit(d.forwards)}</td>
           <td>${n || "—"}</td>
           <td class="col-actions"><button class="btn icon" data-quota="${u.id}" title="Edit limits">${ic.edit()}</button></td>
         </tr>`;
@@ -815,7 +817,7 @@ const quotas_: Painter = async (ctx, area) => {
 
 const LIMIT_FIELDS: [keyof Limit, string][] = [
   ["vms", "VMs"], ["vcpus", "vCPUs"], ["memory_mb", "Memory (MiB)"],
-  ["storage_gb", "Storage (GiB)"], ["networks", "Networks"],
+  ["storage_gb", "Storage (GiB)"], ["networks", "Networks"], ["forwards", "Port forwards"],
 ];
 
 function limitFields(prefix: string, l: Limit): string {
@@ -1041,6 +1043,7 @@ interface UsageRow {
   memory_mb: number;
   storage_bytes: number;
   networks: number;
+  forwards?: number;
 }
 
 const DASH_TABS: [AdminTab, string, (s?: number) => string][] = [
@@ -1066,9 +1069,9 @@ export function limitMeter(label: string, used: number, cap: number | null | und
     </div>`;
 }
 
-/// A user's five limits as separate meters.
+/// A user's six limits as separate meters.
 export function limitSpecs(
-  used: { vms: number; vcpus: number; memory_mb: number; storage_bytes: number; networks: number },
+  used: { vms: number; vcpus: number; memory_mb: number; storage_bytes: number; networks: number; forwards?: number },
   cap: Limit,
 ): string {
   const count = (n: number) => String(n);
@@ -1080,6 +1083,7 @@ export function limitSpecs(
     ${limitMeter("Memory", used.memory_mb, cap.memory_mb, mem)}
     ${limitMeter("Storage", used.storage_bytes / 1073741824, cap.storage_gb, gib)}
     ${limitMeter("Networks", used.networks, cap.networks, count)}
+    ${limitMeter("Port forwards", used.forwards ?? 0, cap.forwards, count)}
   </div>`;
 }
 
@@ -1110,7 +1114,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
   const failedToday = today.filter((e) => e.status === "failed").length;
   const limited = usage.filter((u) => {
     const d = u.quota?.default ?? {};
-    return [d.vms, d.vcpus, d.memory_mb, d.storage_gb, d.networks].some((x) => x != null)
+    return [d.vms, d.vcpus, d.memory_mb, d.storage_gb, d.networks, d.forwards].some((x) => x != null)
       || Object.keys(u.quota?.daemons ?? {}).length > 0;
   });
   const mem = (m: number) => fmtBytes(m * 1048576);

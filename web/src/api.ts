@@ -144,6 +144,58 @@ export interface Limit {
   memory_mb?: number | null;
   storage_gb?: number | null;
   networks?: number | null;
+  forwards?: number | null;
+}
+
+/// Usage as `/me/usage`, `/usage` and the admin tables report it.
+export interface UsageCounts {
+  vms: number;
+  vcpus: number;
+  memory_mb: number;
+  storage_bytes: number;
+  networks: number;
+  forwards?: number;
+}
+
+/// The limits actually in force for one daemon, resolving the quota the way
+/// the server's `check_quota` does: a daemon override replaces the per-daemon
+/// default, and in shared mode it also caps the pool, so the tighter of the two
+/// applies. Showing the override alone under-reports in shared mode — a limit
+/// the server still enforces would read as "no limit".
+export function effectiveLimit(q: Quota | undefined, conn: string): Limit {
+  const own = q?.daemons?.[conn];
+  if (!own) return q?.default ?? {};
+  if (!q?.shared) return own;
+  const out: Limit = {};
+  for (const k of ["vms", "vcpus", "memory_mb", "storage_gb", "networks", "forwards"] as const) {
+    const a = own[k] ?? null;
+    const b = q.default[k] ?? null;
+    out[k] = a == null ? b : b == null ? a : Math.min(a, b);
+  }
+  return out;
+}
+
+/// How much of each limit is left, for a hard `max` on a form field. Mirrors
+/// the server's own comparison: the cap comes from the effective limit, the
+/// usage from this daemon, or from the pooled total in shared mode. `null`
+/// means no ceiling.
+export function remainingLimits(
+  q: Quota | undefined,
+  conn: string,
+  own: UsageCounts,
+  total: UsageCounts,
+): Limit {
+  const cap = effectiveLimit(q, conn);
+  const use = q?.shared ? total : own;
+  const left = (c: number | null | undefined, u: number) => (c == null ? null : Math.max(0, c - u));
+  return {
+    vms: left(cap.vms, use.vms),
+    vcpus: left(cap.vcpus, use.vcpus),
+    memory_mb: left(cap.memory_mb, use.memory_mb),
+    storage_gb: left(cap.storage_gb, Math.ceil((use.storage_bytes ?? 0) / 1073741824)),
+    networks: left(cap.networks, use.networks),
+    forwards: left(cap.forwards, use.forwards ?? 0),
+  };
 }
 
 /// Per-user resource limits: `default` on every daemon separately, or pooled

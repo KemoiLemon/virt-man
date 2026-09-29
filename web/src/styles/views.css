@@ -182,7 +182,9 @@ table.grid + .actions { margin-top: 12px; }
 /* Profile Resource Limits: one block per server (or one for a pooled limit). */
 .pf-limit { margin-bottom: 12px; }
 .pf-limit-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 6px; font-size: 12px; }
-.pf-limit .specs { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+/* The `.specs` grid carries its own bottom margin for a page; inside a limit
+   block that stacks on `.pf-limit`'s and reads as a stray blank line. */
+.pf-limit .specs { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 0; }
 /* Privilege chips in the roles and API key tables. */
 .priv-cell { white-space: normal; }
 .priv {
@@ -194,8 +196,9 @@ table.grid + .actions { margin-top: 12px; }
   display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 7px 14px; margin-bottom: 14px;
 }
-/* Limit fields: five small numbers side by side. */
-.limit-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+/* Limit fields: small numbers side by side; wraps to more rows as the set
+   grows, so the port-forward field is not squeezed. */
+.limit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 10px; margin-bottom: 12px; }
 .quota-daemon { border-top: 1px solid var(--line); padding-top: 9px; margin-top: 9px; }
 .quota-daemon .limit-grid { margin-top: 9px; }
 /* Filter row on the admin tables. Fields sit on the row with their labels;

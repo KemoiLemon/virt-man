@@ -1,6 +1,6 @@
 import { openCropDialog } from "./crop";
-import { api, cacheFirst, uploadWithProgress } from "./api";
-import type { ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, StagedUpload, User, VolumeSummary } from "./api";
+import { api, cacheFirst, effectiveLimit, remainingLimits, uploadWithProgress } from "./api";
+import type { ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, StagedUpload, UsageCounts, User, VolumeSummary } from "./api";
 import { adminRowMenu, adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
 // The text console (xterm.js) is loaded when a container console opens:
@@ -5107,6 +5107,31 @@ async function loadFormData(conn: string) {
   return { pools, nets };
 }
 
+/// The caller's remaining limits on one daemon, for a hard `max` on a form
+/// field: what the server would accept, so a create is not refused after the
+/// work. Empty for an administrator, or when the read fails — the field is
+/// then unbounded and the server still refuses an over-limit value with an
+/// explanatory message.
+async function fieldsLeft(conn: string): Promise<Limit> {
+  if (canAdmin()) return {};
+  try {
+    const u = await api.get<{
+      quota: Quota;
+      total: UsageCounts;
+      daemons: (UsageCounts & { conn: string; online: boolean })[];
+    }>("/me/usage");
+    const own = u.daemons.find((d) => d.conn === conn) ?? u.total;
+    return remainingLimits(u.quota, conn, own, u.total);
+  } catch {
+    return {};
+  }
+}
+
+/// ` max="N"` for a field, or nothing when there is no ceiling.
+function maxAttr(n: number | null | undefined): string {
+  return n == null ? "" : ` max="${n}"`;
+}
+
 /// Create a volume for every "new volume" disk in the device list, then rewrite
 /// the device to reference it, so the XML builder can attach it like an
 /// existing volume. Called before defining the domain in both create and edit.
@@ -5206,6 +5231,16 @@ async function openHardwareEditor(opts: {
   if (modal) modal.querySelector(".modal")?.classList.add("hw-modal");
 
   const { pools, nets } = await loadFormData(conn);
+  // Hard ceilings from the caller's remaining limits, so a field cannot be set
+  // past what the server would accept and then be refused after the work. An
+  // edit may grow by the delta, so the guest's own use is added back.
+  const left = await fieldsLeft(conn);
+  const cap = {
+    cpu: left.vcpus == null ? null : left.vcpus + (editing ? general.cpus : 0),
+    mem: left.memory_mb == null ? null : left.memory_mb + (editing ? general.memory_mb : 0),
+    disk: left.storage_gb == null ? null : left.storage_gb,
+  };
+  if (cap.disk != null) newDisk.size_gb = Math.min(newDisk.size_gb, Math.max(1, cap.disk));
   // Volumes per pool, fetched lazily and cached for the device forms.
   const volCache: Record<string, VolumeSummary[]> = {};
   const volumes = async (pool: string): Promise<VolumeSummary[]> => {
@@ -5366,8 +5401,10 @@ async function openHardwareEditor(opts: {
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-field="${esc(f.key)}">${labels}</select></label>`;
         }
+        const bound = f.key === "size_gb" ? cap.disk : f.max;
         return `<label class="field"><span>${esc(f.label)}</span>
           <input data-field="${esc(f.key)}" type="${f.type}" value="${esc(val)}"
+            ${f.min != null ? `min="${f.min}"` : ""}${maxAttr(bound)}
             placeholder="${esc(f.placeholder ?? "")}"></label>`;
       }));
       return `<div class="hw-page active">
@@ -5382,13 +5419,13 @@ async function openHardwareEditor(opts: {
         return `<div class="hw-page active">
           <h3 class="hw-title">Processors</h3>
           <label class="field"><span>vCPUs</span>
-            <input id="g-cpus" type="number" min="1" max="128" value="${general.cpus}"></label>
+            <input id="g-cpus" type="number" min="1" max="${cap.cpu ?? 128}" value="${general.cpus}"></label>
         </div>`;
       case "memory":
         return `<div class="hw-page active">
           <h3 class="hw-title">Memory</h3>
           <label class="field"><span>Memory (MB)</span>
-            <input id="g-mem" type="number" min="128" step="256" value="${general.memory_mb}"></label>
+            <input id="g-mem" type="number" min="128" step="256"${maxAttr(cap.mem)} value="${general.memory_mb}"></label>
         </div>`;
       case "disk": {
         // Volumes the user may boot from: their own, and not already another
@@ -5427,7 +5464,7 @@ async function openHardwareEditor(opts: {
           <h3 class="hw-title">Hard Disk</h3>
           ${mode}${pool}
           <label class="field"><span>Disk Size (GB)</span>
-            <input id="g-size" type="number" min="1" value="${newDisk.size_gb}"></label>
+            <input id="g-size" type="number" min="1"${maxAttr(cap.disk)} value="${newDisk.size_gb}"></label>
           <label class="field"><span>Format</span>
             <select id="g-format">${opt(["qcow2", "raw"], newDisk.format)}</select></label>
         </div>`;
@@ -5481,15 +5518,22 @@ async function openHardwareEditor(opts: {
       if (!n) return;
       n.onchange = () => { fn(n.value); void render(); };
     };
+    // Each field is clamped to its ceiling, but never below its floor: a
+    // limit smaller than the minimum (an empty quota) must not produce a
+    // value the input cannot hold.
+    const clamp = (v: string, lo: number, hi: number | null) => {
+      const n = Math.max(lo, Math.floor(+v || lo));
+      return hi == null ? n : Math.min(hi, n);
+    };
     bind("#g-name", (v) => { general.name = v; });
-    bind("#g-cpus", (v) => { general.cpus = Math.max(1, +v || 1); });
-    bind("#g-mem", (v) => { general.memory_mb = Math.max(128, +v || 128); });
+    bind("#g-cpus", (v) => { general.cpus = Math.max(1, clamp(v, 1, cap.cpu)); });
+    bind("#g-mem", (v) => { general.memory_mb = clamp(v, 128, cap.mem); });
     bind("#g-gfx", (v) => { general.graphics = v as "vnc" | "spice"; });
     bind("#g-fw", (v) => { general.firmware = v as "uefi" | "bios"; });
     bind("#g-pool", (v) => { newDisk.pool = v; newDisk.volume = ""; });
     bind("#g-disk-mode", (v) => { newDisk.mode = v === "existing" ? "existing" : "new"; });
     bind("#g-volume", (v) => { newDisk.volume = v; });
-    bind("#g-size", (v) => { newDisk.size_gb = Math.max(1, +v || 1); });
+    bind("#g-size", (v) => { newDisk.size_gb = clamp(v, 1, cap.disk); });
     bind("#g-format", (v) => { newDisk.format = v as "raw" | "qcow2"; });
 
     // Device field edits, plus removal.
@@ -5498,7 +5542,13 @@ async function openHardwareEditor(opts: {
       root.querySelectorAll("[data-field]").forEach((n: Element) => {
         (n as HTMLElement).onchange = () => {
           const key = (n as HTMLElement).dataset.field!;
-          devices[i].fields[key] = (n as HTMLInputElement).value;
+          let val = (n as HTMLInputElement).value;
+          // A new disk's size is storage the owner holds: cap it at what is
+          // left, or the create is refused after the volume is made.
+          if (key === "size_gb" && cap.disk != null) {
+            val = String(clamp(val, 1, cap.disk));
+          }
+          devices[i].fields[key] = val;
           // Changing the pool invalidates the volume list.
           void render();
         };
@@ -5561,8 +5611,10 @@ async function openHardwareEditor(opts: {
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-af="${esc(f.key)}">${labels}</select></label>`;
         }
+        const bound = f.key === "size_gb" ? cap.disk : f.max;
         return `<label class="field"><span>${esc(f.label)}</span>
           <input data-af="${esc(f.key)}" type="${f.type}" value="${esc(val)}"
+            ${f.min != null ? `min="${f.min}"` : ""}${maxAttr(bound)}
             placeholder="${esc(f.placeholder ?? "")}"></label>`;
       }));
 
@@ -6506,7 +6558,7 @@ setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done">
 async function loadProfileLimits(el: Element) {
   const box = $("#pf-limits", el);
   if (!box) return;
-  type Used = { vms: number; vcpus: number; memory_mb: number; storage_bytes: number; networks: number };
+  type Used = { vms: number; vcpus: number; memory_mb: number; storage_bytes: number; networks: number; forwards?: number };
   let u: {
     admin: boolean;
     quota: import("./api").Quota;
@@ -6525,7 +6577,7 @@ async function loadProfileLimits(el: Element) {
     return;
   }
   const q = u.quota ?? { shared: false, default: {}, daemons: {} };
-  const any = (l: import("./api").Limit) => [l.vms, l.vcpus, l.memory_mb, l.storage_gb, l.networks].some((x) => x != null);
+  const any = (l: import("./api").Limit) => [l.vms, l.vcpus, l.memory_mb, l.storage_gb, l.networks, l.forwards].some((x) => x != null);
   if (!any(q.default) && !Object.values(q.daemons ?? {}).some(any)) {
     setHtml(box, `${title}<p class="hint">You have no resource limits.</p>`);
     return;
@@ -6545,7 +6597,10 @@ async function loadProfileLimits(el: Element) {
       html += `<div class="pf-limit"><div class="pf-limit-head"><b>${esc(d.name)}</b><span class="dim-note">offline</span></div></div>`;
       continue;
     }
-    html += block(d.name, d, own ?? q.default, own ? "server-specific limit" : "");
+    // The effective cap, not the override alone: in shared mode the pooled
+    // default still applies, so showing only the override would hide a limit
+    // the server enforces.
+    html += block(d.name, d, effectiveLimit(q, d.conn), own ? "server-specific limit" : "");
   }
   setHtml(box, `${title}${html}`);
 }
