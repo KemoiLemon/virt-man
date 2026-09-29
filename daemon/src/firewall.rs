@@ -613,25 +613,86 @@ pub fn forward_accept_nft(subnet: &str) -> Vec<String> {
     .collect()
 }
 
+/// Whether a rule of ours that the backend already has can admit anything at
+/// all: it must sit **ahead of** libvirt's reject in the rule order.
+///
+/// Both backends list a chain in rule order, and that order is the whole
+/// question — libvirt *inserts* its accept+reject at the head of its chain
+/// whenever it (re)applies a network, i.e. on a network start and on a
+/// libvirtd restart. That pushes our rule below the reject, and `iptables -C`
+/// or a `contains` on the nft listing only asks whether the rule exists, so
+/// they keep answering "already there" while every forwarded connection is
+/// rejected: a forward's first packet is NEW, so the reject throws it away
+/// before our accept is ever consulted.
+///
+/// So a rule that is present but behind the reject has to be *moved*, not left
+/// alone — that is the difference between "the fix is applied" and "the fix is
+/// in force".
+fn ahead_of_reject(listing: &str, ours: impl Fn(&str) -> bool) -> bool {
+    for line in listing.lines() {
+        if ours(line) {
+            return true;
+        }
+        // libvirt's own rejection, spelled `-j REJECT` or `reject with icmp`.
+        if line.contains("reject") || line.contains("-j DROP") {
+            return false;
+        }
+    }
+    false
+}
+
+/// The nft rule handles on the lines matching `mark`, so a stray or mis-placed
+/// copy can be removed before ours is inserted again.
+fn nft_handles(listing: &str, mark: &str) -> Vec<u64> {
+    listing
+        .lines()
+        .filter(|l| l.contains(mark))
+        .filter_map(|l| l.rsplit("# handle ").next()?.trim().parse().ok())
+        .collect()
+}
+
 /// Admit a network's DNAT'd traffic into libvirt's **iptables** filter.
 async fn allow_via_iptables(subnet: &str) -> Backend {
     use tokio::process::Command;
     let rule = forward_accept_rule(subnet);
 
-    // -C asks without changing anything, so re-asserting cannot stack copies.
-    match Command::new("iptables")
-        .arg("-C")
-        .arg(LIBVIRT_NET_IN)
-        .args(&rule)
+    // -S lists the chain in order, in one call, which answers both questions:
+    // whether our rule exists and whether it is ahead of the reject. Asking
+    // with -C instead only answered the first, which is how a rule that
+    // libvirt had pushed behind its reject kept looking applied.
+    let Ok(listing) = Command::new("iptables")
+        .args(["-S", LIBVIRT_NET_IN])
         .output()
         .await
-    {
-        // Already there: the common case on every pass after the first.
-        Ok(o) if o.status.success() => return Ok(true),
-        // Ran, but has no such rule (and possibly no such chain).
-        Ok(_) => {}
+    else {
         // No iptables at all, so libvirt's chains cannot exist either.
-        Err(_) => return Ok(false),
+        return Ok(false);
+    };
+    if !listing.status.success() {
+        // No such chain: this host's libvirt does not filter through
+        // iptables — most likely it uses the nftables backend, which the
+        // other path handles.
+        return Ok(false);
+    }
+    let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
+    let prefix = format!("-A {LIBVIRT_NET_IN} ");
+    let ours =
+        |l: &str| l.starts_with(&prefix) && l.contains("--ctstate DNAT") && l.contains(subnet);
+    if ahead_of_reject(&listing, ours) {
+        // In force, which is the common case on every pass after the first.
+        return Ok(true);
+    }
+
+    // Missing, or present but behind the reject: drop every copy, then put one
+    // at the head. Deleting first is what keeps this idempotent, so
+    // re-asserting cannot stack copies.
+    for _ in 0..listing.lines().filter(|l| ours(l)).count() {
+        let _ = Command::new("iptables")
+            .arg("-D")
+            .arg(LIBVIRT_NET_IN)
+            .args(&rule)
+            .output()
+            .await;
     }
 
     let out = Command::new("iptables")
@@ -643,12 +704,12 @@ async fn allow_via_iptables(subnet: &str) -> Backend {
         .await
         .map_err(|e| format!("iptables: {e}"))?;
     if out.status.success() {
-        tracing::info!("firewall: admitting DNAT'd traffic to {subnet} through libvirt's iptables");
+        tracing::info!(
+            "firewall: admitting DNAT'd traffic to {subnet} ahead of libvirt's reject (iptables)"
+        );
         return Ok(true);
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    // No such chain: this host's libvirt does not filter through iptables —
-    // most likely it uses the nftables backend, which the other path handles.
     if err.contains("No chain") {
         return Ok(false);
     }
@@ -671,8 +732,27 @@ async fn allow_via_nftables(subnet: &str) -> Backend {
     if !current.status.success() {
         return Ok(false);
     }
-    if String::from_utf8_lossy(&current.stdout).contains(&our_mark_quoted()) {
+    let listing = String::from_utf8_lossy(&current.stdout).into_owned();
+    let mark = our_mark_quoted();
+    if ahead_of_reject(&listing, |l| l.contains(&mark)) {
         return Ok(true);
+    }
+
+    // Behind the reject, or missing: drop our copies by handle first, so
+    // re-inserting cannot stack them.
+    for handle in nft_handles(&listing, &mark) {
+        let _ = Command::new("nft")
+            .args([
+                "delete",
+                "rule",
+                "ip",
+                LIBVIRT_NFT_TABLE,
+                LIBVIRT_NFT_CHAIN,
+                "handle",
+                &handle.to_string(),
+            ])
+            .output()
+            .await;
     }
 
     // Plain `insert` prepends, putting ours ahead of libvirt's reject.
@@ -682,7 +762,9 @@ async fn allow_via_nftables(subnet: &str) -> Backend {
         .await
         .map_err(|e| format!("nft: {e}"))?;
     if out.status.success() {
-        tracing::info!("firewall: admitting DNAT'd traffic to {subnet} through libvirt's nftables");
+        tracing::info!(
+            "firewall: admitting DNAT'd traffic to {subnet} ahead of libvirt's reject (nftables)"
+        );
         return Ok(true);
     }
     Err(format!(
@@ -791,6 +873,54 @@ mod tests {
             "must not restate libvirt's established-traffic accept"
         );
         assert!(!r.iter().any(|a| a == "DROP" || a == "REJECT"));
+    }
+
+    #[test]
+    fn a_rule_behind_libvirts_reject_is_not_admitting_anything() {
+        // The real shape, measured on an iptables-backed host whose forward
+        // worked before a network restart and not after: libvirt inserted its
+        // own two rules at the head, ours drifted to the end, and the reject
+        // then counted one packet per connection attempt.
+        let ours = |l: &str| l.contains("--ctstate DNAT");
+        let in_force = "\
+-P LIBVIRT_FWI ACCEPT
+-A LIBVIRT_FWI -d 10.74.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT
+-A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable";
+        assert!(ahead_of_reject(in_force, ours), "ahead of the reject");
+
+        let drifted = "\
+-A LIBVIRT_FWI -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
+-A LIBVIRT_FWI -d 10.74.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT";
+        assert!(
+            !ahead_of_reject(drifted, ours),
+            "present, but behind the reject, so it admits nothing"
+        );
+        assert!(!ahead_of_reject("-P LIBVIRT_FWI ACCEPT", ours), "absent");
+    }
+
+    #[test]
+    fn the_nft_chain_is_judged_the_same_way_and_our_copies_are_findable() {
+        let mark = our_mark_quoted();
+        let ours = |l: &str| l.contains(&mark);
+        let listing = "\
+chain guest_input {
+		type filter hook forward priority filter; policy accept;
+		oif \"virbr0\" ip daddr 10.74.0.0/24 ct state established,related accept
+		oif \"virbr0\" reject with icmp type port-unreachable
+		ip daddr 10.74.0.0/24 ct status dnat counter accept comment \"virt-man dnat\" # handle 9
+}";
+        assert!(!ahead_of_reject(listing, ours), "behind libvirt's reject");
+        assert_eq!(nft_handles(listing, &mark), vec![9], "deletable by handle");
+        let moved = listing.replace(
+            "ip daddr 10.74.0.0/24 ct status dnat counter accept comment \"virt-man dnat\" # handle 9",
+            "",
+        );
+        assert!(
+            !ahead_of_reject(&moved, ours),
+            "removing ours leaves none, so it is re-inserted"
+        );
     }
 
     #[test]

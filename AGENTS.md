@@ -577,6 +577,18 @@ and the supervisor re-asserts it every pass, because **starting or restarting a
 network, and a libvirtd restart, make libvirt rewrite those chains without it**.
 Anything that recreates them silently re-breaks forwarding until the next pass.
 
+**The check is positional, not a presence test.** libvirt *inserts* its own
+two rules at the head of its chain, which pushes ours **behind** its reject
+rather than removing it — measured on an iptables host: a working forward, one
+network restart, and our rule sat at line 3 behind a reject counting one packet
+per attempt. `iptables -C` and a `contains` on the nft listing both answer "the
+rule exists", so a host in that state reported itself fixed on every pass while
+every forward was refused, and stayed broken until someone moved the rule by
+hand. So the pass reads the chain in order (`iptables -S`, `nft list chain`) and
+moves our rule to the head whenever it is missing *or* behind a reject — a rule
+that exists but is behind the reject admits nothing, because a forward's first
+packet is NEW.
+
 **Access logs record every guest connection, cheaply.** (`daemon/src/ipam/flows.rs`,
 `web/server/src/access.rs`.) The daemon subscribes to conntrack NEW/DESTROY
 netlink events (one message per *connection*, not per packet; NAT already makes
