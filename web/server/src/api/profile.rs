@@ -190,6 +190,7 @@ async fn my_usage(
                         "conn": c.id, "name": c.name, "online": true,
                         "vms": u.vms, "vcpus": u.vcpus, "memory_mb": u.memory_mb,
                         "storage_bytes": u.storage_bytes, "networks": u.networks,
+                        "forwards": u.forwards,
                     }));
                 }
                 Err(_) => daemons
@@ -203,6 +204,7 @@ async fn my_usage(
         "total": {
             "vms": total.vms, "vcpus": total.vcpus, "memory_mb": total.memory_mb,
             "storage_bytes": total.storage_bytes, "networks": total.networks,
+            "forwards": total.forwards,
         },
         "daemons": daemons,
     })))

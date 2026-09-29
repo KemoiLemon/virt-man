@@ -294,6 +294,20 @@ async fn remove_acl(
 /// before a create can arrive after it.
 const PRUNE_GRACE_MS: u64 = 60_000;
 
+/// Whether a connection's daemon is known to be up. Unknown (no probe yet)
+/// counts as up, so a fresh start does not hide a healthy server; a daemon
+/// already marked offline is skipped rather than called. That skip is what
+/// keeps the admin panel fast while a daemon is down: the health probe has
+/// already decided, and re-asking the daemon just waits for the timeout again.
+fn online(state: &AppState, id: &str) -> bool {
+    state
+        .health
+        .read()
+        .expect("health lock poisoned")
+        .get(id)
+        .is_none_or(|h| h.online)
+}
+
 /// Every guest, network, pool and volume on every reachable daemon, with its
 /// owner. Records for things a daemon no longer has are dropped here, so
 /// ownership does not leak onto a later resource of the same name.
@@ -303,6 +317,9 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
     let mut seen: Vec<(Kind, String, String, String)> = vec![];
     let mut answered: Vec<String> = vec![];
     for c in &conns {
+        if !online(&state, &c.id) {
+            continue; // known down: do not wait for it again
+        }
         let (Ok(doms), Ok(nets), Ok(pools)) = (
             daemon_get(c, "/domains").await,
             daemon_get(c, "/networks").await,
@@ -495,6 +512,9 @@ async fn usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     for u in &users {
         let mut total = crate::perm::Usage::default();
         for c in &conns {
+            if !online(&state, &c.id) {
+                continue;
+            }
             if let Ok(x) = crate::guard::usage_on(&state, c, &u.id).await {
                 total = total.add(x);
             }
@@ -508,6 +528,7 @@ async fn usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
             "memory_mb": total.memory_mb,
             "storage_bytes": total.storage_bytes,
             "networks": total.networks,
+            "forwards": total.forwards,
         }));
     }
     Ok(Json(json!(out)))
@@ -531,6 +552,9 @@ async fn ips(
     let conns: Vec<Connection> = state.read().connections.clone();
     let mut out = vec![];
     for c in &conns {
+        if !online(&state, &c.id) {
+            continue;
+        }
         let Ok(nets) = daemon_get(c, "/networks").await else {
             continue;
         };

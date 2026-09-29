@@ -15,26 +15,38 @@ use crate::state::AppState;
 use crate::store::{Connection, User};
 use crate::xmlcheck;
 
+/// How long a read against a daemon may take before it is abandoned.
+///
+/// A refused connection fails at once, but a host that accepts and then never
+/// answers would otherwise hold the request open forever — and the admin panel
+/// fans out over every daemon, so one black hole made the whole page hang. A
+/// read that has not answered in this long is as good as down.
+const DAEMON_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A GET against the daemon, as JSON. The proxy's own caller is checked;
 /// this is the web server reading for itself.
 pub async fn daemon_get(conn: &Connection, path: &str) -> Result<Value, ApiError> {
     let addr = crate::daemon::parse_url(&conn.url).map_err(ApiError::internal)?;
     let client = crate::daemon::http_client(conn).map_err(ApiError::internal)?;
-    let resp = client
-        .get(format!("{}{path}", addr.base))
-        .header("Authorization", format!("Bearer {}", conn.token))
-        .send()
-        .await
-        .map_err(|e| ApiError::bad_request(format!("daemon error: {e}")))?;
+    let resp = tokio::time::timeout(
+        DAEMON_GET_TIMEOUT,
+        client
+            .get(format!("{}{path}", addr.base))
+            .header("Authorization", format!("Bearer {}", conn.token))
+            .send(),
+    )
+    .await
+    .map_err(|_| ApiError::bad_request(format!("daemon did not answer {path} in time")))?
+    .map_err(|e| ApiError::bad_request(format!("daemon error: {e}")))?;
     if !resp.status().is_success() {
         return Err(ApiError::bad_request(format!(
             "daemon answered {} for {path}",
             resp.status()
         )));
     }
-    let bytes = resp
-        .bytes()
+    let bytes = tokio::time::timeout(DAEMON_GET_TIMEOUT, resp.bytes())
         .await
+        .map_err(|_| ApiError::bad_request(format!("daemon body timed out for {path}")))?
         .map_err(|e| ApiError::internal(format!("daemon body: {e}")))?;
     serde_json::from_slice(&bytes).map_err(|e| ApiError::internal(format!("daemon JSON: {e}")))
 }
@@ -61,6 +73,16 @@ pub fn enc(s: &str) -> String {
         }
     }
     out
+}
+
+/// Whether a volume is ISO media, by its name.
+///
+/// An ISO is shared media: it belongs to nobody, so it costs no one storage,
+/// and any user who may read the pool may upload or download one. Anything
+/// else (a disk image, a container template) is the uploader's own, and counts
+/// against their storage like any other volume.
+pub fn is_iso(name: &str) -> bool {
+    name.trim().to_ascii_lowercase().ends_with(".iso")
 }
 
 fn names(v: &Value) -> Vec<String> {
@@ -238,6 +260,17 @@ pub async fn usage_on(state: &AppState, conn: &Connection, owner: &str) -> Resul
                 u.vcpus += d.get("vcpus").and_then(Value::as_u64).unwrap_or(0);
                 u.memory_mb += d.get("memory_mb").and_then(Value::as_u64).unwrap_or(0);
             }
+        }
+    }
+    // Port forwards on the networks the owner has here. Read live, so a
+    // forward added outside the app is counted too.
+    for n in &nets {
+        if let Ok(fw) = daemon_get(conn, &format!("/networks/{}/firewall", enc(n))).await {
+            u.forwards += fw
+                .get("forwards")
+                .and_then(Value::as_array)
+                .map(|a| a.len() as u64)
+                .unwrap_or(0);
         }
     }
     u.storage_bytes = vols.iter().map(|r| r.capacity).sum();
@@ -676,6 +709,40 @@ pub async fn before(
             check_bridge(state, user, &conn.id, &spec)?;
             Ok(None)
         }
+        Special::PutNetworkFirewall { net } => {
+            if admin {
+                return Ok(None);
+            }
+            let req: Value =
+                serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
+            let want = req
+                .get("forwards")
+                .and_then(Value::as_array)
+                .map(|a| a.len() as u64)
+                .unwrap_or(0);
+            // Only growth counts: take the forwards already on this network
+            // away from what the request would leave behind.
+            let cur = daemon_get(conn, &format!("/networks/{}/firewall", enc(net))).await?;
+            let have = cur
+                .get("forwards")
+                .and_then(Value::as_array)
+                .map(|a| a.len() as u64)
+                .unwrap_or(0);
+            let grow = want.saturating_sub(have);
+            if grow > 0 {
+                check_quota(
+                    state,
+                    conn,
+                    user,
+                    Usage {
+                        forwards: grow,
+                        ..Usage::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(None)
+        }
         Special::CreateVolume { pool } => {
             let req: Value =
                 serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
@@ -700,14 +767,6 @@ pub async fn before(
             Ok(Some(record(Kind::Volume, pool, &spec.name, spec.capacity)))
         }
         Special::Fetch { pool } | Special::FetchTemplate { pool } => {
-            // The size is unknown until the download ends, so a fetch cannot
-            // be held to a storage quota up front: admins only for anyone
-            // with one. Without a quota, the fetched volume is theirs.
-            if !admin && user.quota.default.storage_gb.is_some() {
-                return Err(ApiError::bad_request(
-                    "fetching from a URL is not available with a storage limit; upload the file instead",
-                ));
-            }
             let req: Value =
                 serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
             let name = req
@@ -724,6 +783,24 @@ pub async fn before(
                         .map(crate::routes::decode)
                 })
                 .unwrap_or_default();
+            // ISO media is shared: it belongs to nobody, so it costs no one
+            // storage and any user who may read the pool may download one.
+            // Nothing is recorded; `owner_of` then falls back to the first
+            // administrator, exactly as for an ISO copied into the pool by
+            // hand.
+            if is_iso(&name) {
+                return Ok(None);
+            }
+            // The size is unknown until the download ends, so a fetch cannot
+            // be held to a storage quota up front: admins only, for anyone
+            // with one. The ceiling is the one in force for *this* daemon, so
+            // a per-daemon override is honoured rather than the datacenter
+            // default alone.
+            if !admin && perm::storage_limit(&user.quota, &conn.id).is_some() {
+                return Err(ApiError::bad_request(
+                    "fetching from a URL is not available with a storage limit; upload the file instead",
+                ));
+            }
             let mut r = record(Kind::Volume, pool, &name, 0);
             r.blank = false;
             Ok(Some(r))

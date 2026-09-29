@@ -326,8 +326,10 @@ async fn stage(
         return Err(ApiError::bad_request("empty body"));
     }
     // The size is known only once the body is here; checked before anything
-    // reaches the daemon. Administrators have no quota.
-    if !state.read().is_admin(&user) {
+    // reaches the daemon. Administrators have no quota. An ISO is shared media
+    // and belongs to nobody, so it costs no one storage and is not held to a
+    // quota at all.
+    if !state.read().is_admin(&user) && !crate::guard::is_iso(&name) {
         let quota = crate::guard::check_quota(
             &state,
             &conn_rec,
@@ -698,10 +700,15 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     j.phase = Phase::Done;
     j.finished_ms = now_ms();
     j.sha256 = Some(local.clone());
-    // The volume is the uploader's: they may delete it, and it counts
-    // against their storage. Not `blank`: its contents are theirs, so it is
-    // only ever attached as raw (see `guard`).
-    let record = crate::perm::Resource {
+    // ISO media is shared: it belongs to nobody, so it counts against no one's
+    // storage and no ownership record is written. `owner_of` then falls back to
+    // the first administrator, exactly as for an ISO copied into the pool by
+    // hand, and a non-admin cannot delete one. Anything else is the uploader's:
+    // they may delete it, and it counts against their storage. Not `blank`:
+    // its contents are theirs, so it is only ever attached as raw (see
+    // `guard`).
+    let ownerless = crate::guard::is_iso(&j.name);
+    let record = (!ownerless).then(|| crate::perm::Resource {
         kind: crate::perm::Kind::Volume,
         conn: j.conn.clone(),
         pool: j.pool.clone(),
@@ -712,12 +719,14 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
         capacity: j.size,
         blank: false,
         created_ms: now_ms(),
-    };
+    });
     drop(j);
-    let mut store = state.write();
-    store.resources.push(record);
-    if let Err(e) = store.save(&state.data_dir) {
-        tracing::warn!("could not record upload owner: {e}");
+    if let Some(record) = record {
+        let mut store = state.write();
+        store.resources.push(record);
+        if let Err(e) = store.save(&state.data_dir) {
+            tracing::warn!("could not record upload owner: {e}");
+        }
     }
     Ok(local)
 }

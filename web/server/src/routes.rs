@@ -43,6 +43,11 @@ pub enum Special {
     PutNetworkXml {
         net: String,
     },
+    /// A network's firewall: the port forwards in it count against the
+    /// caller's limit.
+    PutNetworkFirewall {
+        net: String,
+    },
     PutCtXml {
         ct: String,
     },
@@ -221,7 +226,10 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
                 ("DELETE", []) => with(p, "Network.Allocate", Special::DeleteNetwork { net }),
                 ("PUT", ["xml"]) => with(p, "Network.Config", Special::PutNetworkXml { net }),
                 ("POST", ["start" | "stop" | "autostart"]) => need(p, "Network.Config"),
-                ("PUT", ["ipam" | "firewall"]) => need(p, "Network.Config"),
+                ("PUT", ["ipam"]) => need(p, "Network.Config"),
+                ("PUT", ["firewall"]) => {
+                    with(p, "Network.Config", Special::PutNetworkFirewall { net })
+                }
                 // Reservations: who holds which address. Changing one is
                 // editing the network's allocations, which the network's
                 // owner and the admin may do.
@@ -415,6 +423,21 @@ mod tests {
         );
         let n = classify("c", "POST", "/pools/p/volumes/x/upload").unwrap();
         assert_eq!(n.special, Special::AdminOnly, "uploads go through /uploads");
+    }
+
+    #[test]
+    fn a_networks_firewall_write_is_checked_for_port_forwards() {
+        let n = classify("c", "PUT", "/networks/lan/firewall").unwrap();
+        assert_eq!(n.privilege, "Network.Config");
+        assert_eq!(
+            n.special,
+            Special::PutNetworkFirewall { net: "lan".into() }
+        );
+        // The IPAM write is not a firewall write.
+        assert_eq!(
+            classify("c", "PUT", "/networks/lan/ipam").unwrap().special,
+            Special::None
+        );
     }
 
     #[test]

@@ -227,6 +227,9 @@ pub struct Limit {
     pub storage_gb: Option<u64>,
     #[serde(default)]
     pub networks: Option<u64>,
+    /// Port forwards: the rules across every network the user owns.
+    #[serde(default)]
+    pub forwards: Option<u64>,
 }
 
 /// A user's resource limits.
@@ -253,6 +256,7 @@ pub struct Usage {
     pub memory_mb: u64,
     pub storage_bytes: u64,
     pub networks: u64,
+    pub forwards: u64,
 }
 
 impl Usage {
@@ -263,6 +267,7 @@ impl Usage {
             memory_mb: self.memory_mb + o.memory_mb,
             storage_bytes: self.storage_bytes + o.storage_bytes,
             networks: self.networks + o.networks,
+            forwards: self.forwards + o.forwards,
         }
     }
 }
@@ -284,7 +289,7 @@ fn over(limit: &Limit, after: &Usage, asked: &Usage, scope: &str) -> Result<(), 
     let gib = |g: u64| format!("{g} GiB");
     let count = |x: u64| x.to_string();
     type Row<'a> = (&'a str, Option<u64>, u64, u64, &'a dyn Fn(u64) -> String);
-    let rows: [Row; 5] = [
+    let rows: [Row; 6] = [
         ("VM", limit.vms, after.vms, asked.vms, &count),
         ("vCPU", limit.vcpus, after.vcpus, asked.vcpus, &count),
         (
@@ -306,6 +311,13 @@ fn over(limit: &Limit, after: &Usage, asked: &Usage, scope: &str) -> Result<(), 
             limit.networks,
             after.networks,
             asked.networks,
+            &count,
+        ),
+        (
+            "Port forward",
+            limit.forwards,
+            after.forwards,
+            asked.forwards,
             &count,
         ),
     ];
@@ -354,6 +366,29 @@ pub fn check_quota(
         Ok(())
     } else {
         over(&q.default, here, asked, &on)
+    }
+}
+
+/// The storage ceiling actually in force for one daemon, resolving `daemons`
+/// and `shared` exactly as [`check_quota`] does. `None` = unlimited.
+///
+/// Consumers outside `check_quota` (the URL-fetch gate) must ask here rather
+/// than read `quota.default`: reading the datacenter default alone ignores a
+/// per-daemon override, which is a limit that "still follows the datacenter
+/// limits" while the override says otherwise.
+pub fn storage_limit(q: &Quota, conn: &str) -> Option<u64> {
+    let own = q.daemons.get(conn).and_then(|l| l.storage_gb);
+    if q.shared {
+        // Both apply: the override caps the pool, so the tighter one wins.
+        match (own, q.default.storage_gb) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        }
+    } else if q.daemons.contains_key(conn) {
+        own
+    } else {
+        q.default.storage_gb
     }
 }
 
@@ -698,6 +733,7 @@ mod tests {
             memory_mb: mem,
             storage_bytes: gb * GIB,
             networks: 0,
+            forwards: 0,
         }
     }
 
@@ -712,6 +748,7 @@ mod tests {
                 memory_mb: Some(2048),
                 storage_gb: Some(20),
                 networks: None,
+                forwards: None,
             },
             daemons: HashMap::new(),
         };
@@ -825,6 +862,7 @@ mod tests {
             memory_mb: Some(8192),
             storage_gb: Some(60),
             networks: None,
+            forwards: None,
         };
         let here = usage(2, 4, 4096, 40);
         let total = usage(4, 8, 8192, 80);
@@ -883,6 +921,95 @@ mod tests {
             &Usage::default()
         )
         .is_err());
+    }
+
+    /// The fetch gate reads the effective storage ceiling, so a limit that
+    /// exists only as a per-daemon override still applies, and one the override
+    /// clears does not.
+    #[test]
+    fn the_effective_storage_limit_resolves_like_the_quota_check() {
+        let mut daemons = HashMap::new();
+        daemons.insert(
+            "small".to_string(),
+            Limit {
+                storage_gb: None,
+                ..Limit::default()
+            },
+        );
+        let q = Quota {
+            shared: false,
+            default: Limit {
+                storage_gb: Some(10),
+                ..Limit::default()
+            },
+            daemons,
+        };
+        // No override: the datacenter default applies.
+        assert_eq!(storage_limit(&q, "other"), Some(10));
+        // An override that clears storage means no ceiling on that daemon,
+        // rather than inheriting the datacenter's 10 GiB.
+        assert_eq!(storage_limit(&q, "small"), None);
+
+        let per = Quota {
+            shared: false,
+            default: Limit::default(),
+            daemons: {
+                let mut d = HashMap::new();
+                d.insert(
+                    "small".to_string(),
+                    Limit {
+                        storage_gb: Some(4),
+                        ..Limit::default()
+                    },
+                );
+                d
+            },
+        };
+        // A limit that exists only in the override still blocks a fetch.
+        assert_eq!(storage_limit(&per, "small"), Some(4));
+        assert_eq!(storage_limit(&per, "other"), None);
+
+        // Shared: the pooled default still applies, so the tighter wins.
+        let shared = Quota {
+            shared: true,
+            default: Limit {
+                storage_gb: Some(10),
+                ..Limit::default()
+            },
+            daemons: {
+                let mut d = HashMap::new();
+                d.insert(
+                    "small".to_string(),
+                    Limit {
+                        storage_gb: Some(4),
+                        ..Limit::default()
+                    },
+                );
+                d
+            },
+        };
+        assert_eq!(storage_limit(&shared, "small"), Some(4));
+        assert_eq!(storage_limit(&shared, "other"), Some(10));
+    }
+
+    /// A port-forward cap is enforced like any other count.
+    #[test]
+    fn a_port_forward_limit_counts_the_forwards_in_use() {
+        let q = Quota {
+            shared: false,
+            default: Limit {
+                forwards: Some(2),
+                ..Limit::default()
+            },
+            daemons: HashMap::new(),
+        };
+        let with = |f| Usage {
+            forwards: f,
+            ..Usage::default()
+        };
+        assert!(check_quota(&q, "c", "hv", &with(2), &with(2), &Usage::default()).is_ok());
+        let e = check_quota(&q, "c", "hv", &with(3), &with(3), &with(1)).unwrap_err();
+        assert!(e.starts_with("Port forward limit reached"), "{e}");
     }
 
     #[test]
