@@ -282,3 +282,119 @@ test("the button mask is the RFB one, not the DOM's", () => {
   assert.deepEqual(con.touchUp(con.touchDown(P(1, 1)), P(1, 1)).sends[0].buttons, 1);
   assert.deepEqual(con.touchLongPress(con.touchDown(P(1, 1))).sends[0].buttons, 4);
 });
+
+// ---- compressed rectangles -------------------------------------------------
+//
+// The daemon zlibs each rectangle and labels it (`enc`), because a flat console
+// region compresses ~150:1 while a full-screen one is megabytes. A rectangle
+// left undecoded paints garbage; one mislabelled is dropped as corrupt, so that
+// region goes stale until something else repaints it.
+//
+// jsdom has neither DecompressionStream nor a usable Blob/Response stream, so
+// these are shimmed onto node's zlib. The shim must do real decompression --
+// a stub that hands the input back would pass whatever the viewer did with it.
+
+/// Install a `Blob`/`DecompressionStream`/`Response` that really inflate with
+/// node's zlib, modelling the exact chain the viewer uses:
+///   new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"))
+/// then `new Response(stream).arrayBuffer()`.
+/// Returns a restore function.
+async function withZlibShims() {
+  const { inflateSync } = await import("node:zlib");
+  const orig = {
+    Blob: globalThis.Blob,
+    Response: globalThis.Response,
+    DS: globalThis.DecompressionStream,
+  };
+  globalThis.Blob = class {
+    constructor(parts) {
+      this._b = Buffer.concat(parts.map((p) => Buffer.from(p)));
+    }
+    stream() {
+      return { _deflated: this._b };
+    }
+  };
+  globalThis.DecompressionStream = class {
+    constructor(format) {
+      assert.equal(format, "deflate", "the daemon writes a zlib stream, not raw deflate");
+    }
+    // The viewer calls pipeThrough on the Blob's stream, passing this. Model the
+    // pipe as an inflated-bytes carrier, so the real zlib runs.
+    inflateFrom(deflated) {
+      return { _inflated: inflateSync(deflated) };
+    }
+  };
+  globalThis.Response = class {
+    constructor(s) {
+      // `s` is what pipeThrough returned: already inflated by the shim above,
+      // or a Blob stream when the chain is driven differently.
+      this._buf = s._inflated ?? inflateSync(s._deflated ?? s);
+    }
+    async arrayBuffer() {
+      return this._buf.buffer.slice(
+        this._buf.byteOffset,
+        this._buf.byteOffset + this._buf.byteLength,
+      );
+    }
+  };
+  // Give the stream object a pipeThrough that routes through DecompressionStream.
+  const OrigBlob = globalThis.Blob;
+  globalThis.Blob = class extends OrigBlob {
+    stream() {
+      const b = this._b;
+      return {
+        _deflated: b,
+        pipeThrough(ds) { return ds.inflateFrom(b); },
+      };
+    }
+  };
+  return () => Object.assign(globalThis, {
+    Blob: orig.Blob, Response: orig.Response, DecompressionStream: orig.DS,
+  });
+}
+
+test("a zlib rectangle decodes to the same pixels as a raw one", async () => {
+  const { deflateSync } = await import("node:zlib");
+  const rgba = Uint8Array.from([0x10, 0x20, 0x30, 0x00]); // r, g, b, BGRX pad
+  const z = deflateSync(Buffer.from(rgba));
+  const restore = await withZlibShims();
+  try {
+    const px = await con.rectToRgba({
+      x: 0, y: 0, w: 1, h: 1, enc: "zlib",
+      pixels: z.toString("base64"),
+    });
+    assert.ok(px, "a well-formed zlib rect must decode");
+    assert.deepEqual(
+      [...px.slice(0, 4)],
+      [0x10, 0x20, 0x30, 255],
+      "channels pass through and alpha is forced, like the raw path",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("a corrupt zlib rectangle is skipped, not fatal", async () => {
+  // A dropped or truncated rectangle must leave one stale region the next frame
+  // repairs. Throwing would tear down the whole stream.
+  const restore = await withZlibShims();
+  try {
+    const px = await con.rectToRgba({
+      x: 0, y: 0, w: 1, h: 1, enc: "zlib",
+      pixels: Buffer.from("not zlib at all").toString("base64"),
+    });
+    assert.equal(px, null, "corrupt input yields null and the loop skips it");
+  } finally {
+    restore();
+  }
+});
+
+test("a raw rectangle still decodes when compression is off", async () => {
+  // `compress=0` asks for raw bytes; the label must be honoured or the viewer
+  // would try to inflate plain RGBA.
+  const px = await con.rectToRgba({
+    x: 0, y: 0, w: 1, h: 1, enc: "raw",
+    pixels: Buffer.from(String.fromCharCode(0x10, 0x20, 0x30, 0x00), "binary").toString("base64"),
+  });
+  assert.deepEqual([...px.slice(0, 4)], [0x10, 0x20, 0x30, 255]);
+});

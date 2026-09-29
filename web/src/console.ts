@@ -127,16 +127,31 @@ export function touchLongPress(s: TouchPhase): { state: TouchPhase; sends: Touch
   };
 }
 
+/** One changed rectangle inside a frame update. */
+export interface FrameRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** `"zlib"` when `pixels` is deflated, `"raw"` when it is plain RGBA. */
+  enc: "zlib" | "raw";
+  /** base64 of the rectangle's pixels, in the encoding `enc` names. */
+  pixels: string;
+}
+
 /** One frame update as the daemon serialises it. */
 interface FrameUpdate {
   seq: number;
   width: number;
   height: number;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  pixels: string;
+  /**
+   * What changed, as one or more rectangles.
+   *
+   * Multiple rectangles, not one bounding box: the daemon used to send the union
+   * of everything that changed, so a keypress at one corner plus a clock at
+   * another shipped the whole screen. Each rectangle is placed on its own.
+   */
+  rects: FrameRect[];
 }
 
 let current: ConsoleHandle | null = null;
@@ -202,6 +217,56 @@ export function frameToRgba(
     px[i + 3] = 255;
   }
   return px;
+}
+
+/// Base64 -> bytes, as a binary string of one char per byte.
+///
+/// A plain `atob` result is used as-is; this exists so the zlib path and the
+/// raw path feed `frameToRgba` the same way.
+function b64ToBinary(b64: string): string {
+  return atob(b64);
+}
+
+/// Inflate a zlib stream into the same one-char-per-byte binary string `atob`
+/// produces, so the caller can hand either encoding to `frameToRgba` unchanged.
+///
+/// `DecompressionStream` is native and does this off the main thread, which
+/// matters: a full-screen frame inflates to megabytes, and doing that in JS on
+/// the paint path would stall input. It is available in every browser this app
+/// supports (and in the jsdom tests it is stubbed out, see the test file).
+async function inflate(raw: string): Promise<string> {
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const ds = new DecompressionStream("deflate");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  const buf = await new Response(stream).arrayBuffer();
+  const out = new Uint8Array(buf);
+  // Build the string in chunks: a per-character += over megabytes of pixels is
+  // the one thing that would make this slower than not compressing at all.
+  let s = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < out.length; i += CHUNK) {
+    s += String.fromCharCode(...out.subarray(i, i + CHUNK));
+  }
+  return s;
+}
+
+/// Decode one rectangle's pixels, honouring the encoding the daemon labelled
+/// it with, and return RGBA ready for `putImageData`.
+///
+/// Async because the zlib path is: a compressed rectangle has to be inflated
+/// before it can be decoded.
+export async function rectToRgba(r: FrameRect): Promise<Uint8ClampedArray<ArrayBuffer> | null> {
+  if (!r.pixels) return null;
+  let bin: string;
+  try {
+    bin = r.enc === "zlib" ? await inflate(b64ToBinary(r.pixels)) : b64ToBinary(r.pixels);
+  } catch {
+    // A corrupt or mislabelled rectangle must not kill the stream: skipping it
+    // leaves one stale region, which the next frame repairs.
+    return null;
+  }
+  return frameToRgba(bin, r.w, r.h);
 }
 
 /**
@@ -291,7 +356,7 @@ export async function attachConsole(
   const postKey = (keysym: number, down: boolean) =>
     api.post(`${base}/key`, { keysym, down }).catch(() => {});
 
-  const paint = (u: FrameUpdate) => {
+  const paint = async (u: FrameUpdate) => {
     if (canvas.width !== u.width || canvas.height !== u.height) {
       canvas.width = u.width;
       canvas.height = u.height;
@@ -302,11 +367,15 @@ export async function attachConsole(
       state.h = u.height;
       applyScale();
     }
-    if (u.w > 0 && u.h > 0 && u.pixels) {
-      const px = frameToRgba(atob(u.pixels), u.w, u.h);
+    // One putImageData per changed rectangle. Rectangles are merged on the
+    // daemon side, so there are usually one or two; the cap there keeps a
+    // pathological repaint from turning into hundreds of small paints.
+    for (const r of u.rects ?? []) {
+      if (r.w <= 0 || r.h <= 0) continue;
+      const px = await rectToRgba(r);
       if (px) {
         ctx ??= canvas.getContext("2d", { alpha: false });
-        ctx?.putImageData(new ImageData(px, u.w, u.h), u.x, u.y);
+        ctx?.putImageData(new ImageData(px, r.w, r.h), r.x, r.y);
       }
     }
     state.seq = u.seq;
@@ -336,7 +405,7 @@ export async function attachConsole(
       }
       if (!state.live) break;
       if (!u || !u.seq) continue; // nothing new before the daemon's timeout
-      paint(u);
+      await paint(u);
     }
   };
 
