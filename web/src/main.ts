@@ -1516,18 +1516,36 @@ async function refreshTreeVms() {
     }),
   );
 
+  // An administrator passes every ACL check, so the server's lists contain
+  // everyone's resources. The sidebar is for your own: anything the admin does
+  // not own lives in the admin panel, which lists every resource for an
+  // administrator. A resource with no owner record and no administrator to
+  // fall back to (a fresh install, or the loopback sidecar the live suites run
+  // on) is nobody's in particular, and staying visible is what keeps a reused
+  // ambient guest reachable. Pools are shared infrastructure and always stay.
+  const visible = <T>(xs: T[]): T[] =>
+    canAdmin()
+      ? xs.filter((x) => {
+          const r = x as { mine?: boolean; owner?: string };
+          return r.mine === true || !r.owner;
+        })
+      : xs;
+
   let changed = false;
   for (const [id, vms, nets, pools, cts] of results) {
-    if (JSON.stringify(treeVms[id]) !== JSON.stringify(vms)) {
-      treeVms[id] = vms;
+    const v = visible(vms);
+    const n = visible(nets);
+    const c = visible(cts);
+    if (JSON.stringify(treeVms[id]) !== JSON.stringify(v)) {
+      treeVms[id] = v;
       changed = true;
     }
-    if (JSON.stringify(treeCts[id]) !== JSON.stringify(cts)) {
-      treeCts[id] = cts;
+    if (JSON.stringify(treeCts[id]) !== JSON.stringify(c)) {
+      treeCts[id] = c;
       changed = true;
     }
-    if (JSON.stringify(treeNets[id]) !== JSON.stringify(nets)) {
-      treeNets[id] = nets;
+    if (JSON.stringify(treeNets[id]) !== JSON.stringify(n)) {
+      treeNets[id] = n;
       changed = true;
     }
     if (JSON.stringify(treePools[id]) !== JSON.stringify(pools)) {
