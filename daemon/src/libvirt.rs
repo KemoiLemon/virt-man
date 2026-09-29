@@ -1,6 +1,28 @@
 use virt::connect::Connect;
 
 pub const URI: &str = "qemu:///system";
+pub const LXC_URI: &str = "lxc:///system";
+
+/// Which libvirt driver a request is about. Containers are libvirt domains
+/// too, so the `/domains` handlers serve them unchanged: `/containers/...`
+/// runs them inside `DRIVER.scope(Driver::Lxc, ..)` (`api::containers`), and
+/// `with_conn` opens the matching URI. A `/domains` request never sees a
+/// container and a `/containers` request never sees a VM, which is what keeps
+/// the web server's separate VM and CT permissions meaningful.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Driver {
+    Qemu,
+    Lxc,
+}
+
+tokio::task_local! {
+    pub static DRIVER: Driver;
+}
+
+/// The driver of the current request (qemu outside any scope).
+pub fn driver() -> Driver {
+    DRIVER.try_with(|d| *d).unwrap_or(Driver::Qemu)
+}
 
 /// Error type for closures run inside [`with_conn`]. Accepts libvirt errors,
 /// plain strings, and I/O errors via `?`.
@@ -103,8 +125,12 @@ where
     T: Send + 'static,
     F: FnOnce(&Connect) -> Result<T, LvError> + Send + 'static,
 {
+    let uri = match driver() {
+        Driver::Qemu => URI,
+        Driver::Lxc => LXC_URI,
+    };
     tokio::task::spawn_blocking(move || {
-        let mut conn = Connect::open(Some(URI)).map_err(|e| format!("libvirt connect: {e}"))?;
+        let mut conn = Connect::open(Some(uri)).map_err(|e| format!("libvirt connect: {e}"))?;
         let out = f(&conn).map_err(|e| e.to_string());
         // `virt::Connect` has no Drop impl, so an unclosed connection leaks
         // its libvirt event fds. A polling client exhausts the process fd
@@ -117,6 +143,58 @@ where
     })
     .await
     .map_err(|e| format!("libvirt task panicked: {e}"))?
+}
+
+/// Every guest on the host, VMs and containers, whichever driver `c` is.
+///
+/// Anything that serves guests as a set -- DHCP, the firewall, metrics, the
+/// in-use check before deleting a volume, tap reattachment -- must see both,
+/// or a container gets no address, no rules, and its rootfs can be deleted
+/// under it. So callers never list from one connection alone.
+///
+/// A host with no LXC driver answers with its VMs only. The other
+/// connection is closed at once; the domains keep it alive until dropped.
+pub fn all_domains(c: &Connect, flags: u32) -> Vec<virt::domain::Domain> {
+    let mut out = c.list_all_domains(flags).unwrap_or_default();
+    let other = if c.get_type().is_ok_and(|t| t.eq_ignore_ascii_case("LXC")) {
+        Some(URI)
+    } else {
+        lxc_available().then_some(LXC_URI)
+    };
+    if let Some(uri) = other
+        && let Ok(mut o) = Connect::open(Some(uri))
+    {
+        out.extend(o.list_all_domains(flags).unwrap_or_default());
+        let _ = o.close();
+    }
+    out
+}
+
+/// Whether the LXC driver answers. Re-checked at most once a minute: a host
+/// without it would otherwise log a connection failure on every supervisor
+/// pass, and a driver installed later is still picked up.
+pub fn lxc_available() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static CHECKED: AtomicU64 = AtomicU64::new(0);
+    static OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = CHECKED.load(Relaxed);
+    if last != 0 && now.saturating_sub(last) < 60 {
+        return OK.load(Relaxed);
+    }
+    CHECKED.store(now, Relaxed);
+    let ok = match Connect::open(Some(LXC_URI)) {
+        Ok(mut c) => {
+            let _ = c.close();
+            true
+        }
+        Err(_) => false,
+    };
+    OK.store(ok, Relaxed);
+    ok
 }
 
 pub fn domain_state_name(state: virt::sys::virDomainState) -> &'static str {

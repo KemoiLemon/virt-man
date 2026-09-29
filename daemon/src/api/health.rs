@@ -22,9 +22,16 @@ async fn version() -> Result<Json<Value>, ApiError> {
     let lib = crate::libvirt::with_conn(|c| Ok(c.get_lib_version()?))
         .await
         .map_err(ApiError::internal)?;
+    let lxc = tokio::task::spawn_blocking(crate::libvirt::lxc_available)
+        .await
+        .unwrap_or(false);
     Ok(Json(json!({
         "daemon": env!("CARGO_PKG_VERSION"),
         "libvirt": format_libvirt(lib),
+        // Whether containers can run here: the LXC driver answers, and the
+        // tools a rootfs is built with are installed.
+        "lxc": lxc,
+        "lxc_missing_tools": crate::ct::missing_tools(),
     })))
 }
 

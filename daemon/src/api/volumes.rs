@@ -47,6 +47,8 @@ async fn list(Path(pool): Path<String>) -> Result<Json<Value>, ApiError> {
                 "capacity": vol.get_info().map(|i| i.capacity).unwrap_or(0),
                 "allocation": vol.get_info().map(|i| i.allocation).unwrap_or(0),
                 "used_by": used_by,
+                // iso / vztmpl / images, so the pool page can split them.
+                "content": super::templates::content_of(&name),
             }));
         }
         Ok(json!(arr))

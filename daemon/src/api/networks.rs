@@ -292,10 +292,7 @@ pub(crate) fn reattach_taps(c: &virt::connect::Connect, n: &Network) -> usize {
     };
     let net = n.get_name().unwrap_or_default();
     let mut done = 0;
-    for d in c
-        .list_all_domains(virt::sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE)
-        .unwrap_or_default()
-    {
+    for d in crate::libvirt::all_domains(c, virt::sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE) {
         let Ok(dx) = d.get_xml_desc(0) else { continue };
         for tap in taps_on_network(&dx, &net) {
             let ok = std::process::Command::new("ip")

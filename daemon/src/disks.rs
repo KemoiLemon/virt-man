@@ -184,6 +184,17 @@ pub fn disk_refs(xml: &str) -> Vec<DiskRef> {
         }
         rest = &block[end + 7..];
     }
+    // A container's rootfs is not a <disk>: libvirt sees only the directory
+    // it is mounted on. The image is recorded in the definition's metadata
+    // (`ct::rootfs_of`) and counts as the guest's own disk, so the in-use
+    // check protects it and deleting the container removes it.
+    if let Some(path) = crate::ct::rootfs_of(xml) {
+        out.push(DiskRef {
+            source: DiskSource::Path(path),
+            device: "disk".into(),
+            readonly: false,
+        });
+    }
     out
 }
 
@@ -255,12 +266,9 @@ pub fn plan_cleanup_connected(c: &Connect, xml: &str, used_elsewhere: &HashSet<S
 /// just removed.
 pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<String> {
     let mut used = HashSet::new();
-    let Ok(domains) = c.list_all_domains(0) else {
-        // Cannot enumerate: report nothing as in use. The caller's own ISO and
-        // read-only guards still apply, and a failure here must not block a
-        // legitimate delete.
-        return used;
-    };
+    // Cannot enumerate: nothing is reported in use. The caller's own ISO and
+    // read-only guards still apply, and a failure must not block a delete.
+    let domains = crate::libvirt::all_domains(c, 0);
     for d in domains {
         let name = d.get_name().unwrap_or_default();
         if Some(name.as_str()) == excluding {
@@ -280,9 +288,7 @@ pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<S
 /// `referencing_domains` per volume walks every guest once per volume.
 pub fn holders_by_label(c: &Connect) -> std::collections::HashMap<String, Vec<String>> {
     let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
-    let Ok(domains) = c.list_all_domains(0) else {
-        return out;
-    };
+    let domains = crate::libvirt::all_domains(c, 0);
     for d in domains {
         let (Ok(xml), name) = (d.get_xml_desc(0), d.get_name().unwrap_or_default()) else {
             continue;
@@ -329,9 +335,7 @@ pub fn holders_of(
 pub fn referencing_domains(c: &Connect, target: &DiskSource) -> Vec<String> {
     let wanted = labels(c, target);
     let mut out = Vec::new();
-    let Ok(domains) = c.list_all_domains(0) else {
-        return out;
-    };
+    let domains = crate::libvirt::all_domains(c, 0);
     for d in domains {
         let Ok(xml) = d.get_xml_desc(0) else {
             continue;

@@ -159,7 +159,7 @@ async fn snapshot() -> Result<Snapshot, String> {
             nets.push((name, xml, active, bridge));
         }
         let mut guests = HashMap::new();
-        for d in c.list_all_domains(0)? {
+        for d in crate::libvirt::all_domains(c, 0) {
             let (Ok(uuid), Ok(name)) = (d.get_uuid_string(), d.get_name()) else {
                 continue;
             };

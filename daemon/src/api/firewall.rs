@@ -192,7 +192,7 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
         }
 
         let mut vms: Vec<Vm> = Vec::new();
-        for d in c.list_all_domains(0)? {
+        for d in crate::libvirt::all_domains(c, 0) {
             let name = d.get_name().unwrap_or_default();
             if let Some(fw) = store.vms.get(&name).cloned() {
                 let xml = d

@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod ct;
 mod disks;
 mod firewall;
 mod ipam;
@@ -69,6 +70,9 @@ async fn run() -> Result<(), String> {
     // Access log: guest connections from the kernel's connection tracker.
     // Live packet captures stop themselves when nobody is watching.
     tokio::spawn(api::capture::reaper());
+    // A host reboot unmounts every container rootfs, and libvirt's own
+    // autostart then fails for want of it: remount, then start those.
+    tokio::spawn(api::containers::restore());
     ipam::flows::enable_accounting();
     {
         let owners = ipam.clone();

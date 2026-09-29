@@ -70,7 +70,7 @@ fn pools(c: &Connect) -> Result<Vec<Value>, crate::libvirt::LvError> {
 
 fn domains(c: &Connect) -> Result<Vec<Value>, crate::libvirt::LvError> {
     let mut out = Vec::new();
-    for d in c.list_all_domains(0)? {
+    for d in crate::libvirt::all_domains(c, 0) {
         out.push(domain(&d)?);
     }
     Ok(out)
@@ -119,6 +119,9 @@ fn domain(d: &Domain) -> Result<Value, crate::libvirt::LvError> {
         .collect();
     Ok(json!({
         "uuid": uuid,
+        // `ct` for a container: the web server keys history by UUID either
+        // way, but lists and permissions tell the two apart.
+        "kind": if xml.contains("<domain type='lxc'") { "ct" } else { "vm" },
         "name": d.get_name().unwrap_or_default(),
         "state": info.as_ref().map(|i| domain_state_name(i.state)).unwrap_or("unknown"),
         "cpu_time_ns": info.as_ref().map(|i| i.cpu_time).unwrap_or(0),

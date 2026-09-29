@@ -59,7 +59,7 @@ pub fn kib_to_mbps(kib: u64) -> f64 {
 }
 
 /// Validate a rate. `None` or 0 means "no limit".
-fn check_rate(v: Option<f64>, which: &str) -> Result<Option<f64>, String> {
+pub fn check_rate(v: Option<f64>, which: &str) -> Result<Option<f64>, String> {
     match v {
         None => Ok(None),
         Some(x) if !x.is_finite() || x < 0.0 => Err(format!("{which} must be a positive number")),

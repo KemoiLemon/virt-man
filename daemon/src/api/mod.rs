@@ -1,5 +1,7 @@
 pub mod capture;
 pub mod console;
+pub mod containers;
+pub mod ct_console;
 pub mod domains;
 pub mod fetch;
 pub mod filters;
@@ -10,6 +12,7 @@ pub mod metrics;
 pub mod networks;
 pub mod nics;
 pub mod pools;
+pub mod templates;
 pub mod volumes;
 
 use axum::Extension;
@@ -26,7 +29,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl std::fmt::Display) -> Self {
+    pub fn new(status: StatusCode, message: impl std::fmt::Display) -> Self {
         Self {
             status,
             message: message.to_string(),
@@ -70,6 +73,16 @@ fn named_segment(path: &str) -> Option<(usize, NameOf)> {
     match seg.as_slice() {
         ["domains", _, ..] => Some((1, |c, id| {
             crate::libvirt::domain(c, id).ok()?.get_name().ok()
+        })),
+        // A container is a domain on the LXC driver: the lookup must open
+        // that one, since this runs before any handler picks a driver.
+        ["containers", _, ..] => Some((1, |_, id| {
+            let mut c = virt::connect::Connect::open(Some(crate::libvirt::LXC_URI)).ok()?;
+            let n = crate::libvirt::domain(&c, id)
+                .ok()
+                .and_then(|d| d.get_name().ok());
+            let _ = c.close();
+            n
         })),
         ["networks", "bridges"] => None,
         ["networks", _, ..] => Some((1, |c, id| {
@@ -136,22 +149,36 @@ fn encode(s: &str) -> String {
 
 pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
     let fw = firewall::FirewallState::new();
+    // The guest routes, shared by VMs (`/domains`) and containers, which
+    // reach them through `containers::forward` under the LXC driver.
+    let guest = Router::new()
+        .merge(domains::routes())
+        .merge(capture::routes())
+        // One firewall state for both: a NIC change re-applies the ruleset,
+        // and must take the same lock as a rules PUT.
+        .merge(firewall::routes(fw.clone()))
+        .merge(nics::routes(fw));
+    let for_ct = guest.clone();
     let authed = Router::new()
         .merge(health::routes())
         .merge(host::routes())
         .merge(metrics::routes())
-        .merge(domains::routes())
+        .merge(guest)
+        .merge(containers::routes())
+        .merge(ct_console::routes())
+        .route(
+            "/containers/{name}/{*rest}",
+            axum::routing::any(move |req: axum::extract::Request| {
+                containers::forward(for_ct.clone(), req)
+            }),
+        )
+        .merge(templates::routes())
         .merge(networks::routes())
         .merge(networks::ipam_routes(ipam))
         .merge(filters::routes())
         .merge(pools::routes())
         .merge(volumes::routes())
         .merge(fetch::routes())
-        .merge(capture::routes())
-        // One firewall state for both: a NIC change re-applies the ruleset,
-        // and must take the same lock as a rules PUT.
-        .merge(firewall::routes(fw.clone()))
-        .merge(nics::routes(fw))
         .layer(middleware::from_fn(crate::auth::require_token));
 
     // console authenticates via ?token= (browsers can't set WS headers), so it
