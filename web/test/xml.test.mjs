@@ -173,6 +173,20 @@ test("dhcpRemaining reports nothing for a network with no pool", () => {
   assert.equal(xml.dhcpRemaining("192.168.1.1/31", []), null, "no usable hosts");
 });
 
+test("a fractional disk size is rounded to whole bytes", () => {
+  // `<capacity>` is parsed as u64 by the web server, and a fractional GiB
+  // multiplies out to a decimal (1.1 GiB -> 1181116006.4), which was refused
+  // with "<capacity> must be a number".
+  const out = xml.volumeXml({ name: "d.qcow2", capacity_gb: 1.1, format: "qcow2" });
+  assert.match(out, /<capacity>1181116006<\/capacity>/);
+  assert.doesNotMatch(out, /<capacity>[^<]*\./);
+  // A whole size is untouched.
+  assert.match(
+    xml.volumeXml({ name: "d.qcow2", capacity_gb: 20, format: "qcow2" }),
+    /<capacity>21474836480<\/capacity>/,
+  );
+});
+
 test("UEFI guests get the real OVMF loader and a templated nvram store", () => {
   const out = xml.domainXml({
     name: "box",

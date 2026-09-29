@@ -506,7 +506,10 @@ export interface VolumeForm {
 }
 
 export function volumeXml(f: VolumeForm): string {
-  const cap = f.capacity_gb * 1024 * 1024 * 1024;
+  // Whole bytes. `<capacity>` is parsed as u64 by the web server, and a
+  // fractional GiB input multiplies out to a decimal (1.1 GiB -> 1181116006.4),
+  // which was refused with "<capacity> must be a number".
+  const cap = Math.max(0, Math.round(f.capacity_gb * 1024 * 1024 * 1024));
   return `<volume>
   <name>${esc(f.name)}</name>
   <capacity>${cap}</capacity>
