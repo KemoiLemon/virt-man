@@ -161,10 +161,7 @@ select { display: none !important; }
 .crop-handle.s { left: 50%; margin-left: -6px; bottom: -6px; cursor: ns-resize; }
 .crop-handle.w { top: 50%; margin-top: -6px; left: -6px; cursor: ew-resize; }
 .crop-handle.e { top: 50%; margin-top: -6px; right: -6px; cursor: ew-resize; }
-.crop-zoom { width: 100%; accent-color: var(--accent); margin: 10px 0; }
 .crop-body { display: flex; flex-direction: column; gap: 10px; }
-.crop-preview { display: flex; gap: 12px; align-items: center; }
-.crop-preview .avatar { width: 64px; height: 64px; min-width: 64px; }
 
 /* -------------------------------------------------------- admin panel */
 /* A table followed by its own action row needs air between them; .actions

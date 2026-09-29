@@ -1,10 +1,11 @@
-// Avatar cropping: a resizable square window over a draggable, zoomable
-// image, with a live 64px preview. The crop math lives in pure functions so it
-// can be unit-tested without a canvas or real layout.
+// Avatar cropping: a resizable square window over a draggable image. The crop
+// math lives in pure functions so it can be unit-tested without a canvas or
+// real layout.
 //
-// The image is scaled to cover the stage, so the square always shows the
-// picture; dragging inside it pans, and the eight handles on its edges and
-// corners resize it (the zoom slider does the same thing coarsely).
+// The image is scaled to cover the stage and the square shows a piece of it, so
+// the square is the preview -- there is no second copy of the crop. Dragging
+// inside it pans the image; the eight handles on its edges and corners resize
+// it, which is what changes how much is cropped.
 
 import { closeSvg } from "./icons";
 
@@ -58,27 +59,30 @@ export function drawCrop(image: HTMLImageElement, rect: CropRect, out = 256): Pr
   );
 }
 
-function loadImage(file: File): Promise<HTMLImageElement> {
+/// Read the file into a decoded image, returning it with its object URL still
+/// live. The caller must revoke that URL when it is done: the image is both the
+/// source the crop is drawn from *and* the picture shown on the stage, so
+/// revoking here (which an earlier version did) left the stage's own <img>
+/// pointing at a dead blob and rendered an empty square.
+function loadImage(file: File): Promise<{ image: HTMLImageElement; url: string }> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
+    const image = new Image();
+    image.onload = () => resolve({ image, url });
+    image.onerror = () => {
       URL.revokeObjectURL(url);
       reject(new Error("could not read image"));
     };
-    img.src = url;
+    image.src = url;
   });
 }
 
 /** Open the crop dialog. Resolves with a cropped PNG blob, or null on cancel. */
 export async function openCropDialog(file: File): Promise<Blob | null> {
   let image: HTMLImageElement;
+  let objectUrl: string;
   try {
-    image = await loadImage(file);
+    ({ image, url: objectUrl } = await loadImage(file));
   } catch {
     return null;
   }
@@ -89,6 +93,7 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
       if (done) return;
       done = true;
       el.remove();
+      URL.revokeObjectURL(objectUrl);
       document.removeEventListener("pointermove", move, true);
       document.removeEventListener("pointerup", up, true);
       resolve(v);
@@ -99,34 +104,20 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
 
     const stage = document.createElement("div");
     stage.className = "crop-stage";
+    // The stage shows the picture itself -- the square is the preview -- so the
+    // element needs the source, not just the geometry `apply()` writes.
     const img = document.createElement("img");
+    img.src = objectUrl;
     img.draggable = false;
     const win = document.createElement("div");
     win.className = "crop-window";
 
-    const zoom = document.createElement("input");
-    zoom.type = "range";
-    zoom.min = "1";
-    zoom.max = "4";
-    zoom.step = "0.05";
-    zoom.value = "1";
-    zoom.className = "crop-zoom";
-
-    const preview = document.createElement("div");
-    preview.className = "avatar";
-    preview.style.width = "64px";
-    preview.style.height = "64px";
-    preview.style.minWidth = "64px";
-
+    // No zoom slider and no separate preview: the square *is* the preview, and
+    // the eight handles change how much it crops. A slider duplicated them and
+    // a second copy of the image below implied two different crops.
     const body = document.createElement("div");
     body.className = "modal-body crop-body";
-    const previewRow = document.createElement("div");
-    previewRow.className = "crop-preview";
-    const previewLabel = document.createElement("span");
-    previewLabel.className = "hint";
-    previewLabel.textContent = "Preview";
-    previewRow.append(previewLabel, preview);
-    body.append(stage, zoom, previewRow);
+    body.append(stage);
 
     const head = document.createElement("div");
     head.className = "modal-head";
@@ -157,14 +148,13 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
     stage.append(img, win);
 
     // The image is scaled to *cover* the stage, so the square is always filled
-    // with the picture; a contain fit letterboxed a small image and showed the
-    // stage behind it. The square starts at 85% of the stage and can be
-    // dragged by its edges and corners, which changes how much is cropped.
+    // with the picture and no stage background shows through. The square starts
+    // at 85% of the stage; dragging its handles changes how much is cropped, and
+    // zooming is the image being bigger than the square.
     const stageW = () => stage.clientWidth;
     const stageH = () => stage.clientHeight;
-    const base = () =>
+    const scale = () =>
       Math.max(stageW() / image.naturalWidth, stageH() / image.naturalHeight);
-    const scale = () => base() * Number(zoom.value);
     const centre = () => {
       const w = image.naturalWidth * scale();
       const h = image.naturalHeight * scale();
@@ -188,22 +178,6 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
       win.style.height = `${winSide}px`;
       win.style.left = `${winX}px`;
       win.style.top = `${winY}px`;
-      const rect = cropRect(
-        image,
-        ox,
-        oy,
-        s,
-        winX + winSide / 2,
-        winY + winSide / 2,
-        winSide,
-      );
-      drawCrop(image, rect, 64).then((b) => {
-        if (done) return;
-        const url = URL.createObjectURL(b);
-        preview.style.backgroundImage = `url(${url})`;
-        preview.style.backgroundSize = "cover";
-        preview.style.backgroundPosition = "center";
-      });
     };
 
     // The image keeps covering the square: panning is clamped so no stage
@@ -334,11 +308,6 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
     img.addEventListener("pointerdown", down);
     document.addEventListener("pointermove", move, true);
     document.addEventListener("pointerup", up, true);
-
-    zoom.oninput = () => {
-      keepVisible();
-      apply();
-    };
 
     // The image may need a tick to lay out before clientWidth is meaningful.
     const first = () => {
