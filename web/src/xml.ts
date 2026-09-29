@@ -13,8 +13,11 @@ export function esc(s: string): string {
 /// OVMF loader + NVRAM fragment for a UEFI guest. The code path is the
 /// read-only firmware; the nvram is the per-guest variable store, copied
 /// from the OVMF_VARS template on first define. BIOS guests get nothing.
-/// The `.4m.fd` paths are what edk2 actually installs on this host; the
-/// shorter `OVMF_CODE.fd` name does not exist and silently breaks boot.
+///
+/// These are the paths edk2 installs on Arch; Debian and Alpine use
+/// `/usr/share/OVMF/` instead. The SPA cannot see the host's filesystem, so the
+/// daemon rewrites a path that does not exist there to one that does
+/// (`daemon/src/firmware.rs`) — this is the shape to write, not the final path.
 export function firmwareXml(firmware: "uefi" | "bios", name: string): string {
   if (firmware !== "uefi") return "";
   return `<loader readonly="yes" type="pflash" format="raw">/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>
