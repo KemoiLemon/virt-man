@@ -29,7 +29,9 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # user-owned and rustup resolves the user's toolchain.
 run_build() {
   if [[ -n "${SUDO_USER:-}" ]]; then
-    sudo -u "$SUDO_USER" -- "$@"
+    # sudo drops the environment; keep what the root installer set for the
+    # build (RUSTFLAGS on musl, PATH to rustup's cargo).
+    sudo -u "$SUDO_USER" -- env PATH="$PATH" ${RUSTFLAGS:+RUSTFLAGS="$RUSTFLAGS"} "$@"
   else
     "$@"
   fi

@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# virt-man-daemon on OpenRC (Alpine). The systemd unit is daemon/virt-man-daemon.service.
+description="virt-man daemon (libvirt HTTPS control API)"
+command="/usr/local/bin/virt-man-daemon"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+	need net libvirtd
+	after firewall
+}

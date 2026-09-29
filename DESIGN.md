@@ -75,7 +75,7 @@ its node, so one grant on `/nodes/<conn>` covers a whole server:
 ```
 /                                       everything
 /nodes/<conn>                           one daemon
-/nodes/<conn>/{vms,networks,storage,bridges}[/<name>]
+/nodes/<conn>/{vms,containers,networks,storage,bridges}[/<name>]
 ```
 
 The **deepest** path carrying an entry for the user decides, and at one level
@@ -118,6 +118,22 @@ host file as its backing store, and qemu opens it. A bridge-mode network needs
 `Bridge.Use` on that bridge. Pools are defined by administrators; users
 allocate space in them. Administrators skip these checks: they have all of
 libvirt, as before.
+
+**Containers have their own privileges** (`CT.Audit`, `CT.Allocate`,
+`CT.Config`, `CT.PowerMgmt`, `CT.Console`) and roles (`CTUser`, `CTAdmin`),
+beside the VM set rather than folded into it: a VM grant reaches no container
+and the reverse, so an admin can hand someone guests of one kind only. The
+daemon enforces the split too: `/domains` never sees a container.
+
+**`CT.Privileged` is granted, never owned.** A privileged container has no
+user namespace, so its root is the host's root. Ownership gives a container's
+owner every `CT.*` privilege *except* this one, or anyone who can create a
+container could make it privileged by editing it. It is checked on create
+(`privileged: true`) and on any XML write that drops or changes the
+`<idmap>`, and an owner cannot share a privileged container (its console is a
+root shell on the host). The only record of "privileged" is the absence of
+`<idmap>` in the definition: the web server reads it back from the daemon
+rather than keeping a flag that could drift from what runs.
 
 **Limits** (`perm::Quota`): VMs, vCPUs, memory, storage and networks, applied
 per daemon or pooled across all of them, with per-daemon overrides. Usage is
@@ -263,6 +279,51 @@ was silently unreachable. Caught by a test written for the dual-graphics case.
 The pattern: every one of these was invisible in code review and obvious under
 measurement. Hence the testing rules in `AGENTS.md`.
 
+## Containers
+
+Containers are **libvirt LXC** guests (`lxc:///system`), chosen over Incus or
+LXD because libvirt's network, storage and nwfilter drivers are shared by the
+whole host: a container's `<interface type='network'>` joins the same bridges
+as the VMs, so the daemon's DHCP/DNS, the firewall, port forwards, rate limits
+and access logs apply to it unchanged. The one rule that makes that true is
+that **nothing lists guests from one driver**: `libvirt::all_domains` walks
+both, and every caller that treats guests as a set (IPAM, firewall, metrics,
+tap reattachment, the in-use check) uses it. The `/containers` routes are the
+`/domains` handlers run with the LXC driver selected (`DRIVER` task-local), so
+the two cannot drift apart.
+
+**Templates are pool volumes**, Proxmox-style: a rootfs tarball stored like an
+ISO and recognised by its extension, so it can arrive by download, upload, or a
+file copied into the pool. The catalog merges linuxcontainers.org and
+TurnKey's index, both over HTTPS, every download checked against its published
+digest. Proxmox's own index is left out: its HTTPS certificate does not match
+its host, so it is reachable only over plain HTTP, where the index and the
+digests in it can be swapped together.
+
+**The rootfs is a raw ext4 image in a pool** (quotas, deletion logging and the
+in-use check treat it as a disk), mounted by the daemon, not by libvirt.
+Measured on libvirt 12.7: libvirt's own loop-mounted `<filesystem
+type='file'>` cannot be combined with an `<idmap>` — libvirt_lxc creates its
+mount point as the *mapped* root, which is denied. So the daemon loop-mounts
+each image under `/run/virt-man/ct/<uuid>` (every directory above it must be
+traversable by the mapped uid, hence `/run`, not the 0700 data dir) and remounts
+them at start, before starting autostart containers libvirt could not.
+
+**A template is unpacked inside the container's own uid mapping**
+(`unshare --map-users`), so the kernel shifts ownership and nothing runs as
+host root against a tree the template controls: a planted `evil -> /etc`
+symlink resolves inside the namespace, where `/etc` is not writable
+(measured). Switching a container between privileged and unprivileged changes
+the mapping but not the files, so the daemon re-owns the rootfs by the
+difference before the next start — with `lchown`, never following a link.
+
+**Things the LXC driver cannot do**, measured, and how each surfaces: it
+refuses to change a running container's NIC, so a rate limit is saved and
+reported `pending` until the next start rather than claimed; it refuses
+`VIR_DOMAIN_CONSOLE_FORCE`, so a console session is shared by every viewer of
+one container instead of stolen; and it has no bulk stats call, which the
+metrics sampler never used.
+
 ## Deliberately not built
 
 - **Clustering / migration / HA** — one hypervisor is the use case.
@@ -271,3 +332,6 @@ measurement. Hence the testing rules in `AGENTS.md`.
 - **SPICE in the browser** — tried twice; virt-viewer is the answer.
 - **Snapshots, backup scheduling, cloud-init** — not needed yet; the XML editor
   is the escape hatch for anything the UI does not expose.
+- **Container backups, snapshots, mount points beyond the rootfs, and turning
+  a container into a template** — add when needed. Separate container quotas
+  too: a container counts against the VM, vCPU, memory and storage limits.

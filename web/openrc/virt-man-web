@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# virt-man-web on OpenRC (Alpine). The systemd unit is web/server/virt-man-web.service.
+description="virt-man web UI"
+command="/usr/local/bin/virt-man-web"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+export VIRT_MAN_WEB_BIND="${VIRT_MAN_WEB_BIND:-0.0.0.0}"
+export VIRT_MAN_WEB_PORT="${VIRT_MAN_WEB_PORT:-8006}"
+export VIRT_MAN_WEB_DATA="${VIRT_MAN_WEB_DATA:-/var/lib/virt-man}"
+export VIRT_MAN_WEB_DIST="${VIRT_MAN_WEB_DIST:-/usr/local/share/virt-man/dist}"
+
+depend() {
+	need net
+}

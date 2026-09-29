@@ -10,16 +10,16 @@ Two parts, one product:
 
 | Path | Build | Role |
 | --- | --- | --- |
-| `daemon/` | `cargo` | Rust + axum over libvirt (`qemu:///system`). Runs on the hypervisor host. Token auth, HTTPS `[::]:8443`. |
+| `daemon/` | `cargo` | Rust + axum over libvirt (`qemu:///system` for VMs, `lxc:///system` for containers). Runs on the hypervisor host. Token auth, HTTPS `[::]:8443`. |
 | `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, ACL permissions, ownership, quotas, API keys, TLS-pinned daemon proxy). HTTPS `[::]:8006`. |
 
 ## Commands
 
 ```bash
-# frontend: typecheck, build, unit tests (213, incl. the mobile CSS contract)
+# frontend: typecheck, build, unit tests (225, incl. the mobile CSS contract)
 cd web && npx tsc --noEmit && npx vite build && pnpm test
 
-# web backend (24 tests: permissions/roles/key caps + redirect URL building)
+# web backend (133 tests: permissions/roles/key caps, routes, xmlcheck, shares...)
 cd web/server && cargo clippy && cargo test
 
 # live suites — drive the real app in jsdom against a running backend
@@ -31,7 +31,10 @@ cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   and the access log of what that guest then fetched),
 #   live-history (needs the server to have been sampling for ~30 s),
 #   live-empty (no args: runs its own server against a stub daemon with no resources),
-#   live-ops (needs sudo: defines a SPICE guest, stops/starts the daemon)
+#   live-ops (needs sudo: defines a SPICE guest, stops/starts the daemon),
+#   live-ct (needs the daemon's LXC driver: downloads an Alpine template if
+#   the first pool lacks one, makes a container, drives the SPA over it,
+#   types into its console, deletes it -- rootfs included, template kept)
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
@@ -44,13 +47,15 @@ cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
 cd web && node test/live-redirect.mjs https://127.0.0.1:8006
 
 # daemon
-cd daemon && cargo clippy --all-targets && cargo test --bins   # 34 tests
+cd daemon && cargo clippy --all-targets && cargo test --bins   # 157 tests
+cd daemon && sudo -E cargo test --bins -- --ignored reowning   # rootfs re-owning (chown)
 cd daemon && cargo test --test fd_leak -- --ignored            # needs libvirt
 
 # web backend
 cd web/server && cargo clippy --all-targets
 
 # install (builds as $SUDO_USER so repo artifacts stay user-owned)
+sudo ./install.sh daemon|web|all      # apt or apk: packages, rustup, pnpm, then the below
 sudo ./daemon/install.sh && sudo ./web/install.sh
 ```
 
@@ -408,6 +413,35 @@ token match). The SPA shows the script and polls
 `GET /connections/{id}/cert` every second until the daemon is up, then pins the
 cert through the normal `PUT`. `install.sh` honours `VIRT_MAN_TOKEN` by writing
 it to the token file instead of generating one.
+
+**Containers are domains on a second driver; never list guests from one.**
+(`daemon/src/api/containers.rs`, `daemon/src/ct.rs`, DESIGN.md "Containers".)
+
+- **`libvirt::all_domains(c, flags)` is how anything treats guests as a set.**
+  IPAM (a container with no MAC in the snapshot gets no DHCP), the firewall,
+  metrics, `reattach_taps`, and the disk in-use check all go through it. A new
+  caller of `c.list_all_domains` silently leaves containers out.
+- **`/containers/...` is the `/domains` handlers under `DRIVER.scope(Lxc)`.**
+  `containers::forward` rebuilds the request (it must not reuse the old one:
+  axum keeps matched path params in the extensions, and a handler taking
+  `Path<String>` then saw three). Only what differs has its own handler:
+  create, delete, start (mounts the rootfs first), bandwidth (config-only).
+- **Every `/containers` route must be in `web/server/src/routes.rs`**, on the
+  `CT.*` privileges. VM-only routes (reset, graphics, the VNC console) are not
+  classified, so they are refused for a container.
+- **Privileged is the absence of `<idmap>`, and nothing else.** Never add a
+  flag for it. `CT.Privileged` is never an owner privilege; an XML write that
+  drops or changes the idmap needs it (`guard.rs` `PutCtXml`).
+- **A container's rootfs is recorded in its metadata** (`virtman:container
+  rootfs=`), not a `<disk>`. `disks::disk_refs` reads it so the in-use check
+  and the delete cleanup see it; the daemon refuses a redefinition that changes
+  it or adds a second `<filesystem>` (`ct::same_rootfs`).
+- **The daemon mounts every rootfs, not libvirt** (`/run/virt-man/ct/<uuid>`,
+  0711). A start without it fails with "Failed to create .oldroot: Permission
+  denied"; that message means the mount or a directory above it, not the image.
+- **Use `libvirtd`, never start `virtlxcd`.** Its socket unit conflicts with
+  libvirtd's: starting it stopped libvirtd on this host, and every guest
+  network with it.
 
 **libvirt `Connect` has no `Drop`.** `with_conn` must call `close()` on both
 the ok and error paths, or event fds leak and every call fails with "Too many
