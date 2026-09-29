@@ -1,10 +1,10 @@
-// Avatar cropping: a fixed square window over a draggable, zoomable image,
-// with a live 64px preview. The crop math lives in pure functions so it can
-// be unit-tested without a canvas or real layout.
+// Avatar cropping: a resizable square window over a draggable, zoomable
+// image, with a live 64px preview. The crop math lives in pure functions so it
+// can be unit-tested without a canvas or real layout.
 //
-// ponytail: the crop window is fixed-size on screen and the image moves under
-// it (no free-form box dragging). Enough for avatars; add a resizable box only
-// if non-square crops are ever wanted.
+// The image is scaled to cover the stage, so the square always shows the
+// picture; dragging inside it pans, and the eight handles on its edges and
+// corners resize it (the zoom slider does the same thing coarsely).
 
 import { closeSvg } from "./icons";
 
@@ -156,21 +156,27 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
 
     stage.append(img, win);
 
-    // Fit the image inside the stage (never upscale), then allow 1-4x zoom.
+    // The image is scaled to *cover* the stage, so the square is always filled
+    // with the picture; a contain fit letterboxed a small image and showed the
+    // stage behind it. The square starts at 85% of the stage and can be
+    // dragged by its edges and corners, which changes how much is cropped.
     const stageW = () => stage.clientWidth;
     const stageH = () => stage.clientHeight;
     const base = () =>
-      Math.min(stageW() / image.naturalWidth, stageH() / image.naturalHeight, 1);
+      Math.max(stageW() / image.naturalWidth, stageH() / image.naturalHeight);
     const scale = () => base() * Number(zoom.value);
-    const winSize = () => Math.min(stageW(), stageH());
     const centre = () => {
       const w = image.naturalWidth * scale();
       const h = image.naturalHeight * scale();
       return { ox: (stageW() - w) / 2, oy: (stageH() - h) / 2 };
     };
 
+    const MIN_SIDE = 48;
     let ox = 0;
     let oy = 0;
+    let winX = 0;
+    let winY = 0;
+    let winSide = 0;
 
     const apply = () => {
       const s = scale();
@@ -178,19 +184,18 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
       img.style.height = `${image.naturalHeight * s}px`;
       img.style.left = `${ox}px`;
       img.style.top = `${oy}px`;
-      const size = winSize();
-      win.style.width = `${size}px`;
-      win.style.height = `${size}px`;
-      win.style.left = `${(stageW() - size) / 2}px`;
-      win.style.top = `${(stageH() - size) / 2}px`;
+      win.style.width = `${winSide}px`;
+      win.style.height = `${winSide}px`;
+      win.style.left = `${winX}px`;
+      win.style.top = `${winY}px`;
       const rect = cropRect(
         image,
         ox,
         oy,
         s,
-        (stageW() - size) / 2,
-        (stageH() - size) / 2,
-        size,
+        winX + winSide / 2,
+        winY + winSide / 2,
+        winSide,
       );
       drawCrop(image, rect, 64).then((b) => {
         if (done) return;
@@ -201,19 +206,20 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
       });
     };
 
+    // The image keeps covering the square: panning is clamped so no stage
+    // background can show through it.
     const keepVisible = () => {
       const s = scale();
       const w = image.naturalWidth * s;
       const h = image.naturalHeight * s;
-      const size = winSize();
-      const c = centre();
-      // Keep the image covering the window whenever it is large enough; a
-      // source smaller than the window stays centred on the short axis.
-      ox = w >= size ? clamp(ox, (stageW() - size) / 2 + size - w, (stageW() - size) / 2) : c.ox;
-      oy = h >= size ? clamp(oy, (stageH() - size) / 2 + size - h, (stageH() - size) / 2) : c.oy;
+      ox = clamp(ox, winX + winSide - w, winX);
+      oy = clamp(oy, winY + winSide - h, winY);
     };
 
     const reset = () => {
+      winSide = Math.min(stageW(), stageH()) * 0.85;
+      winX = (stageW() - winSide) / 2;
+      winY = (stageH() - winSide) / 2;
       const c = centre();
       ox = c.ox;
       oy = c.oy;
@@ -221,13 +227,100 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
       apply();
     };
 
-    // Drag to pan.
+    // Eight grab handles resize the square. It stays square, anchored at the
+    // edge or corner opposite the one dragged, and always inside the stage.
+    type Handle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+    const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+    for (const h of HANDLES) {
+      const grip = document.createElement("div");
+      grip.className = `crop-handle ${h}`;
+      grip.dataset.handle = h;
+      win.append(grip);
+    }
+
+    const resize = (h: Handle, px: number, py: number) => {
+      const left = winX;
+      const top = winY;
+      const right = winX + winSide;
+      const bottom = winY + winSide;
+      const cx = left + winSide / 2;
+      const cy = top + winSide / 2;
+      const W = stageW();
+      const H = stageH();
+      let raw: number;
+      let maxSide: number;
+      let origin: (s: number) => { x: number; y: number };
+      switch (h) {
+        case "nw":
+          raw = Math.max(right - px, bottom - py);
+          maxSide = Math.min(right, bottom);
+          origin = (s) => ({ x: right - s, y: bottom - s });
+          break;
+        case "ne":
+          raw = Math.max(px - left, bottom - py);
+          maxSide = Math.min(W - left, bottom);
+          origin = (s) => ({ x: left, y: bottom - s });
+          break;
+        case "sw":
+          raw = Math.max(right - px, py - top);
+          maxSide = Math.min(right, H - top);
+          origin = (s) => ({ x: right - s, y: top });
+          break;
+        case "se":
+          raw = Math.max(px - left, py - top);
+          maxSide = Math.min(W - left, H - top);
+          origin = () => ({ x: left, y: top });
+          break;
+        case "n":
+          raw = bottom - py;
+          maxSide = Math.min(2 * Math.min(cx, W - cx), bottom);
+          origin = (s) => ({ x: cx - s / 2, y: bottom - s });
+          break;
+        case "s":
+          raw = py - top;
+          maxSide = Math.min(2 * Math.min(cx, W - cx), H - top);
+          origin = (s) => ({ x: cx - s / 2, y: top });
+          break;
+        case "w":
+          raw = right - px;
+          maxSide = Math.min(right, 2 * Math.min(cy, H - cy));
+          origin = (s) => ({ x: right - s, y: cy - s / 2 });
+          break;
+        default:
+          raw = px - left;
+          maxSide = Math.min(W - left, 2 * Math.min(cy, H - cy));
+          origin = (s) => ({ x: left, y: cy - s / 2 });
+          break;
+      }
+      winSide = clamp(raw, MIN_SIDE, Math.max(MIN_SIDE, maxSide));
+      const o = origin(winSide);
+      winX = o.x;
+      winY = o.y;
+      keepVisible();
+      apply();
+    };
+
+    // Drag inside the square to pan; drag a handle to resize.
     let drag: { sx: number; sy: number; ox: number; oy: number } | null = null;
+    let resizing: Handle | null = null;
     const down = (e: PointerEvent) => {
       drag = { sx: e.clientX, sy: e.clientY, ox, oy };
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     };
+    win.querySelectorAll<HTMLElement>("[data-handle]").forEach((g) => {
+      g.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        resizing = g.dataset.handle as Handle;
+        g.setPointerCapture?.(e.pointerId);
+      });
+    });
     const move = (e: PointerEvent) => {
+      if (resizing) {
+        const r = stage.getBoundingClientRect();
+        resize(resizing, e.clientX - r.left, e.clientY - r.top);
+        return;
+      }
       if (!drag) return;
       ox = drag.ox + (e.clientX - drag.sx);
       oy = drag.oy + (e.clientY - drag.sy);
@@ -236,6 +329,7 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
     };
     const up = () => {
       drag = null;
+      resizing = null;
     };
     img.addEventListener("pointerdown", down);
     document.addEventListener("pointermove", move, true);
@@ -261,9 +355,9 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
         ox,
         oy,
         scale(),
-        (stageW() - winSize()) / 2,
-        (stageH() - winSize()) / 2,
-        winSize(),
+        winX + winSide / 2,
+        winY + winSide / 2,
+        winSide,
       );
       drawCrop(image, rect, 256).then(finish, () => finish(null));
     };
