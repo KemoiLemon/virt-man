@@ -4,6 +4,7 @@ mod config;
 mod ct;
 mod disks;
 mod firewall;
+mod firmware;
 mod ipam;
 mod libvirt;
 mod migrate;

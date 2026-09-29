@@ -95,7 +95,10 @@ async fn get_xml(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
 
 async fn put_xml(Path(name): Path<String>, body: String) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
-        let _ = Domain::define_xml(c, &body)?;
+        // Resolve OVMF paths the forms wrote for another distribution to ones
+        // that exist here, or a Debian host refuses a guest the Arch-flavoured
+        // form produced (and the reverse).
+        let _ = Domain::define_xml(c, &crate::firmware::resolve(&body))?;
         Ok(json!({"name": name, "defined": true}))
     })
     .await
@@ -109,7 +112,7 @@ async fn create(
 ) -> Result<Json<Value>, ApiError> {
     let start = q.get("start").map(|v| v == "true").unwrap_or(true);
     let v = with_conn(move |c| {
-        let d = Domain::define_xml(c, &body)?;
+        let d = Domain::define_xml(c, &crate::firmware::resolve(&body))?;
         let name = d.get_name().unwrap_or_default();
         let started = if start {
             d.create().map(|_| true).unwrap_or(false)
