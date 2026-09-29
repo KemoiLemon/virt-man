@@ -14,9 +14,9 @@
 //!   - `forward` all routed traffic (no subnet constraint)
 //!
 //! Port forwards are DNAT rules on the prerouting hook: a WAN destination
-//! address (0.0.0.0 = any, excluding the guest subnet) and port range are
-//! rewritten to an internal address and port range. libvirt's existing
-//! postrouting masquerade handles the reply path.
+//! address (0.0.0.0 = any, excluding the guest subnet) and port are rewritten
+//! to an internal address and port. libvirt's existing postrouting masquerade
+//! handles the reply path.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,11 +66,15 @@ pub struct Rule {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Forward {
     pub wan_ip: String, // "0.0.0.0" = any, otherwise a specific WAN address
-    pub wan_start: u16,
-    pub wan_end: u16,
+    /// The destination port. A forward translates exactly one port: a range
+    /// has no single corresponding internal port (DNAT maps a port to a port),
+    /// so ranges were removed. An old stored range loads as its first port --
+    /// `serde` accepts `wan_start` as the alias, and the end is dropped.
+    #[serde(alias = "wan_start")]
+    pub wan_port: u16,
     pub lan_ip: String,
-    pub lan_start: u16,
-    pub lan_end: u16,
+    #[serde(alias = "lan_start")]
+    pub lan_port: u16,
     pub proto: String, // tcp | udp
 }
 
@@ -147,15 +151,13 @@ pub fn validate_forward(f: &Forward) -> Result<Forward, String> {
             .map_err(|_| "WAN IP is invalid")?
             .to_string()
     };
-    let (ws, we) = port_range(f.wan_start, f.wan_end).map_err(|e| format!("WAN port: {e}"))?;
-    let (ls, le) = port_range(f.lan_start, f.lan_end).map_err(|e| format!("internal port: {e}"))?;
+    let wan_port = valid_port(f.wan_port).map_err(|e| format!("WAN port: {e}"))?;
+    let lan_port = valid_port(f.lan_port).map_err(|e| format!("internal port: {e}"))?;
     Ok(Forward {
         wan_ip,
-        wan_start: ws,
-        wan_end: we,
+        wan_port,
         lan_ip,
-        lan_start: ls,
-        lan_end: le,
+        lan_port,
         proto: f.proto.clone(),
     })
 }
@@ -225,14 +227,11 @@ fn parse_port_range(s: &str) -> Result<(u16, u16), String> {
     Ok((a, b))
 }
 
-fn port_range(a: u16, b: u16) -> Result<(u16, u16), String> {
-    if a == 0 || b == 0 {
+fn valid_port(p: u16) -> Result<u16, String> {
+    if p == 0 {
         return Err("port 0 is not valid".into());
     }
-    if a > b {
-        return Err(format!("port range {a}-{b} is reversed"));
-    }
-    Ok((a, b))
+    Ok(p)
 }
 
 /// The network address of a CIDR (192.168.167.1/24 -> 192.168.167.0/24).
@@ -474,18 +473,8 @@ fn render_forward(f: &Forward, subnet: &str) -> Option<String> {
         m.push(format!("ip daddr {}", f.wan_ip));
     }
     let l4 = if f.proto == "udp" { "udp" } else { "tcp" };
-    let dport = if f.wan_start == f.wan_end {
-        format!("{l4} dport {}", f.wan_start)
-    } else {
-        format!("{l4} dport {}-{}", f.wan_start, f.wan_end)
-    };
-    m.push(dport);
-    let target = if f.lan_start == f.lan_end {
-        format!("{}:{}", f.lan_ip, f.lan_start)
-    } else {
-        format!("{}:{}-{}", f.lan_ip, f.lan_start, f.lan_end)
-    };
-    Some(format!("{} dnat to {target}", m.join(" ")))
+    m.push(format!("{l4} dport {}", f.wan_port));
+    Some(format!("{} dnat to {}:{}", m.join(" "), f.lan_ip, f.lan_port))
 }
 
 /// Apply a ruleset with `nft -f` (atomic: a syntax error aborts the whole
@@ -1032,11 +1021,9 @@ chain guest_input {
     fn a_specific_wan_forward_matches_that_address_only() {
         let f = Forward {
             wan_ip: "203.0.113.7".into(),
-            wan_start: 2222,
-            wan_end: 2222,
+            wan_port: 2222,
             lan_ip: "192.168.167.5".into(),
-            lan_start: 22,
-            lan_end: 22,
+            lan_port: 22,
             proto: "tcp".into(),
         };
         assert_eq!(
@@ -1049,11 +1036,9 @@ chain guest_input {
     fn an_any_wan_forward_excludes_the_guest_subnet() {
         let f = Forward {
             wan_ip: "0.0.0.0".into(),
-            wan_start: 80,
-            wan_end: 80,
+            wan_port: 80,
             lan_ip: "192.168.167.5".into(),
-            lan_start: 8080,
-            lan_end: 8080,
+            lan_port: 8080,
             proto: "tcp".into(),
         };
         assert_eq!(
