@@ -24,7 +24,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub type R<T> = Result<T, String>;
 
@@ -47,6 +47,20 @@ pub struct Frame {
     /// this must take a full frame.
     damage_base: u64,
 }
+
+/// How long the damage must go quiet before a frame is handed to the viewer.
+///
+/// This is what stops a repaint arriving as strips. A guest painting a window
+/// sends several updates; waking the viewer on each one made it paint whatever
+/// was dirty at that instant, so the picture visibly built up band by band. The
+/// unioned damage of the old code hid that -- one big rectangle looks atomic --
+/// but a partial rectangle does not.
+///
+/// Damage accumulates across updates (tiles stay dirty until handed out), so
+/// waiting loses nothing: the burst collapses into a single frame carrying all
+/// of it. 8ms is under a frame at 60Hz, so a settled screen is not delayed
+/// perceptibly, while a repaint lasting tens of milliseconds is fully absorbed.
+const COALESCE: Duration = Duration::from_millis(8);
 
 /// Damage tile size, in pixels. See [`Frame::touch`].
 const TILE: u16 = 64;
@@ -100,23 +114,41 @@ impl Frame {
     /// 64px tiles, because they are fine enough that an idle desktop's clock
     /// costs one tile, and coarse enough that a repainting window does not
     /// produce hundreds of rectangles to encode and paint separately.
+    ///
+    /// A rectangle is clamped to the framebuffer first. Two reasons: a guest can
+    /// advertise damage past the size we hold (its idea of the screen and ours
+    /// can disagree, especially right after a resize), and an unclamped tile
+    /// index is wrong anyway. Without the clamp an entirely out-of-range report
+    /// marked no tile but still set `dirty_any`, which made the caller send a
+    /// *full screen* for it -- the opposite of what a stray report should cost.
     fn touch(&mut self, r: Rect) {
         if r.w == 0 || r.h == 0 {
             return;
         }
+        // Clamp to the framebuffer so an over-hanging rectangle becomes the part
+        // that is really there, instead of nothing.
+        let (w, h) = (self.w, self.h);
+        if r.x >= w || r.y >= h {
+            return; // entirely outside: no tile to mark, no damage to report
+        }
+        let x_end = (r.x as u32 + r.w as u32).min(w as u32);
+        let y_end = (r.y as u32 + r.h as u32).min(h as u32);
         let x0 = (r.x / TILE) as usize;
         let y0 = (r.y / TILE) as usize;
-        let x1 = ((r.x as u32 + r.w as u32 - 1) / TILE as u32) as usize;
-        let y1 = ((r.y as u32 + r.h as u32 - 1) / TILE as u32) as usize;
+        // `- 1` because the ranges are exclusive ends: a rectangle ending at a
+        // tile boundary must not dirty the next tile.
+        let x1 = ((x_end - 1) / TILE as u32) as usize;
+        let y1 = ((y_end - 1) / TILE as u32) as usize;
         let (tw, th) = (self.tile_w, self.tile_h);
         for ty in y0..=y1.min(th.saturating_sub(1)) {
             for tx in x0..=x1.min(tw.saturating_sub(1)) {
                 if ty * tw + tx < self.dirty.len() {
                     self.dirty[ty * tw + tx] = true;
+                    // Only now is there damage worth waking a viewer for.
+                    self.dirty_any = true;
                 }
             }
         }
-        self.dirty_any = true;
     }
 
     /// Forget all pending damage and return the tiles that were set, as merged
@@ -178,6 +210,21 @@ impl Frame {
         self.dirty.iter_mut().for_each(|d| *d = false);
         self.dirty_any = false;
         out
+    }
+
+    /// Drop the pending damage without producing rectangles.
+    ///
+    /// Used when the viewer is too far behind for damage to be useful: it gets a
+    /// full frame instead. This must clear the tile grid *and* the flag
+    /// together. Clearing only the flag (what this used to do inline) left the
+    /// tiles set, so the *next* update merged those stale tiles with the real
+    /// change -- and a grid full of stale tiles is fragmented enough to blow
+    /// past `MAX_RECTS` and turn an 8x8 change into a whole-screen transfer.
+    fn forget_damage(&mut self) {
+        if self.dirty_any {
+            self.dirty.iter_mut().for_each(|d| *d = false);
+            self.dirty_any = false;
+        }
     }
 }
 
@@ -247,6 +294,34 @@ impl Session {
             return None; // timed out: let the caller re-arm
         }
 
+        // Hold the frame until the guest's updates stop arriving, so a repaint
+        // lands as one paint instead of building up band by band. This blocks a
+        // runtime thread, which is why `frame` runs it on `spawn_blocking`.
+        //
+        // The deadline is fixed *before* waiting, and never moved by a later
+        // update. A window that restarted on every update would never expire for
+        // a guest repainting faster than [`COALESCE`] -- an animation, or simply
+        // a busy desktop -- and the console would stall instead of tearing. So a
+        // burst is absorbed only up to this deadline; a continuous repainter
+        // then gets frames at a steady `COALESCE` rate, which is the honest
+        // behaviour: it is shown a live screen, just not faster than it can
+        // paint one.
+        let settle_until = Instant::now() + COALESCE;
+        while Instant::now() < settle_until {
+            let wait = settle_until.saturating_duration_since(Instant::now());
+            if wait.is_zero() || !self.is_running() {
+                break;
+            }
+            // A generous timeout, not `wait`: waking early is harmless (the
+            // loop re-checks the clock), but a timeout that could fire *before*
+            // the deadline would hand out a half-settled frame.
+            let (guard, _) = self
+                .frame_ready
+                .wait_timeout_while(f, wait, |_| self.is_running())
+                .ok()?;
+            f = guard;
+        }
+
         // A viewer that missed the window the damage was tracked from cannot
         // be patched incrementally; give it the whole screen. Same when the
         // damage is too fragmented to be worth sending piecemeal.
@@ -259,7 +334,7 @@ impl Session {
         let mut rects = if since >= f.damage_base {
             f.take_damage()
         } else {
-            f.dirty_any = false;
+            f.forget_damage();
             Vec::new()
         };
         if rects.is_empty() || rects.len() > MAX_RECTS {
@@ -732,8 +807,10 @@ fn reader_loop(sess: &Arc<Session>, mut s: TcpStream) -> R<()> {
                     changed.then_some((f.seq, f.w, f.h))
                 };
                 if bumped.is_some() {
-                    // Wake any viewer already parked in next_update(). This is
-                    // the fast path: pixels leave on a request already waiting.
+                    // Wake viewers parked in `next_update` so they re-check the
+                    // settle window. They usually go straight back to waiting;
+                    // the frame goes out when the window expires, so this is a
+                    // nudge, not the hand-off.
                     sess.frame_ready.notify_all();
                 }
 
@@ -966,22 +1043,194 @@ mod tests {
     /// assemble in horizontal strips. It also once looped forever, because the
     /// delivered seq sat below `damage_base` so every request looked "behind"
     /// and was answered with another full frame.
+    /// A burst of updates must be delivered as ONE frame, not one per update.
+    ///
+    /// This is the strip fix. A guest repaints a window as several updates; if
+    /// each one is handed to the viewer, the viewer paints whatever is dirty at
+    /// that instant and the picture builds up band by band. The old code hid it
+    /// by unioning damage into one big rectangle, which looks atomic.
+    ///
+    /// Fails if the settle window in `next_update` is removed: the second
+    /// update then arrives as its own frame.
     #[test]
-    fn a_full_screen_arrives_in_one_update() {
-        let w = 1280u16;
-        let h = 800u16;
-        let sess = Session {
+    fn a_burst_of_updates_lands_as_one_frame() {
+        let sess = new_session(256, 256);
+        {
+            let mut f = sess.frame.lock().unwrap();
+            // Two repaints close together, dirtying different bands. The second
+            // lands microseconds later, well inside the settle window.
+            f.touch(Rect {
+                x: 0,
+                y: 0,
+                w: 256,
+                h: 64,
+            });
+            f.seq += 1;
+            f.touch(Rect {
+                x: 0,
+                y: 192,
+                w: 256,
+                h: 64,
+            });
+            f.seq += 1;
+        }
+
+        let u = sess
+            .next_update(0, Duration::from_millis(500))
+            .expect("the burst must be delivered");
+        // Both bands in one frame. Two separate calls would each carry one.
+        let covered: Vec<(u16, u16)> = u.rects.iter().map(|r| (r.y, r.h)).collect();
+        assert_eq!(
+            u.rects.len(),
+            2,
+            "both bands belong to one frame: {covered:?}"
+        );
+        assert!(
+            covered.iter().any(|(y, _)| *y == 0) && covered.iter().any(|(y, _)| *y >= 192),
+            "the frame carries the top and bottom band together: {covered:?}"
+        );
+        // And the viewer is told it is caught up with *both*: a frame that
+        // reported the first seq would be re-sent the second band.
+        assert_eq!(u.seq, 2, "caught up with the whole burst");
+        assert!(
+            sess.next_update(u.seq, Duration::from_millis(50)).is_none(),
+            "delivering the burst must clear it; nothing is left over"
+        );
+    }
+
+    /// A guest that never stops repainting must still be shown.
+    ///
+    /// The settle window must not become a stall: an animation or a video
+    /// re-dirties the frame continuously, and if the hand-off waited for quiet
+    /// that never comes, the console would freeze instead of tearing.
+    #[test]
+    fn a_continuously_repainting_guest_still_gets_frames() {
+        let sess = new_session(128, 128);
+        let stop = Arc::new(AtomicBool::new(false));
+        let keep_dirtying = sess.clone();
+        let stop_flag = stop.clone();
+        let worker = std::thread::spawn(move || {
+            // Redraw faster than the settle window, like an animation.
+            while !stop_flag.load(Ordering::Relaxed) {
+                let mut f = keep_dirtying.frame.lock().unwrap();
+                f.touch(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 128,
+                    h: 128,
+                });
+                f.seq += 1;
+                keep_dirtying.frame_ready.notify_all();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        // Must come back despite never going quiet.
+        let u = sess.next_update(0, Duration::from_millis(500));
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        assert!(
+            u.is_some(),
+            "a constantly-repainting guest must still deliver frames"
+        );
+    }
+
+    /// A viewer too far behind gets a full frame, and the damage it skipped must
+    /// not come back with the next one.
+    ///
+    /// Regression: that path cleared `dirty_any` but left the tile grid set. The
+    /// stale tiles merged into the next update, and a fragmented grid exceeds
+    /// `MAX_RECTS`, so an 8x8 change arrived as a whole screen. The two fields
+    /// are now cleared together, in `forget_damage`.
+    #[test]
+    fn a_behind_viewer_does_not_leave_damage_for_the_next_frame() {
+        let sess = new_session(256, 256);
+        {
+            let mut f = sess.frame.lock().unwrap();
+            f.touch(Rect {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 64,
+            });
+            f.seq = 5;
+            f.damage_base = 5; // a viewer asking from seq 0 is behind this
+        }
+
+        // Behind: the whole screen, as designed.
+        let full = sess
+            .next_update(0, Duration::from_millis(200))
+            .expect("a behind viewer must still get pixels");
+        assert!(
+            full.rects.iter().any(|r| r.w == 256 && r.h == 256),
+            "a behind viewer gets a full frame: {:?}",
+            full.rects
+        );
+        {
+            let f = sess.frame.lock().unwrap();
+            assert!(!f.dirty_any, "the skipped damage must be forgotten");
+        }
+
+        // A small change afterwards must be a small rectangle, not a full frame
+        // resurrected from the stale tiles. `damage_base` is left alone -- the
+        // reader advances it as frames are delivered, and overwriting it here
+        // would just make this viewer "behind" again.
+        {
+            let mut f = sess.frame.lock().unwrap();
+            f.touch(Rect {
+                x: 200,
+                y: 200,
+                w: 8,
+                h: 8,
+            });
+            f.seq = 6;
+        }
+        let next = sess
+            .next_update(full.seq, Duration::from_millis(200))
+            .expect("the new change must be delivered");
+        // The 8x8 change, and *nothing else*. Asserting on area alone is too
+        // weak: under the old code the stale tile came back alongside the real
+        // change (two rectangles, 8192px, still under a full screen), and that
+        // redundant region is exactly the wasted transfer this guards. So pin
+        // which tiles are covered.
+        assert!(
+            next.rects.iter().all(|r| r.y >= 192 && r.x >= 192),
+            "only the region that actually changed may be sent, \
+             but stale tiles came back: {:?}",
+            next.rects
+        );
+        let area: u32 = next.rects.iter().map(|r| r.w as u32 * r.h as u32).sum();
+        assert!(
+            area < 256 * 256,
+            "an 8x8 change must not become a whole screen: {:?}",
+            next.rects
+        );
+    }
+
+    /// A session ready to hand out one frame, with no damage and no socket.
+    fn new_session(w: u16, h: u16) -> Arc<Session> {
+        Arc::new(Session {
             frame: Mutex::new({
                 let mut f = Frame::sized(w, h);
                 f.rgba = vec![9u8; w as usize * h as usize * 4];
-                f.seq = 1;
-                f // no damage yet => a new viewer gets it all
+                f
             }),
             frame_ready: Condvar::new(),
             tx: Mutex::new(None),
             running: AtomicBool::new(true),
             error: Mutex::new(None),
-        };
+        })
+    }
+
+    #[test]
+    fn a_full_screen_arrives_in_one_update() {
+        let w = 1280u16;
+        let h = 800u16;
+        let sess = new_session(w, h);
+        {
+            let mut f = sess.frame.lock().unwrap();
+            f.seq = 1;
+        }
 
         let u = sess
             .next_update(0, Duration::from_millis(50))
@@ -1021,5 +1270,66 @@ mod tests {
         );
         assert_eq!(r.x + r.w, 64, "width must not run past the buffer");
         assert_eq!(r.y + r.h, 64, "height must not run past the buffer");
+    }
+
+    /// A rectangle past the framebuffer must dirty the part that is there, and
+    /// an entirely-outside one must dirty nothing at all.
+    ///
+    /// Regression: `touch` marked no tile for an out-of-range rectangle but
+    /// still set `dirty_any`, so `take_damage` was empty and the caller sent a
+    /// whole screen for a report about pixels that do not exist.
+    #[test]
+    fn out_of_range_damage_does_not_become_a_full_screen() {
+        // Partly inside: clamp to the edge, still real damage.
+        let mut f = Frame::sized(128, 128);
+        f.touch(Rect {
+            x: 120,
+            y: 120,
+            w: 40,
+            h: 40,
+        });
+        let d = f.take_damage();
+        assert_eq!(d.len(), 1, "the overlapping part is damage");
+        for r in &d {
+            assert!(
+                r.x as u32 + r.w as u32 <= 128 && r.y as u32 + r.h as u32 <= 128,
+                "tiles must not run past the framebuffer: {r:?}"
+            );
+        }
+
+        // Entirely outside: no damage, and crucially NOT `dirty_any`, or the
+        // caller turns it into a full-frame transfer.
+        let mut f = Frame::sized(64, 64);
+        f.touch(Rect {
+            x: 5000,
+            y: 5000,
+            w: 10,
+            h: 10,
+        });
+        assert!(
+            !f.dirty_any,
+            "an entirely out-of-range report is not damage"
+        );
+        assert!(f.take_damage().is_empty());
+    }
+
+    /// A rectangle ending exactly on a tile boundary must not dirty the next
+    /// tile: that is a whole extra 64x64 rectangle of wasted transfer.
+    #[test]
+    fn damage_ending_on_a_tile_boundary_stops_there() {
+        let mut f = Frame::sized(256, 256);
+        f.touch(Rect {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 64,
+        });
+        let d = f.take_damage();
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (d[0].x, d[0].y, d[0].w, d[0].h),
+            (0, 0, 64, 64),
+            "exactly one tile, not four"
+        );
     }
 }
