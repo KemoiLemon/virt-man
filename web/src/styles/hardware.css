@@ -50,6 +50,9 @@
   font-size: 11px; color: var(--dim); line-height: 1.7;
   border-left: 2px solid var(--line2); padding: 2px 0 2px 9px;
 }
+/* A note following a field needs its own gap: `.field` is a flex column, so a
+   sibling <p> would otherwise sit flush against the input. */
+.hw-page > .hw-note { margin-top: 10px; }
 .hw-note code { color: var(--fg); }
 .hw-check { font-size: 12px; }
 

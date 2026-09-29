@@ -5184,6 +5184,22 @@ async function createPendingVolumes(
   }
 }
 
+/// What picking a graphics type costs, said before it is saved rather than
+/// discovered on the Console tab.
+///
+/// This matters because the two are not equal for a browser user: the built-in
+/// console is RFB only, so switching a guest to SPICE takes its console away and
+/// leaves a virt-viewer download. That is a fair trade for someone with
+/// virt-viewer, and a straight loss for someone on a phone, so it is stated
+/// rather than assumed. A guest can carry *both* devices -- virt-viewer then
+/// prefers SPICE while the browser keeps VNC -- which is why the hint points at
+/// Add Hardware instead of pretending there is a choice to make here.
+function gfxNote(kind: "vnc" | "spice"): string {
+  return kind === "spice"
+    ? "SPICE is not shown in the browser: the Console tab will offer a virt-viewer download instead. Add a VNC device too if you also want the built-in console."
+    : "VNC is what the built-in console speaks, over the daemon's own compression.";
+}
+
 /// Proxmox-style hardware editor: device list on the LEFT, the selected
 /// device's form on the right. Used for both "Create VM" and editing an
 /// existing guest's hardware, so the two can never drift apart.
@@ -5495,6 +5511,7 @@ async function openHardwareEditor(opts: {
           <h3 class="hw-title">Display</h3>
           <label class="field"><span>Graphics</span>
             <select id="g-gfx">${opt(["vnc", "spice"], general.graphics)}</select></label>
+          <p class="muted hw-note" id="g-gfx-note">${gfxNote(general.graphics)}</p>
         </div>`;
       case "firmware":
         return `<div class="hw-page active">
@@ -5549,7 +5566,13 @@ async function openHardwareEditor(opts: {
     bind("#g-name", (v) => { general.name = v; });
     bind("#g-cpus", (v) => { general.cpus = Math.max(1, clamp(v, 1, cap.cpu)); });
     bind("#g-mem", (v) => { general.memory_mb = clamp(v, 128, cap.mem); });
-    bind("#g-gfx", (v) => { general.graphics = v as "vnc" | "spice"; });
+    bind("#g-gfx", (v) => {
+      general.graphics = v as "vnc" | "spice";
+      // The note is part of the decision, so it must not show the old choice's
+      // text until the page is left and returned to.
+      const note = $("#g-gfx-note", root);
+      if (note) note.textContent = gfxNote(general.graphics);
+    });
     bind("#g-fw", (v) => { general.firmware = v as "uefi" | "bios"; });
     bind("#g-pool", (v) => { newDisk.pool = v; newDisk.volume = ""; });
     bind("#g-disk-mode", (v) => { newDisk.mode = v === "existing" ? "existing" : "new"; });
