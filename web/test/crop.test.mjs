@@ -66,6 +66,39 @@ test("clamps when the window would fall outside the image", () => {
 // No amount of pure-math testing could see that, hence a DOM test.
 
 
+test("cropQuality reports the source resolution and when it is soft", () => {
+  // 1:1 and larger: nothing is invented on the way out.
+  assert.deepEqual(crop.cropQuality(256), { sourcePx: 256, upscale: 1, soft: false });
+  assert.deepEqual(crop.cropQuality(1000).soft, false, "a large source is not soft");
+  // A square covering 100 source px, exported at 256, is magnified 2.56x.
+  const small = crop.cropQuality(100);
+  assert.equal(small.upscale, 2.56);
+  assert.equal(small.soft, true, "2.56x upscaling is visible");
+  // The threshold: just over 1.5x warns, just under does not.
+  assert.equal(crop.cropQuality(171).soft, false, "1.497x is imperceptible");
+  assert.equal(crop.cropQuality(170).soft, true, "1.506x is not");
+  // Degenerate input must not divide by zero.
+  assert.equal(crop.cropQuality(0).soft, false);
+  assert.equal(crop.cropQuality(0).upscale, 0);
+});
+
+test("the readout accounts for the source width and height", () => {
+  // The bug: cover-fitting a 256x256 photo magnified it, so the square covered
+  // only ~92 of its pixels and the export scaled those back up to 256, with
+  // nothing on screen saying so. These are the numbers from that case.
+  const stage = { W: 612, H: 260 };
+  const rect = crop.cropRect({ naturalWidth: 256, naturalHeight: 256 }, 0, 0, 1, 150, 0, 300);
+  assert.ok(rect.size > 0, "a real crop");
+  const q = crop.cropQuality(92.44);
+  assert.equal(q.soft, true, "a 256px source cannot fill a 256px avatar");
+  assert.ok(q.upscale > 2.7 && q.upscale < 2.8, `upscale ${q.upscale}`);
+  // A photo with enough pixels for the export is not flagged.
+  const big = crop.cropQuality(1444.44);
+  assert.equal(big.soft, false);
+  assert.ok(big.upscale < 0.2, "a 4000px source is downsampled, not upscaled");
+  void stage;
+});
+
 test("the crop square is given the picture, not an empty <img>", async () => {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<!doctype html><body></body>", {
@@ -96,8 +129,15 @@ test("the crop square is given the picture, not an empty <img>", async () => {
   globalThis.document = doc;
   globalThis.Image = PatchedImage;
   // The dialog waits for a layout tick before reading clientWidth; jsdom's rAF
-  // exists on the window but the code calls the bare global.
-  globalThis.requestAnimationFrame = (fn) => w.setTimeout(() => fn(0), 0);
+  // exists on the window but the code calls the bare global. jsdom has no
+  // layout, so clientWidth stays 0 and `first()` would retry forever -- run the
+  // callback a bounded number of times and then stop, or the test leaks a
+  // spinning timer that throws after the test has already passed.
+  let ticks = 0;
+  globalThis.requestAnimationFrame = (fn) => {
+    if (ticks++ > 5) return 0;
+    return w.setTimeout(() => fn(0), 0);
+  };
   // createObjectURL must return a string the patched image will accept, and
   // revoking is a no-op here (nothing was really allocated).
   globalThis.URL = { createObjectURL: () => "blob:test", revokeObjectURL: () => {} };
@@ -116,6 +156,15 @@ test("the crop square is given the picture, not an empty <img>", async () => {
     assert.equal(doc.querySelector(".crop-zoom"), null, "no zoom slider");
     assert.equal(doc.querySelector(".crop-preview"), null, "no separate preview");
     assert.ok(doc.querySelector(".crop-handle"), "the square still resizes by hand");
+    // The readout element, which accounts for the source's width and height.
+    // Its *text* is filled by apply(), and apply() only runs once the stage has
+    // a width -- jsdom does no layout, so clientWidth is 0 and the dialog never
+    // reaches its first paint here. The formatting itself is covered by the
+    // cropQuality tests above; this pins that the readout is in the dialog and
+    // sits directly under the stage, which is where a person reads it.
+    const info = doc.querySelector(".crop-info");
+    assert.ok(info, "the dialog shows a resolution readout");
+    assert.equal(info.previousElementSibling, stage, "and it follows the stage");
     doc.querySelector(".modal-foot .btn").dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
     assert.equal(await p, null, "cancel resolves null");
   } finally {

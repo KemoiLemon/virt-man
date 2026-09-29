@@ -5,7 +5,10 @@
 // The image is scaled to cover the stage and the square shows a piece of it, so
 // the square is the preview -- there is no second copy of the crop. Dragging
 // inside it pans the image; the eight handles on its edges and corners resize
-// it, which is what changes how much is cropped.
+// it, which is what changes how much is cropped. A readout under the stage
+// accounts for the source's width and height: how many of its pixels the square
+// actually covers, and whether that is enough for the 256px export or will be
+// magnified into a soft avatar.
 
 import { closeSvg } from "./icons";
 
@@ -13,6 +16,31 @@ export interface CropRect {
   x: number;
   y: number;
   size: number; // natural image px, square
+}
+
+/// The size the crop is exported at. The square on screen is a view of this:
+/// a crop that covers fewer than `OUT` natural pixels is upscaled to reach it,
+/// so the exported avatar is softer than it looks in the dialog.
+export const OUT = 256;
+
+/// What a given square actually yields, for the dialog's readout and for the
+/// warning that a small source cannot fill the export. Pure, so the arithmetic
+/// is tested rather than inferred from a screenshot.
+export interface CropQuality {
+  /// Natural pixels the square currently covers (the exported crop's source).
+  sourcePx: number;
+  /// How much the export magnifies that: 1 means one source px per output px.
+  upscale: number;
+  /// True when the source is too small to fill the export without upscaling.
+  soft: boolean;
+}
+
+export function cropQuality(rectSize: number, out = OUT): CropQuality {
+  const sourcePx = Math.max(0, rectSize);
+  const upscale = sourcePx > 0 ? out / sourcePx : 0;
+  // A little over 1 is imperceptible; past 1.5x the softness is visible, so
+  // that is where the dialog starts warning.
+  return { sourcePx, upscale, soft: sourcePx > 0 && upscale > 1.5 };
 }
 
 export function clamp(v: number, lo: number, hi: number): number {
@@ -46,7 +74,7 @@ export function cropRect(
 }
 
 /** Draw `rect` (natural px) from `image` into an `out`-square canvas, PNG. */
-export function drawCrop(image: HTMLImageElement, rect: CropRect, out = 256): Promise<Blob> {
+export function drawCrop(image: HTMLImageElement, rect: CropRect, out = OUT): Promise<Blob> {
   const canvas = document.createElement("canvas");
   canvas.width = out;
   canvas.height = out;
@@ -115,9 +143,17 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
     // No zoom slider and no separate preview: the square *is* the preview, and
     // the eight handles change how much it crops. A slider duplicated them and
     // a second copy of the image below implied two different crops.
+    //
+    // The readout accounts for the source's width and height, which nothing did
+    // before: cover-fitting a small photo magnified it, so the square covered
+    // only a fraction of its pixels and the 256px export scaled that fraction
+    // back up -- a visibly soft avatar, with nothing on screen saying so.
+    const info = document.createElement("div");
+    info.className = "crop-info";
+
     const body = document.createElement("div");
     body.className = "modal-body crop-body";
-    body.append(stage);
+    body.append(stage, info);
 
     const head = document.createElement("div");
     head.className = "modal-head";
@@ -148,9 +184,16 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
     stage.append(img, win);
 
     // The image is scaled to *cover* the stage, so the square is always filled
-    // with the picture and no stage background shows through. The square starts
-    // at 85% of the stage; dragging its handles changes how much is cropped, and
-    // zooming is the image being bigger than the square.
+    // with the picture and no stage background shows through -- the square is
+    // the preview, so it must never sit over the stage's own background. The
+    // square starts at 85% of the stage; the handles change how much is
+    // cropped.
+    //
+    // Cover-fitting a small photo magnifies it, and the square then covers only
+    // a fraction of its pixels, which the export scales back up to `OUT`. That
+    // magnified *display* is left alone -- shrinking it would letterbox the
+    // square -- and reported instead by the readout below, which names the
+    // source size and the resolution the crop is really taken from.
     const stageW = () => stage.clientWidth;
     const stageH = () => stage.clientHeight;
     const scale = () =>
@@ -178,6 +221,17 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
       win.style.height = `${winSide}px`;
       win.style.left = `${winX}px`;
       win.style.top = `${winY}px`;
+      // The crop's real resolution: natural pixels the square covers, against
+      // the 256px it is exported at. A square smaller than that is magnified on
+      // the way out, whatever it looks like on screen.
+      const rect = cropRect(image, ox, oy, s, winX + winSide / 2, winY + winSide / 2, winSide);
+      const q = cropQuality(rect.size);
+      const src = `${image.naturalWidth}\u00d7${image.naturalHeight}`;
+      const px = `${Math.round(q.sourcePx)}\u00d7${Math.round(q.sourcePx)}`;
+      info.textContent = q.soft
+        ? `Source ${src} \u2014 the square covers only ${px}, so the ${OUT}px avatar will be soft. Pick a larger photo or shrink the square.`
+        : `Source ${src} \u2014 exporting ${OUT}\u00d7${OUT} from ${px}, no upscaling.`;
+      info.classList.toggle("warn", q.soft);
     };
 
     // The image keeps covering the square: panning is clamped so no stage
@@ -328,7 +382,7 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
         winY + winSide / 2,
         winSide,
       );
-      drawCrop(image, rect, 256).then(finish, () => finish(null));
+      drawCrop(image, rect, OUT).then(finish, () => finish(null));
     };
     el.addEventListener("modal-escape", () => finish(null));
     el.onclick = (e: MouseEvent) => {

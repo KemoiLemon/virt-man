@@ -162,6 +162,11 @@ select { display: none !important; }
 .crop-handle.w { top: 50%; margin-top: -6px; left: -6px; cursor: ew-resize; }
 .crop-handle.e { top: 50%; margin-top: -6px; right: -6px; cursor: ew-resize; }
 .crop-body { display: flex; flex-direction: column; gap: 10px; }
+/* What the crop is really taken from. Muted while the source is big enough for
+   the export, and the warning colour when the square covers fewer pixels than
+   the avatar is rendered at -- that is the case worth acting on. */
+.crop-info { font-size: 11px; color: var(--dim); line-height: 1.5; }
+.crop-info.warn { color: var(--warn); }
 
 /* -------------------------------------------------------- admin panel */
 /* A table followed by its own action row needs air between them; .actions
