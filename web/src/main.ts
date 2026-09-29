@@ -6487,6 +6487,9 @@ function openProfile() {
     `<button class="btn" id="pf-close">Close</button>
      <button class="btn primary hidden" id="pf-save">Save Changes</button>`,
   );
+  // Wider than the default: the limits grid and the name/password pairs read
+  // cramped at 640px.
+  el.querySelector(".modal")?.classList.add("wide");
   $("#pf-close", el).onclick = () => el.remove();
   $("#pf-avatar-btn", el).onclick = () => void changeAvatar(el);
   void loadProfileLimits(el);
