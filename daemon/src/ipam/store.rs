@@ -55,8 +55,9 @@ pub struct Reservation {
     /// Lowercase, colon-separated.
     pub mac: String,
     pub ip: Ipv4Addr,
-    /// Hostname: the guest's DHCP hostname, the name the user gave, or the VM
-    /// name. Answers DNS queries.
+    /// Hostname: the guest's DHCP hostname, the name the user gave, or the
+    /// guest's display name (`<title>`, falling back to libvirt's name).
+    /// Answers DNS queries. A duplicate is given a numeric suffix.
     #[serde(default)]
     pub name: Option<String>,
     /// Made by the DHCP server from the range (not by a person).
@@ -150,6 +151,34 @@ impl Net {
             return Err("the range ends before it starts".into());
         }
         Ok(())
+    }
+
+    /// A hostname not already taken by another guest's reservation on this
+    /// network: `base`, or `base-2`, `base-3`, … Two guests may share a
+    /// display name (they are named by UUID), but two reservations in one
+    /// network must not answer DNS as the same name, or one guest would
+    /// resolve to the other's address. `mac`'s own reservation is not a clash,
+    /// so re-deriving a name is stable.
+    pub fn unique_name(&self, base: &str, mac: &str) -> String {
+        let taken = |n: &str| {
+            self.reservations
+                .iter()
+                .any(|r| r.mac != mac && r.name.as_deref() == Some(n))
+        };
+        if !taken(base) {
+            return base.to_string();
+        }
+        for i in 2..1000u32 {
+            let suffix = format!("-{i}");
+            let keep = 63usize.saturating_sub(suffix.len());
+            // Truncate the base because a hostname is capped at 63 characters,
+            // and the suffix is what makes it unique.
+            let cand = format!("{}{suffix}", &base[..base.len().min(keep)]);
+            if !taken(&cand) {
+                return cand;
+            }
+        }
+        base.to_string()
     }
 }
 
@@ -407,6 +436,48 @@ mod tests {
             .is_err(),
             "broadcast"
         );
+    }
+
+    #[test]
+    fn a_duplicate_hostname_gets_a_number() {
+        let mut n = net();
+        // A guest is named by its UUID, so two guests may share a display
+        // name; two reservations in one network must still answer DNS apart,
+        // or one guest would resolve to the other's address.
+        n.reservations.push(Reservation {
+            mac: "52:54:00:00:00:99".into(),
+            ip: "192.168.167.9".parse().unwrap(),
+            name: Some("alpine".into()),
+            dynamic: true,
+            vm: None,
+            seen_ms: 0,
+        });
+        // A name nobody holds is kept as it is, even a maximal one.
+        assert_eq!(n.unique_name("fresh", "52:54:00:00:00:42"), "fresh");
+        assert_eq!(n.unique_name(&"z".repeat(63), "52:54:00:00:00:42"), "z".repeat(63));
+        // "alpine" is held by another MAC, so this one is numbered.
+        assert_eq!(n.unique_name("alpine", "52:54:00:00:00:42"), "alpine-2");
+        // The suffix is what makes it unique, so a taken 63-character base is
+        // truncated to leave room rather than exceeding the hostname limit.
+        n.reservations.push(Reservation {
+            mac: "52:54:00:00:00:98".into(),
+            ip: "192.168.167.8".parse().unwrap(),
+            name: Some("a".repeat(63)),
+            dynamic: true,
+            vm: None,
+            seen_ms: 0,
+        });
+        let long = n.unique_name(&"a".repeat(63), "52:54:00:00:00:42");
+        assert_eq!(long, format!("{}-2", "a".repeat(61)));
+        assert_eq!(long.len(), 63);
+    }
+
+    #[test]
+    fn a_hostname_is_never_its_own_clash() {
+        let n = net();
+        // Re-deriving a reservation's own name is stable: the reservation
+        // holding it is not a clash with itself.
+        assert_eq!(n.unique_name("alpine", "52:54:00:82:de:19"), "alpine");
     }
 
     #[test]

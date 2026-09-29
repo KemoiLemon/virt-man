@@ -210,7 +210,10 @@ pub fn answer(
                     .hostname
                     .as_deref()
                     .and_then(clean_hostname)
-                    .or_else(|| clean_hostname(&vm_name)),
+                    .or_else(|| clean_hostname(&vm_name))
+                    // Duplicate display names get a number so two guests never
+                    // resolve to one DNS name.
+                    .map(|n| net.unique_name(&n, &mac)),
                 dynamic: true,
                 vm: Some(uuid),
                 seen_ms: 0,

@@ -29,8 +29,11 @@ const FORWARD_TIMEOUT_MS: u64 = 3000;
 pub struct Ipam {
     pub store: Arc<Mutex<Store>>,
     path: PathBuf,
-    /// MAC -> (domain uuid, domain name), for every defined guest. Refreshed
-    /// by the supervisor; the DHCP server serves only MACs listed here.
+    /// MAC -> (domain uuid, domain display name), for every defined guest.
+    /// Refreshed by the supervisor; the DHCP server serves only MACs listed
+    /// here. The name is the guest's `<title>` -- what the user calls it --
+    /// and only falls back to libvirt's own name (the UUID the forms use, or
+    /// an old name for a guest made outside the app) when it has no title.
     guests: Arc<Mutex<HashMap<String, (String, String)>>>,
     running: Arc<Mutex<HashMap<String, Listeners>>>,
     /// What guests connect to, for the access log. See `flows`.
@@ -166,8 +169,12 @@ async fn snapshot() -> Result<Snapshot, String> {
             let Ok(x) = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE) else {
                 continue;
             };
+            // The display name, not the libvirt name: a guest the forms made
+            // is named by its UUID, so using `name` here put a UUID in the
+            // DHCP hostname, the DNS answer and the IPAM table.
+            let display = crate::libvirt::title_of(&x).unwrap_or(name);
             for mac in macs(&x) {
-                guests.insert(mac, (uuid.clone(), name.clone()));
+                guests.insert(mac, (uuid.clone(), display.clone()));
             }
         }
         Ok(Snapshot { nets, guests })
