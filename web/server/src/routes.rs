@@ -46,6 +46,10 @@ pub enum Special {
     PutCtXml {
         ct: String,
     },
+    /// A container's resources: growth is checked against the owner's quota.
+    PutCtHardware {
+        ct: String,
+    },
     RenameVm {
         vm: String,
     },
@@ -181,7 +185,10 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
             let p = ct_path(conn, ct);
             let ct = ct.to_string();
             match (method, rest) {
-                (_, [] | ["state"] | ["stats"] | ["interfaces"]) if get => need(p, "CT.Audit"),
+                (_, [] | ["state"] | ["stats"] | ["interfaces"] | ["hardware"]) if get => {
+                    need(p, "CT.Audit")
+                }
+                ("PUT", ["hardware"]) => with(p, "CT.Config", Special::PutCtHardware { ct }),
                 ("DELETE", []) => with(p, "CT.Allocate", Special::DeleteCt { ct }),
                 (_, ["xml"]) if get => need(p, "CT.Audit"),
                 ("PUT", ["xml"]) => with(p, "CT.Config", Special::PutCtXml { ct }),
@@ -343,6 +350,8 @@ mod tests {
                 "/containers/web/interfaces/52:54:00:00:00:01/bandwidth",
                 "CT.Config",
             ),
+            ("GET", "/containers/web/hardware", "CT.Audit"),
+            ("PUT", "/containers/web/hardware", "CT.Config"),
         ] {
             assert_eq!(priv_of(m, p), Some((ct.into(), want)), "{m} {p}");
         }

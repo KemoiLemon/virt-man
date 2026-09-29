@@ -1064,6 +1064,7 @@ function ctMenu(connId: string, name: string): CtxItem[] {
     { label: "Reboot", icon: ic.reboot(), disabled: !running, run: () => void treeCtPower(connId, name, "/reboot") },
     { label: "Force stop", icon: ic.forceStop(), disabled: !running, run: () => void treeCtPower(connId, name, "/destroy") },
     { label: "Console", icon: ic.keyboard(), separator: true, run: () => selectCtRow(connId, name, "console") },
+    { label: "Hardware", icon: ic.cpu(), run: () => selectCtRow(connId, name, "hardware") },
     { label: "Options", icon: ic.options(), run: () => selectCtRow(connId, name, "options") },
     { label: "Network", icon: ic.network(), run: () => selectCtRow(connId, name, "network") },
     { label: "XML", icon: ic.xml(), run: () => selectCtRow(connId, name, "xml") },
@@ -3158,6 +3159,66 @@ async function loadCts() {
   }
 }
 
+/// A container's resources (`GET/PUT /containers/{ct}/hardware`).
+interface CtHardware {
+  vcpus: number; memory_mb: number; swap_mb: number; cpu_limit_pct: number; disk_gb: number;
+}
+
+/// A container's Hardware tab: its resources, the rows the VM editor uses.
+/// Loaded once and never repainted by the poll, so what is typed stays.
+async function renderCtHardware(body: HTMLElement, conn: string, ct: string) {
+  let hw: CtHardware;
+  try {
+    hw = await api.get<CtHardware>(`${guestBase(conn, ct, true)}/hardware`);
+  } catch (e) {
+    setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
+    return;
+  }
+  if (!stillCurrentVm(conn, ct, "hardware")) return;
+  const running = (treeCts[conn] ?? []).find((x) => x.name === ct)?.active === true;
+  const row = (icon: string, label: string, hint: string, id: string, value: number, min: number, unit: string) => `
+    <div class="hwrow">
+      <span class="hwrow-ic">${icon}</span>
+      <div class="hwrow-label"><b>${label}</b><i>${hint}</i></div>
+      <div class="hwctl"><input id="${id}" type="number" min="${min}" value="${value}"> <span class="dim-note">${unit}</span></div>
+    </div>`;
+  setHtml(body, `
+    <div class="actions">
+      <button class="btn primary" id="cthw-save">${ic.edit(14)} Save Hardware</button>
+      ${running ? `<span class="hw-locked">Running: the CPU limit and lower memory apply now; more memory, vCPUs and swap at the next start.</span>` : ""}
+    </div>
+    <div class="hwtable">
+      ${row(ic.cpu(), "vCPUs", "CPUs the container sees", "cthw-cpu", hw.vcpus, 1, "")}
+      ${row(ic.quota(), "CPU limit", "Share of one CPU it may use, 0 for none (150 = 1.5 CPUs)", "cthw-cap", hw.cpu_limit_pct, 0, "%")}
+      ${row(ic.memory(), "Memory", "Hard limit", "cthw-mem", hw.memory_mb, 16, "MB")}
+      ${row(ic.memory(), "Swap", "On top of memory, 0 for none", "cthw-swap", hw.swap_mb, 0, "MB")}
+      ${row(ic.disk(), "Root disk", "Can only grow; grown at once, even while running", "cthw-disk", hw.disk_gb, hw.disk_gb, "GB")}
+    </div>`);
+  $("#cthw-save", body).onclick = () => {
+    const n = (id: string) => Number(($(id, body) as HTMLInputElement).value);
+    const next: CtHardware = {
+      vcpus: n("#cthw-cpu"), cpu_limit_pct: n("#cthw-cap"), memory_mb: n("#cthw-mem"),
+      swap_mb: n("#cthw-swap"), disk_gb: n("#cthw-disk"),
+    };
+    if (next.disk_gb < hw.disk_gb) return toast(`The root disk can only grow (${hw.disk_gb} GB now)`, "bad");
+    const shown = displayName(treeCts[conn], ct);
+    void (async () => {
+      let pending: string[] = [];
+      const ok = await runTask(`Update hardware for ${shown}`, async () => {
+        const r = await api.put<{ pending: string[] }>(`${guestBase(conn, ct, true)}/hardware`, next);
+        pending = r.pending ?? [];
+      }, { notify: toast });
+      if (!ok) return;
+      hw = next;
+      // Say what is not in effect yet, rather than claim it all applied.
+      toast(pending.length
+        ? `Saved. ${capLabel(pending.join(", "))} take${pending.length === 1 ? "s" : ""} effect at the next start.`
+        : "Hardware updated");
+      await refreshTreeVms();
+    })();
+  };
+}
+
 /// A template from the catalog (`GET /templates/catalog`).
 interface CatalogEntry {
   id: string; source: string; section: string; os: string; release: string;
@@ -3706,9 +3767,9 @@ async function renderVm() {
   const title = guest?.title || vm;
   const running = guest?.active === true;
   const privileged = ct && (guest as ContainerSummary | undefined)?.privileged === true;
-  // A container has no hardware editor (its devices are its rootfs and NICs),
-  // no display to hand to virt-viewer, and no reset.
-  if (ct && vmTab === "hardware") vmTab = "summary";
+  // A container has no display to hand to virt-viewer, and no reset. Its
+  // Hardware tab is its own editor (CPU, memory, swap, root disk): the VM
+  // one edits devices a container does not have.
   const restoreTabFocus = holdFocus(content, ".tab.active");
 setHtml(content, `
     <div class="dhead"><span class="dhead-ic">${ct ? ic.container(20) : ic.vm(20)}</span><span class="dtitle">${esc(title)}</span>
@@ -3717,7 +3778,7 @@ setHtml(content, `
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
       <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ct ? ic.keyboard(14) : ic.vm(14)} Console</button>
-      ${ct ? "" : `<button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>`}
+      <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
       <button class="tab ${vmTab === "options" ? "active" : ""}" data-vmtab="options">${ic.options(14)} Options</button>
       <button class="tab ${vmTab === "network" ? "active" : ""}" data-vmtab="network">${ic.network(14)} Network</button>
       <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">${ic.xml(14)} XML</button>
@@ -4342,6 +4403,10 @@ async function renderVmBody(vm: string) {
     return;
   }
 
+  if (vmTab === "hardware" && ctMode) {
+    await renderCtHardware(body, conn, vm);
+    return;
+  }
   if (vmTab === "hardware") {
     // The hardware editor is embedded here — no read-only table and no
     // "Edit hardware" click. Devices are edited in place and saved.

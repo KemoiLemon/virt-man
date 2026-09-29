@@ -8,7 +8,7 @@
 //   /<node>/vms|containers|networks|storage|firewall
 //   /<node>/vms/<vm>               guest summary
 //   /<node>/vms/<vm>/<tab>         console | hardware | options | network | xml
-//   /<node>/containers/<ct>[/<tab>] console | options | network | xml
+//   /<node>/containers/<ct>[/<tab>] console | hardware | options | network | xml
 //   /<node>/networks/<net>         network page
 //   /<node>/storage/<pool>         pool page
 //   /admin/<section>[/<tab>]       administration (/admin/dashboard/usage, ...)
@@ -22,8 +22,8 @@
 export type DcTab = "dashboard" | "guests" | "containers";
 export type ConnTab = "dashboard" | "vms" | "containers" | "networks" | "storage" | "firewall";
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
-/// A container has no hardware editor: its devices are a rootfs and NICs.
-export type CtTab = "summary" | "options" | "network" | "console" | "xml";
+/// A container's Hardware tab edits its resources, not devices.
+export type CtTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 export type AdminSection =
   | "dashboard" | "users" | "groups" | "roles" | "permissions" | "daemons"
   | "vms" | "containers" | "networks" | "pools" | "quotas" | "ips" | "keys" | "activity";
@@ -67,7 +67,7 @@ export const RESERVED = new Set([
 
 const CONN_TABS: ConnTab[] = ["vms", "containers", "networks", "storage", "firewall"];
 const VM_TABS: VmTab[] = ["hardware", "options", "network", "console", "xml"];
-const CT_TABS: CtTab[] = ["options", "network", "console", "xml"];
+const CT_TABS: CtTab[] = ["hardware", "options", "network", "console", "xml"];
 
 /// The path segment for a node: its name when that is unambiguous, else its id.
 export function nodeSegment(id: string, nodes: NodeRef[]): string {

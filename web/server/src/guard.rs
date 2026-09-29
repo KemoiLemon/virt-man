@@ -603,6 +603,27 @@ pub async fn before(
             }
             Ok(None)
         }
+        Special::PutCtHardware { ct } => {
+            if admin {
+                return Ok(None);
+            }
+            let want: Value =
+                serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
+            let cur = daemon_get(conn, &format!("/containers/{}/hardware", enc(ct))).await?;
+            let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+            // Only growth counts, and a bigger disk is storage the owner holds.
+            let grow = Usage {
+                vcpus: n(&want, "vcpus").saturating_sub(n(&cur, "vcpus")),
+                memory_mb: n(&want, "memory_mb").saturating_sub(n(&cur, "memory_mb")),
+                storage_bytes: n(&want, "disk_gb").saturating_sub(n(&cur, "disk_gb")) << 30,
+                ..Usage::default()
+            };
+            if grow != Usage::default() {
+                let owner = owner_user(owner_of(Kind::Ct, ct)).unwrap_or_else(|| user.clone());
+                check_quota(state, conn, &owner, grow).await?;
+            }
+            Ok(None)
+        }
         // Ownership and grants follow the guest to its new name once the
         // daemon accepts it (see `after`).
         Special::RenameVm { .. } | Special::RenameCt { .. } => Ok(None),
@@ -828,6 +849,20 @@ pub fn after(
                 !(x.kind == r.kind && x.conn == r.conn && x.pool == r.pool && x.name == r.name)
             });
             store.resources.push(r);
+        }
+        Special::PutCtHardware { ct } => {
+            // A grown rootfs is more of the owner's storage: the quota sums
+            // volume records, so the record must say the new size.
+            let gb = serde_json::from_slice::<Value>(response)
+                .ok()
+                .and_then(|v| v.pointer("/hardware/disk_gb").and_then(Value::as_u64));
+            let Some(gb) = gb else { return };
+            let vol = format!("ct-{ct}.raw");
+            for r in store.resources.iter_mut() {
+                if r.kind == Kind::Volume && r.conn == conn && r.name == vol {
+                    r.capacity = r.capacity.max(gb << 30);
+                }
+            }
         }
         Special::RenameVm { vm: old } | Special::RenameCt { ct: old } => {
             let (kind, path_of): (Kind, fn(&str, &str) -> String) = match special {

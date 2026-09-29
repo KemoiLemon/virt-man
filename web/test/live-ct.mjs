@@ -8,7 +8,8 @@
 // Checks:
 //   - the sidebar lists containers below the VMs and above networks and pools
 //   - the server and datacenter both have a Containers tab listing it
-//   - its page has no Hardware tab, and a text console that answers
+//   - its page has a Hardware tab (CPU, memory, swap, disk) that applies,
+//     and a text console that answers -- and shows output nobody typed for
 //   - a VM route cannot reach it, and a VM-only action is refused
 //   - it gets an address from the daemon's DHCP (read from the network's hosts)
 //   - deleting it removes its rootfs and keeps the template
@@ -73,6 +74,9 @@ const create = await j("POST", `${P}/containers`, {
   memory_mb: 128,
   vcpus: 1,
   networks: nets.length ? [nets[0].name] : [],
+  // A root password, so the suite can log in on the console (a template's
+  // root is locked, and a login prompt runs nothing typed at it).
+  password: "live-ct-suite",
   start: true,
 });
 check("a container is created from the template and started", create.status === 200 && create.body.started,
@@ -136,7 +140,7 @@ try {
 
   w = await page(`/${enc(node)}/containers/${ct}`);
   const tabs = [...w.document.querySelectorAll("#content [data-vmtab]")].map((t) => t.dataset.vmtab);
-  check("its page has no Hardware tab", tabs.length > 0 && !tabs.includes("hardware"), tabs.join(","));
+  check("its page has a Hardware tab", tabs.includes("hardware"), tabs.join(","));
   const shown = w.document.querySelector("#content .dtitle")?.textContent.trim();
   check("its page names it", shown === "live-ct suite", `shows ${JSON.stringify(shown)}`);
   w.close();
@@ -160,6 +164,54 @@ try {
   }
   check("the console answers typed input", seen.includes("vm-42") || /login:/.test(seen), JSON.stringify(seen.slice(-200)));
   check("no getty spam on the console", !/can't open \/dev\/tty\d/.test(seen), JSON.stringify(seen.slice(-200)));
+
+  // Output the container writes by itself must arrive without a keystroke.
+  // It used to be read only as a side effect of sending input (no libvirt
+  // event loop), so the console updated only when Enter was pressed.
+  // Log in (a fresh getty sits at its prompt), then background a delayed echo.
+  const type = (t) => j("POST", `${P}/containers/${ct}/console/write`, { data: Buffer.from(t).toString("base64") });
+  const until = async (re, ms) => {
+    let buf = "";
+    const t = Date.now();
+    while (!re.test(buf) && Date.now() - t < ms) {
+      const r = (await j("GET", `${P}/containers/${ct}/console/read?after=${off}`)).body;
+      buf += Buffer.from(r.data ?? "", "base64").toString();
+      off = r.offset;
+    }
+    return buf;
+  };
+  await type("\n");
+  if (/login:\s*$/.test(await until(/(login:|#)\s*$/, 5000))) {
+    await type("root\n");
+    await until(/[Pp]assword:\s*$/, 5000);
+    await type("live-ct-suite\n");
+    await until(/#\s*$/, 8000);
+  }
+  // One command, then no input at all while it prints a line a second.
+  await type("for i in 1 2 3; do sleep 1; echo tick-$i; done\n");
+  const t0 = Date.now();
+  const at = [];
+  let late = "";
+  while (at.length < 3 && Date.now() - t0 < 10000) {
+    const r = (await j("GET", `${P}/containers/${ct}/console/read?after=${off}`)).body;
+    late += Buffer.from(r.data ?? "", "base64").toString();
+    off = r.offset;
+    while (at.length < 3 && late.includes(`tick-${at.length + 1}\r`)) at.push(Date.now() - t0);
+  }
+  check("output the container writes by itself arrives with no input, as it is written",
+    at.length === 3 && at[2] - at[0] > 1500,
+    `ticks at ${at.join(", ")} ms: ${JSON.stringify(late.slice(-120))}`);
+
+  // Hardware: read, change, read back; a shrink is refused.
+  const hw0 = (await j("GET", `${P}/containers/${ct}/hardware`)).body;
+  const hw1 = { ...hw0, vcpus: 2, cpu_limit_pct: 50, swap_mb: 64, disk_gb: hw0.disk_gb + 1 };
+  const put = await j("PUT", `${P}/containers/${ct}/hardware`, hw1);
+  check("hardware changes are accepted, and the disk grows at once",
+    put.status === 200 && put.body.disk_grown === true, JSON.stringify(put.body));
+  const hw2 = (await j("GET", `${P}/containers/${ct}/hardware`)).body;
+  check("…and read back as set", JSON.stringify(hw2) === JSON.stringify(hw1), `${JSON.stringify(hw2)}`);
+  check("the root disk cannot shrink",
+    (await j("PUT", `${P}/containers/${ct}/hardware`, { ...hw1, disk_gb: hw0.disk_gb })).status === 400);
   await j("POST", `${P}/containers/${ct}/console/disconnect`);
 } finally {
   await j("POST", `${P}/containers/${ct}/destroy`);
