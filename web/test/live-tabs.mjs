@@ -59,7 +59,7 @@ await wait(1500);
 
 check("server view has a Dashboard tab first, then the resource tabs", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall"], `tabs: ${tabs}`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall"], `tabs: ${tabs}`);
   assert.ok(tabNamed("Dashboard").querySelector("svg"), "Dashboard tab has an icon");
   assert.ok(tabNamed("Firewall").querySelector("svg"), "Firewall tab has an icon");
 });

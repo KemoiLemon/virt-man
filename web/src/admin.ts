@@ -35,7 +35,7 @@ export interface AdminCtx {
   openConnectionDialog(id?: string): void;
   deleteConnection(id: string): Promise<void>;
   /// Open a guest or network in the main view.
-  openResource(kind: "vm" | "network" | "pool", conn: string, name: string): void;
+  openResource(kind: "vm" | "ct" | "network" | "pool", conn: string, name: string): void;
   /// Go to another admin section (through the router, so the URL follows).
   go(section: AdminSection, tab?: AdminTab): void;
   /// The section's open tab, from the URL.
@@ -58,6 +58,7 @@ const LABEL: Record<AdminSection, string> = {
   permissions: "Permissions",
   daemons: "Daemons",
   vms: "VMs",
+  containers: "Containers",
   networks: "Networks",
   pools: "Storage Pools",
   quotas: "Quotas",
@@ -74,6 +75,7 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
   permissions: ic.perms,
   daemons: ic.server,
   vms: ic.vms,
+  containers: ic.container,
   networks: ic.network,
   pools: ic.storage,
   quotas: ic.quota,
@@ -86,7 +88,7 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
 /// live suite against ADMIN_SECTIONS), in the order they are listed.
 export const ADMIN_GROUPS: { label: string; sections: AdminSection[] }[] = [
   { label: "Access", sections: ["users", "groups", "roles", "permissions", "keys"] },
-  { label: "Infrastructure", sections: ["daemons", "vms", "networks", "pools", "ips"] },
+  { label: "Infrastructure", sections: ["daemons", "vms", "containers", "networks", "pools", "ips"] },
   { label: "Limits", sections: ["quotas"] },
   { label: "Audit", sections: ["activity"] },
 ];
@@ -464,7 +466,7 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
   for (const c of ctx.connections()) {
     const node = `/nodes/${c.id}`;
     out.push({ path: node, label: `${c.name} — whole daemon` });
-    for (const k of ["vms", "networks", "storage", "bridges"]) {
+    for (const k of ["vms", "containers", "networks", "storage", "bridges"]) {
       out.push({ path: `${node}/${k}`, label: `${c.name} › all ${k}` });
     }
     try {
@@ -478,6 +480,11 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
       for (const n of nets) out.push({ path: `${node}/networks/${n.name}`, label: `${c.name} › network ${n.name}` });
       for (const p of pools) out.push({ path: `${node}/storage/${p.name}`, label: `${c.name} › pool ${p.name}` });
       for (const b of bridges) out.push({ path: `${node}/bridges/${b}`, label: `${c.name} › bridge ${b}` });
+      // Containers apart: a host without the LXC driver still offers the rest.
+      const cts = await api.get<{ name: string; title?: string }[]>(`/proxy/${c.id}/containers`).catch(() => []);
+      for (const v of cts) {
+        out.push({ path: `${node}/containers/${v.name}`, label: `${c.name} › container ${v.title || v.name}` });
+      }
     } catch {
       // Offline daemon: its whole-daemon paths are still offered.
     }
@@ -597,9 +604,11 @@ const daemons_: Painter = async (ctx, area) => {
 /// owner stays, since "what does this user have" is the other common ask.
 let resOwner = "";
 
-const KIND_SECTION: Record<"vm" | "network" | "pool", AdminSection> = { vm: "vms", network: "networks", pool: "pools" };
+const KIND_SECTION: Record<"vm" | "ct" | "network" | "pool", AdminSection> = {
+  vm: "vms", ct: "containers", network: "networks", pool: "pools",
+};
 
-function resourcePage(kind: "vm" | "network" | "pool"): Painter {
+function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
   return async (ctx, area, gen) => {
     const conns = ctx.connections();
     const conn = ctx.tab() && conns.some((c) => c.id === ctx.tab()) ? ctx.tab()! : conns[0]?.id;
@@ -616,7 +625,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
     const tabs = `<div class="tabbar">
       ${conns.map((c) => `<button class="tab ${c.id === conn ? "active" : ""}" data-res-tab="${esc(c.id)}">
           ${c.online === false ? ic.offline(14) : ic.server(14)} ${esc(c.name)} <span class="tab-count">${counts.get(c.id) ?? 0}</span></button>`).join("")}
-      ${kind === "pool" ? "" : `<div class="tabbar-actions">
+      ${kind === "pool" || kind === "ct" ? "" : `<div class="tabbar-actions">
         <button class="btn primary" id="res-new">${ic.plus(14)} ${kind === "vm" ? "VM" : "Network"} for user</button>
       </div>`}
     </div>`;
@@ -637,13 +646,13 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
         `<td class="tname row-link" data-open-res="${i}">${esc(r.title || r.name)}</td>`;
 
       let table: string;
-      if (kind === "vm") {
+      if (kind === "vm" || kind === "ct") {
         table = `<table class="grid">
           <tr><th>Name</th><th>Owner</th><th>State</th><th>vCPUs</th><th>Memory</th><th class="col-actions"></th></tr>
           ${shown.map((r, i) => `<tr class="${r.suspended ? "suspended" : ""}">
-            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}</td>
+            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}${r.privileged ? ` <span class="state bad">Privileged</span>` : ""}</td>
             <td>${r.vcpus ?? "—"}</td><td>${r.memory_mb ? fmtBytes(r.memory_mb * 1048576) : "—"}</td>
-            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No VMs${resOwner ? " for this owner" : ""}.</td></tr>`}
+            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No ${kind === "ct" ? "containers" : "VMs"}${resOwner ? " for this owner" : ""}.</td></tr>`}
         </table>`;
       } else if (kind === "network") {
         table = `<table class="grid">
@@ -704,12 +713,13 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
       if (create) create.onclick = () => createFor(ctx, kind as "vm" | "network", conn, () => ctx.go(section, conn));
       bind(area, "data-open-res", (i) => {
         const r = shown[Number(i)];
-        ctx.openResource(r.kind as "vm" | "network" | "pool", r.conn, r.name);
+        ctx.openResource(r.kind as "vm" | "ct" | "network" | "pool", r.conn, r.name);
       });
       bind(area, "data-owner-res", (i) => void changeOwner(ctx, shown[Number(i)], section));
       bind(area, "data-share-res", (i) => {
         const r = shown[Number(i)];
-        void openGrant(ctx, { path: `/nodes/${r.conn}/${r.kind === "vm" ? "vms" : "networks"}/${r.name}` });
+        const seg = r.kind === "vm" ? "vms" : r.kind === "ct" ? "containers" : "networks";
+        void openGrant(ctx, { path: `/nodes/${r.conn}/${seg}/${r.name}` });
       });
       bind(area, "data-suspend-res", async (i) => {
         const r = shown[Number(i)];
@@ -1245,6 +1255,7 @@ const SECTIONS: Record<AdminSection, Painter> = {
   permissions: permissions_,
   daemons: daemons_,
   vms: resourcePage("vm"),
+  containers: resourcePage("ct"),
   networks: resourcePage("network"),
   pools: resourcePage("pool"),
   quotas: quotas_,

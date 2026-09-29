@@ -33,6 +33,13 @@ test("every view round-trips through its path", () => {
     { view: "vm", conn: "c1", vm: "web1", tab: "options" },
     { view: "vm", conn: "c1", vm: "web1", tab: "network" },
     { view: "vm", conn: "c1", vm: "web1", tab: "xml" },
+    { view: "dc", tab: "containers" },
+    { view: "conn", conn: "c1", tab: "containers" },
+    { view: "ct", conn: "c1", ct: "web", tab: "summary" },
+    { view: "ct", conn: "c1", ct: "web", tab: "console" },
+    { view: "ct", conn: "c1", ct: "web", tab: "network" },
+    { view: "ct", conn: "c1", ct: "web", tab: "options" },
+    { view: "ct", conn: "c1", ct: "web", tab: "xml" },
     { view: "net", conn: "c2", net: "default" },
     { view: "pool", conn: "c2", pool: "ISOs" },
   ];
@@ -50,6 +57,12 @@ test("paths use the node's name and read the way they were asked for", () => {
   assert.equal(r.routeToPath({ view: "net", conn: "c1", net: "lan" }, nodes), "/Main/networks/lan");
   assert.equal(r.routeToPath({ view: "conn", conn: "c1", tab: "storage" }, nodes), "/Main/storage");
   assert.equal(r.routeToPath({ view: "pool", conn: "c1", pool: "ISOs" }, nodes), "/Main/storage/ISOs");
+});
+
+test("a container has no hardware tab: that path lands on its summary", () => {
+  assert.equal(r.routeToPath({ view: "ct", conn: "c1", ct: "web", tab: "summary" }, nodes), "/Main/containers/web");
+  assert.deepEqual(r.parsePath("/Main/containers/web/hardware", nodes),
+    { view: "ct", conn: "c1", ct: "web", tab: "summary" });
 });
 
 test("names with spaces and slashes are encoded, and decode back", () => {
