@@ -40,6 +40,10 @@ pub fn routes() -> Router {
             "/containers/{name}/interfaces/{mac}/bandwidth",
             axum::routing::put(bandwidth),
         )
+        .route(
+            "/containers/{name}/hardware",
+            get(get_hardware).put(put_hardware),
+        )
 }
 
 /// Everything else under `/containers/{name}/...` is a `/domains` route with
@@ -538,6 +542,259 @@ async fn bandwidth(
     .map_err(ApiError::bad_request)
 }
 
+/// A container's resources, as its hardware editor shows them.
+#[derive(serde::Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Hardware {
+    pub vcpus: u32,
+    pub memory_mb: u64,
+    /// 0 = no swap beyond memory.
+    #[serde(default)]
+    pub swap_mb: u64,
+    /// CPU cap in whole-CPU percent (150 = one and a half CPUs); 0 = none.
+    #[serde(default)]
+    pub cpu_limit_pct: u32,
+    /// The rootfs size. It can only grow: shrinking ext4 under a running
+    /// container is not safe, and there is no undo if it goes wrong.
+    pub disk_gb: u64,
+}
+
+fn mib_of(xml: &str, tag: &str) -> u64 {
+    let Some(i) = xml.find(&format!("<{tag}")) else {
+        return 0;
+    };
+    let t = &xml[i..];
+    let Some(end) = t.find('>') else { return 0 };
+    let unit = crate::disks::attr(&t[..end], "unit").unwrap_or("KiB");
+    let v: u64 = t[end + 1..]
+        .split('<')
+        .next()
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
+    match unit {
+        "MiB" | "M" => v,
+        "GiB" | "G" => v * 1024,
+        "b" | "bytes" => v >> 20,
+        _ => v / 1024,
+    }
+}
+
+fn read_hardware(
+    d: &Domain,
+    c: &virt::connect::Connect,
+) -> Result<(Hardware, String), crate::libvirt::LvError> {
+    let xml = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?;
+    let memory_mb = mib_of(&xml, "memory");
+    let hard = mib_of(&xml, "swap_hard_limit");
+    let vcpus = xml
+        .find("<vcpu")
+        .and_then(|i| xml[i..].split('>').nth(1))
+        .and_then(|t| t.split('<').next()?.trim().parse().ok())
+        .unwrap_or(1);
+    let quota: i64 = xml
+        .find("<quota>")
+        .and_then(|i| xml[i + 7..].split('<').next()?.trim().parse().ok())
+        .unwrap_or(0);
+    let period: i64 = xml
+        .find("<period>")
+        .and_then(|i| xml[i + 8..].split('<').next()?.trim().parse().ok())
+        .unwrap_or(100_000);
+    let image =
+        ct::rootfs_of(&xml).ok_or_else(|| "this container records no rootfs image".to_string())?;
+    let disk_gb = StorageVol::lookup_by_path(c, &image)
+        .and_then(|v| v.get_info())
+        .map(|i| i.capacity.div_ceil(1 << 30))
+        .unwrap_or(0);
+    Ok((
+        Hardware {
+            vcpus,
+            memory_mb,
+            swap_mb: hard.saturating_sub(memory_mb),
+            cpu_limit_pct: if quota > 0 {
+                (quota * 100 / period.max(1)) as u32
+            } else {
+                0
+            },
+            disk_gb,
+        },
+        image,
+    ))
+}
+
+async fn get_hardware(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    let hw = lxc(with_conn(move |c| {
+        let d = crate::libvirt::domain(c, &name)?;
+        // The rootfs volume lives on the storage driver; this connection is
+        // the LXC one, which reaches it through libvirtd all the same.
+        Ok(read_hardware(&d, c)?.0)
+    }))
+    .await
+    .map_err(ApiError::not_found)?;
+    Ok(Json(json!(hw)))
+}
+
+/// Replace `<tag>...</tag>` (or `<tag .../>`) with `new`, or insert `new`
+/// before `before` when there is none. `new` may be empty (remove).
+fn set_element(xml: &str, tag: &str, new: &str, before: &str) -> String {
+    if let Some(i) = xml
+        .find(&format!("<{tag}>"))
+        .or_else(|| xml.find(&format!("<{tag} ")))
+    {
+        let close = format!("</{tag}>");
+        let end = match xml[i..].find(&close) {
+            Some(j) => i + j + close.len(),
+            None => i + xml[i..].find("/>").map_or(0, |j| j + 2),
+        };
+        return format!("{}{new}{}", &xml[..i], &xml[end..]);
+    }
+    match xml.find(before) {
+        Some(i) if !new.is_empty() => format!("{}{new}{}", &xml[..i], &xml[i..]),
+        _ => xml.to_string(),
+    }
+}
+
+/// The definition with `hw`'s sizes in place of the current ones.
+pub fn with_hardware(xml: &str, hw: &Hardware) -> String {
+    let mut x = set_element(
+        xml,
+        "memory",
+        &format!("<memory unit='MiB'>{}</memory>", hw.memory_mb),
+        "<vcpu",
+    );
+    // currentMemory follows memory: a container has no balloon to size below it.
+    x = set_element(&x, "currentMemory", "", "");
+    let vcpu = format!("<vcpu placement='static'>{}</vcpu>", hw.vcpus);
+    x = set_element(&x, "vcpu", &vcpu, "<os");
+    let swap = if hw.swap_mb > 0 {
+        format!(
+            "<memtune><swap_hard_limit unit='MiB'>{}</swap_hard_limit></memtune>",
+            hw.memory_mb + hw.swap_mb
+        )
+    } else {
+        String::new()
+    };
+    x = set_element(&x, "memtune", &swap, "<vcpu");
+    let tune = if hw.cpu_limit_pct > 0 {
+        format!(
+            "<cputune><period>100000</period><quota>{}</quota></cputune>",
+            u64::from(hw.cpu_limit_pct) * 1000
+        )
+    } else {
+        String::new()
+    };
+    set_element(&x, "cputune", &tune, "<os")
+}
+
+fn check_hardware(hw: &Hardware) -> Result<(), String> {
+    if !(16..=1 << 20).contains(&hw.memory_mb) {
+        return Err("memory must be 16 MB-1 TB".into());
+    }
+    if !(1..=256).contains(&hw.vcpus) {
+        return Err("vCPUs must be 1-256".into());
+    }
+    if hw.swap_mb > 1 << 20 {
+        return Err("swap must be under 1 TB".into());
+    }
+    if hw.cpu_limit_pct > hw.vcpus * 100 {
+        return Err(format!(
+            "a CPU limit of {}% is more than {} vCPU(s) can use; leave it 0 for none",
+            hw.cpu_limit_pct, hw.vcpus
+        ));
+    }
+    if !(1..=4096).contains(&hw.disk_gb) {
+        return Err("the root disk must be 1-4096 GB".into());
+    }
+    Ok(())
+}
+
+/// Change a container's resources. Measured on libvirt 12.7, the LXC driver
+/// applies a CPU cap and a *lower* memory limit to a running container at
+/// once, through its cgroup; more memory than it started with, the vCPU
+/// count and swap cannot change live, so they are written to the definition and reported as
+/// `pending` until the next start rather than claimed. A bigger root disk is
+/// grown now, running or not: the volume, its loop device, then ext4 online.
+async fn put_hardware(
+    Path(name): Path<String>,
+    Json(hw): Json<Hardware>,
+) -> Result<Json<Value>, ApiError> {
+    check_hardware(&hw).map_err(ApiError::bad_request)?;
+    let v = lxc(with_conn(move |c| {
+        let d = crate::libvirt::domain(c, &name)?;
+        let (cur, image) = read_hardware(&d, c)?;
+        if hw.disk_gb < cur.disk_gb {
+            return Err(format!(
+                "the root disk can only grow ({} GB now); shrinking it could lose data",
+                cur.disk_gb
+            )
+            .into());
+        }
+        let xml = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?;
+        let next = with_hardware(&xml, &hw);
+        ct::same_rootfs(&xml, &next, &d.get_uuid_string()?)?;
+        Domain::define_xml(c, &next)?;
+
+        let running = d.is_active().unwrap_or(false);
+        let mut applied = vec![];
+        let mut pending = vec![];
+        if running {
+            if hw.memory_mb != cur.memory_mb {
+                // Measured: lowering applies to the running container's
+                // cgroup at once; raising past what it started with is
+                // refused ("Cannot resize the max memory on an active
+                // domain"), so that is pending until the next start.
+                let kib = hw.memory_mb * 1024;
+                match d.set_memory_flags(kib, virt::sys::VIR_DOMAIN_AFFECT_LIVE) {
+                    Ok(_) => applied.push("memory"),
+                    Err(_) => pending.push("memory"),
+                }
+            }
+            if hw.cpu_limit_pct != cur.cpu_limit_pct {
+                // The quota is enforced by the cgroup, so it applies now.
+                let quota = if hw.cpu_limit_pct > 0 {
+                    i64::from(hw.cpu_limit_pct) * 1000
+                } else {
+                    -1
+                };
+                let info = virt::domain::SchedulerInfo {
+                    scheduler_type: "posix".into(),
+                    vcpu_bw: virt::domain::SchedBandwidth {
+                        period: Some(100_000),
+                        quota: Some(quota),
+                    },
+                    ..Default::default()
+                };
+                let ok = d
+                    .set_scheduler_parameters_flags(&info, virt::sys::VIR_DOMAIN_AFFECT_LIVE)
+                    .is_ok();
+                if ok {
+                    applied.push("cpu limit")
+                } else {
+                    pending.push("cpu limit")
+                }
+            }
+            if hw.vcpus != cur.vcpus {
+                pending.push("vCPUs");
+            }
+            if hw.swap_mb != cur.swap_mb {
+                pending.push("swap");
+            }
+        }
+        let mut grown = false;
+        if hw.disk_gb > cur.disk_gb {
+            let vol = StorageVol::lookup_by_path(c, &image)?;
+            vol.resize(hw.disk_gb << 30, 0)?;
+            ct::grow_fs(&image)?;
+            grown = true;
+        }
+        Ok(json!({
+            "name": name, "running": running, "applied": applied, "pending": pending,
+            "disk_grown": grown, "hardware": hw,
+        }))
+    }))
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(v))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +808,59 @@ mod tests {
         assert_eq!(hostname_from("My Web Server!"), "my-web-server");
         assert_eq!(hostname_from("***"), "ct");
         assert!(check_hostname(&hostname_from(&"é".repeat(80))).is_ok());
+    }
+
+    #[test]
+    fn hardware_is_rewritten_in_place_and_read_back() {
+        let nets = vec!["internet".to_string()];
+        let xml = ct::domain_xml(&ct::Spec {
+            uuid: "u",
+            title: "t",
+            memory_mb: 512,
+            swap_mb: 256,
+            vcpus: 1,
+            rootfs: "/p/u.raw",
+            networks: &nets,
+            id_base: Some(ct::ID_BASE),
+        });
+        let hw = Hardware {
+            vcpus: 4,
+            memory_mb: 2048,
+            swap_mb: 0,
+            cpu_limit_pct: 150,
+            disk_gb: 8,
+        };
+        let x = with_hardware(&xml, &hw);
+        assert_eq!(mib_of(&x, "memory"), 2048);
+        assert!(x.contains("<vcpu placement='static'>4</vcpu>"), "{x}");
+        assert!(!x.contains("<memtune>"), "swap 0 drops the limit");
+        assert!(x.contains("<quota>150000</quota>"), "{x}");
+        assert_eq!(x.matches("<vcpu").count(), 1, "replaced, not added");
+        assert!(
+            ct::same_rootfs(&xml, &x, "u").is_ok(),
+            "the rootfs is untouched"
+        );
+        let back = with_hardware(
+            &x,
+            &Hardware {
+                cpu_limit_pct: 0,
+                swap_mb: 64,
+                ..hw.clone()
+            },
+        );
+        assert!(
+            !back.contains("<cputune>") && back.contains("<swap_hard_limit unit='MiB'>2112<"),
+            "{back}"
+        );
+        assert!(
+            check_hardware(&Hardware {
+                cpu_limit_pct: 500,
+                ..hw.clone()
+            })
+            .is_err(),
+            "cap above vCPUs"
+        );
+        assert!(check_hardware(&Hardware { disk_gb: 0, ..hw }).is_err());
     }
 
     #[test]

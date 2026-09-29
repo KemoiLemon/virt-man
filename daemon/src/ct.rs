@@ -158,6 +158,12 @@ pub fn domain_xml(s: &Spec) -> String {
     } else {
         String::new()
     };
+    // `<privnet/>`: a private network namespace even with no interface.
+    // Without it, a container with no NIC shares the host's, and libvirt then
+    // cannot mount /sys/fs/cgroup inside an unprivileged one ("Unable to
+    // create directory /sys/fs/cgroup: Read-only file system", measured on
+    // libvirt 12.7). It is also what a container should have anyway: no NIC
+    // means no network, not the host's.
     let nics: String = s
         .networks
         .iter()
@@ -172,6 +178,7 @@ pub fn domain_xml(s: &Spec) -> String {
         "<domain type='lxc'><name>{uuid}</name><uuid>{uuid}</uuid><title>{title}</title>\
 <metadata><virtman:container xmlns:virtman='{META_NS}' rootfs='{rootfs}'/></metadata>\
 <memory unit='MiB'>{mem}</memory>{swap}<vcpu>{vcpus}</vcpu>\
+<features><privnet/></features>\
 <os><type>exe</type><init>/sbin/init</init></os>{idmap}\
 <devices><filesystem type='mount' accessmode='passthrough'><source dir='{dir}'/><target dir='/'/></filesystem>\
 {nics}<console type='pty'/></devices></domain>",
@@ -337,6 +344,33 @@ pub fn reconcile_owner(dir: &Path, want: u32) -> Result<bool, String> {
         }
     }
     Ok(true)
+}
+
+/// Grow the ext4 inside a rootfs image to fill it, after the volume grew.
+/// Online when mounted: the loop device is told its backing file changed
+/// (`losetup -c`), then `resize2fs` grows the mounted filesystem. Offline,
+/// `resize2fs` runs on the image itself (after the `e2fsck` it insists on).
+pub fn grow_fs(image: &str) -> Result<(), String> {
+    let out = Command::new("losetup")
+        .args(["-j", image])
+        .output()
+        .map_err(|e| format!("losetup: {e}"))?;
+    let dev = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.split(':').next())
+        .map(str::to_string);
+    match dev {
+        Some(dev) => {
+            run(Command::new("losetup").args(["-c", &dev]))?;
+            run(Command::new("resize2fs").arg(&dev))
+        }
+        None => {
+            // e2fsck exits 1 when it fixed something; that is not a failure.
+            let _ = Command::new("e2fsck").args(["-f", "-p", image]).status();
+            run(Command::new("resize2fs").arg(image))
+        }
+    }
 }
 
 /// Unmount a deleted container's rootfs. A busy mount is left alone.
@@ -511,13 +545,21 @@ pub fn hash_password(pw: &str) -> Result<String, String> {
 /// Whether the host can run containers at all, and if not why, in words a
 /// person can act on.
 pub fn missing_tools() -> Vec<&'static str> {
-    ["unshare", "mkfs.ext4", "tar", "mount", "openssl"]
-        .into_iter()
-        .filter(|t| {
-            !std::env::var_os("PATH")
-                .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(t).is_file()))
-        })
-        .collect()
+    [
+        "unshare",
+        "mkfs.ext4",
+        "tar",
+        "mount",
+        "openssl",
+        "losetup",
+        "resize2fs",
+    ]
+    .into_iter()
+    .filter(|t| {
+        !std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(t).is_file()))
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -562,6 +604,10 @@ mod tests {
         assert_eq!(rootfs_of(&x).as_deref(), Some("/p/u.raw"));
         assert!(x.contains("<title>web &lt;1&gt;</title>"), "{x}");
         assert!(x.contains("<source dir='/run/virt-man/ct/u'/>"));
+        assert!(
+            x.contains("<privnet/>"),
+            "never the host's network namespace"
+        );
         s.id_base = None;
         let x = domain_xml(&s);
         assert!(is_privileged(&x));

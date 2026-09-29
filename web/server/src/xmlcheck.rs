@@ -658,6 +658,17 @@ pub fn check_container(xml: &str) -> Result<ContainerSpec, String> {
             }
             "resource" | "clock" => harmless_subtree(c)?,
             "on_poweroff" | "on_reboot" | "on_crash" => leaf(c)?,
+            // Only `privnet` (a private network namespace). `capabilities`
+            // hands the container host capabilities.
+            "features" => {
+                attrs_only(c, &[])?;
+                for f in elements(c) {
+                    if f.tag_name().name() != "privnet" {
+                        return Err(refuse(&format!("<{}> in <features>", f.tag_name().name())));
+                    }
+                    plain(f, &[])?;
+                }
+            }
             "os" => {
                 attrs_only(c, &[])?;
                 for o in elements(c) {
@@ -1213,6 +1224,7 @@ mod tests {
   <currentMemory unit='KiB'>262144</currentMemory>
   <vcpu placement='static'>1</vcpu>
   <resource><partition>/machine</partition></resource>
+  <features><privnet/></features>
   <os><type arch='x86_64'>exe</type><init>/sbin/init</init></os>
   <idmap>
     <uid start='0' target='1073741824' count='65536'/>
@@ -1256,7 +1268,7 @@ mod tests {
         for (what, xml) in [
             ("host bind mount", host_mount),
             ("hostdev", with("<console", "<hostdev mode='capabilities' type='storage'><source><block>/dev/sda</block></source></hostdev><console")),
-            ("capabilities", with("<clock", "<features><capabilities policy='allow'/></features><clock")),
+            ("capabilities", with("<privnet/>", "<privnet/><capabilities policy='allow'/>")),
             ("a bridge interface", with("type='network'><mac", "type='bridge'><mac")),
             ("a VM", with("type='lxc'>", "type='kvm'>")),
             ("seclabel", with("<clock", "<seclabel type='none'/><clock")),
