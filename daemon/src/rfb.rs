@@ -37,14 +37,41 @@ pub struct Frame {
     pub h: u16,
     /// Bumped on every completed update so the UI can skip unchanged frames.
     pub seq: u64,
-    /// Union of the rectangles changed since `damage_base`. Lets the viewer
-    /// receive only what actually moved instead of a whole screen.
-    damage: Option<Rect>,
+    /// One flag per `TILE`x`TILE` cell, row-major, `tile_w * tile_h` long. Lets
+    /// the viewer receive only what actually moved instead of a whole screen.
+    dirty: Vec<bool>,
+    dirty_any: bool,
+    tile_w: usize,
+    tile_h: usize,
     /// `seq` the damage was accumulated from; a viewer further behind than
     /// this must take a full frame.
     damage_base: u64,
 }
 
+/// Damage tile size, in pixels. See [`Frame::touch`].
+const TILE: u16 = 64;
+
+impl Frame {
+    /// A blank framebuffer of `w`x`h`, with its tile grid sized to match. The
+    /// grid must be rebuilt whenever the size changes, or damage lands on the
+    /// wrong tiles after a guest resolution change.
+    fn sized(w: u16, h: u16) -> Frame {
+        let (w, h) = (w.max(1), h.max(1));
+        let tile_w = (w as usize).div_ceil(TILE as usize);
+        let tile_h = (h as usize).div_ceil(TILE as usize);
+        Frame {
+            rgba: vec![0u8; w as usize * h as usize * 4],
+            w,
+            h,
+            seq: 0,
+            dirty: vec![false; tile_w * tile_h],
+            dirty_any: false,
+            tile_w,
+            tile_h,
+            damage_base: 0,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
     pub x: u16,
@@ -54,43 +81,125 @@ pub struct Rect {
 }
 
 impl Rect {
-    fn union(self, o: Rect) -> Rect {
-        let x = self.x.min(o.x);
-        let y = self.y.min(o.y);
-        let r = (self.x + self.w).max(o.x + o.w);
-        let b = (self.y + self.h).max(o.y + o.h);
-        Rect {
-            x,
-            y,
-            w: r - x,
-            h: b - y,
-        }
+    /// Pixels in the rectangle. Used by the damage tests to compare a tiled
+    /// update against the screen it covers.
+    #[cfg(test)]
+    fn area(self) -> u32 {
+        self.w as u32 * self.h as u32
     }
 }
 
 impl Frame {
     /// Record a changed region, merged into the pending damage.
+    ///
+    /// Damage is kept as a *tile grid*, not one bounding box. A bounding box is
+    /// what this used to do, and it made a keypress at the top-left plus one at
+    /// the bottom-right cost a whole-screen transfer: the union of two distant
+    /// rectangles is the screen. Tiles bound the cost by what actually changed.
+    ///
+    /// 64px tiles, because they are fine enough that an idle desktop's clock
+    /// costs one tile, and coarse enough that a repainting window does not
+    /// produce hundreds of rectangles to encode and paint separately.
     fn touch(&mut self, r: Rect) {
         if r.w == 0 || r.h == 0 {
             return;
         }
-        self.damage = Some(match self.damage {
-            Some(d) => d.union(r),
-            None => r,
-        });
+        let x0 = (r.x / TILE) as usize;
+        let y0 = (r.y / TILE) as usize;
+        let x1 = ((r.x as u32 + r.w as u32 - 1) / TILE as u32) as usize;
+        let y1 = ((r.y as u32 + r.h as u32 - 1) / TILE as u32) as usize;
+        let (tw, th) = (self.tile_w, self.tile_h);
+        for ty in y0..=y1.min(th.saturating_sub(1)) {
+            for tx in x0..=x1.min(tw.saturating_sub(1)) {
+                if ty * tw + tx < self.dirty.len() {
+                    self.dirty[ty * tw + tx] = true;
+                }
+            }
+        }
+        self.dirty_any = true;
+    }
+
+    /// Forget all pending damage and return the tiles that were set, as merged
+    /// rectangles. Called once per delivered update.
+    fn take_damage(&mut self) -> Vec<Rect> {
+        if !self.dirty_any {
+            return Vec::new();
+        }
+        let (tw, th) = (self.tile_w, self.tile_h);
+        let mut out = Vec::new();
+        // Merge each run of dirty tiles on a row, then merge identical runs
+        // down the rows. Without this a repaint is N rectangles; with it, the
+        // common case (a rectangle several tiles across) is one.
+        let mut open: Vec<(usize, usize, Rect)> = Vec::new(); // tx0, tx1, rect
+        for ty in 0..th {
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            let mut tx = 0;
+            while tx < tw {
+                if self.dirty[ty * tw + tx] {
+                    let start = tx;
+                    while tx < tw && self.dirty[ty * tw + tx] {
+                        tx += 1;
+                    }
+                    runs.push((start, tx));
+                } else {
+                    tx += 1;
+                }
+            }
+            let mut next: Vec<(usize, usize, Rect)> = Vec::new();
+            for (a, b) in runs {
+                // Extend a rectangle from the previous row when its tx range
+                // matches exactly, so a solid block becomes one rect.
+                if let Some(i) = open.iter().position(|(oa, ob, _)| *oa == a && *ob == b) {
+                    let (oa, ob, mut r) = open.remove(i);
+                    r.h = (ty as u16 + 1) * TILE - r.y;
+                    next.push((oa, ob, r));
+                } else {
+                    next.push((
+                        a,
+                        b,
+                        Rect {
+                            x: (a as u16) * TILE,
+                            y: (ty as u16) * TILE,
+                            w: ((b - a) as u16) * TILE,
+                            h: TILE,
+                        },
+                    ));
+                }
+            }
+            // Rows that did not continue are done.
+            for (_, _, r) in open.drain(..) {
+                out.push(r);
+            }
+            open = next;
+        }
+        for (_, _, r) in open.drain(..) {
+            out.push(r);
+        }
+        self.dirty.iter_mut().for_each(|d| *d = false);
+        self.dirty_any = false;
+        out
     }
 }
 
-/// One update ready for the viewer: raw RGBA pixels for `rect` only.
+/// One update ready for the viewer: raw RGBA pixels, one buffer per rectangle.
+///
+/// Parallel arrays rather than a struct per rect: the pixels are the payload and
+/// the rects are the framing, and both go out in one JSON response.
 pub struct Update {
     pub seq: u64,
     pub w: u16,
     pub h: u16,
-    pub rect: Rect,
-    /// Row-major RGBA, `rect.w * rect.h * 4` bytes — already converted from the
-    /// guest's BGRX by `raw_to_rgba`, so a consumer must not convert again.
-    pub pixels: Vec<u8>,
+    /// Each rectangle, and `pixels[i]` its row-major RGBA (`rects[i].w *
+    /// rects[i].h * 4` bytes) — already converted from the guest's BGRX by
+    /// `raw_to_rgba`, so a consumer must not convert again.
+    pub rects: Vec<Rect>,
+    pub pixels: Vec<Vec<u8>>,
 }
+
+/// Most rectangles one update will carry. Past this the whole screen goes as a
+/// single rect: each rectangle costs the viewer a separate `putImageData`, and a
+/// thousand of those is slower than one full paint. See `next_update`.
+const MAX_RECTS: usize = 24;
 
 pub struct Session {
     pub frame: Mutex<Frame>,
@@ -112,13 +221,19 @@ impl Session {
         self.error.lock().unwrap().clone()
     }
 
-    /// Block until a frame newer than `since` exists, then return only the
-    /// changed rectangle as raw pixels.
+    /// Block until a frame newer than `since` exists, then return the changed
+    /// rectangles as raw pixels.
     ///
     /// This is the whole latency story: the request is already parked inside
     /// the backend when the frame lands, so the pixels go out on the same hop
-    /// that was already waiting. No poll interval, no second round trip, and
-    /// no image compression.
+    /// that was already waiting. No poll interval and no second round trip.
+    ///
+    /// The cap on the number of rectangles exists because each one is a
+    /// separate `putImageData` in the viewer, and a pathological repaint (a
+    /// guest scrolling a textured window) can dirty nearly every tile. Past
+    /// [`MAX_RECTS`] the whole screen is sent as one rect instead: one big
+    /// paint is cheaper to ship than a thousand small ones, and it cannot
+    /// tear.
     pub fn next_update(&self, since: u64, timeout: Duration) -> Option<Update> {
         let mut f = self.frame.lock().unwrap();
         if f.seq <= since {
@@ -133,47 +248,58 @@ impl Session {
         }
 
         // A viewer that missed the window the damage was tracked from cannot
-        // be patched incrementally; give it the whole screen.
-        //
-        // Whatever changed is always sent as ONE rectangle. Splitting a large
-        // repaint into bands made it visibly assemble in strips; a whole screen
-        // is only a few tens of milliseconds, which reads as instant when it
-        // lands in a single paint.
+        // be patched incrementally; give it the whole screen. Same when the
+        // damage is too fragmented to be worth sending piecemeal.
         let full = Rect {
             x: 0,
             y: 0,
             w: f.w,
             h: f.h,
         };
-        let rect = match f.damage {
-            Some(d) if since >= f.damage_base => d,
-            _ => full,
+        let mut rects = if since >= f.damage_base {
+            f.take_damage()
+        } else {
+            f.dirty_any = false;
+            Vec::new()
         };
-        let rect = clamp_rect(rect, f.w, f.h);
-
-        // Copy just the rectangle out of the framebuffer.
-        let (fw, rw, rh) = (f.w as usize, rect.w as usize, rect.h as usize);
-        let mut pixels = vec![0u8; rw * rh * 4];
-        for row in 0..rh {
-            let src = ((rect.y as usize + row) * fw + rect.x as usize) * 4;
-            let dst = row * rw * 4;
-            let n = rw * 4;
-            if src + n <= f.rgba.len() {
-                pixels[dst..dst + n].copy_from_slice(&f.rgba[src..src + n]);
-            }
+        if rects.is_empty() || rects.len() > MAX_RECTS {
+            rects = vec![full];
         }
+        let rects: Vec<Rect> = rects
+            .into_iter()
+            .map(|r| clamp_rect(r, f.w, f.h))
+            .filter(|r| r.w > 0 && r.h > 0)
+            .collect();
+        let rects = if rects.is_empty() { vec![full] } else { rects };
+
+        let pixels = rects
+            .iter()
+            .map(|rect| {
+                // Copy just this rectangle out of the framebuffer.
+                let (fw, rw, rh) = (f.w as usize, rect.w as usize, rect.h as usize);
+                let mut px = vec![0u8; rw * rh * 4];
+                for row in 0..rh {
+                    let src = ((rect.y as usize + row) * fw + rect.x as usize) * 4;
+                    let dst = row * rw * 4;
+                    let n = rw * 4;
+                    if src + n <= f.rgba.len() {
+                        px[dst..dst + n].copy_from_slice(&f.rgba[src..src + n]);
+                    }
+                }
+                px
+            })
+            .collect();
 
         // Everything pending has now been delivered, so the next update only
         // carries what changes from here on. A viewer that falls behind this
         // base is given a full screen instead, so this cannot lose pixels.
-        f.damage = None;
         f.damage_base = f.seq;
 
         Some(Update {
             seq: f.seq,
             w: f.w,
             h: f.h,
-            rect,
+            rects,
             pixels,
         })
     }
@@ -465,14 +591,7 @@ pub fn connect(id: &str, host: &str, port: u16) -> R<Arc<Session>> {
     // half, Nagle buffers them and input arrives late.
     tx.set_nodelay(true).ok();
     let sess = Arc::new(Session {
-        frame: Mutex::new(Frame {
-            rgba: vec![0u8; w as usize * h as usize * 4],
-            w,
-            h,
-            seq: 0,
-            damage: None,
-            damage_base: 0,
-        }),
+        frame: Mutex::new(Frame::sized(w, h)),
         frame_ready: Condvar::new(),
         tx: Mutex::new(Some(tx)),
         running: AtomicBool::new(true),
@@ -584,14 +703,16 @@ fn reader_loop(sess: &Arc<Session>, mut s: TcpStream) -> R<()> {
                             f.touch(Rect { x, y, w, h });
                         }
                         -223 => {
-                            // DesktopSize: the guest changed resolution.
+                            // DesktopSize: the guest changed resolution. Rebuild
+                            // the framebuffer *and* its tile grid, which is sized
+                            // to the old resolution and would otherwise drop
+                            // damage on the wrong tiles.
                             let mut f = sess.frame.lock().unwrap();
-                            f.w = w.max(1);
-                            f.h = h.max(1);
-                            f.rgba = vec![0u8; f.w as usize * f.h as usize * 4];
+                            let seq = f.seq;
+                            *f = Frame::sized(w, h);
                             // Everything changed; force a full frame next.
-                            f.damage = None;
-                            f.damage_base = f.seq;
+                            f.seq = seq;
+                            f.damage_base = seq;
                             resized = Some((f.w, f.h));
                         }
                         other => {
@@ -604,7 +725,7 @@ fn reader_loop(sess: &Arc<Session>, mut s: TcpStream) -> R<()> {
                 // every parked viewer wakes up to redraw an identical screen.
                 let bumped = {
                     let mut f = sess.frame.lock().unwrap();
-                    let changed = f.damage.is_some() || resized.is_some();
+                    let changed = f.dirty_any || resized.is_some();
                     if changed {
                         f.seq += 1;
                     }
@@ -710,46 +831,43 @@ mod tests {
     }
 
     #[test]
-    fn damage_merges_into_one_rect() {
-        let mut f = Frame {
-            rgba: vec![0u8; 64 * 64 * 4],
-            w: 64,
-            h: 64,
-            seq: 0,
-            damage: None,
-            damage_base: 0,
-        };
-        assert!(f.damage.is_none(), "a fresh frame has no damage");
+    fn damage_is_tiled_not_unioned() {
+        let mut f = Frame::sized(128, 128);
+        assert!(!f.dirty_any, "a fresh frame has no damage");
         f.touch(Rect {
             x: 10,
             y: 10,
             w: 4,
             h: 4,
         });
-        assert_eq!(
-            f.damage,
-            Some(Rect {
-                x: 10,
-                y: 10,
-                w: 4,
-                h: 4
-            })
-        );
-        // A second region expands the union, never replaces it.
+        assert!(f.dirty_any);
+        let d = f.take_damage();
+        assert_eq!(d.len(), 1, "one small change is one rectangle");
+        assert_eq!((d[0].x, d[0].y), (0, 0), "the tile containing it");
+        f.take_damage();
+        assert!(!f.dirty_any, "taking damage clears it");
+
+        // The point of tiling: two changes far apart stay two rectangles. A
+        // union (what this used to do) would make them one screen-sized rect,
+        // so a keypress with a clock repainting cost a whole frame.
         f.touch(Rect {
-            x: 20,
-            y: 30,
+            x: 0,
+            y: 0,
             w: 4,
-            h: 2,
+            h: 4,
         });
-        assert_eq!(
-            f.damage,
-            Some(Rect {
-                x: 10,
-                y: 10,
-                w: 14,
-                h: 22
-            })
+        f.touch(Rect {
+            x: 120,
+            y: 120,
+            w: 4,
+            h: 4,
+        });
+        let d = f.take_damage();
+        assert_eq!(d.len(), 2, "two distant changes, two rectangles");
+        let area: u32 = d.iter().map(|r| r.area()).sum();
+        assert!(
+            area < 128 * 128,
+            "tiled damage ({area}px) must be far smaller than the screen"
         );
         // Empty rectangles are ignored.
         f.touch(Rect {
@@ -758,14 +876,58 @@ mod tests {
             w: 0,
             h: 0,
         });
-        assert_eq!(
-            f.damage,
-            Some(Rect {
-                x: 10,
-                y: 10,
-                w: 14,
-                h: 22
-            })
+        assert!(!f.dirty_any, "an empty rect dirties nothing");
+    }
+
+    #[test]
+    fn a_solid_block_becomes_one_rectangle() {
+        // Merging rows matters: without it a 128x128 repaint is four row-runs
+        // (or many more) and each costs the viewer a separate putImageData.
+        let mut f = Frame::sized(128, 128);
+        f.touch(Rect {
+            x: 0,
+            y: 0,
+            w: 128,
+            h: 128,
+        });
+        let d = f.take_damage();
+        assert_eq!(d.len(), 1, "a solid block is one rect: {d:?}");
+        assert_eq!((d[0].w, d[0].h), (128, 128));
+    }
+
+    #[test]
+    fn a_resize_rebuilds_the_tile_grid() {
+        // The grid is sized to the framebuffer. After a guest resolution
+        // change an old grid would drop damage on the wrong tiles (or index
+        // out of bounds), so `Frame::sized` must be used for the new size.
+        let mut f = Frame::sized(64, 64);
+        assert_eq!((f.tile_w, f.tile_h), (1, 1));
+        f.touch(Rect {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 64,
+        });
+        assert_eq!(f.take_damage().len(), 1);
+
+        let mut grown = Frame::sized(1920, 1080);
+        assert_eq!((grown.tile_w, grown.tile_h), (30, 17));
+        grown.touch(Rect {
+            x: 1900,
+            y: 1070,
+            w: 4,
+            h: 4,
+        });
+        let d = grown.take_damage();
+        assert_eq!(d.len(), 1, "a change in the far corner dirties its tile");
+        // The tile grid overhangs the framebuffer on the last row and column
+        // (1080 is not a multiple of 64), so a raw tile can run past the end.
+        // What ships is the clamped rect -- anything else would hand the
+        // viewer pixels the guest does not have.
+        let c = clamp_rect(d[0], 1920, 1080);
+        assert!(
+            c.x as u32 + c.w as u32 <= 1920 && c.y as u32 + c.h as u32 <= 1080,
+            "the delivered rect must stay inside the framebuffer: {c:?}"
         );
     }
 
@@ -809,13 +971,11 @@ mod tests {
         let w = 1280u16;
         let h = 800u16;
         let sess = Session {
-            frame: Mutex::new(Frame {
-                rgba: vec![9u8; w as usize * h as usize * 4],
-                w,
-                h,
-                seq: 1,
-                damage: None, // no damage yet => a new viewer gets it all
-                damage_base: 0,
+            frame: Mutex::new({
+                let mut f = Frame::sized(w, h);
+                f.rgba = vec![9u8; w as usize * h as usize * 4];
+                f.seq = 1;
+                f // no damage yet => a new viewer gets it all
             }),
             frame_ready: Condvar::new(),
             tx: Mutex::new(None),
@@ -826,10 +986,14 @@ mod tests {
         let u = sess
             .next_update(0, Duration::from_millis(50))
             .expect("a waiting viewer must get pixels");
-        assert_eq!(u.pixels.len(), u.rect.w as usize * u.rect.h as usize * 4);
+        assert_eq!(u.rects.len(), 1);
+        assert_eq!(
+            u.pixels[0].len(),
+            u.rects[0].w as usize * u.rects[0].h as usize * 4
+        );
         // The whole screen in a single rectangle: no strips.
         assert_eq!(
-            (u.rect.x, u.rect.y, u.rect.w, u.rect.h),
+            (u.rects[0].x, u.rects[0].y, u.rects[0].w, u.rects[0].h),
             (0, 0, w, h),
             "a full repaint must be delivered as one rectangle, not bands"
         );

@@ -19,6 +19,10 @@ subtle = "2"
 libc = "0.2"
 # Frame pixels are base64'd into JSON for the viewer.
 base64 = "0.22"
+# Console frames are zlib'd before base64. A flat terminal region is mostly
+# repeated bytes and compresses ~900:1; photographic content does not compress
+# at all, which is why the viewer can ask not to bother (see `compress`).
+flate2 = "1"
 # Volume hashing, so a staged upload can be verified after transfer.
 sha2 = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }

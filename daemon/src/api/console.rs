@@ -92,9 +92,20 @@ struct Since {
     /// Last sequence the caller has painted; 0 asks for a full frame.
     #[serde(default)]
     since: u64,
+    /// Whether to zlib each rectangle's pixels. On by default: a flat terminal
+    /// region compresses ~900:1 and costs a fraction of a millisecond, while
+    /// the bytes it saves are the whole problem on a slow link. A viewer on a
+    /// fast link can turn it off to skip the (tiny) CPU cost, and photographic
+    /// content is incompressible either way so it loses nothing by asking.
+    #[serde(default = "yes")]
+    compress: bool,
 }
 
-/// Long-poll for the next changed rectangle.
+fn yes() -> bool {
+    true
+}
+
+/// Long-poll for the next changed rectangles.
 ///
 /// Returns `{"seq": 0}` when nothing changed before the timeout, which the
 /// viewer treats as "ask again".
@@ -116,17 +127,63 @@ async fn frame(
         return Ok(axum::Json(json!({"seq": 0})).into_response());
     };
 
+    // Each rectangle carries its own pixels, so the viewer can putImageData
+    // them independently. `enc` says whether `pixels` is raw RGBA or zlib.
+    let rects: Vec<serde_json::Value> = u
+        .rects
+        .iter()
+        .zip(u.pixels.iter())
+        .map(|(r, px)| {
+            let (enc, body) = if q.compress {
+                deflate(px)
+            } else {
+                ("raw", base64::engine::general_purpose::STANDARD.encode(px))
+            };
+            json!({
+                "x": r.x,
+                "y": r.y,
+                "w": r.w,
+                "h": r.h,
+                "enc": enc,
+                "pixels": body,
+            })
+        })
+        .collect();
+
     Ok(axum::Json(json!({
         "seq": u.seq,
         "width": u.w,
         "height": u.h,
-        "x": u.rect.x,
-        "y": u.rect.y,
-        "w": u.rect.w,
-        "h": u.rect.h,
-        "pixels": base64::engine::general_purpose::STANDARD.encode(&u.pixels),
+        "rects": rects,
     }))
     .into_response())
+}
+
+/// zlib a rectangle's RGBA and base64 it, with the label saying which the
+/// viewer is looking at. Returns `("zlib", base64)` or `("raw", base64)`.
+fn deflate(px: &[u8]) -> (&'static str, String) {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let raw = || base64::engine::general_purpose::STANDARD.encode(px);
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+    // Compression is an optimisation: failing it must keep the frame correct,
+    // so fall back to raw -- and say so, or the viewer would try to inflate it.
+    if enc.write_all(px).is_err() {
+        return ("raw", raw());
+    }
+    let Ok(out) = enc.finish() else {
+        return ("raw", raw());
+    };
+    // DEFLATE has a floor. A 64x64 tile of noise comes out slightly *larger*
+    // than it went in, so send whichever is smaller.
+    if out.len() >= px.len() {
+        return ("raw", raw());
+    }
+    (
+        "zlib",
+        base64::engine::general_purpose::STANDARD.encode(out),
+    )
 }
 
 #[derive(Deserialize)]
@@ -461,6 +518,89 @@ mod tests {
                 .await
                 .is_err(),
             "the port is closed after the TTL"
+        );
+    }
+
+    /// The frame payload's wire format, from the daemon's side.
+    ///
+    /// This is a seam: the browser inflates a zlib stream and then treats the
+    /// bytes as RGBA. The two sides are in different languages and there is no
+    /// type checking across them, so the shape is pinned here. Getting it wrong
+    /// is not a crash -- base64 of *something* decodes either way -- it is a
+    /// console that paints garbage.
+    #[test]
+    fn deflate_is_zlib_and_round_trips_to_the_same_pixels() {
+        use base64::Engine as _;
+        use std::io::Read;
+
+        // Must be big enough to actually compress: four bytes do not pay for
+        // the header, and `deflate` correctly answers "raw" for those (pinned
+        // by the test below).
+        let rgba: Vec<u8> = [0x10, 0x20, 0x30, 0xff].repeat(64 * 64);
+        let (enc, body) = super::deflate(&rgba);
+        assert_eq!(enc, "zlib", "compressible input is labelled zlib");
+
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .expect("payload is base64");
+        // The browser uses `DecompressionStream("deflate")`, which is a *zlib*
+        // stream (a 2-byte header), not a raw deflate stream. `ZlibEncoder`
+        // writes exactly that; a raw `DeflateEncoder` would make every frame
+        // fail to inflate in the browser.
+        assert_eq!(raw[0], 0x78, "zlib header byte: {raw:02x?}");
+
+        let mut out = Vec::new();
+        flate2::read::ZlibDecoder::new(&raw[..])
+            .read_to_end(&mut out)
+            .expect("inflates");
+        assert_eq!(out, rgba, "pixels survive the round trip unchanged");
+        // And the payload really did compress, so the header assertion above is
+        // about zlib rather than accidentally about a stored block.
+        assert!(
+            raw.len() * 50 < rgba.len(),
+            "expected real compression: {} -> {} bytes",
+            rgba.len(),
+            raw.len()
+        );
+    }
+
+    /// Incompressible input must be sent raw, *and labelled raw*.
+    ///
+    /// DEFLATE has a floor: four bytes of noise grow. The label has to follow
+    /// the decision, or the browser inflates plain pixels and the frame is lost.
+    #[test]
+    fn incompressible_pixels_are_sent_raw_and_labelled_raw() {
+        use base64::Engine as _;
+
+        // Short and high-entropy: DEFLATE cannot pay for its own header here.
+        let rgba: Vec<u8> = vec![0xde, 0xad, 0xbe, 0xef];
+        let (enc, body) = super::deflate(&rgba);
+        assert_eq!(enc, "raw", "too small to compress");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .expect("pixels are base64"),
+            rgba,
+            "raw means the pixels themselves"
+        );
+        // Empty input: also raw, and not a panic.
+        let (enc, _) = super::deflate(&[]);
+        assert_eq!(enc, "raw");
+    }
+
+    /// A flat region -- the case a slow link actually complains about -- must
+    /// compress by a wide margin. If this ever stops holding, the feature is
+    /// costing CPU for nothing.
+    #[test]
+    fn a_flat_console_region_compresses_by_a_wide_margin() {
+        let flat = [30u8, 30, 30, 255].repeat(64 * 64);
+        let (enc, body) = super::deflate(&flat);
+        assert_eq!(enc, "zlib");
+        assert!(
+            body.len() * 50 < flat.len(),
+            "64x64 of one colour compressed {} -> {} bytes; expected >50x",
+            flat.len(),
+            body.len()
         );
     }
 }
