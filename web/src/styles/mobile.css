@@ -76,7 +76,7 @@
      for a label beside a control, so they stack. */
   .hwtable .hwrow { grid-template-columns: 20px 1fr; }
   .hwtable .hwrow .hwctl { grid-column: 2; }
-  .crop-stage { height: 200px; }
+  .crop-stage { height: 300px; }
 
   /* ----------------------------------------------------------- modals */
   /* inset() on the flex container also insets the modal it centres, so a

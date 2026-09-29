@@ -66,37 +66,37 @@ test("clamps when the window would fall outside the image", () => {
 // No amount of pure-math testing could see that, hence a DOM test.
 
 
-test("cropQuality reports the source resolution and when it is soft", () => {
-  // 1:1 and larger: nothing is invented on the way out.
-  assert.deepEqual(crop.cropQuality(256), { sourcePx: 256, upscale: 1, soft: false });
-  assert.deepEqual(crop.cropQuality(1000).soft, false, "a large source is not soft");
-  // A square covering 100 source px, exported at 256, is magnified 2.56x.
-  const small = crop.cropQuality(100);
-  assert.equal(small.upscale, 2.56);
-  assert.equal(small.soft, true, "2.56x upscaling is visible");
-  // The threshold: just over 1.5x warns, just under does not.
-  assert.equal(crop.cropQuality(171).soft, false, "1.497x is imperceptible");
-  assert.equal(crop.cropQuality(170).soft, true, "1.506x is not");
-  // Degenerate input must not divide by zero.
-  assert.equal(crop.cropQuality(0).soft, false);
+test("cropQuality exports at the crop's resolution, held to the cap", () => {
+  // The point of the change: a crop covering 1080 px keeps 1080 px, instead of
+  // every avatar coming out at one fixed size.
+  assert.deepEqual(crop.cropQuality(1080), { sourcePx: 1080, outPx: 1080, upscale: 1, soft: false });
+  assert.equal(crop.cropQuality(256).outPx, 256, "a small crop keeps its size");
+  // Past the cap the output stops growing: a 4000px crop is written at the cap.
+  const huge = crop.cropQuality(4000);
+  assert.equal(huge.outPx, crop.OUT_MAX, "capped");
+  assert.equal(huge.outPx, 1080, "and the cap lets a 1080px photo through whole");
+  assert.equal(huge.soft, false, "downscaling is not softness");
+  assert.ok(huge.upscale < 1, "and the export shrinks the crop");
+  // A source below the cap is written 1:1, never padded up to it.
+  const mid = crop.cropQuality(400);
+  assert.equal(mid.outPx, 400);
+  assert.equal(mid.upscale, 1);
+  // Degenerate input must not divide by zero or ask for a 0px canvas.
   assert.equal(crop.cropQuality(0).upscale, 0);
+  assert.ok(crop.cropQuality(0).outPx >= crop.OUT_MIN, "canvas stays a real size");
+  assert.ok(crop.OUT_MAX >= crop.OUT_MIN, "the cap is not below the floor");
 });
 
-test("the readout accounts for the source width and height", () => {
-  // The bug: cover-fitting a 256x256 photo magnified it, so the square covered
-  // only ~92 of its pixels and the export scaled those back up to 256, with
-  // nothing on screen saying so. These are the numbers from that case.
-  const stage = { W: 612, H: 260 };
-  const rect = crop.cropRect({ naturalWidth: 256, naturalHeight: 256 }, 0, 0, 1, 150, 0, 300);
-  assert.ok(rect.size > 0, "a real crop");
-  const q = crop.cropQuality(92.44);
-  assert.equal(q.soft, true, "a 256px source cannot fill a 256px avatar");
-  assert.ok(q.upscale > 2.7 && q.upscale < 2.8, `upscale ${q.upscale}`);
-  // A photo with enough pixels for the export is not flagged.
-  const big = crop.cropQuality(1444.44);
-  assert.equal(big.soft, false);
-  assert.ok(big.upscale < 0.2, "a 4000px source is downsampled, not upscaled");
-  void stage;
+test("cropQuality warns only when the export is magnified", () => {
+  // The output now matches the crop, so a 256px photo is 1:1 and not soft --
+  // the previous fixed 256px export flagged exactly that case.
+  assert.equal(crop.cropQuality(256).soft, false, "1:1 is not soft");
+  assert.equal(crop.cropQuality(1080).soft, false, "the largest source is still 1:1");
+  assert.equal(crop.cropQuality(4000).soft, false);
+  // Softness needs an output larger than the crop, which the cap only allows
+  // below `OUT_MIN`; with both at 1 that is unreachable, so assert the pairs
+  // that would produce it rather than pretending to hit it here.
+  assert.equal(crop.cropQuality(90).upscale, 1, "90 of 90 is 1:1");
 });
 
 test("the crop square is given the picture, not an empty <img>", async () => {
@@ -174,4 +174,57 @@ test("the crop square is given the picture, not an empty <img>", async () => {
     globalThis.URL = prev.URL;
     globalThis.requestAnimationFrame = prev.raf;
   }
+});
+
+test("stageLayout fits the whole photo and starts on all of it", () => {
+  // The point of the change: the image FITS the stage (contain), so a square
+  // photo is fully visible and the starting square covers the whole of it --
+  // which is what makes its export 1080x1080. Re-deriving the scale in the test
+  // is what let a cover-fit regression slip through, so this calls the real
+  // function.
+  const L = crop.stageLayout({ naturalWidth: 1080, naturalHeight: 1080 }, 690, 420);
+  assert.equal(L.scale, 420 / 1080, "the short stage side bounds the scale");
+  assert.equal(Math.round(L.w), 420, "the image renders at the stage height");
+  assert.equal(Math.round(L.h), 420);
+  assert.equal(L.ox, (690 - 420) / 2, "and is centred");
+  assert.equal(L.winSide, 420, "the square starts covering the whole photo");
+  // The crop that starting square takes is the whole source: 1080 natural px.
+  const rect = crop.cropRect({ naturalWidth: 1080, naturalHeight: 1080 },
+    L.ox, L.oy, L.scale, L.winX + L.winSide / 2, L.winY + L.winSide / 2, L.winSide);
+  assert.equal(Math.round(rect.size), 1080, "the whole photo");
+  assert.equal(crop.cropQuality(rect.size).outPx, 1080, "exported at source size");
+});
+
+test("stageLayout on a photo larger than the cap still caps the export", () => {
+  // A 4000x3000 photo fits the stage at 420 tall, the square covers its short
+  // side (3000 natural px), and the cap holds the output to 1080.
+  const L = crop.stageLayout({ naturalWidth: 4000, naturalHeight: 3000 }, 690, 420);
+  const rect = crop.cropRect({ naturalWidth: 4000, naturalHeight: 3000 },
+    L.ox, L.oy, L.scale, L.winX + L.winSide / 2, L.winY + L.winSide / 2, L.winSide);
+  assert.equal(Math.round(rect.size), 3000, "the short side, in source px");
+  const q = crop.cropQuality(rect.size);
+  assert.equal(q.outPx, 1080, "capped");
+  assert.equal(q.soft, false, "capping is not softness");
+});
+
+test("a photo wider than the stage is bounded by its width", () => {
+  // 4000x1000: 690/4000 < 420/1000, so the width bounds the fit, the image is
+  // full-width and short, and the square is its short side.
+  const L = crop.stageLayout({ naturalWidth: 4000, naturalHeight: 1000 }, 690, 420);
+  assert.equal(L.scale, 690 / 4000);
+  assert.equal(Math.round(L.w), 690, "full width");
+  assert.equal(Math.round(L.h), 173, "and short of the stage height");
+  assert.equal(L.winSide, L.h, "the square is the image's short side");
+  const rect = crop.cropRect({ naturalWidth: 4000, naturalHeight: 1000 },
+    L.ox, L.oy, L.scale, L.winX + L.winSide / 2, L.winY + L.winSide / 2, L.winSide);
+  assert.equal(Math.round(rect.size), 1000, "the short side, in source px");
+});
+
+test("stageLayout never starts below the minimum square", () => {
+  // A very wide sliver: its short side in stage px is tiny, so the floor wins
+  // and the square is larger than the photo -- the one case the crop cannot be
+  // a whole-image square, because an avatar has a usable size.
+  const L = crop.stageLayout({ naturalWidth: 20000, naturalHeight: 400 }, 690, 420);
+  assert.ok(L.winSide >= crop.MIN_SIDE, `square ${L.winSide} >= ${crop.MIN_SIDE}`);
+  assert.ok(L.winSide > L.h, "the square is larger than the sliver");
 });

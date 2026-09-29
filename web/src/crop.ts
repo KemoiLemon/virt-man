@@ -2,13 +2,14 @@
 // math lives in pure functions so it can be unit-tested without a canvas or
 // real layout.
 //
-// The image is scaled to cover the stage and the square shows a piece of it, so
-// the square is the preview -- there is no second copy of the crop. Dragging
-// inside it pans the image; the eight handles on its edges and corners resize
-// it, which is what changes how much is cropped. A readout under the stage
-// accounts for the source's width and height: how many of its pixels the square
-// actually covers, and whether that is enough for the 256px export or will be
-// magnified into a soft avatar.
+// The image is scaled to *fit* the stage and the square shows the part of it
+// that is cropped, so the square is the preview -- there is no second copy. The
+// square starts covering the whole photo and the eight handles on its edges and
+// corners resize it; dragging it moves it around the picture. The avatar is
+// exported at the resolution the square covers, held to `OUT_MAX`, so a 1080px
+// photo keeps its 1080 pixels rather than being flattened to a fixed square. A
+// readout under the stage says what the source is and what the crop will be
+// written at, and warns when the source is too small to fill it.
 
 import { closeSvg } from "./icons";
 
@@ -18,33 +19,102 @@ export interface CropRect {
   size: number; // natural image px, square
 }
 
-/// The size the crop is exported at. The square on screen is a view of this:
-/// a crop that covers fewer than `OUT` natural pixels is upscaled to reach it,
-/// so the exported avatar is softer than it looks in the dialog.
-export const OUT = 256;
+/// The avatar is exported at the resolution the square actually covers, so a
+/// 1080px photo keeps its 1080 pixels instead of being flattened to a fixed
+/// size. `OUT_MAX` bounds it: past this the file grows without adding detail
+/// anyone sees in a 32px avatar, and a lossless PNG of it would blow past the
+/// server's 2 MB upload cap (`profile.rs`). 1080 is the bound because that is
+/// the size a phone or 1080p photo comes in at, and it is meant to survive
+/// uncropped; the export is JPEG, which keeps even a 1080px square a few
+/// hundred KB.
+export const OUT_MIN = 1;
+export const OUT_MAX = 1080;
+
+/// Kept as the name for "the size a crop without a usable source exports at",
+/// which the readout and `drawCrop`'s default both want.
+export const OUT = OUT_MAX;
 
 /// What a given square actually yields, for the dialog's readout and for the
-/// warning that a small source cannot fill the export. Pure, so the arithmetic
+/// warning that a small source cannot fill the output. Pure, so the arithmetic
 /// is tested rather than inferred from a screenshot.
 export interface CropQuality {
   /// Natural pixels the square currently covers (the exported crop's source).
   sourcePx: number;
-  /// How much the export magnifies that: 1 means one source px per output px.
+  /// The square the export is written at: the covered pixels, held to
+  /// [`OUT_MIN`, `OUT_MAX`].
+  outPx: number;
+  /// How much the export magnifies the source: 1 means one source px per output
+  /// px, above 1 means the output has more pixels than the crop had detail.
   upscale: number;
-  /// True when the source is too small to fill the export without upscaling.
+  /// True when the source is too small to fill the output without upscaling.
   soft: boolean;
 }
 
-export function cropQuality(rectSize: number, out = OUT): CropQuality {
+export function cropQuality(rectSize: number): CropQuality {
   const sourcePx = Math.max(0, rectSize);
-  const upscale = sourcePx > 0 ? out / sourcePx : 0;
+  const outPx = Math.round(Math.min(OUT_MAX, Math.max(OUT_MIN, sourcePx)));
+  const upscale = sourcePx > 0 ? outPx / sourcePx : 0;
   // A little over 1 is imperceptible; past 1.5x the softness is visible, so
   // that is where the dialog starts warning.
-  return { sourcePx, upscale, soft: sourcePx > 0 && upscale > 1.5 };
+  return { sourcePx, outPx, upscale, soft: sourcePx > 0 && upscale > 1.5 };
 }
 
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
+}
+
+/// The smallest square the handles may leave, in stage pixels.
+export const MIN_SIDE = 48;
+
+/// Where the image sits in the stage and the square it starts with. Pure, so the
+/// fit mode and the starting square are tested rather than re-derived by hand:
+/// the tests used to recompute the scale themselves, which meant flipping the
+/// fit from contain to cover still passed.
+///
+/// The image *fits* the stage (contain), so the whole photo is visible and the
+/// square can cover all of it -- that is what lets a 1080x1080 photo export at
+/// 1080. Covering would scale it to fill the stage's height and crop the sides
+/// off, leaving the square over a fraction of the photo.
+export interface StageLayout {
+  /// Image top-left and size in stage pixels.
+  ox: number;
+  oy: number;
+  w: number;
+  h: number;
+  /// Display scale: stage px per natural px.
+  scale: number;
+  /// The starting square: the whole image when it fits the stage, else the
+  /// largest square the stage allows.
+  winX: number;
+  winY: number;
+  winSide: number;
+}
+
+export function stageLayout(
+  image: { naturalWidth: number; naturalHeight: number },
+  stageW: number,
+  stageH: number,
+): StageLayout {
+  const nw = image.naturalWidth || 1;
+  const nh = image.naturalHeight || 1;
+  const scale = Math.min(stageW / nw, stageH / nh); // contain
+  const w = nw * scale;
+  const h = nh * scale;
+  const ox = (stageW - w) / 2;
+  const oy = (stageH - h) / 2;
+  // Start covering the photo's short side, so the export keeps the source's
+  // resolution rather than a fraction of it.
+  const winSide = Math.max(MIN_SIDE, Math.min(w, h));
+  return {
+    ox,
+    oy,
+    w,
+    h,
+    scale,
+    winX: ox + (w - winSide) / 2,
+    winY: oy + (h - winSide) / 2,
+    winSide,
+  };
 }
 
 /** Map a screen-space crop window to natural-image coordinates, clamped and
@@ -73,7 +143,17 @@ export function cropRect(
   return { x, y, size };
 }
 
-/** Draw `rect` (natural px) from `image` into an `out`-square canvas, PNG. */
+/**
+ * Draw `rect` (natural px) from `image` into an `out`-square canvas.
+ *
+ * JPEG, not PNG: the export is now the crop's real resolution, so a 1080px
+ * photo is ~3 MB as a lossless PNG and the server refuses anything over 2 MB
+ * (`profile.rs`). At quality 0.92 the same square is well under that for a
+ * photo. Uniform noise is the exception -- it is incompressible, and a
+ * synthetic 1080px noise image really does reach ~2.1 MB -- so the quality
+ * steps down until the blob fits rather than letting the upload be refused
+ * after the work.
+ */
 export function drawCrop(image: HTMLImageElement, rect: CropRect, out = OUT): Promise<Blob> {
   const canvas = document.createElement("canvas");
   canvas.width = out;
@@ -82,9 +162,22 @@ export function drawCrop(image: HTMLImageElement, rect: CropRect, out = OUT): Pr
   if (!ctx) return Promise.reject(new Error("canvas unavailable"));
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(image, rect.x, rect.y, rect.size, rect.size, 0, 0, out, out);
-  return new Promise((resolve, reject) =>
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("crop failed"))), "image/png"),
-  );
+  // The same ceiling the server enforces; keep a little margin for the multipart
+  // framing and headers that wrap the body.
+  const LIMIT = 2 * 1024 * 1024 - 64 * 1024;
+  const encode = (q: number) =>
+    new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", q));
+  return (async () => {
+    for (const q of [0.92, 0.8, 0.65, 0.5]) {
+      const blob = await encode(q);
+      if (blob && blob.size <= LIMIT) return blob;
+    }
+    // Nothing fits at a usable quality: hand back the smallest try and let the
+    // server's message name the limit, rather than failing here opaquely.
+    const last = await encode(0.5);
+    if (!last) throw new Error("crop failed");
+    return last;
+  })();
 }
 
 /// Read the file into a decoded image, returning it with its object URL still
@@ -176,81 +269,74 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
     foot.append(cancel, ok);
 
     const modal = document.createElement("div");
-    modal.className = "modal";
+    // Its own class rather than the default 640px: the square is
+    // `min(stageW, stageH) * 0.85`, so both dimensions bound it, and a 640px
+    // modal against a 260px-tall stage held it at 221px -- smaller than the
+    // photo being cropped, which made framing a 1080px image guesswork.
+    modal.className = "modal crop-modal";
     modal.append(head, body, foot);
     el.append(modal);
     document.body.append(el);
 
     stage.append(img, win);
 
-    // The image is scaled to *cover* the stage, so the square is always filled
-    // with the picture and no stage background shows through -- the square is
-    // the preview, so it must never sit over the stage's own background. The
-    // square starts at 85% of the stage; the handles change how much is
-    // cropped.
-    //
-    // Cover-fitting a small photo magnifies it, and the square then covers only
-    // a fraction of its pixels, which the export scales back up to `OUT`. That
-    // magnified *display* is left alone -- shrinking it would letterbox the
-    // square -- and reported instead by the readout below, which names the
-    // source size and the resolution the crop is really taken from.
+    // The image *fits* the stage (contain), so the whole photo is visible and
+    // the square can cover all of it -- which is what lets a 1080x1080 photo
+    // export at 1080 instead of a fraction of the frame. Fitting shows the stage
+    // background beside a non-square photo, and that is deliberate: the square
+    // is the crop, so what is outside it is not part of the avatar.
     const stageW = () => stage.clientWidth;
     const stageH = () => stage.clientHeight;
-    const scale = () =>
-      Math.max(stageW() / image.naturalWidth, stageH() / image.naturalHeight);
-    const centre = () => {
-      const w = image.naturalWidth * scale();
-      const h = image.naturalHeight * scale();
-      return { ox: (stageW() - w) / 2, oy: (stageH() - h) / 2 };
-    };
+    const layout = () => stageLayout(image, stageW(), stageH());
 
-    const MIN_SIDE = 48;
-    let ox = 0;
-    let oy = 0;
+    // The image does not move: it fits the stage, centred, and the square is
+    // what the pointer drags. `ox`/`oy` are read back on each paint so a resize
+    // (the mobile breakpoint changes the stage height) re-centres it.
     let winX = 0;
     let winY = 0;
     let winSide = 0;
 
     const apply = () => {
-      const s = scale();
-      img.style.width = `${image.naturalWidth * s}px`;
-      img.style.height = `${image.naturalHeight * s}px`;
-      img.style.left = `${ox}px`;
-      img.style.top = `${oy}px`;
+      const L = layout();
+      img.style.width = `${L.w}px`;
+      img.style.height = `${L.h}px`;
+      img.style.left = `${L.ox}px`;
+      img.style.top = `${L.oy}px`;
       win.style.width = `${winSide}px`;
       win.style.height = `${winSide}px`;
       win.style.left = `${winX}px`;
       win.style.top = `${winY}px`;
-      // The crop's real resolution: natural pixels the square covers, against
-      // the 256px it is exported at. A square smaller than that is magnified on
-      // the way out, whatever it looks like on screen.
-      const rect = cropRect(image, ox, oy, s, winX + winSide / 2, winY + winSide / 2, winSide);
+      // The crop's real resolution: natural pixels the square covers, and the
+      // size the avatar is written at, which is those pixels held to the cap.
+      const rect = cropRect(image, L.ox, L.oy, L.scale, winX + winSide / 2, winY + winSide / 2, winSide);
       const q = cropQuality(rect.size);
       const src = `${image.naturalWidth}\u00d7${image.naturalHeight}`;
       const px = `${Math.round(q.sourcePx)}\u00d7${Math.round(q.sourcePx)}`;
       info.textContent = q.soft
-        ? `Source ${src} \u2014 the square covers only ${px}, so the ${OUT}px avatar will be soft. Pick a larger photo or shrink the square.`
-        : `Source ${src} \u2014 exporting ${OUT}\u00d7${OUT} from ${px}, no upscaling.`;
+        ? `Source ${src} \u2014 the square covers only ${px}, so the ${q.outPx}px avatar will be soft. Pick a larger photo or shrink the square.`
+        : `Source ${src} \u2014 avatar will be ${q.outPx}\u00d7${q.outPx}, from ${px} of the photo.`;
       info.classList.toggle("warn", q.soft);
     };
 
-    // The image keeps covering the square: panning is clamped so no stage
-    // background can show through it.
+    // The square stays over the picture: the image is the box it may not leave.
+    // The image can be smaller than the square only below the `MIN_SIDE` floor,
+    // where the square wins and the avatar has a usable size.
     const keepVisible = () => {
-      const s = scale();
-      const w = image.naturalWidth * s;
-      const h = image.naturalHeight * s;
-      ox = clamp(ox, winX + winSide - w, winX);
-      oy = clamp(oy, winY + winSide - h, winY);
+      const L = layout();
+      const right = L.ox + L.w;
+      const bottom = L.oy + L.h;
+      winSide = Math.min(winSide, Math.max(MIN_SIDE, Math.min(right - L.ox, bottom - L.oy)));
+      winX = clamp(winX, L.ox, Math.max(L.ox, right - winSide));
+      winY = clamp(winY, L.oy, Math.max(L.oy, bottom - winSide));
     };
 
     const reset = () => {
-      winSide = Math.min(stageW(), stageH()) * 0.85;
-      winX = (stageW() - winSide) / 2;
-      winY = (stageH() - winSide) / 2;
-      const c = centre();
-      ox = c.ox;
-      oy = c.oy;
+      // The starting square: the whole photo when it fits the stage, so the
+      // export keeps the source's own resolution rather than a fraction of it.
+      const L = layout();
+      winX = L.winX;
+      winY = L.winY;
+      winSide = L.winSide;
       keepVisible();
       apply();
     };
@@ -328,11 +414,15 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
       apply();
     };
 
-    // Drag inside the square to pan; drag a handle to resize.
-    let drag: { sx: number; sy: number; ox: number; oy: number } | null = null;
+    // Drag the square around the picture; drag a handle to resize it. It used
+    // to drag the *image* under a fixed square, which is the same motion with
+    // the opposite sign -- and once the image fits the stage rather than
+    // filling it, there is no slack to pan the image into, so the square is the
+    // thing that moves.
+    let drag: { sx: number; sy: number; wx: number; wy: number } | null = null;
     let resizing: Handle | null = null;
     const down = (e: PointerEvent) => {
-      drag = { sx: e.clientX, sy: e.clientY, ox, oy };
+      drag = { sx: e.clientX, sy: e.clientY, wx: winX, wy: winY };
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     };
     win.querySelectorAll<HTMLElement>("[data-handle]").forEach((g) => {
@@ -350,8 +440,8 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
         return;
       }
       if (!drag) return;
-      ox = drag.ox + (e.clientX - drag.sx);
-      oy = drag.oy + (e.clientY - drag.sy);
+      winX = drag.wx + (e.clientX - drag.sx);
+      winY = drag.wy + (e.clientY - drag.sy);
       keepVisible();
       apply();
     };
@@ -373,16 +463,19 @@ export async function openCropDialog(file: File): Promise<Blob | null> {
     cancel.onclick = () => finish(null);
     x.onclick = () => finish(null);
     ok.onclick = () => {
+      const L = layout();
       const rect = cropRect(
         image,
-        ox,
-        oy,
-        scale(),
+        L.ox,
+        L.oy,
+        L.scale,
         winX + winSide / 2,
         winY + winSide / 2,
         winSide,
       );
-      drawCrop(image, rect, OUT).then(finish, () => finish(null));
+      // Written at the crop's own resolution, held to the cap, so a 1080px photo
+      // keeps its detail instead of being flattened to a fixed square.
+      drawCrop(image, rect, cropQuality(rect.size).outPx).then(finish, () => finish(null));
     };
     el.addEventListener("modal-escape", () => finish(null));
     el.onclick = (e: MouseEvent) => {

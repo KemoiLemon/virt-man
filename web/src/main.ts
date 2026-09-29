@@ -6653,7 +6653,10 @@ async function changeAvatar(card?: Element) {
     const blob = await openCropDialog(file);
     if (!blob) return;
     try {
-      user = await api.postRaw<User>("/me/avatar?ext=png", blob, "image/png");
+      // JPEG: the crop is exported at the photo's own resolution, and a
+      // lossless PNG of a 1024px photo is ~3 MB, past the server's 2 MB cap
+      // (`web/server/src/api/profile.rs`).
+      user = await api.postRaw<User>("/me/avatar?ext=jpg", blob, "image/jpeg");
       toast("Avatar updated");
       renderIdentity();
       if (card) refreshProfileCard(card);
