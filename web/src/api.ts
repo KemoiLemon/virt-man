@@ -313,11 +313,11 @@ export interface FirewallRule {
 
 export interface FirewallForward {
   wan_ip: string;
-  wan_start: number;
-  wan_end: number;
+  /// One port, not a range: DNAT maps a port to a port, and a range was
+  /// removed from the daemon's model (`daemon/src/firewall.rs`).
+  wan_port: number;
   lan_ip: string;
-  lan_start: number;
-  lan_end: number;
+  lan_port: number;
   proto: "tcp" | "udp";
 }
 

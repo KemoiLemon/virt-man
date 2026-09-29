@@ -2838,15 +2838,15 @@ function fwRuleRow(r: FirewallRule): string {
 }
 
 function fwFwdRow(f: FirewallForward): string {
+  // One port each side, not a range: DNAT maps a port to a port, and a range
+  // had no single internal counterpart.
   return `
     <tr>
       <td><input data-f-wanip placeholder="0.0.0.0 = any" value="${f.wan_ip === "0.0.0.0" ? "" : esc(f.wan_ip)}"></td>
       <td><select data-f-proto>${fwOpt(["tcp", "udp"], f.proto)}</select></td>
-      <td><input data-f-wstart type="number" min="1" max="65535" value="${f.wan_start}"></td>
-      <td><input data-f-wend type="number" min="1" max="65535" value="${f.wan_end}"></td>
+      <td><input data-f-wport type="number" min="1" max="65535" value="${f.wan_port}"></td>
       <td><input data-f-lanip placeholder="192.168.x.x" value="${esc(f.lan_ip)}"></td>
-      <td><input data-f-lstart type="number" min="1" max="65535" value="${f.lan_start}"></td>
-      <td><input data-f-lend type="number" min="1" max="65535" value="${f.lan_end}"></td>
+      <td><input data-f-lport type="number" min="1" max="65535" value="${f.lan_port}"></td>
       <td><button class="btn danger icon" data-f-del title="Remove">${ic.trash()}</button></td>
     </tr>`;
 }
@@ -2896,14 +2896,16 @@ function readFwRuleRows(root: Element): FirewallRule[] {
 function readFwFwdRows(root: Element): FirewallForward[] {
   return [...root.querySelectorAll("[data-f-lanip]")].map((s) => {
     const tr = (s as HTMLElement).closest("tr")!;
+    const num = (sel: string) => {
+      const v = +((tr.querySelector(sel) as HTMLInputElement)?.value ?? "");
+      return Number.isFinite(v) ? v : 1;
+    };
     return {
       proto: (tr.querySelector("[data-f-proto]") as HTMLSelectElement).value as FirewallForward["proto"],
       wan_ip: (tr.querySelector("[data-f-wanip]") as HTMLInputElement).value || "0.0.0.0",
-      wan_start: +(tr.querySelector("[data-f-wstart]") as HTMLInputElement).value,
-      wan_end: +(tr.querySelector("[data-f-wend]") as HTMLInputElement).value,
+      wan_port: num("[data-f-wport]"),
       lan_ip: (tr.querySelector("[data-f-lanip]") as HTMLInputElement).value,
-      lan_start: +(tr.querySelector("[data-f-lstart]") as HTMLInputElement).value,
-      lan_end: +(tr.querySelector("[data-f-lend]") as HTMLInputElement).value,
+      lan_port: num("[data-f-lport]"),
     };
   });
 }
@@ -2951,8 +2953,8 @@ function openFirewallEditor(netName: string) {
 
       <div class="section-title fw-cat" style="margin-top:18px">NAT Port Forwards</div>
       <table class="grid">
-        <tr><th>WAN</th><th>Proto</th><th>WAN Start</th><th>WAN End</th><th>Internal IP</th><th>Start</th><th>End</th><th></th></tr>
-        ${forwards.map(fwFwdRow).join("") || `<tr><td colspan="8" class="empty">No port forwards.</td></tr>`}
+        <tr><th>WAN</th><th>Proto</th><th>WAN Port</th><th>Internal IP</th><th>Internal Port</th><th></th></tr>
+        ${forwards.map(fwFwdRow).join("") || `<tr><td colspan="6" class="empty">No port forwards.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>`);
 
@@ -2967,7 +2969,7 @@ function openFirewallEditor(netName: string) {
     };
     $("#fw-add-fwd", el).onclick = () => {
       read();
-      forwards.push({ wan_ip: "0.0.0.0", wan_start: 1, wan_end: 1, lan_ip: "", lan_start: 1, lan_end: 1, proto: "tcp" });
+      forwards.push({ wan_ip: "0.0.0.0", wan_port: 1, lan_ip: "", lan_port: 1, proto: "tcp" });
       render();
     };
     el.querySelectorAll("[data-r-del]").forEach((b) => {
