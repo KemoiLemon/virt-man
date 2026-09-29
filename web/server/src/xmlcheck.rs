@@ -580,6 +580,162 @@ pub fn check_domain(xml: &str) -> Result<DomainSpec, String> {
     Ok(spec)
 }
 
+/// What a checked container definition asks for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ContainerSpec {
+    pub name: String,
+    pub uuid: Option<String>,
+    pub vcpus: u64,
+    pub memory_mb: u64,
+    pub networks: Vec<String>,
+    /// No `<idmap>`: the container's root is the host's root. Allowed only
+    /// with `CT.Privileged` -- the caller checks that, this only reports it.
+    pub privileged: bool,
+    /// Every `<uid>`/`<gid>` entry as (tag, start, target, count), so a
+    /// change to the mapping can be told apart from any other edit.
+    pub idmap: Vec<[String; 4]>,
+}
+
+/// A container definition, as a non-admin may redefine it: the shape the
+/// daemon writes (`daemon/src/ct.rs` `domain_xml`) plus what libvirt adds on
+/// read-back. The daemon separately insists the rootfs and its mount are
+/// unchanged; here the point is that nothing else reaches the host: no
+/// second `<filesystem>` (a bind mount of `/` is an escape), no `<hostdev>`,
+/// no `<features><capabilities>` (which grants the container host
+/// capabilities), no `<seclabel>` changes.
+pub fn check_container(xml: &str) -> Result<ContainerSpec, String> {
+    let doc = parse(xml)?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "domain" || root.tag_name().namespace().is_some() {
+        return Err("not a domain definition".into());
+    }
+    attrs_only(root, &["type", "id"])?;
+    one_of(root, "type", &["lxc"])?;
+    let mut spec = ContainerSpec {
+        privileged: true,
+        ..Default::default()
+    };
+    let mut seen = HashSet::new();
+    let mut vm = DomainSpec::default();
+    for c in elements(root) {
+        let tag = c.tag_name().name();
+        if c.tag_name().namespace().is_some() {
+            return Err(refuse(&format!("<{tag}>")));
+        }
+        if !seen.insert(tag) {
+            return Err(format!("<{tag}> appears twice"));
+        }
+        match tag {
+            "name" => spec.name = text(c),
+            "uuid" => {
+                leaf(c)?;
+                spec.uuid = Some(text(c));
+            }
+            "title" | "description" => leaf(c)?,
+            // The daemon's own record of the rootfs; it checks it is unchanged.
+            "metadata" => {
+                for m in elements(c) {
+                    if m.tag_name().name() != "container"
+                        || m.tag_name().namespace() != Some("https://virt-man.invalid/container/1")
+                    {
+                        return Err(refuse("that metadata"));
+                    }
+                }
+            }
+            "memory" => spec.memory_mb = to_mb(c)?,
+            "currentMemory" => attrs_only(c, &["unit"])?,
+            "memtune" => {
+                for m in elements(c) {
+                    if m.tag_name().name() != "swap_hard_limit" {
+                        return Err(refuse(&format!("<{}> in memtune", m.tag_name().name())));
+                    }
+                    plain(m, &["unit"])?;
+                }
+            }
+            "vcpu" => {
+                attrs_only(c, &["placement", "current"])?;
+                spec.vcpus = number(c)?;
+            }
+            "resource" | "clock" => harmless_subtree(c)?,
+            "on_poweroff" | "on_reboot" | "on_crash" => leaf(c)?,
+            "os" => {
+                attrs_only(c, &[])?;
+                for o in elements(c) {
+                    match o.tag_name().name() {
+                        "type" => plain(o, &["arch"])?,
+                        // The container's own init, inside its rootfs.
+                        "init" => leaf(o)?,
+                        other => return Err(refuse(&format!("<{other}> in <os>"))),
+                    }
+                }
+            }
+            "idmap" => {
+                attrs_only(c, &[])?;
+                for m in elements(c) {
+                    if !matches!(m.tag_name().name(), "uid" | "gid") {
+                        return Err(refuse("that idmap entry"));
+                    }
+                    plain(m, &["start", "target", "count"])?;
+                    spec.idmap.push([
+                        m.tag_name().name().to_string(),
+                        attr(m, "start").to_string(),
+                        attr(m, "target").to_string(),
+                        attr(m, "count").to_string(),
+                    ]);
+                }
+                spec.privileged = spec.idmap.is_empty();
+            }
+            "devices" => {
+                attrs_only(c, &[])?;
+                let mut fs = 0;
+                for d in elements(c) {
+                    match d.tag_name().name() {
+                        "emulator" => leaf(d)?,
+                        // Exactly one, the rootfs; the daemon checks it is
+                        // the same directory it mounted.
+                        "filesystem" => {
+                            fs += 1;
+                            harmless_subtree(d)?;
+                        }
+                        "interface" => check_interface(d, &mut vm)?,
+                        "console" => {
+                            plain_or_target(d)?;
+                        }
+                        other => return Err(refuse(&format!("<{other}> in a container"))),
+                    }
+                }
+                if fs != 1 {
+                    return Err(refuse("a filesystem besides the container's rootfs"));
+                }
+            }
+            other => return Err(refuse(&format!("<{other}> in a container"))),
+        }
+    }
+    if spec.name.is_empty() {
+        return Err("the container has no name".into());
+    }
+    uuid_name_agrees(&spec.name, spec.uuid.as_deref(), "container")?;
+    if spec.vcpus == 0 || spec.memory_mb == 0 {
+        return Err("a container needs <vcpu> and <memory>".into());
+    }
+    spec.networks = vm.networks;
+    Ok(spec)
+}
+
+/// A pty console, with the target libvirt adds.
+fn plain_or_target(d: Node) -> Result<(), String> {
+    attrs_only(d, &["type"])?;
+    one_of(d, "type", &["pty"])?;
+    for c in elements(d) {
+        match c.tag_name().name() {
+            "target" => plain(c, &["type", "port"])?,
+            "alias" => plain(c, &["name"])?,
+            other => return Err(refuse(&format!("<{other}> in a console"))),
+        }
+    }
+    Ok(())
+}
+
 pub fn check_network(xml: &str) -> Result<NetworkSpec, String> {
     let doc = parse(xml)?;
     let root = doc.root_element();
@@ -1043,5 +1199,73 @@ mod tests {
         ] {
             assert!(check_volume(bad).is_err(), "{bad}");
         }
+    }
+    /// The definition the daemon writes and libvirt reads back, verbatim
+    /// (`virsh dumpxml --inactive` of a container made by `POST /containers`).
+    const CT: &str = r#"<domain type='lxc'>
+  <name>4b5ae5de-d025-467a-b415-faaa4a3a25ce</name>
+  <uuid>4b5ae5de-d025-467a-b415-faaa4a3a25ce</uuid>
+  <title>Probe CT</title>
+  <metadata>
+    <virtman:container xmlns:virtman="https://virt-man.invalid/container/1" rootfs="/var/lib/libvirt/images/ct-x.raw"/>
+  </metadata>
+  <memory unit='KiB'>262144</memory>
+  <currentMemory unit='KiB'>262144</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <resource><partition>/machine</partition></resource>
+  <os><type arch='x86_64'>exe</type><init>/sbin/init</init></os>
+  <idmap>
+    <uid start='0' target='1073741824' count='65536'/>
+    <gid start='0' target='1073741824' count='65536'/>
+  </idmap>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff><on_reboot>restart</on_reboot><on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/lib/libvirt/libvirt_lxc</emulator>
+    <filesystem type='mount' accessmode='passthrough'>
+      <source dir='/run/virt-man/ct/4b5ae5de-d025-467a-b415-faaa4a3a25ce'/><target dir='/'/>
+    </filesystem>
+    <interface type='network'><mac address='52:54:00:76:cf:2b'/><source network='internet'/></interface>
+    <console type='pty'><target type='lxc' port='0'/></console>
+  </devices>
+</domain>"#;
+
+    #[test]
+    fn a_container_as_the_daemon_writes_it_passes() {
+        let s = check_container(CT).unwrap();
+        assert!(!s.privileged);
+        assert_eq!((s.vcpus, s.memory_mb), (1, 256));
+        assert_eq!(s.networks, vec!["internet"]);
+    }
+
+    #[test]
+    fn dropping_the_idmap_is_reported_as_privileged() {
+        let i = CT.find("<idmap>").unwrap();
+        let j = CT.find("</idmap>").unwrap() + "</idmap>".len();
+        let priv_ = format!("{}{}", &CT[..i], &CT[j..]);
+        assert!(check_container(&priv_).unwrap().privileged);
+    }
+
+    #[test]
+    fn a_container_cannot_reach_the_host() {
+        let with = |from: &str, to: &str| CT.replace(from, to);
+        let host_mount = with(
+            "<interface",
+            "<filesystem type='mount'><source dir='/'/><target dir='/host'/></filesystem><interface",
+        );
+        for (what, xml) in [
+            ("host bind mount", host_mount),
+            ("hostdev", with("<console", "<hostdev mode='capabilities' type='storage'><source><block>/dev/sda</block></source></hostdev><console")),
+            ("capabilities", with("<clock", "<features><capabilities policy='allow'/></features><clock")),
+            ("a bridge interface", with("type='network'><mac", "type='bridge'><mac")),
+            ("a VM", with("type='lxc'>", "type='kvm'>")),
+            ("seclabel", with("<clock", "<seclabel type='none'/><clock")),
+        ] {
+            assert!(check_container(&xml).is_err(), "{what} passed");
+        }
+        assert!(
+            check_domain(CT).is_err(),
+            "a container is not a VM definition"
+        );
     }
 }

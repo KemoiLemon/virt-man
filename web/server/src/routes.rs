@@ -5,7 +5,7 @@
 //! daemon is unreachable through the proxy until someone decides who may use
 //! it — the safe direction to be wrong in.
 
-use crate::perm::{net_path, node_path, pool_path, vm_path};
+use crate::perm::{ct_path, net_path, node_path, pool_path, vm_path};
 
 /// How the proxy must treat a request once the privilege check passes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +13,7 @@ pub enum Special {
     None,
     /// A list to filter to what the caller may see.
     ListVms,
+    ListCts,
     ListNetworks,
     ListPools,
     ListVolumes {
@@ -21,11 +22,18 @@ pub enum Special {
     ListBridges,
     /// Creates: check the body, record the owner.
     CreateVm,
+    /// A container from a template: check privileged, the template, the
+    /// networks and the quota; record the owner and its rootfs.
+    CreateCt,
     CreateNetwork,
     CreateVolume {
         pool: String,
     },
     Fetch {
+        pool: String,
+    },
+    /// A catalog template downloaded into a pool: a fetch by another name.
+    FetchTemplate {
         pool: String,
     },
     /// Replaces a definition: check the body.
@@ -35,14 +43,23 @@ pub enum Special {
     PutNetworkXml {
         net: String,
     },
+    PutCtXml {
+        ct: String,
+    },
     RenameVm {
         vm: String,
+    },
+    RenameCt {
+        ct: String,
     },
     AddNic {
         vm: String,
     },
     DeleteVm {
         vm: String,
+    },
+    DeleteCt {
+        ct: String,
     },
     DeleteNetwork {
         net: String,
@@ -114,6 +131,7 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
     let node = node_path(conn);
     let vms = format!("{node}/vms");
     let nets = format!("{node}/networks");
+    let cts = format!("{node}/containers");
     match (method, s.as_slice()) {
         // Host and daemon.
         (_, ["health"] | ["version"]) if get => need(node, "Sys.Audit"),
@@ -154,6 +172,35 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
                 _ => None,
             }
         }
+
+        // Containers: their own privilege set, so a VM grant reaches no
+        // container and a container grant no VM.
+        (_, ["containers"]) if get => with(cts, "Sys.Audit", Special::ListCts),
+        ("POST", ["containers"]) => with(cts, "CT.Allocate", Special::CreateCt),
+        (_, ["containers", ct, rest @ ..]) => {
+            let p = ct_path(conn, ct);
+            let ct = ct.to_string();
+            match (method, rest) {
+                (_, [] | ["state"] | ["stats"] | ["interfaces"]) if get => need(p, "CT.Audit"),
+                ("DELETE", []) => with(p, "CT.Allocate", Special::DeleteCt { ct }),
+                (_, ["xml"]) if get => need(p, "CT.Audit"),
+                ("PUT", ["xml"]) => with(p, "CT.Config", Special::PutCtXml { ct }),
+                ("POST", ["start" | "shutdown" | "reboot" | "destroy"]) => need(p, "CT.PowerMgmt"),
+                ("POST", ["rename"]) => with(p, "CT.Config", Special::RenameCt { ct }),
+                (_, ["firewall"]) if get => need(p, "CT.Audit"),
+                ("PUT", ["firewall"]) => need(p, "CT.Config"),
+                // The NIC's network is checked like a VM's.
+                ("POST", ["interfaces"]) => with(p, "CT.Config", Special::AddNic { vm: ct }),
+                ("DELETE", ["interfaces", _]) => need(p, "CT.Config"),
+                ("PUT", ["interfaces", _, "bandwidth"]) => need(p, "CT.Config"),
+                (_, ["console", ..]) => need(p, "CT.Console"),
+                (_, ["capture", ..]) => need(p, "CT.Console"),
+                _ => None,
+            }
+        }
+        // The template catalog is public information; reading it costs the
+        // daemon an outbound request, so it needs a server grant.
+        (_, ["templates", "catalog"]) if get => need(node.clone(), "Sys.Audit"),
 
         // Networks.
         (_, ["networks"]) if get => with(nets, "Sys.Audit", Special::ListNetworks),
@@ -209,6 +256,11 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
                     with(p, "Datastore.Allocate", Special::AdminOnly)
                 }
                 ("POST", ["fetch"]) => with(p, "Datastore.AllocateSpace", Special::Fetch { pool }),
+                ("POST", ["templates"]) => with(
+                    p,
+                    "Datastore.AllocateSpace",
+                    Special::FetchTemplate { pool },
+                ),
                 _ => None,
             }
         }
@@ -275,6 +327,42 @@ mod tests {
             priv_of("POST", "/domains"),
             Some(("/nodes/c/vms".into(), "VM.Allocate"))
         );
+    }
+
+    #[test]
+    fn containers_use_their_own_privileges_and_path() {
+        let ct = "/nodes/c/containers/web";
+        for (m, p, want) in [
+            ("GET", "/containers/web", "CT.Audit"),
+            ("POST", "/containers/web/start", "CT.PowerMgmt"),
+            ("PUT", "/containers/web/xml", "CT.Config"),
+            ("POST", "/containers/web/console/connect", "CT.Console"),
+            ("DELETE", "/containers/web", "CT.Allocate"),
+            (
+                "PUT",
+                "/containers/web/interfaces/52:54:00:00:00:01/bandwidth",
+                "CT.Config",
+            ),
+        ] {
+            assert_eq!(priv_of(m, p), Some((ct.into(), want)), "{m} {p}");
+        }
+        let n = classify("c", "POST", "/containers").unwrap();
+        assert_eq!(
+            (n.path.as_str(), n.privilege),
+            ("/nodes/c/containers", "CT.Allocate")
+        );
+        assert_eq!(n.special, Special::CreateCt);
+        assert_eq!(
+            classify("c", "PUT", "/containers/web/xml").unwrap().special,
+            Special::PutCtXml { ct: "web".into() }
+        );
+        // No VM-only routes on a container.
+        assert_eq!(priv_of("POST", "/containers/web/reset"), None);
+        assert_eq!(priv_of("GET", "/containers/web/graphics"), None);
+        let t = classify("c", "POST", "/pools/p/templates").unwrap();
+        assert_eq!(t.privilege, "Datastore.AllocateSpace");
+        assert_eq!(t.special, Special::FetchTemplate { pool: "p".into() });
+        assert_eq!(priv_of("GET", "/templates/catalog").unwrap().1, "Sys.Audit");
     }
 
     #[test]

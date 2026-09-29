@@ -13,7 +13,7 @@
 //! alone: without the UUID there is no telling a rename from a delete and a
 //! re-create, and the second must NOT inherit the first's owner or grants.
 
-use crate::perm::{net_path, pool_path, vm_path, Kind};
+use crate::perm::{ct_path, net_path, pool_path, vm_path, Kind};
 use crate::store::Store;
 use std::collections::HashMap;
 
@@ -23,6 +23,7 @@ use std::collections::HashMap;
 #[derive(Debug, Default, Clone)]
 pub struct Listing {
     pub vms: HashMap<String, String>,
+    pub cts: HashMap<String, String>,
     pub networks: HashMap<String, String>,
     pub pools: HashMap<String, String>,
     pub was: HashMap<String, String>,
@@ -61,6 +62,7 @@ fn adopt_early_renames(
 ) {
     for (kind, list) in [
         ("vm", &now.vms),
+        ("ct", &now.cts),
         ("network", &now.networks),
         ("pool", &now.pools),
     ] {
@@ -77,6 +79,7 @@ fn adopt_early_renames(
             }
             let (rkind, path) = match kind {
                 "vm" => (Some(Kind::Vm), vm_path(conn, old)),
+                "ct" => (Some(Kind::Ct), ct_path(conn, old)),
                 "network" => (Some(Kind::Network), net_path(conn, old)),
                 _ => (None, pool_path(conn, old)),
             };
@@ -108,6 +111,7 @@ pub fn apply(store: &mut Store, conn: &str, now: &Listing) -> usize {
 
     for (kind, list, path_of) in [
         ("vm", &now.vms, vm_path as fn(&str, &str) -> String),
+        ("ct", &now.cts, ct_path),
         ("network", &now.networks, net_path),
         ("pool", &now.pools, pool_path),
     ] {
@@ -120,6 +124,7 @@ pub fn apply(store: &mut Store, conn: &str, now: &Listing) -> usize {
             // Renamed. Its records, then its grants, follow it.
             let rkind = match kind {
                 "vm" => Some(Kind::Vm),
+                "ct" => Some(Kind::Ct),
                 "network" => Some(Kind::Network),
                 _ => None,
             };
@@ -141,6 +146,7 @@ pub fn apply(store: &mut Store, conn: &str, now: &Listing) -> usize {
     let mut next = HashMap::new();
     for (kind, list) in [
         ("vm", &now.vms),
+        ("ct", &now.cts),
         ("network", &now.networks),
         ("pool", &now.pools),
     ] {
@@ -158,6 +164,7 @@ async fn listing(conn: &crate::store::Connection) -> Option<Listing> {
     let mut out = Listing::default();
     for (kind, path) in [
         ("vm", "/domains"),
+        ("ct", "/containers"),
         ("network", "/networks"),
         ("pool", "/pools"),
     ] {
@@ -173,6 +180,7 @@ async fn listing(conn: &crate::store::Connection) -> Option<Listing> {
             }
             let map = match kind {
                 "vm" => &mut out.vms,
+                "ct" => &mut out.cts,
                 "network" => &mut out.networks,
                 _ => &mut out.pools,
             };

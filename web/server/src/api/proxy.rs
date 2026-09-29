@@ -156,6 +156,7 @@ fn filter(
 ) -> Option<Vec<u8>> {
     match special {
         Special::ListVms => guard::filter_list(state, user, conn, Kind::Vm, body),
+        Special::ListCts => guard::filter_list(state, user, conn, Kind::Ct, body),
         Special::ListNetworks => guard::filter_list(state, user, conn, Kind::Network, body),
         Special::ListPools => guard::filter_pools(state, user, conn, body),
         Special::ListBridges => guard::filter_bridges(state, user, conn, body),
@@ -174,6 +175,7 @@ fn delete_label(path: &str) -> Option<String> {
     let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
     match seg.as_slice() {
         ["domains", name] => Some(format!("Delete VM {name}")),
+        ["containers", name] => Some(format!("Delete container {name}")),
         ["filters", name] => Some(format!("Delete filter {name}")),
         ["networks", name] => Some(format!("Delete network {name}")),
         ["pools", name] => Some(format!("Delete storage pool {name}")),
@@ -331,7 +333,8 @@ async fn resolve_uuid(conn: &crate::store::Connection, uuid: &str) -> Option<Str
     }
     // A miss: re-read every list for this daemon once.
     let mut map = HashMap::new();
-    for list in ["/domains", "/networks", "/pools"] {
+    // Containers too: a UUID names one thing on a host, whichever list it is in.
+    for list in ["/domains", "/containers", "/networks", "/pools"] {
         if let Ok(v) = crate::guard::daemon_get(conn, list).await {
             for x in v.as_array().into_iter().flatten() {
                 if let (Some(u), Some(n)) = (x["uuid"].as_str(), x["name"].as_str()) {
@@ -357,7 +360,7 @@ async fn canonical_path(conn: &crate::store::Connection, rest: &str) -> String {
         .map(str::to_string)
         .collect();
     let named = match seg.first().map(String::as_str) {
-        Some("domains") | Some("pools") => true,
+        Some("domains") | Some("containers") | Some("pools") => true,
         Some("networks") => seg.get(1).map(String::as_str) != Some("bridges"),
         _ => false,
     };
@@ -475,6 +478,7 @@ async fn proxy(
         Special::None
             | Special::AdminOnly
             | Special::DeleteVm { .. }
+            | Special::DeleteCt { .. }
             | Special::DeleteNetwork { .. }
             | Special::DeleteVolume { .. }
     ) && write;

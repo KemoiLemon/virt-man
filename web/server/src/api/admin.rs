@@ -186,12 +186,19 @@ fn valid_path(p: &str) -> bool {
     match seg.as_slice() {
         ["nodes", c] => !c.is_empty(),
         ["nodes", c, k] => {
-            !c.is_empty() && matches!(*k, "vms" | "networks" | "storage" | "bridges")
+            !c.is_empty()
+                && matches!(
+                    *k,
+                    "vms" | "containers" | "networks" | "storage" | "bridges"
+                )
         }
         ["nodes", c, k, n] => {
             !c.is_empty()
                 && !n.is_empty()
-                && matches!(*k, "vms" | "networks" | "storage" | "bridges")
+                && matches!(
+                    *k,
+                    "vms" | "containers" | "networks" | "storage" | "bridges"
+                )
         }
         _ => false,
     }
@@ -303,6 +310,9 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
         ) else {
             continue; // offline: show nothing, prune nothing
         };
+        // A host without the LXC driver has no containers, which is not the
+        // same as being unreachable: an error here prunes nothing.
+        let cts = daemon_get(c, "/containers").await.ok();
         answered.push(c.id.clone());
         for d in doms.as_array().into_iter().flatten() {
             let name = d["name"].as_str().unwrap_or("").to_string();
@@ -312,6 +322,28 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
                 "uuid": d["uuid"], "title": d["title"],
                 "state": d["state"], "vcpus": d["vcpus"], "memory_mb": d["memory_mb"],
             }));
+        }
+        match &cts {
+            Some(cts) => {
+                for d in cts.as_array().into_iter().flatten() {
+                    let name = d["name"].as_str().unwrap_or("").to_string();
+                    seen.push((Kind::Ct, c.id.clone(), String::new(), name.clone()));
+                    out.push(json!({
+                        "kind": "ct", "conn": c.id, "conn_name": c.name, "name": name,
+                        "uuid": d["uuid"], "title": d["title"],
+                        "state": d["state"], "vcpus": d["vcpus"], "memory_mb": d["memory_mb"],
+                        "privileged": d["privileged"],
+                    }));
+                }
+            }
+            // Unknown: keep every container record on this daemon.
+            None => {
+                for r in state.read().resources.iter() {
+                    if r.kind == Kind::Ct && r.conn == c.id {
+                        seen.push((Kind::Ct, c.id.clone(), String::new(), r.name.clone()));
+                    }
+                }
+            }
         }
         for n in nets.as_array().into_iter().flatten() {
             let name = n["name"].as_str().unwrap_or("").to_string();
@@ -362,6 +394,7 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
     for x in &mut out {
         let kind = match x["kind"].as_str() {
             Some("vm") => Kind::Vm,
+            Some("ct") => Kind::Ct,
             Some("network") => Kind::Network,
             Some("volume") => Kind::Volume,
             _ => continue,
@@ -541,6 +574,8 @@ mod tests {
             "/nodes/c",
             "/nodes/c/vms",
             "/nodes/c/vms/web",
+            "/nodes/c/containers",
+            "/nodes/c/containers/web",
             "/nodes/c/bridges/br0",
         ] {
             assert!(super::valid_path(ok), "{ok}");

@@ -207,6 +207,7 @@ impl Store {
             let privs = privs_of(&scopes);
             let full = perm::PRIVILEGES
                 .iter()
+                .filter(|p| perm::legacy_expressible(p))
                 .all(|p| privs.iter().any(|x| x == p));
             let role = if full {
                 perm::ADMIN_ROLE.to_string()
@@ -676,6 +677,10 @@ mod tests {
             "a full admin gets the real role"
         );
         assert!(!s.is_admin(&v("o")));
+        assert!(
+            !s.can(&v("o"), "/nodes/c/containers/x", "CT.Privileged"),
+            "migration grants nothing that did not exist before"
+        );
         assert!(
             s.can(&v("o"), "/nodes/c/vms/x", "VM.Config"),
             "operator keeps VM write"

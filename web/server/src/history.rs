@@ -301,6 +301,10 @@ pub struct Query {
     pub name: String,
     #[serde(default)]
     pub sub: String,
+    /// The subject is a container: the series is the same (keyed by UUID),
+    /// the permission is not.
+    #[serde(default)]
+    pub ct: bool,
     pub since_ms: i64,
     #[serde(default = "default_points")]
     pub points: i64,
@@ -704,6 +708,7 @@ mod tests {
             kind: kind.into(),
             name: name.into(),
             sub: sub.into(),
+            ct: false,
             since_ms: 0,
             points: 240,
         }

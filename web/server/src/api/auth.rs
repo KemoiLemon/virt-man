@@ -16,6 +16,7 @@ use crate::store::{random_hex, sha256_hex, User};
 pub fn routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/auth/me", get(me))
+        .route("/auth/privs", get(privs))
         .layer(middleware::from_fn(auth::require_user(state.clone())))
         .route("/auth/status", get(status))
         .route("/auth/setup", post(setup))
@@ -147,6 +148,23 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         auth::cleared_cookie().parse().unwrap(),
     );
     (headers, Json(json!({"logged_out": true}))).into_response()
+}
+
+#[derive(Deserialize)]
+struct PrivsQ {
+    path: String,
+}
+
+/// What the caller may do at one path. Only their own privileges, so it
+/// reveals nothing they could not learn by trying; the forms use it to offer
+/// only what will be accepted (the privileged-container box).
+async fn privs(
+    State(state): State<AppState>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
+    axum::extract::Query(q): axum::extract::Query<PrivsQ>,
+) -> Json<Value> {
+    let p: Vec<String> = state.read().privs(&user, &q.path).into_iter().collect();
+    Json(json!({ "path": q.path, "privs": p }))
 }
 
 async fn me(
