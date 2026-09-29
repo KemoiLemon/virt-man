@@ -249,6 +249,9 @@ body {
   display: flex; flex-direction: column;
 }
 .modal.wide { width: 900px; }
+/* The profile's six limit cards are one row, so the grid sets the floor for the
+   width rather than the other way round. */
+.modal.pf-modal { width: 1040px; }
 .action-modal { width: 480px; }
 .action-message { color: var(--fg); white-space: pre-line; line-height: 1.55; }
 .modal-head {

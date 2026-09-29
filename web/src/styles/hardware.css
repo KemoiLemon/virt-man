@@ -104,9 +104,30 @@
 }
 .hwctl { min-width: 0; }
 .hwctl-static { font-size: 13px; word-break: break-all; color: var(--dim); }
+/* Boot order: the order number, what the device actually is, then the actions.
+   The actions sit at the left edge of their own column rather than trailing the
+   name, so every row's arrow/bin cluster lines up down the list and the name
+   column can be scanned on its own. */
+.boot-list { border: 1px solid var(--line); }
+.boot-list:empty { display: none; }
+.boot-row {
+  display: grid; grid-template-columns: 18px minmax(120px, 1fr) auto;
+  align-items: center; gap: 10px; padding: 6px 9px;
+  border-bottom: 1px solid var(--line);
+}
+.boot-row:last-child { border-bottom: none; }
+.boot-order { color: var(--dim); font-size: 11px; text-align: right; }
+.boot-name { min-width: 0; }
+.boot-name b { display: block; font-size: 12px; font-weight: 600; color: var(--fg); word-break: break-all; }
+/* The kind the entry stands for ("Hard Disk"), under the name of the actual
+   backing device, so a reordered disk is identifiable and still readable. */
+.boot-name i { display: block; font-style: normal; font-size: 10px; color: var(--dim); margin-top: 1px; }
+.boot-acts { display: flex; gap: 4px; justify-self: start; }
 /* Keep the button and its notice on one line so margin-left:auto can push the
    notice to the far edge; .actions wraps by default. */
 .hw-actions { flex-wrap: nowrap; align-items: center; }
+/* The boot list's own Add row: no bottom margin inside the modal body. */
+.hwctl > .actions { margin-bottom: 0; }
 
 /* Restart notice: pushed to the trailing edge rather than sitting beside the
    button, and vertically centred against it. */

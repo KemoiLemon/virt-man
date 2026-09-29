@@ -385,6 +385,28 @@ function sanitizeBandwidth(block: string): string {
   return parts.length ? `<bandwidth>${parts.join("")}</bandwidth>` : "";
 }
 
+/** What each `<boot dev=...>` actually points at, in the same words
+ * `deviceSummary` uses. libvirt picks a boot device by *kind*, not by name, so
+ * `hd` means "the first disk, in declaration order" and `cdrom` the first CD:
+ * labelling the kind alone leaves the user unable to tell which of several
+ * disks they just reordered. `network` and `fd` name no backing device. */
+export function bootTargets(xml: string): Record<string, string> {
+  const name = (block: string) => {
+    const src = block.match(/<source\b[^>]*>/)?.[0] ?? "";
+    const at = (n: string) => src.match(new RegExp(`${n}\\s*=\\s*['"]([^'"]*)['"]`))?.[1] ?? "";
+    const file = at("file");
+    return file ? (file.split("/").pop() ?? file) : at("volume") || at("pool");
+  };
+  const blocks = [...xml.matchAll(/<disk\b[^>]*device=['"](disk|cdrom)['"][\s\S]*?<\/disk>/g)];
+  const out: Record<string, string> = {};
+  for (const kind of ["disk", "cdrom"] as const) {
+    const names = blocks.filter((m) => m[1] === kind).map((m) => name(m[0])).filter(Boolean);
+    // More than one disk: it is the first that boots, so it is the one named.
+    if (names.length) out[kind === "disk" ? "hd" : "cdrom"] = names[0];
+  }
+  return out;
+}
+
 /** Parse the devices this editor manages back out of a domain XML. */
 export function devicesFromXml(xml: string): HwDevice[] {
   const out: HwDevice[] = [];

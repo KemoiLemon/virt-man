@@ -13,7 +13,7 @@ import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
 import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type CtTab, type Route } from "./route";
-import { HW_CATALOG, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
+import { HW_CATALOG, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
@@ -4034,6 +4034,7 @@ async function renderVmBody(vm: string) {
       // has been added. libvirt tries the <boot> elements top to bottom.
       const bootOrder: string[] = [...xml.matchAll(/<boot dev='([^']*)'\/>/g)].map((m) => m[1]);
       if (bootOrder.length === 0) bootOrder.push("hd", "cdrom");
+      const bootNames = bootTargets(xml);
       const ct = ctMode;
       const machine = pick(/machine='([^']*)'/);
       const arch = pick(/arch='([^']*)'/);
@@ -4123,10 +4124,12 @@ async function renderVmBody(vm: string) {
         setHtml(bootList, bootOrder.map((d, i) => `
           <div class="boot-row" data-boot-i="${i}">
             <span class="boot-order">${i + 1}</span>
-            <span class="boot-name">${esc(BOOT_LABEL[d] ?? d)}</span>
-            <button class="btn icon" data-boot-up ${i === 0 ? "disabled" : ""} title="Move up">${ic.up(14)}</button>
-            <button class="btn icon" data-boot-down ${i === bootOrder.length - 1 ? "disabled" : ""} title="Move down">${ic.down(14)}</button>
-            <button class="btn danger icon" data-boot-del title="Remove">${ic.trash()}</button>
+            <span class="boot-name"><b>${esc(bootNames[d] ?? BOOT_LABEL[d] ?? d)}</b><i>${esc(BOOT_LABEL[d] ?? d)}</i></span>
+            <span class="boot-acts">
+              <button class="btn icon" data-boot-up ${i === 0 ? "disabled" : ""} title="Move up">${ic.up(14)}</button>
+              <button class="btn icon" data-boot-down ${i === bootOrder.length - 1 ? "disabled" : ""} title="Move down">${ic.down(14)}</button>
+              <button class="btn danger icon" data-boot-del title="Remove">${ic.trash()}</button>
+            </span>
           </div>`).join("") || `<p class="hint">Nothing to boot from; libvirt uses its own order.</p>`);
         const idx = (b: Element) => Number((b.closest("[data-boot-i]") as HTMLElement).dataset.bootI);
         bootList.querySelectorAll("[data-boot-up]").forEach((b: Element) => {
@@ -6487,9 +6490,11 @@ function openProfile() {
     `<button class="btn" id="pf-close">Close</button>
      <button class="btn primary hidden" id="pf-save">Save Changes</button>`,
   );
-  // Wider than the default: the limits grid and the name/password pairs read
-  // cramped at 640px.
-  el.querySelector(".modal")?.classList.add("wide");
+  // Wider than `.wide` (900px): the limits are six cards pinned to one row, and
+  // at 900 they were squeezed against the viewport cap. Its own class, since
+  // `.wide` is shared with the access log and firewall tables, which do not
+  // want to grow.
+  el.querySelector(".modal")?.classList.add("wide", "pf-modal");
   $("#pf-close", el).onclick = () => el.remove();
   $("#pf-avatar-btn", el).onclick = () => void changeAvatar(el);
   void loadProfileLimits(el);

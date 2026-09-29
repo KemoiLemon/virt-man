@@ -278,3 +278,30 @@ test("a bandwidth block is rebuilt from numbers, not copied", () => {
   assert.match(out, /<bandwidth><inbound average="10"\/><\/bandwidth>/);
   assert.doesNotMatch(out, /onload|script/);
 });
+
+test("a boot entry names the device it actually boots", () => {
+  // libvirt resolves <boot dev='hd'> to the first disk, so labelling the kind
+  // alone ("Hard Disk") leaves which of several disks unidentifiable after a
+  // reorder.
+  const xml = `<domain><os><boot dev='hd'/><boot dev='cdrom'/></os><devices>
+    <disk type='file' device='disk'>
+      <source file='/var/lib/libvirt/images/boot.qcow2'/><target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='disk'>
+      <source file='/var/lib/libvirt/images/data.qcow2'/><target dev='vdb' bus='virtio'/>
+    </disk>
+    <disk type='volume' device='cdrom'>
+      <source pool='iso' volume='alpine.iso'/><target dev='sda' bus='sata'/>
+    </disk>
+  </devices></domain>`;
+  const t = hw.bootTargets(xml);
+  assert.equal(t.hd, "boot.qcow2", "the first disk, not the second");
+  assert.equal(t.cdrom, "alpine.iso");
+  // network/fd have no backing device, so they carry no name.
+  assert.equal(t.network, undefined);
+});
+
+test("a guest with no disks names nothing", () => {
+  const t = hw.bootTargets("<domain><os><boot dev='hd'/></os><devices></devices></domain>");
+  assert.deepEqual(t, {}, "an empty cdrom must not be named");
+});

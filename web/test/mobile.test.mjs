@@ -169,3 +169,26 @@ test("dialogs stay inside the safe area", () => {
   assert.match(block, /\.modal-back\{[^}]*padding:var\(--safe-top\)/,
     "the overlay pads by the insets, which insets the dialog it centres");
 });
+
+test("the profile's limit grid is one row on desktop and wraps on a phone", () => {
+  // Six cards pinned to six columns; `auto-fit` reflowed them into a 4+2 block
+  // as soon as the modal met the viewport cap, which read as a broken grid.
+  assert.match(css, /\.pf-limit \.specs\{[^}]*repeat\(6,/,
+    "six columns, so the set stays one row");
+  assert.match(css, /\.modal\.pf-modal\{[^}]*width:10\d\dpx/,
+    "and the modal is wide enough to hold them");
+  // Below the breakpoint the modal is full width, so six columns would be
+  // unreadable: the wrap must still be re-allowed there, inside the query.
+  const q = css.search(WIDTH_QUERY);
+  assert.match(css.slice(q), /\.pf-limit \.specs\{[^}]*auto-fit/,
+    "a narrow screen re-allows wrapping");
+});
+
+test("a boot row puts the actions in their own column after the name", () => {
+  // The actions align down the list rather than trailing each device name, and
+  // the name column stays flexible so a long volume name does not push them.
+  assert.match(css, /\.boot-row\{[^}]*grid-template-columns:18px minmax\([^)]*\) auto/,
+    "order, name and actions are three grid columns");
+  assert.match(css, /\.boot-acts\{[^}]*justify-self:start/,
+    "the cluster sits at the left edge of its column");
+});

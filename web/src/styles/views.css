@@ -200,7 +200,12 @@ table.grid + .actions { margin-top: 12px; }
 .pf-limit-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 6px; font-size: 12px; }
 /* The `.specs` grid carries its own bottom margin for a page; inside a limit
    block that stacks on `.pf-limit`'s and reads as a stray blank line. */
-.pf-limit .specs { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 0; }
+/* Six limits, six columns: `auto-fit` reflowed them into a 4+2 block as soon as
+   the modal met the viewport cap, which read as a broken grid rather than a
+   row. `minmax(0, 1fr)` lets the cards shrink instead, so the set stays one row
+   and the numbers never wrap mid-value. Below the breakpoint in mobile.css the
+   modal is full-width and the grid is allowed to wrap again. */
+.pf-limit .specs { grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 0; }
 /* Privilege chips in the roles and API key tables. */
 .priv-cell { white-space: normal; }
 .priv {

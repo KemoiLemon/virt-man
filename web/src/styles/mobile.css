@@ -89,6 +89,9 @@
     width: 100%; max-width: 100vw;
   }
   .modal { max-height: 100dvh; }
+  /* The profile pins its limits to one row for a desktop modal; at phone width
+     six columns are unreadable, so let them wrap into twos again. */
+  .pf-limit .specs { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
   .hw-modal, .add-hw-modal { height: auto; max-height: 100dvh; }
   .modal-body { overflow-x: auto; }
   .modal-foot { flex-wrap: wrap; }
