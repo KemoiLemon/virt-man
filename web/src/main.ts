@@ -2859,6 +2859,14 @@ function blankPolicy(): FirewallPolicy {
   return { in: "accept", out: "accept", forward: "accept" };
 }
 
+/// Boot devices a guest may try, and what to call them. The order they are
+/// tried in is the document order of the `<os>` `<boot dev=.../>` elements,
+/// which is how libvirt reads them.
+const BOOT_DEVS = ["hd", "cdrom", "network", "fd"] as const;
+const BOOT_LABEL: Record<string, string> = {
+  fd: "Floppy", hd: "Hard Disk", cdrom: "CD/DVD", network: "Network",
+};
+
 /// Three dropdowns for the per-direction default policies, in one row.
 function fwPolicyRow(p: FirewallPolicy): string {
   return `
@@ -4004,7 +4012,10 @@ async function renderVmBody(vm: string) {
       const pick = (re: RegExp, fallback = "—") => xml.match(re)?.[1] ?? fallback;
       const title = pick(/<title>([^<]*)<\/title>/, "");
       const description = pick(/<description>([^<]*)<\/description>/, "");
-      const bootDev = pick(/<boot dev='([^']*)'/, "hd");
+      // Boot order: disk then CD, as a fresh guest boots, plus whatever else
+      // has been added. libvirt tries the <boot> elements top to bottom.
+      const bootOrder: string[] = [...xml.matchAll(/<boot dev='([^']*)'\/>/g)].map((m) => m[1]);
+      if (bootOrder.length === 0) bootOrder.push("hd", "cdrom");
       const ct = ctMode;
       const machine = pick(/machine='([^']*)'/);
       const arch = pick(/arch='([^']*)'/);
@@ -4037,11 +4048,14 @@ async function renderVmBody(vm: string) {
           </div>
           ${ct ? "" : `<div class="hwrow">
             <span class="hwrow-ic">${ic.disk()}</span>
-            <div class="hwrow-label"><b>Boot Device</b></div>
-            <div class="hwctl"><select id="opt-boot">
-              ${["hd", "cdrom", "network"].map((d) =>
-                `<option value="${d}" ${d === bootDev ? "selected" : ""}>${d}</option>`).join("")}
-            </select></div>
+            <div class="hwrow-label"><b>Boot Order</b><i>Tried top to bottom</i></div>
+            <div class="hwctl">
+              <div id="opt-boot-list" class="boot-list"></div>
+              <div class="actions" style="margin:8px 0 0">
+                <select id="opt-boot-add">${BOOT_DEVS.map((d) => `<option value="${d}">${esc(BOOT_LABEL[d])}</option>`).join("")}</select>
+                <button class="btn" id="opt-boot-add-btn">${ic.plus(14)} Add device</button>
+              </div>
+            </div>
           </div>`}
           <div class="hwrow">
             <span class="hwrow-ic">${ic.key()}</span>
@@ -4083,10 +4097,45 @@ async function renderVmBody(vm: string) {
           </div>
         </div>`);
 
+      // Reorder with the arrows, remove with the bin, add from the menu; the
+      // sequence is written into <os> on save.
+      const bootList = $("#opt-boot-list");
+      const paintBoot = () => {
+        if (!bootList) return;
+        setHtml(bootList, bootOrder.map((d, i) => `
+          <div class="boot-row" data-boot-i="${i}">
+            <span class="boot-order">${i + 1}</span>
+            <span class="boot-name">${esc(BOOT_LABEL[d] ?? d)}</span>
+            <button class="btn icon" data-boot-up ${i === 0 ? "disabled" : ""} title="Move up">${ic.up(14)}</button>
+            <button class="btn icon" data-boot-down ${i === bootOrder.length - 1 ? "disabled" : ""} title="Move down">${ic.down(14)}</button>
+            <button class="btn danger icon" data-boot-del title="Remove">${ic.trash()}</button>
+          </div>`).join("") || `<p class="hint">Nothing to boot from; libvirt uses its own order.</p>`);
+        const idx = (b: Element) => Number((b.closest("[data-boot-i]") as HTMLElement).dataset.bootI);
+        bootList.querySelectorAll("[data-boot-up]").forEach((b: Element) => {
+          (b as HTMLElement).onclick = () => {
+            const i = idx(b);
+            if (i > 0) { [bootOrder[i - 1], bootOrder[i]] = [bootOrder[i], bootOrder[i - 1]]; paintBoot(); }
+          };
+        });
+        bootList.querySelectorAll("[data-boot-down]").forEach((b: Element) => {
+          (b as HTMLElement).onclick = () => {
+            const i = idx(b);
+            if (i < bootOrder.length - 1) { [bootOrder[i], bootOrder[i + 1]] = [bootOrder[i + 1], bootOrder[i]]; paintBoot(); }
+          };
+        });
+        bootList.querySelectorAll("[data-boot-del]").forEach((b: Element) => {
+          (b as HTMLElement).onclick = () => { bootOrder.splice(idx(b), 1); paintBoot(); };
+        });
+      };
+      paintBoot();
+      $("#opt-boot-add-btn")?.addEventListener("click", () => {
+        const sel = $("#opt-boot-add") as HTMLSelectElement | null;
+        if (sel) { bootOrder.push(sel.value); paintBoot(); }
+      });
+
       $("#opt-save")?.addEventListener("click", async () => {
         const newTitle = $("#opt-title").value.trim();
         const newDesc = $("#opt-desc").value.trim();
-        const newBoot = ($("#opt-boot") as HTMLSelectElement | null)?.value ?? bootDev;
         const newName = $("#opt-name").value.trim();
 
         // Rename first: the rename endpoint is the only safe way to swap the
@@ -4114,8 +4163,16 @@ async function renderVmBody(vm: string) {
         let next = xml
           .replace(/\s*<title>[^<]*<\/title>/, "")
           .replace(/\s*<description>[^<]*<\/description>/, "")
-          .replace(/<boot dev='[^']*'\/>/, `<boot dev='${esc(newBoot)}'/>`)
           .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
+        if (!ct) {
+          // The whole boot sequence is rewritten: its document order is the
+          // order libvirt tries the devices, and a guest that had none gets one
+          // (libvirt's implicit default is disk-then-CD, which is what this
+          // starts from).
+          const boots = bootOrder.map((d) => `<boot dev='${esc(d)}'/>`).join("");
+          next = next.replace(/\n?[ \t]*<boot dev='[^']*'\/>/g, "");
+          if (boots) next = next.replace(/(<\/os>)/, `  ${boots}\n  $1`);
+        }
         const meta = [
           newTitle ? `  <title>${esc(newTitle)}</title>` : "",
           newDesc ? `  <description>${esc(newDesc)}</description>` : "",
