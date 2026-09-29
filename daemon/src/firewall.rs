@@ -678,15 +678,18 @@ async fn allow_via_iptables(subnet: &str) -> Backend {
     let prefix = format!("-A {LIBVIRT_NET_IN} ");
     let ours =
         |l: &str| l.starts_with(&prefix) && l.contains("--ctstate DNAT") && l.contains(subnet);
-    if ahead_of_reject(&listing, ours) {
+    let copies = listing.lines().filter(|l| ours(l)).count();
+    if copies == 1 && ahead_of_reject(&listing, ours) {
         // In force, which is the common case on every pass after the first.
         return Ok(true);
     }
 
-    // Missing, or present but behind the reject: drop every copy, then put one
-    // at the head. Deleting first is what keeps this idempotent, so
-    // re-asserting cannot stack copies.
-    for _ in 0..listing.lines().filter(|l| ours(l)).count() {
+    // Missing, behind the reject, or more than one copy: drop every copy, then
+    // put a single one at the head. Exactly one is what counts: a copy behind
+    // the reject admits nothing, and an extra copy is one nothing will ever
+    // remove, because finding ours ahead of the reject is what stops this pass
+    // from looking again.
+    for _ in 0..copies {
         let _ = Command::new("iptables")
             .arg("-D")
             .arg(LIBVIRT_NET_IN)
@@ -721,9 +724,20 @@ async fn allow_via_nftables(subnet: &str) -> Backend {
     use tokio::process::Command;
 
     // Reading the chain serves twice over: it says whether this host uses the
-    // nftables backend at all, and whether our rule is already in place.
+    // nftables backend at all, and where our rule is. `-a` is what makes the
+    // listing carry each rule's handle, which is the only way to delete one:
+    // nft has no "delete the rule matching this spec" the way iptables does,
+    // so without it a mis-placed copy cannot be removed. The option has to
+    // precede the command, or nft rejects the whole line.
     let Ok(current) = Command::new("nft")
-        .args(["list", "chain", "ip", LIBVIRT_NFT_TABLE, LIBVIRT_NFT_CHAIN])
+        .args([
+            "-a",
+            "list",
+            "chain",
+            "ip",
+            LIBVIRT_NFT_TABLE,
+            LIBVIRT_NFT_CHAIN,
+        ])
         .output()
         .await
     else {
@@ -734,13 +748,14 @@ async fn allow_via_nftables(subnet: &str) -> Backend {
     }
     let listing = String::from_utf8_lossy(&current.stdout).into_owned();
     let mark = our_mark_quoted();
-    if ahead_of_reject(&listing, |l| l.contains(&mark)) {
+    let copies = nft_handles(&listing, &mark);
+    if copies.len() == 1 && ahead_of_reject(&listing, |l| l.contains(&mark)) {
         return Ok(true);
     }
 
-    // Behind the reject, or missing: drop our copies by handle first, so
-    // re-inserting cannot stack them.
-    for handle in nft_handles(&listing, &mark) {
+    // Behind the reject, missing, or duplicated: drop our copies by handle
+    // first, so re-inserting cannot stack them.
+    for handle in copies {
         let _ = Command::new("nft")
             .args([
                 "delete",
@@ -913,6 +928,11 @@ chain guest_input {
 }";
         assert!(!ahead_of_reject(listing, ours), "behind libvirt's reject");
         assert_eq!(nft_handles(listing, &mark), vec![9], "deletable by handle");
+        // A duplicate is found too, so a pass can collapse it back to one.
+        let twice = format!(
+            "{listing}\n\t\tip daddr 10.74.0.0/24 ct status dnat counter accept comment \"virt-man dnat\" # handle 11"
+        );
+        assert_eq!(nft_handles(&twice, &mark).len(), 2, "both copies");
         let moved = listing.replace(
             "ip daddr 10.74.0.0/24 ct status dnat counter accept comment \"virt-man dnat\" # handle 9",
             "",
