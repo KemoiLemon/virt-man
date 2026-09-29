@@ -33,6 +33,23 @@ async fn run() -> Result<(), String> {
     // the aws-lc-rs one axum-server already uses, or building a client panics.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     config::ensure_privileges()?;
+    // libvirt's event loop, before any connection is opened. A remote
+    // connection (every one here goes through libvirtd's socket) only reads
+    // the socket when something drives it: with no loop, a console stream
+    // received output only as a side effect of sending input, so the
+    // container's console updated only when a key was pressed.
+    virt::event::event_register_default_impl().map_err(|e| format!("libvirt event loop: {e}"))?;
+    std::thread::Builder::new()
+        .name("libvirt-events".into())
+        .spawn(|| {
+            loop {
+                if let Err(e) = virt::event::event_run_default_impl() {
+                    tracing::warn!("libvirt event loop: {e}");
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+        })
+        .map_err(|e| format!("libvirt event thread: {e}"))?;
 
     let cfg = config::Config::load()?;
     let auth = auth::Auth::from_file(&cfg.token_path)?;
