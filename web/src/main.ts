@@ -13,7 +13,7 @@ import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
 import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type CtTab, type Route } from "./route";
-import { HW_CATALOG, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
+import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
@@ -2890,11 +2890,8 @@ function blankPolicy(): FirewallPolicy {
 
 /// Boot devices a guest may try, and what to call them. The order they are
 /// tried in is the document order of the `<os>` `<boot dev=.../>` elements,
-/// which is how libvirt reads them.
-const BOOT_DEVS = ["hd", "cdrom", "network", "fd"] as const;
-const BOOT_LABEL: Record<string, string> = {
-  fd: "Floppy", hd: "Hard Disk", cdrom: "CD/DVD", network: "Network",
-};
+/// which is how libvirt reads them. Defined in `hardware.ts` beside the code
+/// that resolves them, so the dropdown and the list cannot disagree.
 
 /// Three dropdowns for the per-direction default policies, in one row.
 function fwPolicyRow(p: FirewallPolicy): string {
@@ -4082,7 +4079,7 @@ async function renderVmBody(vm: string) {
             <div class="hwctl">
               <div id="opt-boot-list" class="boot-list"></div>
               <div class="actions" style="margin:8px 0 0">
-                <select id="opt-boot-add">${BOOT_DEVS.map((d) => `<option value="${d}">${esc(BOOT_LABEL[d])}</option>`).join("")}</select>
+                <select id="opt-boot-add"></select>
                 <button class="btn" id="opt-boot-add-btn">${ic.plus(14)} Add device</button>
               </div>
             </div>
@@ -4130,8 +4127,21 @@ async function renderVmBody(vm: string) {
       // Reorder with the arrows, remove with the bin, add from the menu; the
       // sequence is written into <os> on save.
       const bootList = $("#opt-boot-list");
+      const bootAdd = $("#opt-boot-add") as HTMLSelectElement | null;
+      const bootAddBtn = $("#opt-boot-add-btn") as HTMLButtonElement | null;
       const paintBoot = () => {
         if (!bootList) return;
+        // The dropdown shrinks as devices are added and grows again on remove,
+        // so it is repainted with the list rather than baked into the page.
+        // An empty list disables Add: every kind is already in the order.
+        const choices = bootChoices(bootOrder, bootNames);
+        if (bootAdd) {
+          setHtml(bootAdd, choices.map((c) => `<option value="${esc(c.value)}">${esc(c.label)}</option>`).join(""));
+        }
+        if (bootAddBtn) {
+          bootAddBtn.disabled = choices.length === 0;
+          bootAddBtn.title = choices.length ? "" : "Every boot device is already listed";
+        }
         setHtml(bootList, bootOrder.map((d, i) => `
           <div class="boot-row" data-boot-i="${i}">
             <span class="boot-order">${i + 1}</span>
@@ -4162,7 +4172,9 @@ async function renderVmBody(vm: string) {
       paintBoot();
       $("#opt-boot-add-btn")?.addEventListener("click", () => {
         const sel = $("#opt-boot-add") as HTMLSelectElement | null;
-        if (sel) { bootOrder.push(sel.value); paintBoot(); }
+        // Guarded: with every kind already listed the select is empty, and
+        // pushing its empty value would add a `<boot dev=''/>`.
+        if (sel?.value) { bootOrder.push(sel.value); paintBoot(); }
       });
 
       $("#opt-save")?.addEventListener("click", async () => {

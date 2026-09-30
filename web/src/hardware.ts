@@ -440,6 +440,39 @@ export function bootTargets(xml: string): Record<string, string> {
   return out;
 }
 
+/// Boot devices a guest may try, and what to call them. The order they are
+/// tried in is the document order of the `<os>` `<boot dev=.../>` elements,
+/// which is how libvirt reads them.
+export const BOOT_DEVS = ["hd", "cdrom", "network", "fd"] as const;
+export const BOOT_LABEL: Record<string, string> = {
+  fd: "Floppy", hd: "Hard Disk", cdrom: "CD/DVD", network: "Network",
+};
+
+/// What to offer in the boot-order dropdown, and what to call each entry.
+///
+/// Two things the plain `BOOT_LABEL[kind]` list got wrong:
+///
+/// - The label names the *device*, not just the kind. libvirt boots "the first
+///   disk", so with two attached, "Hard Disk" does not say which one; the name
+///   from `bootTargets` does (`Debian-13.qcow2`). The kind is a fallback for a
+///   boot device with no backing device of its own (Network, and a Floppy with
+///   no image), which is also the only label those can have.
+/// - A kind already in the order is not offered again. Adding it twice is
+///   meaningless -- libvirt resolves both to the same device -- and the second
+///   entry did nothing but confuse the order.
+///
+/// `names` comes from the guest XML (`bootTargets`), so an entry names the disk
+/// really attached.
+export function bootChoices(
+  order: string[],
+  names: Record<string, string>,
+): { value: string; label: string }[] {
+  return BOOT_DEVS
+    .filter((d) => !order.includes(d))
+    .map((d) => ({ value: d, label: names[d] ? `${names[d]} (${BOOT_LABEL[d]})` : BOOT_LABEL[d] }));
+}
+
+
 /** Parse the devices this editor manages back out of a domain XML. */
 export function devicesFromXml(xml: string): HwDevice[] {
   const out: HwDevice[] = [];

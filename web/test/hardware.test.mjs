@@ -234,8 +234,10 @@ test("a summary shows the pool and network nickname, not their UUID", () => {
   // title, so the hardware tab used to show a UUID for anything made or
   // migrated since. The resolver is display-only: the underlying `fields` still
   // hold the libvirt names, which is what the XML is written from.
-  const resolve = (kind, name) =>
-    kind === "pool" ? "Local images" : name === "net-a" ? "LAN" : name;
+  const resolve = (kind, name) => {
+    if (kind === "pool") return "Local images";
+    return name === "net-a" ? "LAN" : name;
+  };
   const disk = { kind: "disk", fields: { pool: "8f0d-uuid", volume: "a.qcow2", bus: "virtio" } };
   assert.equal(hw.deviceSummary(disk, resolve), "Local images/a.qcow2 (virtio)");
   assert.equal(
@@ -362,3 +364,29 @@ test("a guest with no disks names nothing", () => {
   const t = hw.bootTargets("<domain><os><boot dev='hd'/></os><devices></devices></domain>");
   assert.deepEqual(t, {}, "an empty cdrom must not be named");
 });
+
+test("the boot dropdown names the device and hides what is already added", () => {
+  // Two things the old kind-only list got wrong: "Hard Disk" does not say
+  // *which* disk libvirt will boot when several are attached, and offering a
+  // kind that is already in the order adds a second entry resolving to the same
+  // device -- so it did nothing but confuse the sequence.
+  const names = { hd: "Debian-13.qcow2", cdrom: "debian-netinst.iso" };
+
+  // Nothing added yet: every kind offered, named where it has a device.
+  const all = hw.bootChoices([], names);
+  assert.deepEqual(all.map((c) => c.value), ["hd", "cdrom", "network", "fd"]);
+  assert.equal(all[0].label, "Debian-13.qcow2 (Hard Disk)", "the real disk is named");
+  assert.equal(all[1].label, "debian-netinst.iso (CD/DVD)");
+  // No backing device: the kind is the only honest label.
+  assert.equal(all[2].label, "Network");
+  assert.equal(all[3].label, "Floppy");
+
+  // The default order leaves only what is not already in it.
+  assert.deepEqual(hw.bootChoices(["hd", "cdrom"], names).map((c) => c.value), ["network", "fd"]);
+  // Order does not matter for the filter, only membership.
+  assert.deepEqual(hw.bootChoices(["cdrom", "hd"], names).map((c) => c.value), ["network", "fd"]);
+  // Everything added: nothing left, so Add is disabled and no empty value is
+  // pushed into the order.
+  assert.deepEqual(hw.bootChoices(["hd", "cdrom", "network", "fd"], names), []);
+});
+

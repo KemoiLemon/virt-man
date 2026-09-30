@@ -171,6 +171,7 @@ export function domainXml(f: DomainForm): string {
   <os>
     <type arch="${arch}" machine="q35">hvm</type>
     ${loader}
+${BOOT_ORDER_XML}
   </os>
   <features><acpi/><apic/></features>
   <devices>
@@ -186,8 +187,17 @@ export function domainXml(f: DomainForm): string {
 </domain>`;
 }
 
-/// PCIe root ports, so a running guest can take hot-plugged devices.
+/// A new guest's boot order: hard disk, then CD/DVD.
 ///
+/// Written as real `<boot>` elements rather than left to libvirt's own
+/// defaults. Without them libvirt picks its own order, which is usually the same
+/// but is neither guaranteed nor visible in the definition -- so the Boot Order
+/// panel showed an order the guest did not actually have, and a save would
+/// have written one that differed from what had been booting.
+const BOOT_ORDER_XML = `    <boot dev="hd"/>
+    <boot dev="cdrom"/>`;
+
+/// PCIe root ports, so a running guest can take hot-plugged devices.///
 /// On q35 every PCIe device sits on a root port of its own, and libvirt only
 /// creates as many as the devices defined at boot need -- so a fresh guest had
 /// no free slot and hot-adding a NIC failed with "No more available PCI slots"

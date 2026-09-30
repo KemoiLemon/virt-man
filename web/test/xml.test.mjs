@@ -464,3 +464,19 @@ test("new UUIDs are canonical v4", () => {
   const re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   for (let i = 0; i < 20; i++) assert.match(xml.newUuid(), re);
 });
+
+test("a new guest is defined with hard disk then CD/DVD", () => {
+  // Written as real <boot> elements rather than left to libvirt's defaults:
+  // otherwise the definition has no order at all, so the Boot Order panel
+  // showed one the guest did not have and a save wrote a different one.
+  const out = xml.domainXml({
+    name: "booty", cpus: 1, memory_mb: 512, firmware: "bios", graphics: "vnc",
+    existing_volume: "", new_disk: false, disk_size_gb: 10, disk_format: "qcow2",
+    disk_path: "/p/booty.qcow2", pool: "default", iso: "", iso_pool: "",
+    network: "", bridge: "",
+  });
+  const osMatch = out.match(/<os>[\s\S]*?<\/os>/);
+  assert.ok(osMatch, "the guest has an <os> block");
+  const order = [...osMatch[0].matchAll(/<boot dev="([^"]*)"\/>/g)].map((m) => m[1]);
+  assert.deepEqual(order, ["hd", "cdrom"], "disk first, then CD/DVD, in that order");
+});
