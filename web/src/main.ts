@@ -4043,6 +4043,17 @@ async function renderVmBody(vm: string) {
       const bootOrder: string[] = [...xml.matchAll(/<boot dev='([^']*)'\/>/g)].map((m) => m[1]);
       if (bootOrder.length === 0) bootOrder.push("hd", "cdrom");
       const bootNames = bootTargets(xml);
+      // A network boot entry is named by its network, which `bootTargets`
+      // reports as the libvirt name. Swap in the nickname the rest of the page
+      // uses, keeping the MAC: the entry reads "LAN 52:54:...". Uses the bare
+      // `networkName`, not the formatted label, so the substitution does not
+      // depend on a delimiter.
+      if (bootNames.networkName && bootNames.network) {
+        bootNames.network = bootNames.network.replace(
+          bootNames.networkName,
+          displayName(treeNets[selectedConn!], bootNames.networkName),
+        );
+      }
       const ct = ctMode;
       const machine = pick(/machine='([^']*)'/);
       const arch = pick(/arch='([^']*)'/);

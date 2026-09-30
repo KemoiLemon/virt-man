@@ -422,7 +422,8 @@ function sanitizeBandwidth(block: string): string {
  * `deviceSummary` uses. libvirt picks a boot device by *kind*, not by name, so
  * `hd` means "the first disk, in declaration order" and `cdrom` the first CD:
  * labelling the kind alone leaves the user unable to tell which of several
- * disks they just reordered. `network` and `fd` name no backing device. */
+ * disks they just reordered. `fd` names no backing device -- there is no way to
+ * attach a floppy in this UI. */
 export function bootTargets(xml: string): Record<string, string> {
   const name = (block: string) => {
     const src = block.match(/<source\b[^>]*>/)?.[0] ?? "";
@@ -437,29 +438,56 @@ export function bootTargets(xml: string): Record<string, string> {
     // More than one disk: it is the first that boots, so it is the one named.
     if (names.length) out[kind === "disk" ? "hd" : "cdrom"] = names[0];
   }
+  // A network boot tries the first NIC, so it is described the way the Network
+  // tab describes one: which network it is on, and its MAC when the XML carries
+  // it (libvirt only writes one once the guest has been started, or if it was
+  // set explicitly). The name is the network's libvirt name; the caller shows
+  // the nickname for it with whatever resolver it already has.
+  const nic = xml.match(/<interface\b[^>]*>[\s\S]*?<\/interface>/)?.[0];
+  if (nic) {
+    const net = nic.match(/<source\b[^>]*network=['"]([^'"]*)['"]/)?.[1] ?? "";
+    const mac = nic.match(/<mac\b[^>]*address=['"]([^'"]*)['"]/)?.[1] ?? "";
+    if (net || mac) out.network = [net, mac].filter(Boolean).join(" ");
+    // The bare network name, alongside the formatted label above, so a caller
+    // can swap it for the network's nickname without parsing the label apart. A
+    // libvirt name cannot contain a space today, but splitting on one would
+    // break silently if that ever changed.
+    if (net) out.networkName = net;
+  }
+  // No `fd`: the editor cannot attach a floppy, so naming a device for it would
+  // promise something the guest cannot have. See `bootChoices`.
   return out;
 }
 
-/// Boot devices a guest may try, and what to call them. The order they are
-/// tried in is the document order of the `<os>` `<boot dev=.../>` elements,
-/// which is how libvirt reads them.
-export const BOOT_DEVS = ["hd", "cdrom", "network", "fd"] as const;
+/// Boot devices a guest may try. The order they are tried in is the document
+/// order of the `<os>` `<boot dev=.../>` elements, which is how libvirt reads
+/// them.
+///
+/// `fd` is deliberately absent. This UI has no way to attach a floppy -- there
+/// is no floppy in `HW_CATALOG` -- so offering it was an option that could only
+/// ever add a `<boot dev='fd'/>` pointing at a drive the guest does not have.
+/// A guest that already lists one keeps it (the list is built from its own XML);
+/// it is just never offered again.
+export const BOOT_DEVS = ["hd", "cdrom", "network"] as const;
 export const BOOT_LABEL: Record<string, string> = {
   fd: "Floppy", hd: "Hard Disk", cdrom: "CD/DVD", network: "Network",
 };
 
 /// What to offer in the boot-order dropdown, and what to call each entry.
 ///
-/// Two things the plain `BOOT_LABEL[kind]` list got wrong:
+/// Three rules, each fixing a way the old plain `BOOT_DEVS` list misled:
 ///
 /// - The label names the *device*, not just the kind. libvirt boots "the first
 ///   disk", so with two attached, "Hard Disk" does not say which one; the name
-///   from `bootTargets` does (`Debian-13.qcow2`). The kind is a fallback for a
-///   boot device with no backing device of its own (Network, and a Floppy with
-///   no image), which is also the only label those can have.
+///   from `bootTargets` does (`Debian-13.qcow2`), and a NIC is named by its
+///   network and MAC. The kind is the fallback for a boot device with no
+///   backing device, which is the only label those can have.
 /// - A kind already in the order is not offered again. Adding it twice is
 ///   meaningless -- libvirt resolves both to the same device -- and the second
 ///   entry did nothing but confuse the order.
+/// - A kind the guest cannot boot from is not offered at all: no network boot
+///   without a NIC, and no floppy (see `BOOT_DEVS`). Offering it produces a
+///   `<boot>` element libvirt accepts and then never uses.
 ///
 /// `names` comes from the guest XML (`bootTargets`), so an entry names the disk
 /// really attached.
@@ -467,9 +495,16 @@ export function bootChoices(
   order: string[],
   names: Record<string, string>,
 ): { value: string; label: string }[] {
-  return BOOT_DEVS
-    .filter((d) => !order.includes(d))
-    .map((d) => ({ value: d, label: names[d] ? `${names[d]} (${BOOT_LABEL[d]})` : BOOT_LABEL[d] }));
+  return BOOT_DEVS.flatMap((d) => {
+    if (order.includes(d)) return [];
+    // A boot device with no backing device is not bootable. `bootTargets`
+    // reports only what it found, so absence is the test -- no NIC means no
+    // `network` entry. `hd`/`cdrom` are always offered: the kinds are meaningful
+    // even before a disk is attached, which is how a guest is set up to boot
+    // from media added later.
+    if (d !== "hd" && d !== "cdrom" && names[d] === undefined) return [];
+    return [{ value: d, label: names[d] ? `${names[d]} (${BOOT_LABEL[d]})` : BOOT_LABEL[d] }];
+  });
 }
 
 

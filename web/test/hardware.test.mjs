@@ -356,8 +356,32 @@ test("a boot entry names the device it actually boots", () => {
   const t = hw.bootTargets(xml);
   assert.equal(t.hd, "boot.qcow2", "the first disk, not the second");
   assert.equal(t.cdrom, "alpine.iso");
-  // network/fd have no backing device, so they carry no name.
+  // No interface in this XML, so there is nothing for a network boot to use.
   assert.equal(t.network, undefined);
+  assert.equal(t.networkName, undefined);
+});
+
+test("a network boot entry names the interface's network and MAC", () => {
+  // libvirt network-boots from the first NIC, so the entry has to say which one
+  // that is: the network it sits on and its MAC.
+  const xml = `<domain><os><boot dev='network'/></os><devices>
+    <interface type='network'>
+      <mac address='52:54:00:05:55:c9'/>
+      <source network='internet'/>
+      <model type='virtio'/>
+    </interface>
+  </devices></domain>`;
+  const t = hw.bootTargets(xml);
+  assert.equal(t.network, "internet 52:54:00:05:55:c9", "network and MAC, in one label");
+  // The bare name travels separately, so a caller can swap in the network's
+  // nickname without splitting the label on a space.
+  assert.equal(t.networkName, "internet");
+
+  // A NIC with no MAC in the XML (libvirt writes one once the guest has been
+  // started) still names its network.
+  const noMac = "<domain><devices><interface type='network'><source network='lan'/></interface></devices></domain>";
+  assert.equal(hw.bootTargets(noMac).network, "lan");
+  assert.equal(hw.bootTargets(noMac).networkName, "lan");
 });
 
 test("a guest with no disks names nothing", () => {
@@ -366,27 +390,60 @@ test("a guest with no disks names nothing", () => {
 });
 
 test("the boot dropdown names the device and hides what is already added", () => {
-  // Two things the old kind-only list got wrong: "Hard Disk" does not say
-  // *which* disk libvirt will boot when several are attached, and offering a
-  // kind that is already in the order adds a second entry resolving to the same
-  // device -- so it did nothing but confuse the sequence.
-  const names = { hd: "Debian-13.qcow2", cdrom: "debian-netinst.iso" };
+  // Three things the old kind-only list got wrong: "Hard Disk" does not say
+  // *which* disk libvirt will boot when several are attached; offering a kind
+  // already in the order adds a second entry resolving to the same device; and
+  // offering a kind the guest has no device for adds a `<boot>` element libvirt
+  // accepts and never uses.
+  const names = { hd: "Debian-13.qcow2", cdrom: "debian-netinst.iso", network: "internet 52:54:00:05:55:c9" };
 
-  // Nothing added yet: every kind offered, named where it has a device.
+  // Nothing added yet: each kind offered, named where it has a device.
   const all = hw.bootChoices([], names);
-  assert.deepEqual(all.map((c) => c.value), ["hd", "cdrom", "network", "fd"]);
+  assert.deepEqual(all.map((c) => c.value), ["hd", "cdrom", "network"]);
   assert.equal(all[0].label, "Debian-13.qcow2 (Hard Disk)", "the real disk is named");
   assert.equal(all[1].label, "debian-netinst.iso (CD/DVD)");
-  // No backing device: the kind is the only honest label.
-  assert.equal(all[2].label, "Network");
-  assert.equal(all[3].label, "Floppy");
+  // A network entry names the network and its MAC.
+  assert.equal(all[2].label, "internet 52:54:00:05:55:c9 (Network)");
 
   // The default order leaves only what is not already in it.
-  assert.deepEqual(hw.bootChoices(["hd", "cdrom"], names).map((c) => c.value), ["network", "fd"]);
+  assert.deepEqual(hw.bootChoices(["hd", "cdrom"], names).map((c) => c.value), ["network"]);
   // Order does not matter for the filter, only membership.
-  assert.deepEqual(hw.bootChoices(["cdrom", "hd"], names).map((c) => c.value), ["network", "fd"]);
+  assert.deepEqual(hw.bootChoices(["cdrom", "hd"], names).map((c) => c.value), ["network"]);
   // Everything added: nothing left, so Add is disabled and no empty value is
   // pushed into the order.
-  assert.deepEqual(hw.bootChoices(["hd", "cdrom", "network", "fd"], names), []);
+  assert.deepEqual(hw.bootChoices(["hd", "cdrom", "network"], names), []);
+});
+
+test("a floppy is never offered: the editor cannot attach one", () => {
+  // It was listed unconditionally, so a guest with no floppy drive was offered
+  // a floppy boot option -- which writes `<boot dev='fd'/>` for a drive that
+  // does not exist. `HW_CATALOG` has no floppy, so the option could only ever
+  // be wrong.
+  assert.ok(
+    !hw.BOOT_DEVS.includes("fd"),
+    `fd must not be offered, got ${JSON.stringify(hw.BOOT_DEVS)}`,
+  );
+  // Not even with a name for it, and not for any order.
+  const withEveryName = { hd: "d.qcow2", cdrom: "c.iso", network: "net", fd: "disk.img" };
+  for (const order of [[], ["hd"], ["hd", "cdrom", "network"]]) {
+    assert.ok(
+      !hw.bootChoices(order, withEveryName).some((c) => c.value === "fd"),
+      `fd offered for order ${JSON.stringify(order)}`,
+    );
+  }
+});
+
+test("network boot is not offered without a NIC", () => {
+  // A guest with no interface cannot network-boot, so offering it would add a
+  // `<boot dev='network'/>` that libvirt accepts and never uses.
+  const noNic = { hd: "d.qcow2", cdrom: "c.iso" };
+  assert.deepEqual(
+    hw.bootChoices([], noNic).map((c) => c.value),
+    ["hd", "cdrom"],
+    "no network entry without an interface",
+  );
+  // With a NIC it appears, named by network and MAC.
+  const withNic = { ...noNic, network: "internet 52:54:00:05:55:c9" };
+  assert.deepEqual(hw.bootChoices([], withNic).map((c) => c.value), ["hd", "cdrom", "network"]);
 });
 
