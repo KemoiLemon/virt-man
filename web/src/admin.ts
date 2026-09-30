@@ -227,11 +227,11 @@ const users_: Painter = async (ctx, area) => {
           <td class="tname">${esc(u.username)}${u.id === me?.id ? ` <span class="badge">you</span>` : ""}${u.admin ? ` <span class="badge on">admin</span>` : ""}</td>
           <td>${esc(u.nickname)}</td>
           <td>${(u.groups ?? []).map((g) => `<span class="role-tag">@${esc(g)}</span>`).join("") || `<span class="dim-note">—</span>`}</td>
-          <td>${quotaSummary(u.quota)}</td>
+          <td>${limitsApply(u) ? quotaSummary(u.quota) : `<span class="dim-note">—</span>`}</td>
           <td class="col-actions"><div class="row-actions">
             <button class="btn icon" data-edit-user="${u.id}" title="Edit">${ic.edit()}</button>
             <button class="btn icon" data-user-perms="${u.id}" title="Permissions">${ic.perms()}</button>
-            <button class="btn icon" data-user-quota="${u.id}" title="Limits">${ic.quota()}</button>
+            ${limitsApply(u) ? `<button class="btn icon" data-user-quota="${u.id}" title="Limits">${ic.quota()}</button>` : ""}
             <button class="btn danger icon" data-del-user="${u.id}" title="Delete">${ic.trash()}</button>
           </div></td>
         </tr>`).join("")}
@@ -255,6 +255,17 @@ const users_: Painter = async (ctx, area) => {
     } catch (e) { ctx.toast((e as Error).message, "bad"); }
   });
 };
+
+/// Whether the limits UI applies to this account at all.
+///
+/// Administrators are never capped (`guard::check_quota` exempts them), so
+/// showing them a Limits column, a Limits row and a quota editor offers a
+/// control that does nothing. "period" is the point: an admin is not offered a
+/// limit field anywhere, so there is no half-state where one is displayed but
+/// ignored.
+export function limitsApply(u: { admin?: boolean }): boolean {
+  return !u.admin;
+}
 
 function quotaSummary(q?: Quota): string {
   const d = q?.default ?? {};
@@ -794,11 +805,11 @@ const quotas_: Painter = async (ctx, area) => {
     <p class="hint">Limits apply to what a user owns. "Per daemon" applies the limits on each daemon separately; "Pooled" shares them across all daemons. A daemon override replaces the per-daemon limits there, or further caps the pool. Administrators are not limited.</p>
     <table class="grid">
       <tr><th>User</th><th>Mode</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Storage</th><th>Networks</th><th>Forwards</th><th>Overrides</th><th class="col-actions"></th></tr>
-      ${users.map((u) => {
+      ${users.filter(limitsApply).map((u) => {
         const d = u.quota?.default ?? {};
         const n = Object.keys(u.quota?.daemons ?? {}).length;
         return `<tr>
-          <td class="tname">${esc(u.username)}${u.admin ? ` <span class="badge on">admin</span>` : ""}</td>
+          <td class="tname">${esc(u.username)}</td>
           <td>${u.quota?.shared ? "Pooled" : "Per daemon"}</td>
           <td>${fmtLimit(d.vms)}</td><td>${fmtLimit(d.vcpus)}</td>
           <td>${d.memory_mb == null ? "∞" : fmtBytes(d.memory_mb * 1048576)}</td>
@@ -836,6 +847,14 @@ function readLimit(root: Element, prefix: string): Limit {
 }
 
 export function openQuota(ctx: AdminCtx, u: User) {
+  // Neither Limits table nor Users table offers this for an admin, and the
+  // server would ignore anything set here, so refuse rather than show an
+  // editor whose result is discarded. Kept as a guard on the one entry point:
+  // a future caller gets the behaviour without having to remember the rule.
+  if (!limitsApply(u)) {
+    ctx.toast("Administrators are not limited", "bad");
+    return;
+  }
   const q: Quota = u.quota ?? { shared: false, default: {}, daemons: {} };
   const conns = ctx.connections();
   const el = ctx.openModal(
@@ -1112,6 +1131,8 @@ const dashboard_: Painter = async (ctx, area, gen) => {
   const dayAgo = Date.now() - 86_400_000;
   const today = act.entries.filter((e) => e.at_ms >= dayAgo);
   const failedToday = today.filter((e) => e.status === "failed").length;
+  // `/usage` already excludes administrators server-side (`admin.rs` filters
+  // them out), so every row here is a non-admin and has limits of its own.
   const limited = usage.filter((u) => {
     const d = u.quota?.default ?? {};
     return [d.vms, d.vcpus, d.memory_mb, d.storage_gb, d.networks, d.forwards].some((x) => x != null)
