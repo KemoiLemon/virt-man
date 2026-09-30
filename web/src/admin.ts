@@ -246,7 +246,7 @@ const users_: Painter = async (ctx, area) => {
   bind(area, "data-del-user", async (id) => {
     const u = users.find((x) => x.id === id);
     if (!await ctx.askConfirm("Delete user",
-      `Delete ${u?.username ?? "this user"}? Their API keys, sessions and grants go too; what they own passes to an administrator.`,
+      `Delete ${u?.username ?? "this user"}? Their API keys, sessions and grants go too; what they own passes to an Administrator.`,
       "Delete", true)) return;
     try {
       await api.del(`/users/${id}`);
@@ -737,7 +737,7 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
         const r = shown[Number(i)];
         const to = !r.suspended;
         if (to && !await ctx.askConfirm("Suspend access",
-          `Suspend ${r.owner_name ?? "the owner"}'s access to ${r.title || r.name}? They keep read-only access; administrators are unaffected.`, "Suspend", true)) return;
+          `Suspend ${r.owner_name ?? "the owner"}'s access to ${r.title || r.name}? They keep read-only access; Administrators are unaffected.`, "Suspend", true)) return;
         try {
           await api.put("/resources", { kind: r.kind, conn: r.conn, pool: r.pool ?? "", name: r.name, suspended: to });
           r.suspended = to;
