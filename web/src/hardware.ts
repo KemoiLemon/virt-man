@@ -23,6 +23,17 @@ export interface HwField {
   hint?: string;
   /** Only show this field when another field equals this value. */
   showWhen?: { key: string; value: string };
+  /**
+   * Hide the field when its own value is blank. Used by a derived field (a
+   * disk's path), so it appears for a device that has one and leaves no empty
+   * row for a device that does not.
+   */
+  hideWhenBlank?: boolean;
+  /**
+   * Render the value but do not accept edits. For fields the form derives
+   * rather than the user setting directly; the value still round-trips.
+   */
+  readonly?: boolean;
 }
 
 export interface HwType {
@@ -54,12 +65,15 @@ export const HW_CATALOG: HwType[] = [
       { key: "volume", label: "Volume", type: "select", options: [], showWhen: { key: "mode", value: "existing" } },
       { key: "size_gb", label: "Disk Size (GB)", type: "number", min: 1, value: "10", placeholder: "10", showWhen: { key: "mode", value: "new" } },
       {
+        // Applies to both forms: `deviceXml` writes it as the driver type for a
+        // path-backed disk too, so hiding it here (as this did) meant a value
+        // that was written but could not be seen or corrected. Guessing it wrong
+        // makes qemu parse the file as the wrong image type.
         key: "format", label: "Format", type: "select", value: "qcow2",
         options: [
           { value: "qcow2", label: "qcow2" },
           { value: "raw", label: "raw" },
         ],
-        showWhen: { key: "mode", value: "new" },
       },
       {
         key: "bus", label: "Bus", type: "select", value: "virtio",
@@ -68,6 +82,15 @@ export const HW_CATALOG: HwType[] = [
           { value: "sata", label: "SATA" },
           { value: "scsi", label: "SCSI" },
         ],
+      },
+      {
+        // Shown only when the disk has one. Guests we wrote address their disk
+        // by absolute path, and that path is the thing actually attached -- so
+        // hiding it left the page describing the disk as an unnamed volume with
+        // no visible source at all. Read-only, because it is derived: editing it
+        // here would fight `resolveDevicePath` and the volume dropdowns.
+        key: "path", label: "Path", type: "text", readonly: true,
+        hideWhenBlank: true,
       },
     ],
   },
@@ -79,6 +102,12 @@ export const HW_CATALOG: HwType[] = [
     fields: [
       { key: "pool", label: "ISO Pool", type: "select", options: [] },
       { key: "volume", label: "ISO Volume", type: "select", options: [] },
+      {
+        // A cdrom the SPA wrote is file-backed too, so it needs the same
+        // treatment as the disk above.
+        key: "path", label: "Path", type: "text", readonly: true,
+        hideWhenBlank: true,
+      },
     ],
   },
   {
@@ -292,24 +321,28 @@ export function deviceXml(d: HwDevice, index = 1): string {
 }
 
 /** Human-readable one-liner for a device, shown in sidebar/table rows. */
-export function deviceSummary(d: HwDevice): string {
+export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", name: string) => string): string {
   const f = (k: string) => (d.fields[k] ?? "").trim();
+  // Pools and networks are named by their UUID and carry their nickname as a
+  // title, so showing the raw name shows a UUID for anything made or migrated
+  // since UUIDs. The *value* stays the libvirt name -- this is display only.
+  const named = (kind: "pool" | "network", name: string) => resolve?.(kind, name) || name;
   switch (d.kind) {
     case "disk": {
       const path = f("path");
       if (path) return `${path.split("/").pop()} (${f("bus") || "virtio"})`;
       if ((d.fields.mode ?? "existing") === "new") {
-        return `${f("pool")}/new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"}`;
+        return `${named("pool", f("pool"))}/new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"}`;
       }
-      return `${f("pool")}/${f("volume")} (${f("bus") || "virtio"})`;
+      return `${named("pool", f("pool"))}/${f("volume")} (${f("bus") || "virtio"})`;
     }
     case "cdrom": {
       const path = f("path");
       if (path) return path.split("/").pop() ?? path;
       const vol = f("volume");
-      return vol ? `${f("pool")}/${vol}` : "empty";
+      return vol ? `${named("pool", f("pool"))}/${vol}` : "empty";
     }
-    case "interface": return `${f("network")} (${f("model") || "virtio"})`;
+    case "interface": return `${named("network", f("network"))} (${f("model") || "virtio"})`;
     case "hostdev": return `${f("domain")}:${f("bus")}:${f("slot")}.${f("function")}`;
     case "usb": return `${f("vendor")}:${f("product")}`;
     case "rng": return f("backend") || "/dev/urandom";

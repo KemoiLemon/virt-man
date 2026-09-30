@@ -229,6 +229,63 @@ test("summaries describe each device for the sidebar", () => {
   assert.equal(hw.deviceSummary({ kind: "memballoon", fields: {} }), "virtio");
 });
 
+test("a summary shows the pool and network nickname, not their UUID", () => {
+  // Pools and networks are named by their UUID and keep the human name as a
+  // title, so the hardware tab used to show a UUID for anything made or
+  // migrated since. The resolver is display-only: the underlying `fields` still
+  // hold the libvirt names, which is what the XML is written from.
+  const resolve = (kind, name) =>
+    kind === "pool" ? "Local images" : name === "net-a" ? "LAN" : name;
+  const disk = { kind: "disk", fields: { pool: "8f0d-uuid", volume: "a.qcow2", bus: "virtio" } };
+  assert.equal(hw.deviceSummary(disk, resolve), "Local images/a.qcow2 (virtio)");
+  assert.equal(
+    hw.deviceSummary({ kind: "interface", fields: { network: "net-a", model: "virtio" } }, resolve),
+    "LAN (virtio)",
+  );
+  // The cdrom summary names its pool too.
+  assert.equal(
+    hw.deviceSummary({ kind: "cdrom", fields: { pool: "8f0d-uuid", volume: "b.iso" } }, resolve),
+    "Local images/b.iso",
+  );
+  // Without a resolver the libvirt name stands, so nothing depends on it.
+  assert.equal(hw.deviceSummary(disk), "8f0d-uuid/a.qcow2 (virtio)");
+});
+
+test("Format is offered for a path-backed disk, not only a new volume", () => {
+  // `deviceXml` writes `fields.format` as the driver type for a path-backed
+  // disk as well, so hiding the field (as this used to, behind mode=new) meant
+  // a value that was written but could not be seen or corrected. Guessing it
+  // wrong makes qemu parse the file as the wrong image type.
+  const disk = hw.HW_CATALOG.find((c) => c.id === "disk");
+  const format = disk.fields.find((f) => f.key === "format");
+  assert.ok(format, "the disk form offers Format");
+  assert.equal(format.showWhen, undefined, "and shows it for every source mode");
+});
+
+test("a path-backed disk shows its path, and only when it has one", () => {
+  // Our own guests address a disk by absolute path, and that path is what is
+  // actually attached. Without a field for it the page described the disk as an
+  // unnamed volume with no visible source, and the volume dropdown came up
+  // blank -- the disk looked unattached.
+  for (const id of ["disk", "cdrom"]) {
+    const t = hw.HW_CATALOG.find((c) => c.id === id);
+    const path = t.fields.find((f) => f.key === "path");
+    assert.ok(path, `${id} offers a path field`);
+    assert.equal(path.readonly, true, `${id}: it is derived, so not editable by hand`);
+    assert.equal(path.hideWhenBlank, true, `${id}: hidden when there is no path`);
+  }
+});
+
+test("a path-backed disk round-trips as file-backed", () => {
+  // The guard against the bug that `resolveDevicePath` deleting an unresolved
+  // path produced: `<source pool="" volume=""/>`, an unusable disk.
+  const d = { kind: "disk", fields: { path: "/var/lib/libvirt/images/x.qcow2", format: "qcow2", bus: "virtio" } };
+  const xml = hw.deviceXml(d, 0);
+  assert.match(xml, /type="file"/);
+  assert.match(xml, /<source file="\/var\/lib\/libvirt\/images\/x\.qcow2"\/>/);
+  assert.doesNotMatch(xml, /pool=""/, "never an empty pool reference");
+});
+
 test("watchdog and memballoon models survive a round trip", () => {
   const xml = `<domain><devices>
     <watchdog model="itco" action="reset"/>

@@ -5305,23 +5305,62 @@ async function openHardwareEditor(opts: {
   };
   /// Point a disk at its volume's path, so the definition refers to the file
   /// rather than to a pool+volume pair. libvirt cannot resolve a volume source
-  /// on every host it ships on, and a disk it cannot resolve never reaches the
-  /// guest's AppArmor profile — so qemu is refused permission and the guest
-  /// will not start. Cleared when the volume is unknown, which keeps the
-  /// reference form for a definition we cannot account for.
+  /// Reconcile a disk's `path` and its `pool`+`volume` pair, in both
+  /// directions, so the form can preselect and the XML is still written by
+  /// path.
+  ///
+  /// A path is what `deviceXml` writes (libvirt 11.3 cannot resolve a
+  /// pool+volume source into a path, and a disk it cannot resolve never reaches
+  /// the guest's AppArmor profile, so the guest will not start). But the form's
+  /// dropdowns are pool+volume, and a guest we wrote carries only a path -- so
+  /// both were blank for a disk that is plainly attached. Searching the pools
+  /// for the file fills them in.
+  ///
+  /// The path is never dropped. This used to `delete d.fields.path` whenever
+  /// the volume lookup missed, which meant opening the Hardware tab on a
+  /// path-backed disk and saving rewrote it as `<source pool="" volume=""/>` --
+  /// an unusable disk, lost by looking at it. A file outside every pool (the
+  /// common case here: an ISO in a synced folder) keeps its path and is simply
+  /// not preselected in the dropdowns.
   const resolveDevicePath = async (d: HwDevice) => {
     const name = (d.fields.volume ?? "").trim();
     const pool = (d.fields.pool ?? "").trim();
-    const found = name ? (await volumes(pool)).find((v) => v.name === name) : undefined;
-    if (!found?.path) {
-      delete d.fields.path;
+    const path = (d.fields.path ?? "").trim();
+
+    // pool+volume -> path, when the volume is reachable.
+    if (name) {
+      const found = (await volumes(pool)).find((v) => v.name === name);
+      if (found?.path) {
+        d.fields.path = found.path;
+        // The volume list carries no format, so it comes from the name: we name
+        // our own volumes after their format, and getting this wrong would make
+        // qemu parse the file as the wrong image type.
+        d.fields.format = /\.raw$/i.test(found.name) ? "raw" : "qcow2";
+      }
       return;
     }
-    d.fields.path = found.path;
-    // The volume list carries no format, so it comes from the name: we name
-    // our own volumes after their format, and getting this wrong would make
-    // qemu parse the file as the wrong image type.
-    d.fields.format = /\.raw$/i.test(found.name) ? "raw" : "qcow2";
+
+    // path -> pool+volume, so the dropdowns show where it lives. Best effort:
+    // a path in no pool we can list stays as it is.
+    if (path && !pool) {
+      const owner = await poolOwning(path);
+      if (owner) {
+        d.fields.pool = owner.pool;
+        d.fields.volume = owner.name;
+      }
+    }
+  };
+
+  /// The pool and volume name for a volume path, or null when no listed pool
+  /// contains it. Pools are searched in order and the first match wins, which
+  /// is enough: the daemon gives us each volume's real path, so a false match
+  /// would need two pools to report the same file.
+  const poolOwning = async (path: string): Promise<{ pool: string; name: string } | null> => {
+    for (const p of pools) {
+      const hit = (await volumes(p.name)).find((v) => v.path === path);
+      if (hit) return { pool: p.name, name: hit.name };
+    }
+    return null;
   };
   // Pools that contain at least one ISO. The cdrom pool dropdown hides
   // every other pool, so a pool with no bootable media never appears.
@@ -5380,6 +5419,25 @@ async function openHardwareEditor(opts: {
   const opt = (list: string[], sel: string) =>
     list.map((v) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
 
+  /// A pool's or network's nickname, for display only.
+  ///
+  /// Both are named by their UUID and keep the human name as a `title`, so the
+  /// raw name is a UUID for anything made or migrated since then. Only the
+  /// *label* changes: every option's value stays the libvirt name, because that
+  /// is what the XML and the API address them by.
+  const resolveName = (kind: "pool" | "network", name: string): string => {
+    if (!name) return name;
+    const list = kind === "pool" ? pools : nets;
+    return displayName(list, name);
+  };
+
+  /// `opt`, but labelled by nickname. `fallback` names the entry used when the
+  /// stored value is not in the list at all (a pool this caller cannot see).
+  const optNamed = (kind: "pool" | "network", list: string[], sel: string) =>
+    list
+      .map((v) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(resolveName(kind, v))}</option>`)
+      .join("");
+
   /** Sidebar rows mirror Proxmox: label plus the current value. */
   function sidebar(): string {
     const fixed = [
@@ -5403,7 +5461,7 @@ async function openHardwareEditor(opts: {
       return `
       <button class="hw-item hw-custom ${page === `dev-${i}` ? "active" : ""}" data-hw="dev-${i}">
         <span class="hw-ic">${ic[t?.icon ?? "cpu"]()}</span>
-        <span class="hw-tx"><b>${esc(t?.label ?? d.kind)}</b><i>${esc(deviceSummary(d))}</i></span>
+        <span class="hw-tx"><b>${esc(t?.label ?? d.kind)}</b><i>${esc(deviceSummary(d, resolveName))}</i></span>
       </button>`;
     }).join("");
     return `
@@ -5428,7 +5486,9 @@ async function openHardwareEditor(opts: {
       }
       // After the pool is settled, so the path is looked up in the right one.
       if (d.kind === "disk" || d.kind === "cdrom") await resolveDevicePath(d);
-      const fields = await Promise.all(t.fields.map(async (f) => {
+      const fields = await Promise.all(t.fields
+        .filter((f) => !f.hideWhenBlank || (d.fields[f.key] ?? "").trim())
+        .map(async (f) => {
         const val = d.fields[f.key] ?? f.value ?? "";
         if (f.type === "select") {
           let list: string[] = (f.options ?? []).map((o) => o.value);
@@ -5438,6 +5498,12 @@ async function openHardwareEditor(opts: {
             list = (await volumes(d.fields.pool ?? pools[0]?.name ?? "")).map((v) => v.name);
             // The cdrom picks an ISO; a disk may pick any volume.
             if (d.kind === "cdrom") list = list.filter((v) => v.toLowerCase().endsWith(".iso"));
+            // The current volume must be in its own list. A path-backed disk
+            // resolves to a pool+volume that may not be in that pool's list yet
+            // (a stale daemon cache, or a volume this caller cannot see), and an
+            // absent option renders the select blank -- which is the bug where
+            // the disk looked unattached. Prepending it keeps the truth visible.
+            if (val && !list.includes(val)) list = [val, ...list];
           }
           // A cdrom may be empty: that is a valid empty drive.
           const emptyOpt = d.kind === "cdrom" && f.key === "volume"
@@ -5445,13 +5511,16 @@ async function openHardwareEditor(opts: {
             : "";
           const labels = f.options?.length
             ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
-            : emptyOpt + opt(list, val);
+            : emptyOpt + (f.key === "pool" || f.key === "network"
+              ? optNamed(f.key, list, val)
+              : opt(list, val));
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-field="${esc(f.key)}">${labels}</select></label>`;
         }
         const bound = f.key === "size_gb" ? cap.disk : f.max;
         return `<label class="field"><span>${esc(f.label)}</span>
           <input data-field="${esc(f.key)}" type="${f.type}" value="${esc(val)}"
+            ${f.readonly ? "readonly" : ""}
             ${f.min != null ? `min="${f.min}"` : ""}${maxAttr(bound)}
             placeholder="${esc(f.placeholder ?? "")}"></label>`;
       }));
@@ -5655,6 +5724,8 @@ async function openHardwareEditor(opts: {
             list = (await volumes(pool)).map((v) => v.name);
             // The cdrom picks an ISO; a disk may pick any volume.
             if (kind === "cdrom") list = list.filter((v) => v.toLowerCase().endsWith(".iso"));
+            // Keep the current value selectable; see the device page above.
+            if (val && !list.includes(val)) list = [val, ...list];
           }
           // A cdrom may be empty: that is a valid empty drive.
           const emptyOpt = kind === "cdrom" && f.key === "volume"
@@ -5662,7 +5733,9 @@ async function openHardwareEditor(opts: {
             : "";
           const labels = f.options?.length
             ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
-            : emptyOpt + opt(list, val);
+            : emptyOpt + (f.key === "pool" || f.key === "network"
+              ? optNamed(f.key, list, val)
+              : opt(list, val));
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-af="${esc(f.key)}">${labels}</select></label>`;
         }
