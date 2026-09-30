@@ -313,6 +313,56 @@ test("withFirmware leaves no dangling close tags on libvirt single-quoted XML", 
   assert.match(bios, /<boot dev='hd'\/>/, "boot device survives");
 });
 
+test("withFirmware drops libvirt's <firmware> element with the attribute it needs", () => {
+  // Copied from `virsh dumpxml` of a real UEFI guest. libvirt writes BOTH
+  // `firmware='efi'` on <os> and a <firmware> element listing which features of
+  // that autoselected firmware to require. The element is only legal *with* the
+  // attribute: stripping one and keeping the other made every hardware save on
+  // a UEFI guest fail with libvirt's
+  //   cannot use feature-based firmware autoselection when firmware
+  //   autoselection is disabled
+  // -- so this was the normal case, not an edge one. It surfaced when changing
+  // the display type, because any hardware save rewrites the firmware block.
+  const live = `<domain type='kvm'>
+  <name>alpine</name>
+  <os firmware='efi'>
+    <type arch='x86_64' machine='pc-q35-11.1'>hvm</type>
+    <firmware>
+      <feature enabled='no' name='enrolled-keys'/>
+      <feature enabled='no' name='secure-boot'/>
+    </firmware>
+    <loader readonly='yes' type='pflash' format='raw'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>
+    <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd' format='raw'>/var/lib/libvirt/qemu/nvram/alpine_VARS.fd</nvram>
+    <boot dev='hd'/>
+  </os>
+</domain>`;
+
+  const out = xml.withFirmware(live, "uefi", "alpine");
+  assert.doesNotMatch(out, /<firmware[\s>]/, "the element goes with the attribute");
+  assert.doesNotMatch(out, /<feature[\s>]/, "and so do its feature children");
+  assert.doesNotMatch(out, /firmware=['"]/, "autoselection is off");
+  // Exactly one loader and one nvram, not a duplicate from the re-splice.
+  assert.equal((out.match(/<loader/g) || []).length, 1);
+  assert.equal((out.match(/<nvram/g) || []).length, 1);
+});
+
+test("withFirmware keeps <type> the first child of <os>", () => {
+  // libvirt requires <type> first inside <os>. Splicing the fragment directly
+  // after the <os> opening tag put <loader> ahead of it.
+  const live = `<domain type='kvm'>
+  <os firmware='efi'>
+    <type arch='x86_64' machine='pc-q35-11.1'>hvm</type>
+    <loader readonly='yes' type='pflash' format='raw'>/old.fd</loader>
+    <boot dev='hd'/>
+  </os>
+</domain>`;
+  for (const fw of ["uefi", "bios"]) {
+    const out = xml.withFirmware(live, fw, "box");
+    assert.match(out, /<os[^>]*>\s*<type/, `${fw}: <type> must come first`);
+    assert.match(out, /<boot dev='hd'\/>/, `${fw}: boot device survives`);
+  }
+});
+
 test("an upload defaults its volume name to the picked file's name", () => {
   assert.equal(xml.volumeNameFromFile("debian-13.2.0-amd64-netinst.iso"), "debian-13.2.0-amd64-netinst.iso");
   // Surrounding whitespace would make a confusing volume name.

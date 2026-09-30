@@ -26,7 +26,7 @@ export function firmwareXml(firmware: "uefi" | "bios", name: string): string {
 
 /// Rewrite an existing domain's firmware selection in place. Strips whatever
 /// loader/nvram the guest already has (so a BIOS<->UEFI switch actually
-/// takes effect) and splices the new fragment after the <os> opening tag.
+/// takes effect) and splices the new fragment after `<type>`.
 export function withFirmware(
   domainXml: string,
   firmware: "uefi" | "bios",
@@ -41,10 +41,24 @@ export function withFirmware(
     .replace(/\s*<loader\b[^>]*\/>\s*/g, "")
     .replace(/\s*<nvram\b[\s\S]*?<\/nvram>\s*/g, "")
     .replace(/\s*<nvram\b[^>]*\/>\s*/g, "")
+    // The `<firmware>` element goes with the attribute it depends on. Both are
+    // libvirt's *feature-based autoselection*: with `firmware='efi'` present
+    // libvirt reads `<firmware>` to mean "these features of the autoselected
+    // firmware", and without it the element is illegal. Dropping the attribute
+    // while keeping the element made every UEFI hardware save fail with
+    // "cannot use feature-based firmware autoselection when firmware
+    // autoselection is disabled" — which is what libvirt itself writes into a
+    // domain's XML, so this was the normal case, not an edge one.
+    .replace(/\s*<firmware\b[\s\S]*?<\/firmware>\s*/g, "")
+    .replace(/\s*<firmware\b[^>]*\/>\s*/g, "")
     .replace(/(<os\b[^>]*)\s+firmware=['"][^'"]*['"]/g, "$1");
   const frag = firmwareXml(firmware, name);
   if (frag) {
-    out = out.replace(/(<os\b[^>]*>)/, `$1\n    ${frag}`);
+    // After `<type>`, not after `<os>`: libvirt requires `<type>` to be the
+    // first child of `<os>`. Splicing straight after the opening tag put
+    // `<loader>` ahead of it, which reorders the definition for no reason even
+    // where libvirt tolerated it.
+    out = out.replace(/(<os\b[^>]*>\s*<type\b[^>]*>[^<]*<\/type>)/, `$1\n    ${frag}`);
   }
   return out;
 }
