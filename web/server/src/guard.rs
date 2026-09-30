@@ -277,6 +277,20 @@ pub async fn usage_on(state: &AppState, conn: &Connection, owner: &str) -> Resul
     Ok(u)
 }
 
+/// Whether a stored quota applies to this owner at all.
+///
+/// Was this an admin? Then no quota they hold is ever enforced: the admin page
+/// has always said "Administrators are not limited", and it no longer offers
+/// them the fields, so a stored quota can only be a leftover. Before this, only
+/// the *creating* admin was skipped (`if !admin`, where the actor is checked,
+/// not the owner), so a guest owned by an admin was capped by the admin's own
+/// quota -- which is the case this closes.
+///
+/// Pure and public so the rule is testable without an `AppState`.
+pub fn quota_applies(is_owner_admin: bool, q: &perm::Quota) -> bool {
+    !is_owner_admin && *q != perm::Quota::default()
+}
+
 /// Would `owner` stay within their quota if `delta` were added on `conn`?
 pub async fn check_quota(
     state: &AppState,
@@ -285,7 +299,10 @@ pub async fn check_quota(
     delta: Usage,
 ) -> Result<(), ApiError> {
     let q = owner.quota.clone();
-    if q == perm::Quota::default() {
+    // Checked on the owner rather than the caller: ownership is what a quota
+    // limits, and administration travels with the account (a group can grant
+    // it), so it is re-read here instead of trusting a caller's idea.
+    if !quota_applies(state.read().is_admin(owner), &q) {
         return Ok(());
     }
     let here = usage_on(state, conn, &owner.id).await?.add(delta);
@@ -1008,4 +1025,51 @@ fn forget(store: &mut crate::store::Store, kind: Kind, conn: &str, pool: &str, n
     };
     // A later resource of the same name must not inherit this one's grants.
     store.acl.retain(|e| e.path != path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quota_applies;
+    use crate::perm::Quota;
+
+    fn some_quota() -> Quota {
+        Quota {
+            default: crate::perm::Limit {
+                vms: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stored_quota_does_not_apply_to_an_administrator() {
+        // The admin page says "Administrators are not limited", and no longer
+        // offers them the fields. Enforcing a leftover quota against an admin
+        // is what this prevents -- previously only the *creating* admin was
+        // skipped, so a guest owned by an admin was capped by the admin's own
+        // quota.
+        let q = some_quota();
+        assert!(
+            !quota_applies(true, &q),
+            "an admin's stored quota must not be enforced"
+        );
+        assert!(
+            !quota_applies(true, &Quota::default()),
+            "and an absent one is equally not enforced"
+        );
+    }
+
+    #[test]
+    fn a_quota_still_applies_to_a_regular_user() {
+        assert!(
+            quota_applies(false, &some_quota()),
+            "a non-admin with limits is capped"
+        );
+        // No limits means no check at all, admin or not.
+        assert!(
+            !quota_applies(false, &Quota::default()),
+            "an empty quota is not a limit of zero"
+        );
+    }
 }
