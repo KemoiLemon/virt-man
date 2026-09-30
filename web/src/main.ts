@@ -768,6 +768,17 @@ setHtml(app, `
   void pollUploads();
 }
 
+/// The account's base role, as the server names it.
+///
+/// Matches `perm::ADMIN_ROLE` ("Administrator") and `perm::DEFAULT_ROLE`
+/// ("User") exactly, capitalization included: those are the names the ACL and
+/// the role list use, so the profile showing "administrator" was the odd one
+/// out. Written once here because the header renders in two places (the sidebar
+/// card and the profile card), and two literals would drift.
+function roleLabel(isAdmin: boolean | undefined): string {
+  return isAdmin ? "Administrator" : "User";
+}
+
 /// Whether to offer the admin page: `Permissions.Modify` at `/`, as the
 /// server reports it in /auth/me. Hiding the button is cosmetic -- the API
 /// refuses every admin call from anyone else.
@@ -1587,7 +1598,7 @@ function renderProfileBtn() {
   el.onclick = openProfile;
   setHtml(el, `
     <div class="avatar">${avatarHtml()}</div>
-    <div class="who"><b>${esc(user.nickname)}</b><span>${user.admin ? "administrator" : "user"}</span></div>`);
+    <div class="who"><b>${esc(user.nickname)}</b><span>${roleLabel(user.admin)}</span></div>`);
 }
 
 // ---------------------------------------------------------------- datacenter
@@ -6482,7 +6493,7 @@ function openProfile() {
        </button>
        <div class="who">
          <b id="pf-who-name">${esc(user.nickname)}</b>
-         <span id="pf-who-user">@${esc(user.username)} · ${user.admin ? "administrator" : "user"}</span>
+         <span id="pf-who-user">@${esc(user.username)} · ${roleLabel(user.admin)}</span>
        </div>
      </div>
 
@@ -6620,11 +6631,17 @@ async function loadProfileLimits(el: Element) {
     return; // the rest of the profile is still usable
   }
   if (!box.isConnected) return;
-  const title = `<div class="section-title">Resource Limits</div>`;
+  // An administrator has no limits at all, so the section is removed rather
+  // than explained. A heading plus "Administrators have no resource limits" is
+  // still a Resource Limits section: it takes the space, and it is the first
+  // thing read on the profile. Nothing here can be set for them, and the server
+  // no longer enforces anything either (`guard::quota_applies`), so there is
+  // nothing to say.
   if (u.admin) {
-    setHtml(box, `${title}<p class="hint">Administrators have no resource limits.</p>`);
+    setHtml(box, "");
     return;
   }
+  const title = `<div class="section-title">Resource Limits</div>`;
   const q = u.quota ?? { shared: false, default: {}, daemons: {} };
   const any = (l: import("./api").Limit) => [l.vms, l.vcpus, l.memory_mb, l.storage_gb, l.networks, l.forwards].some((x) => x != null);
   if (!any(q.default) && !Object.values(q.daemons ?? {}).some(any)) {
@@ -6659,7 +6676,7 @@ function refreshProfileCard(el: Element) {
   const name = $("#pf-who-name", el);
   if (name) name.textContent = user.nickname;
   const who = $("#pf-who-user", el);
-  if (who) who.textContent = `@${user.username} · ${user.admin ? "administrator" : "user"}`;
+  if (who) who.textContent = `@${user.username} · ${roleLabel(user.admin)}`;
   const av = $("#pf-avatar-btn .avatar", el);
   if (av) setHtml(av, avatarHtml());
 }
