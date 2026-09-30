@@ -283,6 +283,10 @@ impl Session {
     /// tear.
     pub fn next_update(&self, since: u64, timeout: Duration) -> Option<Update> {
         let mut f = self.frame.lock().unwrap();
+        // The seq at the moment this request arrived. If the frame it is about
+        // to receive was painted before that, it is already settled and must be
+        // handed over immediately.
+        let parked_at = f.seq;
         if f.seq <= since {
             let (guard, _) = self
                 .frame_ready
@@ -294,32 +298,33 @@ impl Session {
             return None; // timed out: let the caller re-arm
         }
 
-        // Hold the frame until the guest's updates stop arriving, so a repaint
-        // lands as one paint instead of building up band by band. This blocks a
-        // runtime thread, which is why `frame` runs it on `spawn_blocking`.
+        // Let a repaint that is *still arriving* finish before handing it out,
+        // so it lands as one paint instead of building up band by band.
         //
-        // The deadline is fixed *before* waiting, and never moved by a later
-        // update. A window that restarted on every update would never expire for
-        // a guest repainting faster than [`COALESCE`] -- an animation, or simply
-        // a busy desktop -- and the console would stall instead of tearing. So a
-        // burst is absorbed only up to this deadline; a continuous repainter
-        // then gets frames at a steady `COALESCE` rate, which is the honest
-        // behaviour: it is shown a live screen, just not faster than it can
-        // paint one.
-        let settle_until = Instant::now() + COALESCE;
-        while Instant::now() < settle_until {
-            let wait = settle_until.saturating_duration_since(Instant::now());
-            if wait.is_zero() || !self.is_running() {
-                break;
+        // This must not apply to a frame that was already complete when the
+        // request arrived. Waiting unconditionally costs the settle period on
+        // every frame -- measured at 8ms per frame even for a single settled
+        // rectangle -- and because the viewer can only ask for the next frame
+        // after painting the last, a guest repainting faster than that cycle
+        // grows an unbounded backlog. That is a multi-second lag on a 3ms link.
+        // So: settle only if something landed *while this request was waiting*.
+        if f.seq > parked_at {
+            // Fixed deadline, never restarted by a later update. A window that
+            // restarted would never expire for a guest repainting faster than
+            // [`COALESCE`] -- an animation, or simply a busy desktop -- and the
+            // console would stall entirely instead of merely tearing.
+            let settle_until = Instant::now() + COALESCE;
+            while Instant::now() < settle_until {
+                let wait = settle_until.saturating_duration_since(Instant::now());
+                if wait.is_zero() || !self.is_running() {
+                    break;
+                }
+                let (guard, _) = self
+                    .frame_ready
+                    .wait_timeout_while(f, wait, |_| self.is_running())
+                    .ok()?;
+                f = guard;
             }
-            // A generous timeout, not `wait`: waking early is harmless (the
-            // loop re-checks the clock), but a timeout that could fire *before*
-            // the deadline would hand out a half-settled frame.
-            let (guard, _) = self
-                .frame_ready
-                .wait_timeout_while(f, wait, |_| self.is_running())
-                .ok()?;
-            f = guard;
         }
 
         // A viewer that missed the window the damage was tracked from cannot
@@ -1043,6 +1048,73 @@ mod tests {
     /// assemble in horizontal strips. It also once looped forever, because the
     /// delivered seq sat below `damage_base` so every request looked "behind"
     /// and was answered with another full frame.
+    ///
+    /// A frame that was already painted when the request arrived must be handed
+    /// over at once, without paying the settle window.
+    ///
+    /// Regression, and a reported symptom: the settle applied unconditionally,
+    /// so *every* frame cost `COALESCE`. The viewer can only ask for the next
+    /// frame after painting the last, so a guest repainting faster than that
+    /// cycle grew an unbounded backlog -- seconds of lag on a 3ms network.
+    /// Settling is only for a repaint that is still arriving.
+    #[test]
+    fn an_already_settled_frame_is_delivered_without_the_settle_delay() {
+        let sess = new_session(640, 480);
+        {
+            let mut f = sess.frame.lock().unwrap();
+            f.touch(Rect {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 64,
+            });
+            f.seq = 1;
+        }
+        // Let it settle before the request arrives.
+        std::thread::sleep(COALESCE * 3);
+
+        let started = Instant::now();
+        let u = sess
+            .next_update(0, Duration::from_secs(5))
+            .expect("the frame must be delivered");
+        let took = started.elapsed();
+        assert_eq!(u.seq, 1);
+        assert!(
+            took < COALESCE,
+            "an already-settled frame must not pay the settle window: {took:?}"
+        );
+    }
+
+    /// The coalescing must survive that: an update landing *while* the request
+    /// is parked is still absorbed into a single frame.
+    #[test]
+    fn an_arriving_burst_is_still_coalesced() {
+        let sess = new_session(640, 480);
+        let painter = sess.clone();
+        let worker = std::thread::spawn(move || {
+            // Start after the request has parked.
+            std::thread::sleep(Duration::from_millis(5));
+            for i in 0..4u16 {
+                let mut f = painter.frame.lock().unwrap();
+                f.touch(Rect {
+                    x: 0,
+                    y: i * 32,
+                    w: 64,
+                    h: 32,
+                });
+                f.seq += 1;
+                painter.frame_ready.notify_all();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let u = sess
+            .next_update(0, Duration::from_secs(5))
+            .expect("the burst must be delivered");
+        worker.join().unwrap();
+        assert_eq!(u.seq, 4, "the whole burst arrives as one frame");
+    }
+
     /// A burst of updates must be delivered as ONE frame, not one per update.
     ///
     /// This is the strip fix. A guest repaints a window as several updates; if
