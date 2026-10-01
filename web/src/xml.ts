@@ -107,7 +107,7 @@ export function domainXml(f: DomainForm): string {
   const arch = "x86_64";
   // The UEFI variable store is named after the libvirt name, like libvirt's.
   const loader = firmwareXml(f.firmware, libvirtName);
-  const graphicsPort = f.graphics === "spice" ? "5901" : "5900";
+  const graphicsPort = displayPort(f.graphics);
 
   let disks = "";
   if (f.disk_path) {
@@ -185,6 +185,37 @@ ${BOOT_ORDER_XML}
     ${HOTPLUG_PORTS}
   </devices>
 </domain>`;
+}
+
+/// The port a display of this type is opened on.
+///
+/// Fixed per type rather than left to libvirt's autoport: the port rides in the
+/// definition so the daemon has one to attach to before the guest starts, and
+/// the two types must not collide if a guest carries one of each.
+export function displayPort(kind: "vnc" | "spice"): string {
+  return kind === "spice" ? "5901" : "5900";
+}
+
+/// Put exactly one `<graphics>` of `kind` into a definition, with the
+/// `<audio>` libvirt pairs with it.
+///
+/// Every device the hardware editor owns is stripped and re-added on save; the
+/// display is edited on the Display page, not through the device catalogue, so
+/// it is this function that puts it back. Appending without stripping was the
+/// bug: a guest switched to SPICE kept its VNC device and gained a SPICE one,
+/// and each consumer picks a different device (`parse_graphics` prefers VNC,
+/// the .vv endpoint prefers SPICE), so the switch looked like it had reverted
+/// itself. The audio follows the display: `spice` audio beside a VNC display is
+/// malformed, and `spice` is what a guest with no display was refused for.
+///
+/// Appended just before `</devices>` rather than spliced by regex, because a
+/// definition whose last device is self-closing has no closing tag to anchor to.
+export function addDisplay(xml: string, kind: "vnc" | "spice"): string {
+  const close = xml.lastIndexOf("</devices>");
+  if (close === -1) return xml;
+  const graphics = `<graphics type="${kind}" port="${displayPort(kind)}" autoport="yes" listen="127.0.0.1"/>`;
+  const audio = `<audio id="1" type="${kind === "spice" ? "spice" : "none"}"/>`;
+  return `${xml.slice(0, close)}    ${graphics}\n    ${audio}\n  ${xml.slice(close)}`;
 }
 
 /// A new guest's boot order: hard disk, then CD/DVD.

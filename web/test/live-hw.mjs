@@ -210,12 +210,17 @@ check("Add Hardware offers a catalogue with an XML preview", () => {
 // one that matches the display, so the save fails the first time it is tried.
 // The save is asynchronous (runTask), so wait for the API to answer rather
 // than for a fixed time.
-[...document.querySelectorAll(".hw-inline .hw-item")]
-  .find((i) => i.textContent.includes("Display"))
-  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(500);
-const gfxNote = document.querySelector(".hw-inline .hw-page.active #g-gfx-note");
+// The Display row is `data-hw="display"`, so this does not depend on the
+// label text or on which rows happen to be rendered.
+const displayRow = document.querySelector('.hw-inline .hw-item[data-hw="display"]');
 check("the Display page says what each graphics type costs", () => {
+  assert.ok(displayRow, "the sidebar offers a Display entry");
+  assert.match(displayRow.textContent, /Display/);
+});
+displayRow?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(600);
+const gfxNote = document.querySelector(".hw-inline .hw-page.active #g-gfx-note");
+check("the Display page carries a picker and its note", () => {
   assert.ok(document.querySelector(".hw-inline .hw-page.active #g-gfx"), "graphics picker present");
   assert.ok(gfxNote && gfxNote.textContent.trim().length > 0, "a note accompanies the picker");
 });
@@ -223,7 +228,16 @@ check("the Display page says what each graphics type costs", () => {
 // jsdom never fires `change` from a click on a listbox; the select is driven
 // the way `enhanceSelects` does and the handler is called directly.
 const switchDisplay = async (to) => {
+  // The editor is rebuilt after a save (renderVm re-runs openHardwareEditor),
+  // and `page` is local to that function, so it comes back on General. Opening
+  // Display each time is what a user does too -- and finding it missing is a
+  // real failure, not a test artefact.
+  const row = document.querySelector('.hw-inline .hw-item[data-hw="display"]');
+  assert.ok(row, `the Display entry survives the save (${to})`);
+  row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(600);
   const sel = document.querySelector(".hw-inline .hw-page.active #g-gfx");
+  assert.ok(sel, `the Display page opens after a save (no #g-gfx for ${to})`);
   sel.value = to;
   sel.onchange();
   await wait(400);
@@ -235,15 +249,38 @@ const switchDisplay = async (to) => {
   const fresh = [...document.querySelectorAll(".toast")].slice(before);
   return fresh.map((t) => t.textContent.trim()).join(" | ");
 };
+// What the guest actually carries afterwards, read back from the server: the
+// picker is the only place a VNC/SPICE choice is made, so the saved
+// definition must hold exactly one display of the chosen type. Two would mean
+// the old device was left in place and the new one appended, which is what
+// switching "back to the original" looked like from the UI: virt-viewer and
+// the console each pick a different device, so the change never took effect.
+const displays = async () => {
+  const res = await fetch(
+    new URL(`/proxy/${fixture.conn}/domains/${encodeURIComponent(fixture.name)}/xml`, base).toString());
+  const { xml } = await res.json();
+  return [...xml.matchAll(/<graphics\b[^>]*type=['"]([^'"]+)['"]/g)].map((m) => m[1]);
+};
 const toSpice = await switchDisplay("spice");
 check("switching a guest to SPICE saves", () => {
   assert.ok(!/administrators/.test(toSpice), `refused: ${toSpice}`);
   assert.match(toSpice, /saved|Hardware saved/i, `no success reported ("${toSpice}")`);
 });
+// Awaited before the check, not inside it: `check` is synchronous, so an
+// async callback's rejection would be an unhandled rejection and the check
+// would be recorded as a pass without ever having looked.
+const afterSpice = await displays();
+check("and the guest is left with exactly one display, SPICE", () => {
+  assert.deepEqual(afterSpice, ["spice"], `guest carries ${JSON.stringify(afterSpice)}`);
+});
 const backToVnc = await switchDisplay("vnc");
 check("and back to VNC saves too", () => {
   assert.ok(!/administrators/.test(backToVnc), `refused: ${backToVnc}`);
   assert.match(backToVnc, /saved|Hardware saved/i, `no success reported ("${backToVnc}")`);
+});
+const afterVnc = await displays();
+check("and again carries exactly one display, VNC", () => {
+  assert.deepEqual(afterVnc, ["vnc"], `guest carries ${JSON.stringify(afterVnc)}`);
 });
 
 for (const [state, name] of results) {

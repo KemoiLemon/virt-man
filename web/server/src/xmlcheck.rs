@@ -1078,32 +1078,6 @@ mod tests {
         );
     }
 
-
-    /// Live verification helper: `cargo test -- --ignored live_audio <file>`
-    /// feeds a real read-back XML with the audio type swapped for each kind
-    /// named in `VIRT_MAN_AUDIO_TYPES`, so the verdicts are the checker's and
-    /// not a test's own idea of them.
-    #[test]
-    #[ignore]
-    fn live_audio_verdicts() {
-        let path = std::env::var("VIRT_MAN_AUDIO_XML").unwrap();
-        let xml = std::fs::read_to_string(&path).unwrap();
-        assert!(xml.contains("<audio"), "the file has no <audio> to swap");
-        for kind in ["none", "spice", "dbus", "pipewire", "alsa", "pulseaudio"] {
-            let cur = if xml.contains("<audio id='1' type='spice'/>") {
-                "<audio id='1' type='spice'/>"
-            } else {
-                "<audio id='1' type='none'/>"
-            };
-            let probe = xml.replace(cur, &format!("<audio id='1' type='{kind}'/>"));
-            assert!(
-                probe != xml || kind == "spice",
-                "nothing was swapped: no {cur} in {path}"
-            );
-            println!("audio type={kind:<11} -> {:?}", check_domain(&probe).map(|s| s.name));
-        }
-    }
-
     #[test]
     fn host_access_is_refused() {
         for (dev, why) in [

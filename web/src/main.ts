@@ -26,7 +26,7 @@ import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
-import { autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
+import { addDisplay, autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
@@ -6168,15 +6168,30 @@ async function openHardwareEditor(opts: {
           .replace(/<channel\b[\s\S]*?org\.qemu\.guest_agent[\s\S]*?<\/channel>\s*/g, "")
           .replace(/<tpm\b[\s\S]*?<\/tpm>\s*/g, "")
           .replace(/<watchdog\b(?:[^>]*\/>|[\s\S]*?<\/watchdog>)\s*/g, "")
+          // The graphics device is stripped and re-added below, like the rest.
+          // Leaving the old one in place appended the new one instead of
+          // replacing it, so a guest ended up with *both* a VNC and a SPICE
+          // device -- and each consumer picks a different one (`parse_graphics`
+          // prefers VNC, the .vv endpoint prefers SPICE), so switching the
+          // display type never took effect and always looked like it had
+          // switched itself back. Its `<audio>` is stripped with it: libvirt
+          // pairs the two, and a leftover `type='spice'` audio beside a VNC
+          // display is the shape that was refused for a non-admin.
+          .replace(/<graphics\b(?:[^>]*\/>|[\s\S]*?<\/graphics>)\s*/g, "")
+          .replace(/<audio\b(?:[^>]*\/>|[\s\S]*?<\/audio>)\s*/g, "")
           .replace(/<vcpu([^>]*)>\d+<\/vcpu>/, `<vcpu$1>${general.cpus}</vcpu>`)
           .replace(/<memory([^>]*)>\d+<\/memory>/, `<memory$1>${general.memory_mb * 1024}</memory>`)
           .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`)
           .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
         // The display name lives in the title for a UUID-named guest.
         const titled = byUuid ? withTitle(stripped, shown || target) : stripped;
+        // The graphics device is not a catalogue device (there is exactly one,
+        // edited on the Display page), so it is re-added here rather than
+        // through `withDevices`.
+        const withDisplay = addDisplay(titled, general.graphics);
         set("defining domain");
         await api.putXml(`/proxy/${conn}/domains/${encodeURIComponent(target)}/xml`,
-          withFirmware(withDevices(titled, devices), general.firmware, target));
+          withFirmware(withDevices(withDisplay, devices), general.firmware, target));
         await refreshTreeVms();
       }, { done: "Hardware saved", notify: toast }).then(() => void renderVm());
       return;

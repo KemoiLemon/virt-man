@@ -480,3 +480,46 @@ test("a new guest is defined with hard disk then CD/DVD", () => {
   const order = [...osMatch[0].matchAll(/<boot dev="([^"]*)"\/>/g)].map((m) => m[1]);
   assert.deepEqual(order, ["hd", "cdrom"], "disk first, then CD/DVD, in that order");
 });
+
+test("switching the display replaces it instead of adding a second one", () => {
+  // A guest saved through the editor keeps whatever the server last read back,
+  // so `addDisplay` is always called on a definition that may already carry a
+  // display. Appending without stripping left both devices in place, and the
+  // two consumers disagree about which to use (parse_graphics prefers VNC, the
+  // .vv endpoint prefers SPICE) -- so switching to SPICE appeared to revert.
+  const base = `  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <graphics type="vnc" port="5900" autoport="yes" listen="127.0.0.1"/>
+    <audio id="1" type="none"/>
+  </devices>
+</domain>`;
+  // The editor strips both before re-adding, which is what the caller does.
+  const stripped = base
+    .replace(/<graphics\b(?:[^>]*\/>|[\s\S]*?<\/graphics>)\s*/g, "")
+    .replace(/<audio\b(?:[^>]*\/>|[\s\S]*?<\/audio>)\s*/g, "");
+  const out = xml.addDisplay(stripped, "spice");
+  const kinds = [...out.matchAll(/<graphics\b[^>]*type="([^"]*)"/g)].map((m) => m[1]);
+  assert.deepEqual(kinds, ["spice"], `exactly one display, got ${kinds}`);
+  assert.equal((out.match(/<audio/g) ?? []).length, 1, "exactly one audio device");
+  assert.match(out, /<audio id="1" type="spice"\/>/, "the audio follows the display");
+  // Saving back to VNC must not leave the SPICE pairing behind.
+  const back = xml.addDisplay(
+    out.replace(/<graphics\b(?:[^>]*\/>|[\s\S]*?<\/graphics>)\s*/g, "")
+      .replace(/<audio\b(?:[^>]*\/>|[\s\S]*?<\/audio>)\s*/g, ""),
+    "vnc",
+  );
+  assert.deepEqual([...back.matchAll(/<graphics\b[^>]*type="([^"]*)"/g)].map((m) => m[1]), ["vnc"]);
+  assert.match(back, /<audio id="1" type="none"\/>/);
+  // The devices are still inside <devices>.
+  assert.ok(out.indexOf("<graphics") < out.indexOf("</devices>"));
+  assert.ok(back.indexOf("<audio") < back.indexOf("</devices>"));
+});
+
+test("a guest with no display is given one, and its audio matches", () => {
+  const bare = `  <devices>\n    <emulator>/usr/bin/qemu-system-x86_64</emulator>\n    <memballoon model="virtio"/>\n  </devices>\n</domain>`;
+  const out = xml.addDisplay(bare, "spice");
+  assert.match(out, /<graphics type="spice" port="5901"/);
+  assert.match(out, /<audio id="1" type="spice"\/>/);
+  // A definition with no <devices> at all is left alone rather than corrupted.
+  assert.equal(xml.addDisplay("<domain><name>x</name></domain>", "spice"), "<domain><name>x</name></domain>");
+});
