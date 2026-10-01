@@ -204,6 +204,48 @@ check("Add Hardware offers a catalogue with an XML preview", () => {
   results.push(["info", `device types: ${types.length}`]);
 });
 
+// Switch the display from VNC to SPICE and save, then back. This is the
+// shape that was refused with "type='spice' on <audio> is only available to
+// administrators": the guest has no <audio> of its own until libvirt adds the
+// one that matches the display, so the save fails the first time it is tried.
+// The save is asynchronous (runTask), so wait for the API to answer rather
+// than for a fixed time.
+[...document.querySelectorAll(".hw-inline .hw-item")]
+  .find((i) => i.textContent.includes("Display"))
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(500);
+const gfxNote = document.querySelector(".hw-inline .hw-page.active #g-gfx-note");
+check("the Display page says what each graphics type costs", () => {
+  assert.ok(document.querySelector(".hw-inline .hw-page.active #g-gfx"), "graphics picker present");
+  assert.ok(gfxNote && gfxNote.textContent.trim().length > 0, "a note accompanies the picker");
+});
+
+// jsdom never fires `change` from a click on a listbox; the select is driven
+// the way `enhanceSelects` does and the handler is called directly.
+const switchDisplay = async (to) => {
+  const sel = document.querySelector(".hw-inline .hw-page.active #g-gfx");
+  sel.value = to;
+  sel.onchange();
+  await wait(400);
+  const save = document.querySelector(".hw-inline #hw-save");
+  const before = document.querySelectorAll(".toast").length;
+  save.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  // The save is a runTask: it reports success or the server's reason itself.
+  await wait(4000);
+  const fresh = [...document.querySelectorAll(".toast")].slice(before);
+  return fresh.map((t) => t.textContent.trim()).join(" | ");
+};
+const toSpice = await switchDisplay("spice");
+check("switching a guest to SPICE saves", () => {
+  assert.ok(!/administrators/.test(toSpice), `refused: ${toSpice}`);
+  assert.match(toSpice, /saved|Hardware saved/i, `no success reported ("${toSpice}")`);
+});
+const backToVnc = await switchDisplay("vnc");
+check("and back to VNC saves too", () => {
+  assert.ok(!/administrators/.test(backToVnc), `refused: ${backToVnc}`);
+  assert.match(backToVnc, /saved|Hardware saved/i, `no success reported ("${backToVnc}")`);
+});
+
 for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }

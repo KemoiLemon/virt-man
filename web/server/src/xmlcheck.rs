@@ -100,6 +100,20 @@ fn attrs_only(n: Node, allowed: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// Audio backends that name nothing on the host.
+///
+/// libvirt picks the backend to match the display: a guest with only a SPICE
+/// `<graphics>` gets `type='spice'` on its `<audio>` (and a VNC-only guest
+/// gets `type='none'`, or the host's own sound server on older libvirt).
+/// Both are the *default* pairing, not something the user asked for -- and
+/// that is the trap: `spice` routes the guest's sound through the SPICE
+/// display, which is on loopback and reachable only by the .vv relay, while
+/// every other backend here (`pulseaudio`, `pipewire`, `alsa`, `oss`, `sdl`,
+/// `dbus`) writes to a sound server on the host. So the allowlist is exactly
+/// the display-coupled ones; a host backend is a guest writing to the host
+/// and stays an administrator's to ask for.
+const AUDIO_TYPES: &[&str] = &["none", "spice"];
+
 /// `n` must have no child elements.
 fn leaf(n: Node) -> Result<(), String> {
     match elements(n).next() {
@@ -429,11 +443,19 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                     }
                 }
             }
-            // `audio type='none'` is what libvirt adds to every guest with a
-            // display; any other backend writes to a host sound server.
+            // `<audio>` is a property of the display, and libvirt rewrites
+            // it whenever a `<graphics>` is added, removed or retyped: saving
+            // hardware for a guest with no display of its own (the SPA used
+            // to write one, and a guest defined by hand may have none) makes
+            // libvirt *add* a `<graphics type='spice'>` plus a matching
+            // `<audio type='spice'>`. Refusing `spice` therefore meant a
+            // non-admin could never save such a guest at all, and the refusal
+            // named an attribute the user never chose. The allowlist carries
+            // the pairing, so the round trip works; the host's own sound
+            // servers do not.
             "audio" => {
                 plain(d, &["id", "type"])?;
-                one_of(d, "type", &["none"])?;
+                one_of(d, "type", AUDIO_TYPES)?;
             }
             // Guest-side emulated hardware. Each is held to the types that
             // name nothing on the host: an `evdev` or `passthrough` input
@@ -443,7 +465,13 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                 plain(d, &["type", "bus"])?;
                 one_of(d, "type", &["mouse", "keyboard", "tablet"])?;
             }
-            "video" | "sound" | "watchdog" | "memballoon" | "controller" => {
+            // `sound` is the pre-1.10 spelling of `<audio>`; the same rule.
+            "sound" => {
+                attrs_only(d, &["model"])?;
+                one_of(d, "model", AUDIO_TYPES)?;
+                harmless_subtree(d)?;
+            }
+            "video" | "watchdog" | "memballoon" | "controller" => {
                 harmless_subtree(d)?;
                 let host_ref = d.descendants().any(|x| {
                     matches!(x.tag_name().name(), "source" | "backend" | "driver")
@@ -1007,6 +1035,72 @@ mod tests {
         ] {
             let s = check_domain(file).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(s.name, name);
+        }
+    }
+
+    #[test]
+    fn the_hosts_sound_server_is_refused_but_the_display_pairing_is_not() {
+        // What libvirt writes on its own for a SPICE guest: it must pass, or
+        // a non-admin cannot re-save a guest libvirt has touched. The old
+        // refusal named `type='spice'` on `<audio>` and blocked exactly this.
+        for good in [
+            r#"<audio id="1" type="none"/>"#,
+            r#"<audio id="1" type="spice"/><graphics type="spice" port="5901" autoport="yes" listen="127.0.0.1"/>"#,
+            r#"<sound model="spice"/><graphics type="spice" port="5901" autoport="yes" listen="127.0.0.1"/>"#,
+        ] {
+            assert!(check_domain(&with_device(good)).is_ok(), "{good}");
+        }
+        for (bad, why) in [
+            (r#"<audio id="1" type="pulseaudio"/>"#, "host pulse server"),
+            (r#"<audio id="1" type="pipewire"/>"#, "host pipewire server"),
+            (r#"<audio id="1" type="alsa"/>"#, "host ALSA"),
+            (r#"<sound model="es1370"/>"#, "the old spelling"),
+        ] {
+            assert!(check_domain(&with_device(bad)).is_err(), "{why} allowed");
+        }
+    }
+
+    /// The real thing: define a guest through the app's own form XML, let
+    /// libvirt read it back, and re-save that. Uses a stub so it fails if the
+    /// pairing ever stops round-tripping.
+    #[test]
+    fn a_spice_guest_read_back_can_be_saved_by_a_non_admin() {
+        let vnc = form_domain();
+        let spice = vnc.replace(
+            r#"<graphics type="vnc" port="-1" autoport="yes" listen="127.0.0.1"/>"#,
+            r#"<graphics type="spice" port="5901" autoport="yes" listen="127.0.0.1"/>
+    <audio id="1" type="spice"/>"#,
+        );
+        assert_ne!(vnc, spice, "the form XML changed shape");
+        assert!(
+            check_domain(&spice).is_ok(),
+            "libvirt's read-back of a SPICE guest"
+        );
+    }
+
+
+    /// Live verification helper: `cargo test -- --ignored live_audio <file>`
+    /// feeds a real read-back XML with the audio type swapped for each kind
+    /// named in `VIRT_MAN_AUDIO_TYPES`, so the verdicts are the checker's and
+    /// not a test's own idea of them.
+    #[test]
+    #[ignore]
+    fn live_audio_verdicts() {
+        let path = std::env::var("VIRT_MAN_AUDIO_XML").unwrap();
+        let xml = std::fs::read_to_string(&path).unwrap();
+        assert!(xml.contains("<audio"), "the file has no <audio> to swap");
+        for kind in ["none", "spice", "dbus", "pipewire", "alsa", "pulseaudio"] {
+            let cur = if xml.contains("<audio id='1' type='spice'/>") {
+                "<audio id='1' type='spice'/>"
+            } else {
+                "<audio id='1' type='none'/>"
+            };
+            let probe = xml.replace(cur, &format!("<audio id='1' type='{kind}'/>"));
+            assert!(
+                probe != xml || kind == "spice",
+                "nothing was swapped: no {cur} in {path}"
+            );
+            println!("audio type={kind:<11} -> {:?}", check_domain(&probe).map(|s| s.name));
         }
     }
 
