@@ -75,8 +75,7 @@ console sessions, and back-to-back runs collide.
 These are not style preferences. Violating them produces broken builds or
 silently broken UI.
 
-**No native OS chrome.** `<select>` is `display:none` behind a themed
-`.select-trigger`/`.select-popover` listbox (`web/src/listbox.ts`). Never use
+**No native OS chrome.** `<select>` is `display:none` behind a themed`.select-trigger`/`.select-popover` listbox (`web/src/listbox.ts`). Never use
 `window.prompt`/`confirm`/`alert` — use `askText`/`askConfirm` in `main.ts`.
 The browser's right-click menu is replaced on resource surfaces: every sidebar
 row, and in the content pane the cards, dashboard rows, tabs and page header
@@ -106,6 +105,16 @@ steals focus.
 
 **No inline event handlers.** `onclick="..."` in an HTML string is blocked by
 the CSP. Assign handlers in JS after rendering.
+
+**No mini-notes.** Do not put explanatory prose beside a control, above a table
+or under a field (`<p class="hint">`, `.dsub`, `.hw-note` used as a note): no
+"People you share with see this", no "The server downloads the image itself",
+no restating what the labels already say. It is clutter that pushes the real
+content down and has to be re-translated, re-styled and kept true. A panel
+explains itself through its labels, its place in the app and the actions on it.
+If something genuinely cannot be inferred, fix the labels instead. What stays:
+dynamic readouts (live state, progress, errors, in-use lists) and an empty
+state's own line — those carry information, not narration.
 
 **A pane render that awaits must check it still owns the pane.** Bump
 `beginRender()` at the top of any renderer, and `if (!stillCurrent(gen)) return;`
@@ -178,7 +187,8 @@ second and would otherwise repeat the same wrong answer forever. The all-pools
 list deliberately does not refresh every pool, keeping the sidebar's poll cheap.
 
 **The URL is the view.** `web/src/route.ts` maps views to paths (`/`,
-`/servers`, `/guests`, `/<node>`, `/<node>/vms|networks|storage|firewall`,
+`/servers`, `/guests`, `/containers`, `/networks`, `/storage`, `/<node>`,
+`/<node>/vms|networks|storage|firewall`,
 `/<node>/vms/<vm>[/console|hardware|options|firewall|xml]`,
 `/<node>/networks/<net>`, `/<node>/storage/<pool>`) and is unit-tested. Every
 view renderer calls `syncUrl()` right after `beginRender()`, which is the one
@@ -189,8 +199,20 @@ poll never adds history. `renderCurrent()` (boot, Back/Forward) sets
 normalises (a deleted node, pool or network) replaces the dead URL instead of
 stacking it. A node is addressed by name unless that name is ambiguous or is a
 top-level path the web server answers itself (`/users`, `/activity`, ...) —
-then by id, or a reload would get JSON instead of the app. **Keep `RESERVED` in
-`route.ts` in step with the server's top-level routes.**
+or is a Datacenter tab (`route.ts` `DC_TABS`: `/guests`, `/containers`,
+`/networks`, `/storage`) — then by id, or a reload would get an admin page or
+the app's own Datacenter tab. **Keep `RESERVED` in
+`route.ts` in step with the server's top-level routes and `DC_TABS`.**
+
+**The Datacenter lists every server's resources, and creating one does not
+select a server.** Guests, Containers, Networks and Storage are tabs over the
+tree's per-server caches, each headed by the same `quickStats` cards, and each
+card carries its own owning server (`data-*-conn`), so an action on a card
+names the daemon it belongs to instead of the app's `selectedConn`. The create
+buttons there pass an explicit `conn` to the form (`withDaemon`) and the view
+stays put: a create is not a request to switch the whole app to that daemon.
+The card builders (`netCard`, `poolCard`) are shared with a server's own tabs,
+which is why they take the owning connection as an argument.
 
 **Pages paint from cache, then from the daemon.** A remote daemon costs a
 round trip per read, so opening a view used to show nothing until it answered.

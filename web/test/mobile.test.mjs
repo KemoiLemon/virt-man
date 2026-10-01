@@ -192,3 +192,12 @@ test("a boot row puts the actions in their own column after the name", () => {
   assert.match(css, /\.boot-acts\{[^}]*justify-self:start/,
     "the cluster sits at the left edge of its column");
 });
+
+test("an empty card list fills the pane, not one grid cell", () => {
+  // The VMs and Networks tabs on a daemon render their list as a .card-grid,
+  // but Containers and Storage do not. Without the span the empty state became
+  // a single 340px cell beside nothing -- the same "No X available." message,
+  // two different shapes, on four tabs of one server.
+  assert.match(css, /\.card-grid>\.empty-create\{[^}]*grid-column:1\/-1/,
+    "the empty state spans every column of a card grid");
+});

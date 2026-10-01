@@ -101,14 +101,103 @@ await wait(1200);
 
 // ---- Guests get their own tab ---------------------------------------------
 
-check("Datacenter has Dashboard and Guests tabs, and no Servers tab", () => {
+check("Datacenter has Dashboard, Guests, Containers, Networks and Storage tabs, and no Servers tab", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
   // Servers moved to the admin page's Daemons section.
-  assert.deepEqual(tabs, ["Dashboard", "Guests"], `tabs (${tabs})`);
+  assert.deepEqual(tabs, ["Dashboard", "Guests", "Containers", "Networks", "Storage"], `tabs (${tabs})`);
   // The landing dashboard has no guest cards either; guests are their own tab.
   assert.equal(document.querySelectorAll("[data-dc-vm]").length, 0,
     "guests are not listed on the Dashboard tab");
 });
+
+check("each datacenter tab has its own URL, and reloading one lands on it", () => {
+  // The path is written by syncUrl on every view render, so a tab that is a
+  // view has a path; the RESERVED/DC_TABS list is what keeps it from being
+  // read back as a node name.
+  const paths = {};
+  for (const name of ["Guests", "Containers", "Networks", "Storage"]) {
+    [...document.querySelectorAll(".tabbar .tab")]
+      .find((t) => t.textContent.trim() === name)
+      ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    paths[name] = window.location.pathname;
+  }
+  assert.deepEqual(paths,
+    { Guests: "/guests", Containers: "/containers", Networks: "/networks", Storage: "/storage" },
+    JSON.stringify(paths));
+});
+
+// ---- Networks and Storage list every server's, like Guests ------------------
+
+const connOf = (el) => el.getAttribute("data-net-conn") ?? el.getAttribute("data-pool-conn");
+for (const [tab, label, card] of [
+  ["Networks", "networks", "[data-dc-net], [data-net-open]"],
+  ["Storage", "storage pools", "[data-pool-open]"],
+]) {
+  [...document.querySelectorAll(".tabbar .tab")]
+    .find((t) => t.textContent.trim() === tab)
+    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(600);
+  const cards = [...document.querySelectorAll(card)];
+  check(`${tab} tab lists every server's ${label}, each naming its server`, () => {
+    const body = document.querySelector("#content")?.textContent ?? "";
+    assert.match(body, /SERVERS/, "quick statistics head the tab");
+    assert.match(body, tab === "Networks" ? /NETWORKS/ : /POOLS/, `counts ${label}`);
+    assert.ok(cards.length > 0, `${label} listed (${cards.length})`);
+    for (const c of cards) assert.ok(connOf(c), "the card carries its owning server");
+  });
+  results.push(["info", `${label}: ${cards.length} card(s)`]);
+}
+
+// Creating from the Datacenter must not select the daemon on the page behind
+// the form: choosing a daemon there is a choice about the resource, not a
+// navigation. This is the regression that kept coming back, so it drives the
+// pick-a-daemon path itself -- with NO server selected, which is the only case
+// that path is reached in.
+document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(400);
+check("creating from the Datacenter keeps the Datacenter", () => {
+  [...document.querySelectorAll(".tabbar .tab")]
+    .find((t) => t.textContent.trim() === "Storage")
+    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  document.querySelector("#dc-pool-create")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  document.querySelector("#dc-net-create")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  assert.equal(window.location.pathname, "/storage", `still on the Datacenter`);
+  const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
+  assert.ok(tabs.includes("Guests"), `datacenter tabs still there (${tabs})`);
+});
+
+// The real case: no server selected at all, so the daemon picker opens. The
+// tree must not gain a selection and the Datacenter must stay on screen.
+check("the daemon picker does not select the daemon it picks", () => {
+  // Clear any selection the checks above left, then open the picker.
+  document.querySelector("#dc-row")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  document.querySelector("#dc-pool-create")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+});
+await wait(500);
+check("…the picker lists a daemon to choose", () => {
+  const modal = document.querySelector(".modal-back.open");
+  assert.ok(modal, "a daemon picker is open for the Datacenter create");
+  const pick = modal.querySelector("[data-pick-conn]");
+  assert.ok(pick, "the picker lists a daemon");
+  pick.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+});
+await wait(700);
+check("…and picking one leaves the Datacenter on screen, unselected", () => {
+  // The bug: picking a daemon made the app select it, so the sidebar gained a
+  // selection and the pane switched to that server's page.
+  const sel = document.querySelector(".tree-row.sel");
+  assert.equal(sel?.id, "dc-row", `the Datacenter is still the selected row (got ${sel?.className})`);
+  const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
+  assert.ok(tabs.includes("Guests"), `still the Datacenter's tabs (${tabs})`);
+});
+
+// The Dashboard tab is a separate view; the checks below read #dc-dash, which
+// only exists while that tab is the current one. The tab-walk above left the
+// Datacenter on Storage.
+[...document.querySelectorAll(".tabbar .tab")]
+  .find((t) => t.textContent.trim() === "Dashboard")
+  ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(1200);
 
 check("the datacenter dashboard summarises every server", () => {
   const body = document.querySelector("#dc-dash")?.textContent ?? "";
@@ -203,7 +292,7 @@ check("server rows are selectable", () => {
 await wait(1400);
 check("clicking a server opens its view", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall"], `server tabs render (${tabs})`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall"], `server tabs render (${tabs})`);
 });
 
 for (const [state, name2] of results) {

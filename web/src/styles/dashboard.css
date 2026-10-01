@@ -181,6 +181,11 @@
    wherever it sits (card grids, pool lists, dashboard sections). The icon
    follows the highlight like the create cards do. */
 .storage-card[data-open] { cursor: pointer; }
+/* Nothing to show at all: a pool card shaped like the others, so the section
+   keeps its silhouette on an empty host, but dimmed and inert -- there is no
+   pool behind it to open, hover or key through. */
+.storage-card-none { opacity: .55; }
+.storage-card-none .metric-value { color: var(--dim); }
 .storage-card[data-open]:hover { border-color: var(--accent); background: var(--panel2); }
 .storage-card[data-open]:hover .storage-card-icon { color: var(--accent); }
 /* Table rows that open a page (dashboard networking tables). */
@@ -188,8 +193,16 @@ table.grid tr.row-open { cursor: pointer; }
 table.grid tr.row-open:hover td { background: var(--hover); }
 table.grid tr.row-open:hover td:first-child { color: var(--accent); }
 
-/* An empty list: one line saying so, and a small button to make the first. */
-.empty-create { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* An empty list: one line saying so, and a small button to make the first one,
+   stacked and centred in the space the list would have taken. The list element
+   is a block, not flex, so this only centres horizontally without a width.
+   A card-grid list is the exception: it is a grid, so the empty state would
+   become one 340px cell beside nothing instead of the pane's own message (the
+   VMs and Networks tabs on a daemon, while Containers and Storage, which are
+   not grids, already looked right). Span every column so all four match. */
+.empty-create { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+.card-grid > .empty-create { grid-column: 1 / -1; }
+.empty-create .empty-msg { font-size: 16px; }
 
 /* -------------------------------------------------------------- skeletons
    Placeholders shown until a page's first read answers. They sit inside the

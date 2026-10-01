@@ -142,20 +142,22 @@ check("themed dialog opens instead of native window.prompt", () => {
   const addResource = [...document.querySelectorAll(".ctxmenu-item")]
     .find((b) => b.textContent.trim() === "Add Resource");
   assert.ok(addResource, "the Datacenter menu offers Add Resource");
+  // Adding a server is the admin page's job now (Daemons), not the tree's.
+  assert.equal([...document.querySelectorAll(".ctxmenu-item")]
+    .find((b) => b.textContent.trim() === "Add server"), undefined, "no Add server in the menu");
   addResource.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   const modal = document.querySelector(".modal-back.open");
   assert.ok(modal, "a themed modal opened (not window.prompt)");
-  // The chooser offers all four resource kinds, daemon included.
+  // The chooser offers resources, never a daemon: adding a server is an
+  // administrative act and lives only in the admin page's Daemons section.
   const kinds = [...modal.querySelectorAll("[data-create]")].map((b) => b.dataset.create);
-  for (const want of ["daemon", "vm", "network", "pool"]) {
+  for (const want of ["vm", "network", "pool"]) {
     assert.ok(kinds.includes(want), `${want} offered (${kinds})`);
   }
-  // Choosing Daemon hands off to the server connection dialog.
-  modal.querySelector('[data-create="daemon"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  const conn = document.querySelector(".modal-back.open");
-  assert.ok(conn, "Daemon opens a follow-up dialog");
-  assert.match(conn.querySelector(".modal-head").textContent, /Server/i, "Add Server dialog");
-  conn.remove();
+  assert.ok(!kinds.includes("daemon"), `no daemon option in Add Resource (${kinds})`);
+  const labels = [...modal.querySelectorAll(".create-resource-card b")].map((b) => b.textContent.trim());
+  assert.ok(!labels.some((l) => /daemon/i.test(l)), `no daemon card (${labels})`);
+  modal.remove();
 });
 
 // Admin page: the activity log lives there now, and the old bottom-right
@@ -194,6 +196,59 @@ check("themed dialog opens instead of native window.prompt", () => {
   check("a recorded action appears in the Activity log", () => {
     assert.match(document.querySelector("#admin-area").textContent, /live-suite probe/, "recorded entry listed");
   });
+
+  // Permissions: an existing grant must be editable, not only removable. A row
+  // offers Edit; the dialog comes up prefilled, says Save, and changing the
+  // role replaces that entry rather than leaving the old one behind (the
+  // server keys an entry on path+ugid+role, so the old key has to be dropped).
+  // Skipped when the instance has no ACL rows to edit.
+  click(document.querySelector('#tree [data-admin-section="permissions"]'));
+  await wait(1000);
+  const aclRows = [...document.querySelectorAll("#admin-area table.grid tr")]
+    .filter((r) => r.querySelector("[data-del-acl]"));
+  if (aclRows.length) {
+    check("a permission row offers Edit as well as Remove", () => {
+      assert.ok(aclRows[0].querySelector("[data-edit-acl]"), "Edit present on the row");
+      assert.ok(aclRows[0].querySelector("[data-del-acl]"), "Remove still present");
+    });
+    const aclBefore = await (await fetch(new URL("/acl", base).toString())).json();
+    // Match the row to its entry the way the table sorted them: by path, then
+    // ugid. The row carries no id of its own, so the modal's prefilled path is
+    // what identifies which entry is being edited.
+    const row = aclRows.find((r) => r.querySelector("[data-edit-acl]"));
+    click(row.querySelector("[data-edit-acl]"));
+    await wait(500);
+    const aclModal = document.querySelector(".modal-back.open");
+    const editPath = aclModal.querySelector("#a-path").value;
+    const editUgid = aclModal.querySelector("#a-ugid").value;
+    check("Edit permission comes up prefilled, with Save rather than Add", () => {
+      assert.match(aclModal?.textContent ?? "", /Edit permission/i, "titled Edit permission");
+      assert.match(aclModal.querySelector("#a-save").textContent, /Save/, "the action reads Save");
+      assert.ok(editPath, "path prefilled");
+      const onServer = aclBefore.find((e) => e.path === editPath && e.ugid === editUgid);
+      assert.ok(onServer, `the dialog describes a real entry (${editPath} / ${editUgid})`);
+      assert.equal(aclModal.querySelector("#a-role").value, onServer.role, "role prefilled from the entry");
+      assert.equal(aclModal.querySelector("#a-prop").checked, onServer.propagate, "propagate prefilled");
+    });
+    // Flip the role and save, then assert the server agrees on the new value.
+    const key = (e) => `${e.path}|${e.ugid}`;
+    const target = aclBefore.find((e) => e.path === editPath && e.ugid === editUgid);
+    const fromRole = target.role;
+    const toRole = [...aclModal.querySelector("#a-role").options]
+      .map((o) => o.value).find((v) => v !== fromRole);
+    aclModal.querySelector("#a-role").value = toRole;
+    click(aclModal.querySelector("#a-save"));
+    await wait(1200);
+    const aclAfter = await (await fetch(new URL("/acl", base).toString())).json();
+    check("saving an edited permission replaces it, leaving no duplicate", () => {
+      assert.ok(aclAfter.some((e) => key(e) === key(target) && e.role === toRole),
+        `role is now ${toRole} (${JSON.stringify(aclAfter.map((e) => `${e.path}:${e.role}`))})`);
+      assert.ok(!aclAfter.some((e) => key(e) === key(target) && e.role === fromRole),
+        `the old ${fromRole} entry is gone`);
+    });
+  } else {
+    results.push(["info", "no ACL rows to edit on this instance"]);
+  }
 
   // NOTE: deliberately does NOT click #act-clear. That action clears the
   // *whole* log, not the entry this suite added, so running the suite wiped
@@ -282,6 +337,28 @@ await (async () => {
     const pane = document.querySelector("#content");
     assert.equal(rightClick(pane), false, "content pane background is not hijacked");
     document.querySelector(".ctxmenu")?.remove();
+  });
+
+  // Container cards come from the tree's cache, which is empty on a host with
+  // no containers -- so assert the tab's quick statistics, which describe the
+  // list either way. Same widget as the Guests tab, with containers counted.
+  document.querySelector('[data-dctab="containers"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  check("the Containers tab carries the same quick statistics", () => {
+    const cards = [...document.querySelectorAll("#content .cards .card")];
+    const labels = cards.map((c) => c.querySelector("i")?.textContent.trim());
+    for (const want of ["SERVERS", "CONTAINERS", "RUNNING", "STOPPED"]) {
+      assert.ok(labels.includes(want), `${want} card present (${labels})`);
+    }
+    assert.ok(!labels.includes("GUESTS"), "counts containers, not guests");
+    const total = cards.find((c) => c.querySelector("i")?.textContent.trim() === "CONTAINERS");
+    const running = cards.find((c) => c.querySelector("i")?.textContent.trim() === "RUNNING");
+    const stopped = cards.find((c) => c.querySelector("i")?.textContent.trim() === "STOPPED");
+    assert.ok(total.querySelector(".card-ic svg"), "the totals carry the container icon");
+    assert.equal(
+      Number(running.querySelector("b").textContent) + Number(stopped.querySelector("b").textContent),
+      Number(total.querySelector("b").textContent),
+      "running + stopped is the total",
+    );
   });
 
   // Resource surfaces in the content pane get the same menu as their tree row.
@@ -600,7 +677,7 @@ check("the palette reaches every page, with an icon on each command", () => {
     assert.ok(r.querySelector(".ico > svg"), `"${r.textContent.trim()}" has an icon`);
   }
   const labels = rows.map((r) => r.querySelector(".tayne-label").textContent);
-  for (const want of ["Datacenter", "Datacenter — Guests", "Add resource", "Add server"]) {
+  for (const want of ["Datacenter", "Datacenter — Guests", "Add resource"]) {
     assert.ok(labels.includes(want), `${want} offered`);
   }
   assert.ok(labels.some((l) => / — Storage$/.test(l)), "a server's Storage tab");

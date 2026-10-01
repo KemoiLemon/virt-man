@@ -22,7 +22,11 @@
 .tree-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tree-state { font-size: 12px; color: var(--dim); letter-spacing: .5px; }
 .tree-state.on { color: var(--ok); }
-.tree-empty { padding: 14px 16px; color: var(--dim); font-size: 11px; }
+/* Where a group's rows would have been, when the group is empty: the same
+   shape and indent as a real row, so the tree keeps its silhouette, but dimmed
+   and with no hover -- there is nothing behind it to open or click. */
+.tree-ghost { opacity: .5; cursor: default; font-style: italic; }
+.tree-ghost:hover { background: none; }
 
 /* Table cells reuse the tree's state vocabulary: the VM/network grids show the
    same running/stopped labels and clickable names. */
@@ -233,9 +237,14 @@ table.grid + .actions { margin-top: 12px; }
    the create buttons are pushed right, as on a tab bar. */
 .admin-filters { align-items: flex-end; flex-wrap: wrap; }
 .admin-filters .field { min-width: 150px; margin: 0; }
-/* Admin action rows put their add / create button on the right, as a tab
-   bar's actions sit, rather than at the left edge above the table. */
-.actions-end { justify-content: flex-end; }
+/* The admin section's add button rides in the page header, inline with the
+   title rather than as a row of its own above the table. It takes the
+   remaining width, so it sits flush with the trailing edge. */
+.dhead-actions { margin-left: auto; display: flex; gap: 8px; }
+/* The header carries the add button now, so a section's first table sits hard
+   under it. .dhead's own 4px is sized for a title alone; give the content the
+   air the button row used to provide. */
+#admin-area > .grid:first-child, #admin-area > .card-grid:first-child { margin-top: 16px; }
 .row-link { cursor: pointer; }
 .row-link:hover { color: var(--accent); }
 tr.suspended td { color: var(--dim); }

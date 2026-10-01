@@ -46,6 +46,10 @@ export interface AdminCtx {
   createNetwork(conn: string, owner: string, after: () => void): void;
   /// The identity changed (your own groups, roles): refresh it and re-render.
   refreshMe(): Promise<void>;
+  /// Put this section's primary action in the page header, inline with the
+  /// title, instead of a row of its own above the content. A section calls it
+  /// with its own button markup; `renderAdmin` owns where it lands.
+  head(html: string): void;
   /// Whether the pane still shows the render that started at `gen`.
   stillCurrent(gen: number): boolean;
 }
@@ -219,7 +223,6 @@ function bind(area: Element, attr: string, run: (value: string, el: HTMLElement)
 const users_: Painter = async (ctx, area) => {
   const me = ctx.me();
   ctx.setHtml(area, `
-    <div class="actions actions-end"><button class="btn primary" id="add-user">${ic.plus(14)} Add user</button></div>
     <table class="grid">
       <tr><th>Username</th><th>Display Name</th><th>Groups</th><th>Limits</th><th class="col-actions"></th></tr>
       ${users.map((u) => `
@@ -236,7 +239,8 @@ const users_: Painter = async (ctx, area) => {
           </div></td>
         </tr>`).join("")}
     </table>`);
-  ctx.$("#add-user", area).onclick = () => openUser(ctx, null);
+  ctx.head(`<button class="btn primary" id="add-user">${ic.plus(14)} Add user</button>`);
+  ctx.$("#add-user").onclick = () => openUser(ctx, null);
   bind(area, "data-edit-user", (id) => openUser(ctx, users.find((u) => u.id === id) ?? null));
   bind(area, "data-user-perms", (id) => openGrant(ctx, { ugid: `user:${id}` }));
   bind(area, "data-user-quota", (id) => {
@@ -299,8 +303,7 @@ function openUser(ctx: AdminCtx, u: User | null) {
      <div class="check-list">
        ${groups.map((g) => `<label class="check"><input type="checkbox" data-group="${esc(g.name)}"
           ${u?.groups?.includes(g.name) ? "checked" : ""}> ${esc(g.name)}</label>`).join("") || `<span class="dim-note">No groups yet.</span>`}
-     </div>
-     ${u ? "" : `<p class="hint">"User" can see daemons and pools, and create guests and networks &mdash; so it sees only what it creates. Set limits after creating.</p>`}`,
+     </div>`,
     `<button class="btn" id="u-cancel">Cancel</button><button class="btn primary" id="u-save">${u ? "Save" : "Create"}</button>`,
   );
   ctx.$("#u-cancel", el).onclick = () => el.remove();
@@ -333,7 +336,6 @@ function openUser(ctx: AdminCtx, u: User | null) {
 
 const groups_: Painter = async (ctx, area) => {
   ctx.setHtml(area, `
-    <div class="actions actions-end"><button class="btn primary" id="add-group">${ic.plus(14)} Add group</button></div>
     <table class="grid">
       <tr><th>Group</th><th>Comment</th><th>Members</th><th class="col-actions"></th></tr>
       ${groups.map((g) => `
@@ -348,7 +350,8 @@ const groups_: Painter = async (ctx, area) => {
           </div></td>
         </tr>`).join("") || `<tr><td colspan="4" class="empty">No groups. A group gets permissions like a user does, and every member has them.</td></tr>`}
     </table>`);
-  ctx.$("#add-group", area).onclick = () => openGroup(ctx, null);
+  ctx.head(`<button class="btn primary" id="add-group">${ic.plus(14)} Add group</button>`);
+  ctx.$("#add-group").onclick = () => openGroup(ctx, null);
   bind(area, "data-edit-group", (n) => openGroup(ctx, groups.find((g) => g.name === n) ?? null));
   bind(area, "data-group-perms", (n) => openGrant(ctx, { ugid: `group:${n}` }));
   bind(area, "data-del-group", async (n) => {
@@ -407,7 +410,6 @@ function privGroups(): [string, string[]][] {
 
 const roles_: Painter = async (ctx, area) => {
   ctx.setHtml(area, `
-    <div class="actions actions-end"><button class="btn primary" id="add-role">${ic.plus(14)} New role</button></div>
     <table class="grid">
       <tr><th>Role</th><th>Privileges</th><th class="col-actions"></th></tr>
       ${roles.map((r) => `
@@ -422,7 +424,8 @@ const roles_: Painter = async (ctx, area) => {
           </div></td>
         </tr>`).join("")}
     </table>`);
-  ctx.$("#add-role", area).onclick = () => openRole(ctx, null);
+  ctx.head(`<button class="btn primary" id="add-role">${ic.plus(14)} New role</button>`);
+  ctx.$("#add-role").onclick = () => openRole(ctx, null);
   const find = (n: string) => roles.find((r) => r.name === n) ?? null;
   bind(area, "data-edit-role", (n) => openRole(ctx, find(n)));
   bind(area, "data-view-role", (n) => openRole(ctx, find(n)));
@@ -441,7 +444,6 @@ function openRole(ctx: AdminCtx, r: RoleDef | null) {
   const el = ctx.openModal(
     r ? `Role — ${esc(r.name)}` : "New role",
     `<label class="field"><span>Name</span><input id="r-name" value="${esc(r?.name ?? "")}" ${ro ? "disabled" : ""} placeholder="BackupOperator"></label>
-     ${ro ? `<p class="hint">Built-in roles are fixed. Make a new role for custom access.</p>` : ""}
      ${privGroups().map(([grp, ps]) => `
        <div class="section-title">${esc(grp)}</div>
        <div class="check-list">${ps.map((p) => `<label class="check"><input type="checkbox" data-priv="${esc(p)}"
@@ -472,14 +474,18 @@ function openRole(ctx: AdminCtx, r: RoleDef | null) {
 /// grant is made by choosing rather than typing a path.
 async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string }[]> {
   const out = [
-    { path: "/", label: "/ — everything" },
-    { path: "/nodes", label: "/nodes — every daemon" },
+    { path: "/", label: "/" },
+    { path: "/nodes", label: "/nodes" },
   ];
   for (const c of ctx.connections()) {
     const node = `/nodes/${c.id}`;
-    out.push({ path: node, label: `${c.name} — whole daemon` });
+    // Labelled by the daemon's *name*, the way `pathLabel` reads an existing
+    // entry back, so the picker and the table spell a path the same way. The
+    // value stays the id: that is what the server stores and matches on.
+    const shown = `/nodes/${c.name}`;
+    out.push({ path: node, label: shown });
     for (const k of ["vms", "containers", "networks", "storage", "bridges"]) {
-      out.push({ path: `${node}/${k}`, label: `${c.name} › all ${k}` });
+      out.push({ path: `${node}/${k}`, label: `${shown}/${k}` });
     }
     try {
       const [vms, nets, pools, bridges] = await Promise.all([
@@ -488,14 +494,14 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
         api.get<{ name: string }[]>(`/proxy/${c.id}/pools`),
         api.get<string[]>(`/proxy/${c.id}/networks/bridges`),
       ]);
-      for (const v of vms) out.push({ path: `${node}/vms/${v.name}`, label: `${c.name} › VM ${v.name}` });
-      for (const n of nets) out.push({ path: `${node}/networks/${n.name}`, label: `${c.name} › network ${n.name}` });
-      for (const p of pools) out.push({ path: `${node}/storage/${p.name}`, label: `${c.name} › pool ${p.name}` });
-      for (const b of bridges) out.push({ path: `${node}/bridges/${b}`, label: `${c.name} › bridge ${b}` });
+      for (const v of vms) out.push({ path: `${node}/vms/${v.name}`, label: `${shown}/vms/${v.name}` });
+      for (const n of nets) out.push({ path: `${node}/networks/${n.name}`, label: `${shown}/networks/${n.name}` });
+      for (const p of pools) out.push({ path: `${node}/storage/${p.name}`, label: `${shown}/storage/${p.name}` });
+      for (const b of bridges) out.push({ path: `${node}/bridges/${b}`, label: `${shown}/bridges/${b}` });
       // Containers apart: a host without the LXC driver still offers the rest.
       const cts = await api.get<{ name: string; title?: string }[]>(`/proxy/${c.id}/containers`).catch(() => []);
       for (const v of cts) {
-        out.push({ path: `${node}/containers/${v.name}`, label: `${c.name} › container ${v.title || v.name}` });
+        out.push({ path: `${node}/containers/${v.name}`, label: `${shown}/containers/${v.name}` });
       }
     } catch {
       // Offline daemon: its whole-daemon paths are still offered.
@@ -516,8 +522,6 @@ const permissions_: Painter = async (ctx, area) => {
   const acl = await api.get<AclEntry[]>("/acl");
   const sorted = [...acl].sort((a, b) => a.path.localeCompare(b.path) || a.ugid.localeCompare(b.ugid));
   ctx.setHtml(area, `
-    <div class="actions actions-end"><button class="btn primary" id="add-acl">${ic.plus(14)} Add permission</button></div>
-    <p class="hint">A role granted at a path applies there and below (unless "propagate" is off). The deepest grant for a user wins over one inherited from above, and a user's own grant wins over their groups'. Owners always hold full access to what they create.</p>
     <table class="grid">
       <tr><th>Path</th><th>User / Group</th><th>Role</th><th>Propagate</th><th class="col-actions"></th></tr>
       ${sorted.map((e, i) => `
@@ -526,10 +530,13 @@ const permissions_: Painter = async (ctx, area) => {
           <td>${esc(e.label ?? ugidLabel(e.ugid))}</td>
           <td><span class="role-tag">${esc(e.role)}</span></td>
           <td>${e.propagate ? "Yes" : "No"}</td>
-          <td class="col-actions"><button class="btn danger icon" data-del-acl="${i}" title="Remove">${ic.trash()}</button></td>
+          <td class="col-actions"><button class="btn icon" data-edit-acl="${i}" title="Edit">${ic.edit()}</button>
+          <button class="btn danger icon" data-del-acl="${i}" title="Remove">${ic.trash()}</button></td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No permissions.</td></tr>`}
     </table>`);
-  ctx.$("#add-acl", area).onclick = () => openGrant(ctx, {});
+  ctx.head(`<button class="btn primary" id="add-acl">${ic.plus(14)} Add permission</button>`);
+  ctx.$("#add-acl").onclick = () => openGrant(ctx, {});
+  bind(area, "data-edit-acl", (i) => void openGrant(ctx, {}, sorted[Number(i)]));
   bind(area, "data-del-acl", async (i) => {
     const e = sorted[Number(i)];
     if (!await ctx.askConfirm("Remove permission",
@@ -542,42 +549,61 @@ const permissions_: Painter = async (ctx, area) => {
   });
 };
 
-/// Grant a role. Prefilled from wherever it was opened: a user's or group's
-/// row, or a resource's.
-export async function openGrant(ctx: AdminCtx, pre: { ugid?: string; path?: string }) {
+/// Grant a role, or edit one that exists. Prefilled from wherever it was
+/// opened: a user's or group's row, a resource's, or the entry being edited.
+///
+/// An entry's identity is the triple (path, ugid, role) -- that is what the
+/// server upserts and deletes on -- so an edit that changes any of the three
+/// cannot be a plain put: the old triple has to go, or the change would leave
+/// the original grant behind as a second row. `edit` carries that old triple.
+export async function openGrant(ctx: AdminCtx, pre: { ugid?: string; path?: string }, edit?: AclEntry) {
   if (!roles.length) await loadMeta(ctx);
   const paths = await pathChoices(ctx);
-  if (pre.path && !paths.some((p) => p.path === pre.path)) paths.push({ path: pre.path, label: pathLabel(ctx, pre.path) });
+  // An edited entry's path is already in the list unless its daemon is gone;
+  // keep it selectable either way, or the form would silently move the grant.
+  const wantPath = edit?.path ?? pre.path;
+  if (wantPath && !paths.some((p) => p.path === wantPath)) paths.push({ path: wantPath, label: pathLabel(ctx, wantPath) });
+  const ugid = edit?.ugid ?? pre.ugid;
   const el = ctx.openModal(
-    "Add permission",
+    edit ? "Edit permission" : "Add permission",
     `<label class="field"><span>Path</span><select id="a-path">
-        ${paths.map((p) => option(p.path, p.label, p.path === (pre.path ?? "/"))).join("")}
+        ${paths.map((p) => option(p.path, p.label, p.path === (wantPath ?? "/"))).join("")}
       </select></label>
      <div class="grid2">
        <label class="field"><span>User / Group</span><select id="a-ugid">
-         ${users.map((u) => option(`user:${u.id}`, u.username, pre.ugid === `user:${u.id}`)).join("")}
-         ${groups.map((g) => option(`group:${g.name}`, `@${g.name}`, pre.ugid === `group:${g.name}`)).join("")}
+         ${users.map((u) => option(`user:${u.id}`, u.username, ugid === `user:${u.id}`)).join("")}
+         ${groups.map((g) => option(`group:${g.name}`, `@${g.name}`, ugid === `group:${g.name}`)).join("")}
        </select></label>
        <label class="field"><span>Role</span><select id="a-role">
-         ${roles.map((r) => option(r.name, r.name, r.name === "VMUser")).join("")}
+         ${roles.map((r) => option(r.name, r.name, r.name === (edit?.role ?? "VMUser"))).join("")}
        </select></label>
      </div>
-     <label class="check"><input type="checkbox" id="a-prop" checked> Propagate to everything below</label>`,
-    `<button class="btn" id="a-cancel">Cancel</button><button class="btn primary" id="a-save">Add</button>`,
+     <label class="check"><input type="checkbox" id="a-prop"${(edit?.propagate ?? true) ? " checked" : ""}> Propagate to everything below</label>`,
+    `<button class="btn" id="a-cancel">Cancel</button><button class="btn primary" id="a-save">${edit ? "Save" : "Add"}</button>`,
   );
   ctx.$("#a-cancel", el).onclick = () => el.remove();
   ctx.$("#a-save", el).onclick = async () => {
+    const next = {
+      path: ctx.$("#a-path", el).value,
+      ugid: ctx.$("#a-ugid", el).value,
+      role: ctx.$("#a-role", el).value,
+      propagate: ctx.$("#a-prop", el).checked,
+    };
+    const changedKey = !!edit && (edit.path !== next.path || edit.ugid !== next.ugid || edit.role !== next.role);
     try {
-      await api.put("/acl", {
-        path: ctx.$("#a-path", el).value,
-        ugid: ctx.$("#a-ugid", el).value,
-        role: ctx.$("#a-role", el).value,
-        propagate: ctx.$("#a-prop", el).checked,
-      });
+      await api.put("/acl", next);
+      // Drop the old triple only after the new one is in, so a failure leaves
+      // the permission in place rather than deleting it and adding nothing.
+      if (changedKey) await api.del("/acl", edit);
       el.remove();
-      ctx.toast("Permission added");
+      ctx.toast(edit ? "Permission updated" : "Permission added");
       await ctx.refreshMe();
-    } catch (e) { ctx.toast((e as Error).message, "bad"); }
+    } catch (e) {
+      // The put landed but the cleanup did not: the edit left two rows. Say so
+      // rather than report a plain failure, or the duplicate is invisible.
+      if (changedKey) ctx.toast(`${(e as Error).message} -- the original permission may still be listed; remove it by hand.`, "bad");
+      else ctx.toast((e as Error).message, "bad");
+    }
   };
 }
 
@@ -586,8 +612,6 @@ export async function openGrant(ctx: AdminCtx, pre: { ugid?: string; path?: stri
 const daemons_: Painter = async (ctx, area) => {
   const conns = ctx.connections();
   ctx.setHtml(area, `
-    <div class="actions actions-end"><button class="btn primary" id="add-daemon">${ic.plus(14)} Add daemon</button></div>
-    <p class="hint">Users see a daemon when they hold Sys.Audit on it (the "User" role grants it at /). Restrict one with a NoAccess grant on its path.</p>
     <table class="grid">
       <tr><th>Name</th><th>URL</th><th>Status</th><th>Cert</th><th class="col-actions"></th></tr>
       ${conns.map((c) => `
@@ -603,7 +627,8 @@ const daemons_: Painter = async (ctx, area) => {
           </div></td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No daemons yet.</td></tr>`}
     </table>`);
-  ctx.$("#add-daemon", area).onclick = () => ctx.openConnectionDialog();
+  ctx.head(`<button class="btn primary" id="add-daemon">${ic.plus(14)} Add daemon</button>`);
+  ctx.$("#add-daemon").onclick = () => ctx.openConnectionDialog();
   bind(area, "data-edit-conn", (id) => ctx.openConnectionDialog(id));
   bind(area, "data-conn-perms", (id) => void openGrant(ctx, { path: `/nodes/${id}` }));
   bind(area, "data-del-conn", (id) => void ctx.deleteConnection(id));
@@ -755,8 +780,7 @@ async function changeOwner(ctx: AdminCtx, r: AdminResource, back: AdminSection) 
     `Owner — ${esc(r.title || r.name)}`,
     `<label class="field"><span>Owner</span><select id="o-user">
        ${users.map((u) => option(u.id, u.username, u.id === r.owner)).join("")}
-     </select></label>
-     <p class="hint">The owner has full access to it, and it counts against their limits.</p>`,
+     </select></label>`,
     `<button class="btn" id="o-cancel">Cancel</button><button class="btn primary" id="o-save">Save</button>`,
   );
   ctx.$("#o-cancel", el).onclick = () => el.remove();
@@ -779,14 +803,12 @@ export async function assignOwner(conn: string, kind: "vm" | "network", name: st
 /// create form opens over the admin page -- on the daemon tab you were on --
 /// and the result is handed to them. Admins are not held to their limits.
 function createFor(ctx: AdminCtx, kind: "vm" | "network", conn: string, after: () => void) {
-  const server = ctx.connections().find((c) => c.id === conn)?.name ?? "";
   const el = ctx.openModal(
     kind === "vm" ? "Create VM for a user" : "Create network for a user",
     `<label class="field"><span>Owner</span><select id="cf-user">
        ${users.filter((u) => !u.admin).concat(users.filter((u) => u.admin))
          .map((u) => option(u.id, u.username, false)).join("")}
-     </select></label>
-     <p class="hint">On ${esc(server)}. The ${kind === "vm" ? "VM" : "network"} is created with the usual form, then handed to this user; you stay on this page.</p>`,
+     </select></label>`,
     `<button class="btn" id="cf-cancel">Cancel</button><button class="btn primary" id="cf-next">Continue</button>`,
   );
   ctx.$("#cf-cancel", el).onclick = () => el.remove();
@@ -802,7 +824,6 @@ function createFor(ctx: AdminCtx, kind: "vm" | "network", conn: string, after: (
 
 const quotas_: Painter = async (ctx, area) => {
   ctx.setHtml(area, `
-    <p class="hint">Limits apply to what a user owns. "Per daemon" applies the limits on each daemon separately; "Pooled" shares them across all daemons. A daemon override replaces the per-daemon limits there, or further caps the pool. Administrators are not limited.</p>
     <table class="grid">
       <tr><th>User</th><th>Mode</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Storage</th><th>Networks</th><th>Forwards</th><th>Overrides</th><th class="col-actions"></th></tr>
       ${users.filter(limitsApply).map((u) => {
@@ -872,8 +893,7 @@ export function openQuota(ctx: AdminCtx, u: User) {
          <label class="check"><input type="checkbox" data-qd-on="${c.id}" ${has ? "checked" : ""}> ${esc(c.name)}</label>
          <div data-qd-box="${c.id}" ${has ? "" : "hidden"}>${limitFields(`qd-${c.id}`, q.daemons[c.id] ?? {})}</div>
        </div>`;
-     }).join("") || `<span class="dim-note">No daemons.</span>`}
-     <p class="hint">Example: one VM with 2 vCPUs, 2048 MiB and 20 GiB — or 3 VMs pooled over 6 vCPUs, 8192 MiB and 60 GiB.</p>`,
+     }).join("") || `<span class="dim-note">No daemons.</span>`}`,
     `<button class="btn" id="q-cancel">Cancel</button><button class="btn primary" id="q-save">Save</button>`,
   );
   el.querySelector(".modal")?.classList.add("wide");
@@ -914,7 +934,6 @@ const ips_: Painter = async (ctx, area, gen) => {
         ${users.map((u) => option(u.id, u.username, ipOwner === u.id)).join("")}
       </select></label>
     </div>
-    <p class="hint">Every address is held by one guest permanently (see IPAM). Changing it takes effect at the guest's next DHCP renewal; removing it lets the guest take a new one.</p>
     <table class="grid">
       <tr><th>Address</th><th>Guest</th><th>Owner</th><th>Network</th><th>Daemon</th><th>MAC</th><th>Kind</th><th class="col-actions"></th></tr>
       ${rows.map((r, i) => `
@@ -973,7 +992,6 @@ const ips_: Painter = async (ctx, area, gen) => {
 const keys_: Painter = async (ctx, area) => {
   const keys = await api.get<ApiKey[]>("/keys");
   ctx.setHtml(area, `
-    <div class="actions actions-end"><button class="btn primary" id="add-key">${ic.plus(14)} New API key</button></div>
     <table class="grid">
       <tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Limited to</th><th class="col-actions"></th></tr>
       ${keys.map((k) => `
@@ -985,7 +1003,8 @@ const keys_: Painter = async (ctx, area) => {
           <td class="col-actions"><button class="btn danger icon" data-del-key="${k.id}" title="Revoke">${ic.trash()}</button></td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No keys.</td></tr>`}
     </table>`);
-  ctx.$("#add-key", area).onclick = () => {
+  ctx.head(`<button class="btn primary" id="add-key">${ic.plus(14)} New API key</button>`);
+  ctx.$("#add-key").onclick = () => {
     const el = ctx.openModal(
       "New API key",
       `<div class="grid2">
@@ -994,7 +1013,6 @@ const keys_: Painter = async (ctx, area) => {
            ${users.map((u) => option(u.id, u.username, u.id === ctx.me()?.id)).join("")}
          </select></label>
        </div>
-       <p class="hint">A key can only narrow its owner's access. Tick nothing to give it everything the owner has.</p>
        ${privGroups().map(([grp, ps]) => `
          <div class="section-title">${esc(grp)}</div>
          <div class="check-list">${ps.map((p) => `<label class="check"><input type="checkbox" data-kpriv="${esc(p)}"> ${esc(p.split(".")[1])}</label>`).join("")}</div>`).join("")}`,
@@ -1029,7 +1047,6 @@ const activity_: Painter = async (ctx, area, gen) => {
   const res = await api.get<{ entries: ActivityEntry[]; all_users: boolean }>("/activity");
   if (!ctx.stillCurrent(gen)) return;
   ctx.setHtml(area, `
-    <div class="actions actions-end"><button class="btn danger" id="act-clear">${ic.trash(14)} Clear all activity</button></div>
     <table class="grid">
       <tr><th>When</th><th>User</th><th>Action</th><th>Result</th><th>Detail</th></tr>
       ${res.entries.map((e) => `
@@ -1041,7 +1058,8 @@ const activity_: Painter = async (ctx, area, gen) => {
           <td class="task-msg">${esc(e.message || "—")}</td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No activity recorded yet.</td></tr>`}
     </table>`);
-  ctx.$("#act-clear", area).onclick = async () => {
+  ctx.head(`<button class="btn danger" id="act-clear">${ic.trash(14)} Clear all activity</button>`);
+  ctx.$("#act-clear").onclick = async () => {
     if (!await ctx.askConfirm("Clear activity log", "Delete every user's activity history?", "Clear", true)) return;
     try {
       await api.del("/activity");

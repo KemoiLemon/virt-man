@@ -3,8 +3,9 @@
 //   /                              datacenter dashboard
 //   /guests                        datacenter guests tab
 //   /servers                       old Servers tab: the admin Daemons page now
-//   /<node>                        server dashboard
 //   /containers                    datacenter containers tab
+//   /networks, /storage            datacenter networks and storage tabs
+//   /<node>                        server dashboard
 //   /<node>/vms|containers|networks|storage|firewall
 //   /<node>/vms/<vm>               guest summary
 //   /<node>/vms/<vm>/<tab>         console | hardware | options | network | xml
@@ -19,7 +20,7 @@
 // those, or is shared by another node, is addressed by its connection id
 // instead: a reload of /users would otherwise get JSON, not the app.
 
-export type DcTab = "dashboard" | "guests" | "containers";
+export type DcTab = "dashboard" | "guests" | "containers" | "networks" | "storage";
 export type ConnTab = "dashboard" | "vms" | "containers" | "networks" | "storage" | "firewall";
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 /// A container's Hardware tab edits its resources, not devices.
@@ -62,8 +63,13 @@ export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
   "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
   "groups", "acl", "resources", "ips", "usage", "shares",
-  "servers", "guests", "containers", "templates", "admin",
+  "servers", "guests", "containers", "networks", "storage", "templates", "admin",
 ]);
+
+/// Top-level paths that are a Datacenter tab. They are in RESERVED (the server
+/// answers nothing there), which is what keeps `parsePath` from reading one as
+/// a node segment: a server named "networks" is addressed by its id instead.
+const DC_TABS: DcTab[] = ["guests", "containers", "networks", "storage"];
 
 const CONN_TABS: ConnTab[] = ["vms", "containers", "networks", "storage", "firewall"];
 const VM_TABS: VmTab[] = ["hardware", "options", "network", "console", "xml"];
@@ -144,8 +150,8 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
     const t = tabs.includes(name as AdminTab) ? (name as AdminTab) : tabs[0];
     return { view: "admin", section: s, tab: t };
   }
-  if (parts.length === 1 && (first === "guests" || first === "containers")) {
-    return { view: "dc", tab: first };
+  if (parts.length === 1 && DC_TABS.includes(first as DcTab)) {
+    return { view: "dc", tab: first as DcTab };
   }
   // The Datacenter's Servers tab moved to the admin page's Daemons section;
   // an old link still lands there (main.ts sends a non-admin to "/").

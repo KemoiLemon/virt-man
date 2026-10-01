@@ -34,6 +34,8 @@ test("every view round-trips through its path", () => {
     { view: "vm", conn: "c1", vm: "web1", tab: "network" },
     { view: "vm", conn: "c1", vm: "web1", tab: "xml" },
     { view: "dc", tab: "containers" },
+    { view: "dc", tab: "networks" },
+    { view: "dc", tab: "storage" },
     { view: "conn", conn: "c1", tab: "containers" },
     { view: "ct", conn: "c1", ct: "web", tab: "summary" },
     { view: "ct", conn: "c1", ct: "web", tab: "console" },
@@ -114,6 +116,16 @@ test("every top-level server route is reserved", () => {
   }
   assert.ok(tops.size >= 5, `found server routes: ${[...tops]}`);
   for (const top of tops) assert.ok(r.RESERVED.has(top), `/${top} is a server route but not reserved`);
+});
+
+// A Datacenter tab path must not be read as a node: a server named "storage"
+// is still addressed by its id, exactly as the RESERVED test above ensures for
+// the server's own top-level routes.
+test("a node named like a datacenter tab is addressed by id", () => {
+  const ns = [{ id: "c9", name: "networks" }, { id: "c1", name: "Main" }];
+  assert.equal(r.nodeSegment("c9", ns), "c9");
+  assert.deepEqual(r.parsePath("/networks", ns), { view: "dc", tab: "networks" });
+  assert.deepEqual(r.parsePath("/c9", ns), { view: "conn", conn: "c9", tab: "dashboard" });
 });
 
 // The VM Firewall tab became part of the Network tab; a bookmark to the old
