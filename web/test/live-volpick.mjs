@@ -95,6 +95,25 @@ check("the Hard Disk page offers the user's own volumes", () => {
   assert.ok(opts.includes("pick-disk.qcow2"), `offered: ${opts}`);
   assert.ok(!opts.some((o) => o.endsWith(".iso")), "no ISOs");
 });
+// A pool is named by its UUID and keeps the human name as a title, so the
+// select must show the title -- but keep the libvirt name as the value, since
+// that is what the XML and the API address the pool by. This form used a plain
+// `opt()` and so listed the raw UUID.
+const poolList = (await json(`/proxy/${conn}/pools`)).body;
+check("the Storage Pool select is labelled by nickname, not the UUID", () => {
+  const sel = d.querySelector("#g-pool");
+  assert.ok(sel, "the pool select is on the Hard Disk page");
+  assert.ok(sel.options.length, "at least one pool is offered");
+  for (const o of sel.options) {
+    const p = poolList.find((x) => x.name === o.value);
+    if (!p) continue;
+    assert.equal(
+      o.textContent, p.title || p.name,
+      `option label must be the nickname (pool ${p.name}, title ${p.title}): ${o.textContent}`,
+    );
+    assert.equal(o.value, p.name, "the value must stay the libvirt name");
+  }
+});
 const all = (await json(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`)).body;
 check("…and only theirs", () => {
   const offered = [...d.querySelectorAll("#g-volume option")].map((o) => o.value);
