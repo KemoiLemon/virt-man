@@ -376,10 +376,17 @@ fn check_interface(i: Node, spec: &mut DomainSpec) -> Result<(), String> {
             other => return Err(refuse(&format!("<{other}> in an interface"))),
         }
     }
-    let net = net
-        .filter(|n| !n.is_empty())
-        .ok_or("an interface needs a network")?;
-    spec.networks.push(net);
+    // A NIC may name no network. libvirt's schema requires a `<source>`, not a
+    // named one, so `<source network=""/>` is how a NIC attaches to nothing --
+    // and it grants access to no network, so it is not a hole: every non-empty
+    // source below is still checked against the caller's privileges. Without
+    // this branch the hardware editor's "None" would work for an admin and be
+    // refused for everyone else, and a non-admin could never clear a NIC.
+    match net {
+        Some(n) if !n.is_empty() => spec.networks.push(n),
+        // Absent (`<source/>`) and empty both mean no network.
+        _ => {}
+    }
     Ok(())
 }
 
@@ -1116,6 +1123,51 @@ mod tests {
         assert_eq!(
             (b.forward.as_str(), b.bridge.as_deref()),
             ("bridge", Some("br0"))
+        );
+    }
+
+    /// A NIC may name no network: libvirt's schema requires a `<source>`, not a
+    /// named one, so `<source network=""/>` is a NIC attached to nothing. The
+    /// hardware editor offers "None" for exactly this, and it must be allowed
+    /// for a non-admin -- but it must not become a way to reach a network the
+    /// caller may not use, so a named source is still recorded for the check.
+    #[test]
+    fn an_interface_may_name_no_network_but_a_named_one_is_still_recorded() {
+        let with_nic = |nic: &str| {
+            form_domain().replace(
+                "    <interface type=\"network\">\n      <source network=\"default\"/>\n      <model type=\"virtio\"/>\n      <bandwidth><inbound average=\"12800\"/></bandwidth>\n    </interface>",
+                nic,
+            )
+        };
+        // The blank one is accepted, and contributes no network to check --
+        // there is nothing for a privilege to be checked against.
+        let none = with_nic(
+            r#"<interface type="network">
+      <source network=""/>
+      <model type="virtio"/>
+    </interface>"#,
+        );
+        assert_ne!(
+            none,
+            form_domain(),
+            "the fixture must actually be substituted"
+        );
+        let s = check_domain(&none).expect("a NIC with no network is allowed");
+        assert!(
+            s.networks.is_empty(),
+            "an unnamed source must not be recorded as a network: {:?}",
+            s.networks
+        );
+        // A named one is still recorded, so the caller's privileges cover it.
+        let named = with_nic(
+            r#"<interface type="network">
+      <source network="lab"/>
+      <model type="virtio"/>
+    </interface>"#,
+        );
+        assert_eq!(
+            check_domain(&named).unwrap().networks,
+            vec!["lab".to_string()]
         );
     }
 

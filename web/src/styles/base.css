@@ -231,6 +231,12 @@ body {
 .btn.on { border-color: var(--accent); color: var(--accent); }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.icon { padding: 5px 7px; }
+/* A control standing beside a field takes the field's metrics, so the two line
+   up: .btn is 11px/5px against an input's 12px/6px, which leaves the icon
+   button ~3px shorter than the box next to it. Same reasoning as the filter
+   bar in density.css -- and it has to be restated there, because that file is
+   emitted later in the bundle and would otherwise win. */
+.field .field-btn { font-size: 12px; padding: 6px 8px; letter-spacing: normal; }
 .btn .ico { pointer-events: none; }
 /* Same reasoning for a bare icon used outside a button. */
 .ico { vertical-align: middle; }
@@ -342,6 +348,10 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 input:hover, select:hover, textarea:hover { border-color: var(--hover-line); }
 input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
+/* Read-only, not disabled: the value is submitted and must look settled rather
+   than broken, since a generated subnet is not the user's to type. */
+input[readonly] { color: var(--dim); cursor: default; }
+input[readonly]:focus { border-color: var(--line2); }
 textarea { resize: vertical; }
 input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
 

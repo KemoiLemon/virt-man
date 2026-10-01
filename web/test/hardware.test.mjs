@@ -65,12 +65,24 @@ test("device values are escaped into the XML", () => {
 
 test("validation rejects a device missing required fields", () => {
   assert.ok(hw.validateDevice({ kind: "disk", fields: {} }), "empty disk is rejected");
-  assert.ok(hw.validateDevice({ kind: "interface", fields: {} }), "empty interface is rejected");
+  assert.equal(
+    hw.validateDevice({ kind: "interface", fields: {} }), null,
+    "an interface with no network is allowed: that is the form's 'None', and it " +
+      "emits <source network=\"\"/>, which libvirt accepts",
+  );
   assert.equal(
     hw.validateDevice({ kind: "disk", fields: { pool: "p", volume: "v" } }), null,
     "a complete disk passes",
   );
   assert.equal(hw.validateDevice({ kind: "memballoon", fields: {} }), null, "fieldless device passes");
+});
+
+/// "None" must still produce a NIC, and one whose source libvirt accepts: the
+/// schema requires a `<source>`, not a named one.
+test("an interface with no network still emits an empty source", () => {
+  const xml = hw.deviceXml({ kind: "interface", fields: { network: "" } });
+  assert.match(xml, /<interface[^>]*>/, `the interface element is kept: ${xml}`);
+  assert.match(xml, /<source network=""\/>/, `an empty source, not no source: ${xml}`);
 });
 
 test("a new-volume disk needs a pool and size, not an existing volume", () => {

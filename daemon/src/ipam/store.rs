@@ -182,6 +182,79 @@ impl Net {
     }
 }
 
+/// Choose the `/24` a new network should use, avoiding every prefix in
+/// `used`.
+///
+/// Tries `10.0.0.0/8` first, then `192.168.0.0/16`, as requested. Within each
+/// pool the address is random rather than sequential, so two hosts allocating
+/// the same subnet at the same time are unlikely to agree, and a deleted
+/// network's address is not immediately handed to the next one (which would
+/// make a stale guest config point at a stranger).
+///
+/// The first octet of each pool is skipped where the host or real life is
+/// likely to have it already: `10.0.x` and `10.1.x` are the usual VPN ranges
+/// (WireGuard, Tailscale, some corporate tunnels), and `192.168.0/1/2` plus
+/// `.100` and `.122` are the common home-router and VirtualBox defaults. This
+/// is a heuristic, not a guarantee -- `used` is what actually decides.
+/// `used` should hold every prefix the host can already reach (its own
+/// interfaces, its routes, and every defined network), as `(u32, u8)` network
+/// address and prefix length. A candidate collides if it overlaps any of them
+/// in either direction: a /16 in `used` swallows every /24 inside it, and a
+/// used /24 inside a candidate /16 counts too, so a network the host is on is
+/// never handed out.
+///
+/// Returns `None` only if both pools are exhausted, which on a real host means
+/// something is very wrong and the caller must fail rather than guess.
+pub fn pick_subnet(used: &[(u32, u8)], rand: &mut dyn FnMut() -> u32) -> Option<Ipv4Addr> {
+    // Each pool is every /24 inside it: 10/8 has 65536 of them, 192.168/16 has
+    // 256. `base` is the pool's network address and `count` how many /24s it
+    // holds, so candidate i is `base + (i << 8)`.
+    const POOLS: [(u32, u32); 2] = [
+        (0x0A00_0000, 1 << 16), // 10.0.0.0/8
+        (0xC0A8_0000, 1 << 8),  // 192.168.0.0/16
+    ];
+    // Ranges skipped because real hosts very often already have them: 10.0/16
+    // and 10.1/16 (WireGuard, Tailscale, corporate VPNs) and 192.168.0/1/2
+    // plus .100 and .122 (home routers, VirtualBox defaults). A heuristic, not
+    // a guarantee -- `used` is what actually decides.
+    let skip = |base: u32, cand: u32| -> bool {
+        let off = cand - base;
+        match base {
+            0x0A00_0000 => off < (2 << 16),
+            0xC0A8_0000 => (off >> 8) <= 2 || (off >> 8) == 100 || (off >> 8) == 122,
+            _ => false,
+        }
+    };
+    for (base, count) in POOLS {
+        // Start at a random /24 in the pool. Stepping through a pool from a
+        // random point and wrapping made the walk appear to exhaust a pool
+        // that still had most of its space free, and fall through to 192.168
+        // with 10/8 wide open, so the walk covers the whole pool first.
+        let start = rand() % count;
+        for i in 0..count {
+            let cand = base + (((start + i) % count) << 8);
+            if skip(base, cand) || overlaps_any(cand, 24, used) {
+                continue;
+            }
+            return Some(Ipv4Addr::from(cand));
+        }
+    }
+    None
+}
+
+/// Whether `cand/prefix` overlaps any used prefix. Overlap is symmetric: the
+/// candidate may sit inside a used prefix, or contain one.
+fn overlaps_any(cand: u32, prefix: u8, used: &[(u32, u8)]) -> bool {
+    used.iter().any(|&(net, p)| {
+        let p = p.min(32);
+        let same = |a: u32, pa: u8, b: u32, pb: u8| {
+            let m = mask(pa.min(pb));
+            (a & m) == (b & m)
+        };
+        same(cand, prefix, net, p)
+    })
+}
+
 /// `aa:BB:cc…` or `aa-bb-…` to lowercase colon form; None if not a MAC.
 pub fn normalize_mac(mac: &str) -> Option<String> {
     let parts: Vec<&str> = mac.trim().split([':', '-']).collect();
@@ -454,7 +527,10 @@ mod tests {
         });
         // A name nobody holds is kept as it is, even a maximal one.
         assert_eq!(n.unique_name("fresh", "52:54:00:00:00:42"), "fresh");
-        assert_eq!(n.unique_name(&"z".repeat(63), "52:54:00:00:00:42"), "z".repeat(63));
+        assert_eq!(
+            n.unique_name(&"z".repeat(63), "52:54:00:00:00:42"),
+            "z".repeat(63)
+        );
         // "alpine" is held by another MAC, so this one is numbered.
         assert_eq!(n.unique_name("alpine", "52:54:00:00:00:42"), "alpine-2");
         // The suffix is what makes it unique, so a taken 63-character base is
@@ -509,5 +585,103 @@ mod tests {
             "no temp file left behind"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A fixed "random" so the walk from the random offset is deterministic.
+    fn seq(start: u32) -> impl FnMut() -> u32 {
+        let mut n = start;
+        move || {
+            n = n.wrapping_add(1);
+            n
+        }
+    }
+
+    #[test]
+    fn a_generated_subnet_is_a_24_in_10_or_192_168_and_avoids_the_host() {
+        // A host on 10.20.30.0/24 (its own LAN) and already serving
+        // 10.40.0.0/24, plus a 192.168.5.0/24.
+        let used = [
+            (u32::from(Ipv4Addr::new(10, 20, 30, 0)), 24),
+            (u32::from(Ipv4Addr::new(10, 40, 0, 0)), 24),
+            (u32::from(Ipv4Addr::new(192, 168, 5, 0)), 24),
+        ];
+        for seed in 0..300u32 {
+            let ip = pick_subnet(&used, &mut seq(seed)).expect("a subnet is always available");
+            let n = u32::from(ip);
+            assert_eq!(ip.octets()[3], 0, "{ip} must be a /24 network address");
+            let a = ip.octets()[0];
+            assert!(a == 10 || (a == 192 && ip.octets()[1] == 168), "{ip}");
+            assert!(
+                !overlaps_any(n, 24, &used),
+                "{ip} overlaps something already in use"
+            );
+        }
+    }
+
+    /// The heuristic skips the ranges a real host most often already has, and
+    /// falls through to 192.168 only once 10/8 is genuinely full.
+    #[test]
+    fn the_common_ranges_are_skipped_and_192_168_is_the_fallback() {
+        // Nothing used: a generated value must avoid the reserved offsets, so a
+        // host's real 10.0.x VPN is not collided with, and must prefer 10/8
+        // (192.168 only when 10/8 cannot serve).
+        for seed in 0..64u32 {
+            let ip = pick_subnet(&[], &mut seq(seed)).unwrap();
+            let o = ip.octets();
+            assert!(
+                (o[0] == 10 && o[1] > 1)
+                    || (o[0] == 192 && o[1] == 168 && o[2] > 2 && o[2] != 100 && o[2] != 122),
+                "{ip} is in a reserved range"
+            );
+        }
+        // With 10.0/16 and 10.1/16 reserved but the rest free, the answer must
+        // come from 10/8 rather than 192.168: the pool order is the point.
+        let ip = pick_subnet(&[], &mut seq(3)).unwrap();
+        assert_eq!(ip.octets()[0], 10, "10/8 is used before 192.168: {ip}");
+        assert!(ip.octets()[1] > 1, "10.0/16 and 10.1/16 are reserved: {ip}");
+        // Mark every /24 of 10/8 used: the answer must move to 192.168.
+        let used: Vec<(u32, u8)> = (0..(1u32 << 16))
+            .map(|b| (0x0A00_0000 + (b << 8), 24))
+            .collect();
+        let ip = pick_subnet(&used, &mut seq(7)).unwrap();
+        assert_eq!(&ip.octets()[..2], &[192, 168], "fell back to 192.168: {ip}");
+        assert!(
+            ip.octets()[2] > 2 && ip.octets()[2] != 100 && ip.octets()[2] != 122,
+            "192.168.0/1/2 and .100/.122 are reserved: {ip}"
+        );
+    }
+
+    /// A used prefix wider than /24 swallows the candidates inside it, and a
+    /// candidate is not handed out if it would contain a used one.
+    #[test]
+    fn overlap_is_checked_in_both_directions() {
+        // The host is on 10.50.0.0/16: every 10.50.x.0/24 is out.
+        let used = [(u32::from(Ipv4Addr::new(10, 50, 0, 0)), 16)];
+        assert!(overlaps_any(
+            u32::from(Ipv4Addr::new(10, 50, 7, 0)),
+            24,
+            &used
+        ));
+        assert!(!overlaps_any(
+            u32::from(Ipv4Addr::new(10, 51, 0, 0)),
+            24,
+            &used
+        ));
+        for _ in 0..50 {
+            let ip = pick_subnet(&used, &mut seq(3)).unwrap();
+            assert_ne!(ip.octets()[1], 50, "never inside the host's /16: {ip}");
+        }
+    }
+
+    #[test]
+    fn both_pools_exhausted_returns_none() {
+        let mut used: Vec<(u32, u8)> = (0..(1u32 << 16))
+            .map(|b| (0x0A00_0000 + (b << 8), 24))
+            .collect();
+        used.extend((0..256u32).map(|b| (0xC0A8_0000 + (b << 8), 24)));
+        assert!(
+            pick_subnet(&used, &mut seq(0)).is_none(),
+            "nothing left to hand out must be reported, not guessed"
+        );
     }
 }

@@ -15,10 +15,121 @@ pub fn routes() -> Router {
     Router::new()
         .route("/networks", get(list))
         .route("/networks/bridges", get(bridges))
+        .route("/networks/suggest-subnet", get(suggest_subnet))
         .route("/networks/{name}", get(get_one).delete(delete))
         .route("/networks/{name}/start", post(start))
         .route("/networks/{name}/stop", post(stop))
         .route("/networks/{name}/autostart", post(set_autostart))
+}
+
+/// The host's own interfaces and routes, as `(network address, prefix)`.
+///
+/// Read from `ip -o addr` (the host's real LAN) and `ip -o route` (a VPN on
+/// 10.0.0.0/8 has no interface of its own, so the route table is the only
+/// place it shows). A generated /24 must collide with neither.
+fn used_prefixes_host() -> Vec<(u32, u8)> {
+    let mut out: Vec<(u32, u8)> = Vec::new();
+    // The host's own addressing and routes. `ip -o addr` and `ip -o route` are
+    // the two commands that show both without guessing at /proc formats.
+    for args in [["-o", "addr", "show"], ["-o", "route", "show"]] {
+        let Ok(o) = std::process::Command::new("ip").args(args).output() else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            for tok in line.split_whitespace() {
+                // `10.0.0.5/24` in addr output, `10.0.0.0/24` in route output.
+                if let Some((net, p)) = read_cidr(tok) {
+                    out.push((net, p));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every IPv4 prefix this host can already reach: its interfaces and routes,
+/// plus every network libvirt knows.
+///
+/// A generated /24 must collide with none of them, and the libvirt half is
+/// why this cannot live in the store: a network defined outside this app is
+/// not in `ipam.json`, and the host's routes cover a VPN that has no interface
+/// of its own (the usual `10.0.0.0/8` WireGuard case).
+async fn used_prefixes() -> Vec<(u32, u8)> {
+    let mut out = tokio::task::spawn_blocking(used_prefixes_host)
+        .await
+        .unwrap_or_default();
+    // Live or not: a network that is down now still owns its address, and
+    // reusing it would break it when it starts.
+    if let Ok(found) = with_conn(|c| {
+        let mut v = Vec::new();
+        for n in c.list_all_networks(0).unwrap_or_default() {
+            if let Ok(xml) = n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE)
+                && let Some((net, p)) = read_cidr(&ip_cidr(&xml))
+            {
+                v.push((net, p));
+            }
+        }
+        Ok(v)
+    })
+    .await
+    {
+        out.extend(found);
+    }
+    out
+}
+
+/// `10.0.0.0/24` or a bare address to `(network address, prefix)`. Accepts
+/// both, since addr output carries a host address and route output a network.
+fn read_cidr(tok: &str) -> Option<(u32, u8)> {
+    let (addr, prefix) = match tok.split_once('/') {
+        Some((a, p)) => (a, p.parse::<u8>().ok()?.min(32)),
+        None => (tok, 32),
+    };
+    let ip: std::net::Ipv4Addr = addr.parse().ok()?;
+    Some((u32::from(ip) & crate::ipam::store::mask(prefix), prefix))
+}
+
+/// A free `/24` for a new network, so a user never picks an address that
+/// collides. Read-only: the SPA asks for this to prefill the form, and the
+/// create path checks conflicts itself again, since a caller may skip this.
+async fn suggest_subnet() -> Result<Json<Value>, ApiError> {
+    let used = used_prefixes().await;
+    let mut r = 0u64;
+    let mut rand = || {
+        // /dev/urandom, as elsewhere in this daemon; a clock fallback still
+        // spreads callers, which is all this needs.
+        if r == 0 {
+            let mut b = [0u8; 8];
+            r = if std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b))
+                .is_ok()
+            {
+                u64::from_le_bytes(b)
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(1)
+                    ^ (std::process::id() as u64) << 32
+            };
+        }
+        let v = r;
+        r = r.rotate_left(17);
+        v as u32
+    };
+    let net = crate::ipam::store::pick_subnet(&used, &mut rand)
+        .ok_or_else(|| ApiError::internal("no free /24 left in 10/8 or 192.168/16"))?;
+    // The **gateway**, not the network address: x.x.x.0 is the subnet's own
+    // address and libvirt refuses it as a host address (`Invalid address ... in
+    // network`), so the value a form puts in its <ip address> must be x.x.x.1.
+    // `pick_subnet` works in network addresses because that is what an overlap
+    // check needs, so the +1 happens here, at the boundary.
+    let gateway = std::net::Ipv4Addr::from(u32::from(net) + 1);
+    Ok(Json(json!({
+        "subnet": format!("{gateway}/24"),
+        "network": format!("{net}/24"),
+        "used": used.len(),
+    })))
 }
 
 /// Routes that read or change IPAM state.
@@ -335,6 +446,17 @@ fn taps_on_network(domain_xml: &str, net: &str) -> Vec<String> {
 }
 
 async fn create(State(ipam): State<Ipam>, body: String) -> Result<Json<Value>, ApiError> {
+    // A NAT or isolated network with no subnet of its own is given one, so a
+    // user never picks an address that collides with the host's LAN, a VPN or
+    // another network. Bridge mode takes its addressing from the bridge, so it
+    // is left alone.
+    let body = if wants_generated_subnet(&body) {
+        let used = used_prefixes().await;
+        let subnet = free_subnet(&used)?;
+        inject_subnet(&body, subnet)
+    } else {
+        body
+    };
     // A new network with an IPv4 subnet is served by this daemon from the
     // start, so libvirt never runs dnsmasq for it.
     let libvirt_xml = if ipamxml::needs_takeover(&body) {
@@ -358,6 +480,83 @@ async fn create(State(ipam): State<Ipam>, body: String) -> Result<Json<Value>, A
     .await
     .map_err(ApiError::internal)?;
     Ok(Json(v))
+}
+
+/// Whether this definition should be given a generated subnet.
+///
+/// Only a network that would carry an IPv4 subnet and has none: NAT and
+/// isolated both qualify, bridge mode does not (the bridge owns addressing and
+/// libvirt refuses an `<ip>` there). An existing `<ip>` is the caller's choice
+/// -- an administrator may set one deliberately -- and is never replaced.
+/// Whether this definition should be given a generated subnet.
+///
+/// Only **NAT**: it must route and hand out addresses, so a subnet is not
+/// optional there. A NAT network that already carries an `<ip>` is the
+/// caller's deliberate choice and is never replaced.
+///
+/// An **isolated** network is left alone when it has no subnet. It is usually a
+/// private segment the operator routes themselves -- a dummy interface, a
+/// private routed network, an internal-only link -- and libvirt runs no DHCP
+/// for it either way. Forcing a subnet on one would claim addresses on a
+/// segment nothing serves, and would make "no subnet" impossible to express.
+///
+/// **Bridge** mode takes its addressing from the bridge, and libvirt refuses
+/// an `<ip>` there.
+fn wants_generated_subnet(xml: &str) -> bool {
+    ip_cidr(xml).is_empty()
+        && forward_mode(xml) == "nat"
+        && crate::ipam::store::import(xml).is_none()
+}
+
+/// A free `/24`, or an error naming what to do about it. `used` is passed in
+/// so a caller that already gathered it does not re-query libvirt.
+fn free_subnet(used: &[(u32, u8)]) -> Result<std::net::Ipv4Addr, ApiError> {
+    let mut r = 0u64;
+    let mut rand = || {
+        if r == 0 {
+            let mut b = [0u8; 8];
+            r = if std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b))
+                .is_ok()
+            {
+                u64::from_le_bytes(b)
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(1)
+                    ^ (std::process::id() as u64) << 32
+            };
+        }
+        let v = r;
+        r = r.rotate_left(17);
+        v as u32
+    };
+    crate::ipam::store::pick_subnet(used, &mut rand).ok_or_else(|| {
+        ApiError::internal(
+            "no free /24 left in 10/8 or 192.168/16: free an address range by deleting a network",
+        )
+    })
+}
+
+/// Put an `<ip address='…' netmask='255.255.255.0'/>` into a definition that
+/// has none, right after any `<dns>` (libvirt wants `<dns>` before `<ip>`) and
+/// before `</network>`. Written as text because the caller's XML is already a
+/// document we pass to libvirt unparsed, the same way the SPA builds it.
+///
+/// `subnet` is the /24's **network address** (as `pick_subnet` returns it); the
+/// gateway written into the definition is its first host address, x.x.x.1,
+/// because libvirt refuses x.x.x.0 as a host address.
+fn inject_subnet(xml: &str, subnet: std::net::Ipv4Addr) -> String {
+    // The gateway is the first host address: what libvirt, dnsmasq and our own
+    // DHCP/DNS use as the bridge address.
+    let gw = std::net::Ipv4Addr::from(u32::from(subnet) + 1);
+    let tag = format!("<ip address='{gw}' netmask='255.255.255.0'/>");
+    let insert_at = xml
+        .find("</network>")
+        .or_else(|| xml.rfind('>').map(|i| i + 1))
+        .unwrap_or(xml.len());
+    format!("{}\n  {}\n{}", &xml[..insert_at], tag, &xml[insert_at..])
 }
 
 async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -721,5 +920,87 @@ mod tests {
         assert_eq!(netmask_bits("255.255.255.0"), 24);
         assert_eq!(netmask_bits("255.255.0.0"), 16);
         assert_eq!(netmask_bits("255.255.255.128"), 25);
+    }
+
+    /// Only a NAT network without a subnet gets one. An isolated network may
+    /// legitimately have none -- that is how a private routed (or dummy)
+    /// segment is expressed -- a bridge network takes its addressing from the
+    /// bridge, and an existing `<ip>` is the caller's deliberate choice.
+    #[test]
+    fn only_a_subnet_less_nat_network_is_given_one() {
+        assert!(wants_generated_subnet(
+            "<network><name>x</name><forward mode='nat'/></network>"
+        ));
+        // Isolated: no subnet is a valid, deliberate choice.
+        assert!(!wants_generated_subnet("<network><name>x</name></network>"));
+        assert!(!wants_generated_subnet(
+            "<network><name>x</name><forward mode='bridge'/></network>"
+        ));
+        // A subnet the caller did give -- NAT or isolated -- is never replaced.
+        assert!(!wants_generated_subnet(
+            "<network><name>x</name><ip address='10.9.0.1' netmask='255.255.255.0'/></network>"
+        ));
+    }
+
+    /// The injected definition must be one the takeover then recognises, and
+    /// must not disturb an existing `<dns>`, which libvirt requires before
+    /// `<ip>`.
+    #[test]
+    fn an_injected_subnet_is_taken_over_and_keeps_dns_ahead_of_ip() {
+        let src = "<network>\n  <name>x</name>\n  <dns>\n    <forwarder addr='1.1.1.1'/>\n  </dns>\n</network>";
+        let out = inject_subnet(src, std::net::Ipv4Addr::new(10, 42, 7, 0));
+        // The gateway is the first host address, and the prefix is /24.
+        assert_eq!(ip_cidr(&out), "10.42.7.1/24", "{out}");
+        assert!(
+            out.find("<dns").unwrap() < out.find("<ip").unwrap(),
+            "{out}"
+        );
+        assert!(
+            out.contains("</network>"),
+            "the document stays closed: {out}"
+        );
+        // And the whole point: it now imports as ours, so DHCP/DNS serve it.
+        let net = crate::ipam::store::import(&out).expect("takeover recognises it");
+        assert_eq!(net.gateway, std::net::Ipv4Addr::new(10, 42, 7, 1));
+        assert_eq!(net.prefix, 24);
+    }
+
+    /// A bare `<network/>` still gets a closed document back.
+    #[test]
+    fn injecting_into_a_minimal_document_stays_well_formed() {
+        let out = inject_subnet("<network></network>", std::net::Ipv4Addr::new(10, 5, 0, 0));
+        assert_eq!(ip_cidr(&out), "10.5.0.1/24", "{out}");
+        assert_eq!(out.matches("</network>").count(), 1, "{out}");
+    }
+
+    /// The value the form puts in its CIDR field must be a **host** address.
+    /// x.x.x.0 is the subnet's own address, and libvirt refuses it outright --
+    /// `Invalid address '10.x.x.0/24' in network ...` -- so suggesting the
+    /// network address made every create through the form fail. `pick_subnet`
+    /// works in network addresses, so the gateway is derived at this boundary.
+    #[test]
+    fn a_suggested_subnet_is_a_gateway_not_the_network_address() {
+        for i in 0..64u32 {
+            let net = crate::ipam::store::pick_subnet(&[], &mut || i).expect("a subnet");
+            assert_eq!(
+                net.octets()[3],
+                0,
+                "pick_subnet works in network addresses: {net}"
+            );
+            // What the endpoint hands out is the first host address of it.
+            let gateway = std::net::Ipv4Addr::from(u32::from(net) + 1);
+            assert_eq!(
+                gateway.octets()[3],
+                1,
+                "the suggestion is x.x.x.1: {gateway}"
+            );
+            // And that address is the one libvirt accepts: injecting it into a
+            // definition yields an <ip> whose address is a host address.
+            let xml = inject_subnet("<network></network>", net);
+            assert_eq!(ip_cidr(&xml), format!("{gateway}/24"), "{xml}");
+            // The network address itself must never be what a form is given:
+            // libvirt rejects it, which is the bug this guards.
+            assert_ne!(ip_cidr(&xml), format!("{net}/24"), "{xml}");
+        }
     }
 }

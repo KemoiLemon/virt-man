@@ -8,6 +8,7 @@ import ArrowLeftRight from "@phosphor-icons/core/assets/fill/arrows-left-right-f
 import ArrowRight from "@phosphor-icons/core/assets/fill/arrow-right-fill.svg?raw";
 import ArrowUp from "@phosphor-icons/core/assets/fill/arrow-up-fill.svg?raw";
 import ArrowUUpLeft from "@phosphor-icons/core/assets/fill/arrow-u-up-left-fill.svg?raw";
+import ArrowsClockwise from "@phosphor-icons/core/assets/fill/arrows-clockwise-fill.svg?raw";
 import Camera from "@phosphor-icons/core/assets/fill/camera-fill.svg?raw";
 import ChevronDown from "@phosphor-icons/core/assets/fill/caret-down-fill.svg?raw";
 import Circle from "@phosphor-icons/core/assets/fill/circle-fill.svg?raw";
@@ -110,6 +111,7 @@ export const ic = {
   trash: svg(Trash2),
   upload: svg(Upload),
   reboot: svg(RotateCw),
+  reroll: svg(ArrowsClockwise),
   reset: svg(RotateCcw),
   circle: svg(Circle),
   circleDot: svg(CircleDot),

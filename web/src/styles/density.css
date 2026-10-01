@@ -6,6 +6,11 @@ body { font-size: 14px; }
 .layout { grid-template-columns: minmax(300px, 21vw) 1fr; }
 /* Give the selected tab's information a clear gutter below the tab bar. */
 .detail { padding: 26px 20px 20px; }
+/* A tab with nothing at all on it: the empty state owns the pane, so centre it
+   in the space the list would have filled instead of leaving it clinging to the
+   top. `:has` so a pane with real content is untouched; the children are split
+   out because `:only-child` would then never match one of two siblings. */
+.detail:has(> .empty-create:only-child) { display: flex; flex-direction: column; justify-content: center; }
 /* Padding is set per-axis: the shorthand would reset the padding-left that
    indents nested tree rows, since this layer loads after views.css. */
 .tree-row { padding-top: 9px; padding-bottom: 9px; padding-right: 14px; padding-left: 14px; font-size: 13px; }
@@ -13,7 +18,6 @@ body { font-size: 14px; }
 .tree-vm { padding-left: 40px; }
 .tree-res { padding-left: 40px; }
 .tree-state { font-size: 12px; }
-.tree-empty { font-size: 12px; padding: 16px 18px; }
 .pane-head { height: 40px; padding: 0 12px; font-size: 12px; }
 .tab { font-size: 12px; padding: 10px 16px; }
 .btn { font-size: 12px; padding: 6px 13px; }
@@ -24,6 +28,11 @@ body { font-size: 14px; }
 .card { padding: 14px 15px; }
 .section-title { font-size: 12px; margin-bottom: 9px; }
 input, select, textarea { font-size: 13px; padding: 7px 9px; }
+/* The reroll button beside the network form's subnet field, matched to the
+   input's metrics. Must live in this layer: it is emitted after base.css, and
+   a rule in base.css loses the cascade to `.btn` here -- the mistake the
+   filter-bar rule below records. */
+.field .field-btn { font-size: 13px; padding: 7px 9px; letter-spacing: normal; }
 .select-trigger { font-size: 13px; padding: 7px 9px; }
 /* A button inside a filter bar is a control standing among the fields, so it
    takes their metrics rather than .btn's smaller ones. This has to live in

@@ -342,7 +342,7 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
       const vol = f("volume");
       return vol ? `${named("pool", f("pool"))}/${vol}` : "empty";
     }
-    case "interface": return `${named("network", f("network"))} (${f("model") || "virtio"})`;
+    case "interface": return `${f("network") ? named("network", f("network")) : "No network"} (${f("model") || "virtio"})`;
     case "hostdev": return `${f("domain")}:${f("bus")}:${f("slot")}.${f("function")}`;
     case "usb": return `${f("vendor")}:${f("product")}`;
     case "rng": return f("backend") || "/dev/urandom";
@@ -378,7 +378,11 @@ export function validateDevice(d: HwDevice): string | null {
         return "A CD/DVD drive requires a pool";
       }
       return null;
-    case "interface": return need(["network"], "A network device");
+    // A NIC may name no network: libvirt requires a <source>, but accepts an
+    // empty one, so `<source network=""/>` is a NIC that attaches to nothing
+    // until a network is chosen. xmlcheck allows exactly that (and no foreign
+    // network), so this stays a non-admin's choice.
+    case "interface": return null;
     case "hostdev": return need(["bus", "slot", "function"], "PCI passthrough");
     case "usb": return need(["vendor", "product"], "USB passthrough");
     default: return null;

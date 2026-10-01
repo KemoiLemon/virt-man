@@ -218,6 +218,13 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
         (_, ["networks"]) if get => with(nets, "Sys.Audit", Special::ListNetworks),
         ("POST", ["networks"]) => with(nets, "Network.Allocate", Special::CreateNetwork),
         (_, ["networks", "bridges"]) if get => with(node, "Sys.Audit", Special::ListBridges),
+        // A free /24 for a new network, so the form can show what the daemon
+        // will pick. Reads the host's own addressing and routes, like the
+        // bridge list, so it sits on the node's audit -- which the default
+        // role has, or the user creating a network could not be shown it. Must
+        // come before the {name} arm, or it would be read as a network named
+        // "suggest-subnet".
+        (_, ["networks", "suggest-subnet"]) if get => need(node, "Sys.Audit"),
         (_, ["networks", net, rest @ ..]) => {
             let p = net_path(conn, net);
             let net = net.to_string();
@@ -429,15 +436,34 @@ mod tests {
     fn a_networks_firewall_write_is_checked_for_port_forwards() {
         let n = classify("c", "PUT", "/networks/lan/firewall").unwrap();
         assert_eq!(n.privilege, "Network.Config");
-        assert_eq!(
-            n.special,
-            Special::PutNetworkFirewall { net: "lan".into() }
-        );
+        assert_eq!(n.special, Special::PutNetworkFirewall { net: "lan".into() });
         // The IPAM write is not a firewall write.
         assert_eq!(
             classify("c", "PUT", "/networks/lan/ipam").unwrap().special,
             Special::None
         );
+    }
+
+    #[test]
+    fn the_suggested_subnet_is_a_readable_route_not_a_network_named_that() {
+        // A regular user creates networks (`Network.Allocate` at `/`), so this
+        // must not need an admin privilege, or the form could not be prefilled
+        // for exactly the people who use it.
+        let n = classify("c", "GET", "/networks/suggest-subnet").expect("classified");
+        assert_eq!(n.privilege, "Sys.Audit");
+        assert_eq!(n.special, Special::None, "the default role has Sys.Audit");
+        // And it must not fall through to the {name} arm: that would check a
+        // privilege on a network called "suggest-subnet" and read the daemon's
+        // own definition of a network that does not exist.
+        assert_ne!(
+            classify("c", "GET", "/networks/suggest-subnet")
+                .unwrap()
+                .path,
+            "/nodes/c/networks/suggest-subnet",
+            "classified as a network named suggest-subnet"
+        );
+        // A network that really is named that is still reachable by its path.
+        assert!(classify("c", "GET", "/networks/lan").is_some());
     }
 
     #[test]
