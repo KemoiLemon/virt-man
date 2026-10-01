@@ -306,7 +306,11 @@ pub async fn check_quota(
         return Ok(());
     }
     let here = usage_on(state, conn, &owner.id).await?.add(delta);
-    let everywhere = if q.shared {
+    // Walked only for a pooled default with no override here: an override is
+    // that daemon's own ceiling, so the pool never answers for it (`perm::
+    // check_quota`), and walking every daemon would be a round trip per daemon
+    // for nothing.
+    let everywhere = if q.shared && !q.daemons.contains_key(&conn.id) {
         let others: Vec<Connection> = state
             .read()
             .connections

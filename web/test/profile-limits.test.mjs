@@ -112,3 +112,57 @@ test("the base role is named as the server names it", async () => {
   assert.match(userWho.textContent, /·\s*User$/, `got: ${userWho.textContent}`);
   user.window.close();
 });
+
+/// A per-daemon override is that daemon's own ceiling and replaces the global
+/// one -- it is not capped by it. Pooled mode previously showed the tighter of
+/// the two, so a pooled default of 5 VMs hid an override of 10 and the page
+/// reported a limit the server does not apply (`perm::check_quota`).
+test("a server override beats a tighter pooled default", async () => {
+  const usage = {
+    admin: false,
+    quota: {
+      shared: true,
+      default: { vms: 5 },
+      daemons: { c1: { vms: 10 } },
+    },
+    total: { vms: 6, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+    daemons: [
+      { conn: "c1", name: "Big", online: true, vms: 6, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+      { conn: "c2", name: "Other", online: true, vms: 0, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+    ],
+  };
+  const { window, modal } = await openProfileWith(USER, usage);
+  const blocks = [...modal.querySelectorAll(".pf-limit")];
+  const forDaemon = (name) => {
+    const el = blocks.find((b) => b.querySelector(".pf-limit-head b")?.textContent === name);
+    assert.ok(el, `a ${name} block renders`);
+    return el.textContent;
+  };
+  // The overridden daemon shows its own 10, not min(10, 5) = 5.
+  assert.match(forDaemon("Big"), /10/, `the override must show through: ${forDaemon("Big")}`);
+  assert.match(forDaemon("Big"), /server-specific limit/);
+  // Pooled: a server without an override is not listed at all -- the pool
+  // already states its limits, so a row per server is the same limit restated.
+  assert.ok(
+    !blocks.some((b) => b.querySelector(".pf-limit-head b")?.textContent === "Other"),
+    "a pooled server with no override must not get a row",
+  );
+  window.close();
+});
+
+/// Pooled with no overrides anywhere: one pooled figure, no per-server rows.
+test("a pooled quota with no overrides lists no per-server limits", async () => {
+  const usage = {
+    admin: false,
+    quota: { shared: true, default: { vms: 5 }, daemons: {} },
+    total: { vms: 1, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+    daemons: [
+      { conn: "c1", name: "Big", online: true, vms: 1, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+      { conn: "c2", name: "Other", online: true, vms: 0, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+    ],
+  };
+  const { window, modal } = await openProfileWith(USER, usage);
+  const names = [...modal.querySelectorAll(".pf-limit .pf-limit-head b")].map((b) => b.textContent);
+  assert.deepEqual(names, ["All servers"], `only the pooled figure: ${names.join(", ")}`);
+  window.close();
+});

@@ -236,8 +236,9 @@ pub struct Limit {
 ///
 /// `per_daemon` mode applies `default` on every daemon separately; `shared`
 /// pools `default` across all daemons together. Either way an entry in
-/// `daemons` sets that daemon's own ceiling (in shared mode, on top of the
-/// pool).
+/// `daemons` sets that daemon's own ceiling, and takes priority over `default`
+/// -- including in shared mode, where an overridden daemon is left out of the
+/// pool entirely rather than being capped by it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quota {
     #[serde(default)]
@@ -357,13 +358,15 @@ pub fn check_quota(
     asked: &Usage,
 ) -> Result<(), String> {
     let on = format!("on '{server}'");
+    // An override is that daemon's own ceiling and replaces the global one, so
+    // it is checked on its own and the pooled default is not also applied --
+    // `everywhere` includes this daemon, so applying both let a pooled default
+    // smaller than the override win, which is the opposite of an override.
     if let Some(l) = q.daemons.get(conn) {
-        over(l, here, asked, &on)?;
+        return over(l, here, asked, &on);
     }
     if q.shared {
         over(&q.default, everywhere, asked, "across all servers")
-    } else if q.daemons.contains_key(conn) {
-        Ok(())
     } else {
         over(&q.default, here, asked, &on)
     }
@@ -377,18 +380,11 @@ pub fn check_quota(
 /// per-daemon override, which is a limit that "still follows the datacenter
 /// limits" while the override says otherwise.
 pub fn storage_limit(q: &Quota, conn: &str) -> Option<u64> {
-    let own = q.daemons.get(conn).and_then(|l| l.storage_gb);
-    if q.shared {
-        // Both apply: the override caps the pool, so the tighter one wins.
-        match (own, q.default.storage_gb) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, b) => b,
-        }
-    } else if q.daemons.contains_key(conn) {
-        own
-    } else {
-        q.default.storage_gb
+    // An override replaces the global limit, pooled or not: it is that daemon's
+    // ceiling, and may raise it as well as lower it.
+    match q.daemons.get(conn) {
+        Some(l) => l.storage_gb,
+        None => q.default.storage_gb,
     }
 }
 
@@ -923,6 +919,46 @@ mod tests {
         .is_err());
     }
 
+    /// An override takes priority over the global limit, pooled or not: it is
+    /// that daemon's own ceiling. Previously the pooled default was applied on
+    /// top of it, so a default smaller than the override silently won.
+    #[test]
+    fn an_override_beats_a_tighter_pooled_default() {
+        let mut daemons = HashMap::new();
+        daemons.insert(
+            "big".to_string(),
+            Limit {
+                vms: Some(10),
+                storage_gb: Some(80),
+                ..Limit::default()
+            },
+        );
+        let q = Quota {
+            shared: true,
+            default: Limit {
+                vms: Some(5),
+                storage_gb: Some(10),
+                ..Limit::default()
+            },
+            daemons,
+        };
+        // 6 VMs across the pool: over the pooled default of 5, but the
+        // overridden daemon answers to its own 10.
+        let total = usage(6, 0, 0, 0);
+        assert!(
+            check_quota(&q, "big", "hv", &total, &total, &Usage::default()).is_ok(),
+            "override wins over a tighter pool"
+        );
+        assert!(
+            check_quota(&q, "other", "hv", &total, &total, &Usage::default()).is_err(),
+            "an untouched daemon still answers to the pool"
+        );
+        // The override may raise the global storage figure too; `Some(10)`
+        // here would be the old min() of both.
+        assert_eq!(storage_limit(&q, "big"), Some(80));
+        assert_eq!(storage_limit(&q, "other"), Some(10));
+    }
+
     /// The fetch gate reads the effective storage ceiling, so a limit that
     /// exists only as a per-daemon override still applies, and one the override
     /// clears does not.
@@ -969,7 +1005,8 @@ mod tests {
         assert_eq!(storage_limit(&per, "small"), Some(4));
         assert_eq!(storage_limit(&per, "other"), None);
 
-        // Shared: the pooled default still applies, so the tighter wins.
+        // Shared: the pooled default only governs the daemons without an
+        // override, so the override's 4 is not capped by the pool's 10.
         let shared = Quota {
             shared: true,
             default: Limit {

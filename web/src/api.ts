@@ -158,21 +158,12 @@ export interface UsageCounts {
 }
 
 /// The limits actually in force for one daemon, resolving the quota the way
-/// the server's `check_quota` does: a daemon override replaces the per-daemon
-/// default, and in shared mode it also caps the pool, so the tighter of the two
-/// applies. Showing the override alone under-reports in shared mode — a limit
-/// the server still enforces would read as "no limit".
+/// the server's `check_quota` does: a daemon override is that daemon's own
+/// ceiling and replaces the global one, pooled or not. It is not capped by the
+/// pool -- taking the tighter of the two made a pooled default smaller than an
+/// override silently win, so the page showed a limit the server does not apply.
 export function effectiveLimit(q: Quota | undefined, conn: string): Limit {
-  const own = q?.daemons?.[conn];
-  if (!own) return q?.default ?? {};
-  if (!q?.shared) return own;
-  const out: Limit = {};
-  for (const k of ["vms", "vcpus", "memory_mb", "storage_gb", "networks", "forwards"] as const) {
-    const a = own[k] ?? null;
-    const b = q.default[k] ?? null;
-    out[k] = a == null ? b : b == null ? a : Math.min(a, b);
-  }
-  return out;
+  return q?.daemons?.[conn] ?? q?.default ?? {};
 }
 
 /// How much of each limit is left, for a hard `max` on a form field. Mirrors
@@ -186,7 +177,10 @@ export function remainingLimits(
   total: UsageCounts,
 ): Limit {
   const cap = effectiveLimit(q, conn);
-  const use = q?.shared ? total : own;
+  // The pooled total is what the pooled default counts against, and it is only
+  // consulted for a daemon with no override -- the server skips the pool
+  // entirely when one applies.
+  const use = q?.shared && !q.daemons?.[conn] ? total : own;
   const left = (c: number | null | undefined, u: number) => (c == null ? null : Math.max(0, c - u));
   return {
     vms: left(cap.vms, use.vms),

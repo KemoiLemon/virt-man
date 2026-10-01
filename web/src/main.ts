@@ -12,7 +12,7 @@ import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
-import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type CtTab, type Route } from "./route";
+import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type CtTab, type DcTab, type Route } from "./route";
 import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice } from "./hardware";
 import { enhanceSelects } from "./listbox";
@@ -83,7 +83,7 @@ function setHtml(el: Element, html: string) {
 /// What an empty list shows: a line saying so, and a small button to create
 /// the first one. `id` names the button so the caller can bind it.
 function emptyState(what: string, label: string, id: string): string {
-  return `<div class="empty empty-create">No ${what} available.
+  return `<div class="empty empty-create"><span class="empty-msg">No ${what} available.</span>
     <button class="btn" id="${id}">${ic.plus(14)} ${label}</button></div>`;
 }
 
@@ -93,7 +93,7 @@ let user: User | null = null;
 let authDisabled = false;
 let connections: Connection[] = [];
 let selectedConn: string | null = null;
-let connTab: "dashboard" | "vms" | "containers" | "networks" | "storage" | "firewall" = "dashboard";
+let connTab: ConnTab = "dashboard";
 /// Pool whose volume table is expanded; survives the 1s pool poll so the
 /// table is re-rendered in place instead of vanishing every second.
 let volumesOpen: string | null = null;
@@ -115,7 +115,7 @@ let vmTab: "summary" | "hardware" | "options" | "network" | "console" | "xml" = 
 let summaryDiskSel: Record<string, string> = {};
 /// Which NIC the summary's Network card is graphing, per VM.
 let summaryNetSel: Record<string, string> = {};
-let dcTab: "dashboard" | "guests" | "containers" = "dashboard";
+let dcTab: DcTab = "dashboard";
 /// The admin page's open section, or null when it is not the view. A view of
 /// its own with its own sidebar, rather than a modal, so it has a URL and
 /// works as a page on a phone.
@@ -477,7 +477,6 @@ function openCommandPalette() {
 
   // Creation. Resource kinds that need a server are offered for the one open.
   add("add-resource", "Add resource", "VM, network, pool or server", ic.plus(), () => openAddResource());
-  add("add-server", "Add server", "Connect to a daemon", ic.server(), () => openConnectionDialog());
   if (selectedConn) {
     const server = connections.find((c) => c.id === selectedConn)?.name ?? "";
     add("create-vm", "Create VM", server, ic.vm(), () => openCreateVm());
@@ -846,6 +845,20 @@ async function refreshHealth() {
 /// Nested resource tree: Datacenter root -> servers -> guests, mirroring
 /// vm-man's sidebar. Guests come from the per-connection cache, so opening a
 /// server reveals its VMs inline instead of only in the content pane.
+/// A row in the tree that stands where a group's rows would have been, saying
+/// the group is empty. Same shape as a real row (icon slot, indent, label) so
+/// the tree keeps its silhouette and a server with no pools still reads as
+/// having a pool group -- but not a button, and not focusable: there is nothing
+/// behind it to open. `cls` is the real row's own class, which carries the
+/// indent for that kind.
+function ghostRow(cls: string, icon: string, label: string): string {
+  return `
+      <div class="tree-row tree-ghost ${cls}" aria-disabled="true">
+        <span class="tree-ic">${icon}</span>
+        <span class="tree-label">${esc(label)}</span>
+      </div>`;
+}
+
 function renderTree() {
   const tree = $("#tree");
   if (!tree) return;
@@ -914,7 +927,7 @@ function renderTree() {
       </button>`,
             )
             .join("")
-        : "";
+        : ghostRow("tree-res tree-net", ic.network(), "No networks");
       const poolRows = pools.length
         ? pools
             .map(
@@ -927,7 +940,7 @@ function renderTree() {
       </button>`,
             )
             .join("")
-        : "";
+        : ghostRow("tree-res tree-pool", ic.storage(), "No storage pools");
       // Offline: the guest, network and pool states below are last known,
       // not current, so they are greyed rather than shown as live.
       return `
@@ -946,7 +959,7 @@ function renderTree() {
       <span class="tree-ic">${ic.datacenter()}</span>
       <span class="tree-label">Datacenter</span>
     </button>
-    ${serverRows || `<div class="tree-empty">No servers yet — add one below.</div>`}`);
+    ${serverRows || ghostRow("tree-group", ic.server(), "No servers")}`);
 
   restoreTreeFocus();
   $("#dc-row").onclick = () => {
@@ -1169,7 +1182,6 @@ function canShareVm(connId: string, vmName: string, ct = false): boolean {
 
 /// Share one of your guests with other users, at a fixed level.
 async function openShareVm(connId: string, vmName: string, ct = false) {
-  const what = ct ? "container" : "VM";
   const shown = displayName(guestList(connId, ct), vmName);
   let data: { shares: { user: string; username: string; role: string }[]; roles: string[] };
   let people: { id: string; username: string }[];
@@ -1190,8 +1202,7 @@ async function openShareVm(connId: string, vmName: string, ct = false) {
   };
   const el = openModal(
     `Share — ${esc(shown)}`,
-    `<p class="hint">People you share with see this ${what} in their list. They cannot delete it or share it onward.</p>
-     <div class="section-title">Shared with</div>
+    `<div class="section-title">Shared with</div>
      <table class="grid" id="sh-list">
        <tr><th>User</th><th>Access</th><th class="col-actions"></th></tr>
        ${data.shares.map((x) => `<tr><td class="tname">${esc(x.username)}</td><td>${esc(LEVEL[x.role] ?? x.role)}</td>
@@ -1361,7 +1372,6 @@ function serverMenu(serverId: string): CtxItem[] {
 function rootMenu(): CtxItem[] {
   return [
     { label: "Add Resource", icon: ic.plus(), run: () => openAddResource() },
-    { label: "Add server", icon: ic.server(), run: () => openConnectionDialog() },
     { label: "Refresh", icon: ic.reboot(), separator: true, run: () => void refreshTreeVms() },
   ];
 }
@@ -1613,31 +1623,32 @@ function renderDc() {
       <button class="tab ${dcTab === "dashboard" ? "active" : ""}" data-dctab="dashboard">${ic.datacenter(14)} Dashboard</button>
       <button class="tab ${dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
       <button class="tab ${dcTab === "containers" ? "active" : ""}" data-dctab="containers">${ic.container(14)} Containers</button>
+      <button class="tab ${dcTab === "networks" ? "active" : ""}" data-dctab="networks">${ic.network(14)} Networks</button>
+      <button class="tab ${dcTab === "storage" ? "active" : ""}" data-dctab="storage">${ic.storage(14)} Storage</button>
     </div>`;
   // Aggregate cards across every known server, from the tree's guest cache.
   const allVms = Object.values(treeVms).flat();
   const runningVms = allVms.filter((v) => v.active).length;
-  // Summary cards head both the Servers and Guests tabs.
-  const cards = `<div class="cards">
+  // Summary cards head the Servers and Guests tabs. Four tiles either way, so
+  // the two are the same widget with their nouns substituted.
+  const quickStats = (total: number, running: number, noun: string, icon: () => string) => `<div class="cards">
         <div class="card">
           <span class="card-ic">${ic.server(20)}</span>
           <div><b>${connections.length}</b><i>SERVERS</i></div>
         </div>
         <div class="card">
-          <span class="card-ic">${ic.vms(20)}</span>
-          <div><b>${allVms.length}</b><i>GUESTS</i></div>
+          <span class="card-ic">${icon()}</span>
+          <div><b>${total}</b><i>${noun}</i></div>
         </div>
-        <div class="card ${runningVms > 0 ? "ok" : ""}">
+        <div class="card ${running > 0 ? "ok" : ""}">
           <span class="card-ic">${ic.start(20)}</span>
-          <div><b>${runningVms}</b><i>RUNNING</i></div>
+          <div><b>${running}</b><i>RUNNING</i></div>
         </div>
         <div class="card">
           <span class="card-ic">${ic.stop(20)}</span>
-          <div><b>${allVms.length - runningVms}</b><i>STOPPED</i></div>
+          <div><b>${total - running}</b><i>STOPPED</i></div>
         </div>
       </div>`;
-  // Every guest across every server, so a VM is reachable directly from here
-  // instead of only through the sidebar.
   const guestCards = connections
     .flatMap((c) => (treeVms[c.id] ?? []).map((v) => ({ conn: c, vm: v })))
     .map(({ conn, vm }) => `
@@ -1664,12 +1675,31 @@ function renderDc() {
   if (dcTab === "dashboard") {
     body = `<div id="dc-dash">${skeleton("dashboard")}</div>`;
   } else if (dcTab === "containers") {
+    // Same quick statistics as the Guests tab, over the tree's container cache.
     const all = connections.flatMap((c) => (treeCts[c.id] ?? []).map((v) => ({ conn: c, ct: v })));
-    body = `<div class="section-title">Containers</div>
+    const running = all.filter(({ ct }) => ct.active).length;
+    body = `${quickStats(all.length, running, "CONTAINERS", ic.container)}
+       <div class="section-title">Containers</div>
        ${all.length ? `<div class="card-grid">${all.map(({ conn, ct }) => ctCard(ct, conn.id, conn.name)).join("")}</div>`
          : emptyState("containers", "Create CT", "dc-ct-create")}`;
+  } else if (dcTab === "networks") {
+    const all = connections.flatMap((c) => (treeNets[c.id] ?? []).map((n) => ({ conn: c, n })));
+    const active = all.filter(({ n }) => n.active).length;
+    body = `${quickStats(all.length, active, "NETWORKS", ic.network)}
+       <div class="section-title">Networks</div>
+       ${all.length ? `<div class="card-grid">${all.map(({ conn, n }) => netCard(n, conn.id, conn.name)).join("")}</div>`
+         : emptyState("networks", "Create Network", "dc-net-create")}`;
+  } else if (dcTab === "storage") {
+    const all = connections.flatMap((c) => (treePools[c.id] ?? []).map((p) => ({ conn: c, p })));
+    const active = all.filter(({ p }) => p.active).length;
+    body = `${quickStats(all.length, active, "POOLS", ic.storage)}
+       <div class="section-title">Storage Pools</div>
+       ${all.length ? `<div class="card-grid">${all.map(({ conn, p }) => poolCard(p, conn.id, { server: conn.name })).join("")}</div>`
+         : emptyState("storage pools", "Create Pool", "dc-pool-create")}`;
   } else if (dcTab === "guests") {
-    body = `${cards}<div class="section-title">Guests</div>
+    // Every guest across every server, so a VM is reachable directly from here
+    // instead of only through the sidebar.
+    body = `${quickStats(allVms.length, runningVms, "GUESTS", ic.vms)}<div class="section-title">Guests</div>
        ${guestCards ? `<div class="card-grid">${guestCards}</div>` : emptyState("guests", "Create Guest", "dc-guest-create")}`;
   } else {
     body = `<div id="users-area">${skeleton("table")}</div>`;
@@ -1680,9 +1710,16 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
 
   if (dcTab === "dashboard") void loadDcDashboard();
 
-  $("#dc-guest-create")?.addEventListener("click", () => openCreateVm());
-  $("#dc-ct-create")?.addEventListener("click", () => openCreateCt());
+  // Creating from the Datacenter is a Datacenter action: the form takes an
+  // explicit connection and the view stays put, rather than switching the
+  // whole app to the daemon the user picked.
+  $("#dc-guest-create")?.addEventListener("click", () => void openCreateVm());
+  $("#dc-ct-create")?.addEventListener("click", () => void openCreateCt());
+  $("#dc-net-create")?.addEventListener("click", () => dcCreate((conn) => openCreateNetwork(conn)));
+  $("#dc-pool-create")?.addEventListener("click", () => dcCreate((conn) => openCreatePool(conn)));
   bindCtCards(content);
+  bindDcNetCards(content);
+  bindDcPoolCards(content);
   content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
       dcTab = (b as HTMLElement).dataset.dctab as typeof dcTab;
@@ -1729,7 +1766,88 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
       void openHardwareEditor({ vm: el.dataset.dcHwedit! });
     };
   });
+}
 
+/// A rendered Datacenter pool card's buttons. Each acts on the owned server
+/// through `selectedConn`, so pointing it there is harmless (the card was not
+/// in that server's page); Volumes opens the pool's page there, which is the
+/// one action that must genuinely switch views.
+function bindDcPoolCards(root: Element) {
+  root.querySelectorAll<HTMLElement>("[data-pool-open]").forEach((card) => {
+    card.onclick = (e) => {
+      if ((e.target as Element).closest?.("button")) return;
+      selectPoolRow(card.dataset.poolOpenConn!, card.dataset.poolOpen!);
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-vols]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      selectPoolRow(b.dataset.volsConn!, b.dataset.vols!);
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-upload]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      selectedConn = b.dataset.uploadConn!;
+      renderTree();
+      openUpload(b.dataset.upload!);
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-delpool]").forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      selectedConn = b.dataset.delpoolConn!;
+      renderTree();
+      await deletePool(b.dataset.delpool!);
+      renderDc();
+    };
+  });
+}
+
+/// A rendered Datacenter network card's buttons: the same actions a server's
+/// Networks tab binds, against the card's own server.
+function bindDcNetCards(root: Element) {
+  root.querySelectorAll<HTMLElement>("[data-net-open]").forEach((card) => {
+    card.onclick = (e) => {
+      if ((e.target as Element).closest?.("button")) return;
+      selectNetRow(card.dataset.netConn!, card.dataset.netOpen!);
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-net-toggle]").forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      selectedConn = b.dataset.netConn!;
+      renderTree();
+      await netAction(b.dataset.netAction === "start" ? "start" : "stop", b.dataset.netToggle!);
+      renderDc();
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-net-autostart]").forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      selectedConn = b.dataset.netConn!;
+      renderTree();
+      await toggleAutostart(b.dataset.netAutostart!);
+      renderDc();
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-net-edit]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      selectedConn = b.dataset.netConn!;
+      renderTree();
+      openEditNetwork(b.dataset.netEdit!);
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-delnet]").forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      selectedConn = b.dataset.delnetConn!;
+      renderTree();
+      await deleteNetwork(b.dataset.delnet!);
+      renderDc();
+    };
+  });
 }
 
 /// Datacenter dashboard: aggregate every reachable server's host metrics into
@@ -1896,7 +2014,7 @@ async function loadDcDashboard() {
             <td>${mPct.toFixed(0)}% · ${fmtBytes(mUsed * 1024)}</td>
             <td>${dPct.toFixed(0)}% · ${fmtBytes(dUsed)}</td>
           </tr>`;
-        }).join("")}
+        }).join("") || `<tr><td colspan="4" class="empty">No servers.</td></tr>`}
       </table>
     </div>
 
@@ -1920,7 +2038,7 @@ async function loadDcDashboard() {
         <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-dash-pool="${esc(p.name)}" data-dash-conn="${c.id}">
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
-            <span class="storage-card-title">${esc(p.name)}<span class="host" style="display:block;font-weight:400">${esc(c.name)}</span></span>
+            <span class="storage-card-title">${esc(p.title || p.name)}<span class="host" style="display:block;font-weight:400">${esc(c.name)}</span></span>
             <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
           </div>
           <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
@@ -1930,7 +2048,15 @@ async function loadDcDashboard() {
             <span>${fmtBytes(cap)} total</span>
           </div>
         </div>`;
-      }).join("") || `<div class="empty">No pools.</div>`}
+      }).join("") || `<div class="storage-card storage-card-none">
+          <div class="storage-card-head">
+            <span class="storage-card-icon">${ic.storage()}</span>
+            <span class="storage-card-title">No storage pools</span>
+          </div>
+          <div class="metric-value">—</div>
+          <div class="meter"></div>
+          <div class="metric-foot"><span>nothing to show</span></div>
+        </div>`}
     </div>
     `);
 
@@ -2012,6 +2138,10 @@ const adminCtx: AdminCtx = {
     if (!canAdmin()) adminSection = null;
     renderApp();
   },
+  head: (html) => {
+    const slot = $("#admin-head");
+    if (slot) setHtml(slot, html);
+  },
   stillCurrent: (gen) => stillCurrent(gen),
 };
 
@@ -2021,7 +2151,8 @@ function renderAdmin() {
   syncUrl();
   const content = $("#content");
   setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.admin(20)}</span>
-      <span class="dtitle">${esc(adminTitle(adminSection))}</span></div>
+      <span class="dtitle">${esc(adminTitle(adminSection))}</span>
+      <span class="dhead-actions" id="admin-head"></span></div>
     <div id="admin-area"></div>`);
   void renderAdminSection(adminCtx, $("#admin-area", content), adminSection, gen);
 }
@@ -2031,8 +2162,7 @@ function renderAdmin() {
 function showSecret(title: string, secret: string) {
   const el = openModal(
     title,
-    `<div class="hw-note">Copy this now — it is not stored and cannot be shown again.</div>
-     <code class="cmd secret-value" id="sv">${esc(secret)}</code>`,
+    `<code class="cmd secret-value" id="sv">${esc(secret)}</code>`,
     `<button class="btn" id="sv-copy">${ic.copy(14)} Copy</button>
      <button class="btn primary" id="sv-done">Done</button>`,
   );
@@ -2088,8 +2218,7 @@ function openIpamSettings(conn: string, net: string, ipam: IpamInfo) {
       <input id="ipam-fwd" value="${esc(ipam.dns_forwarders.join(", "))}" placeholder="1.1.1.1, 9.9.9.9"></label>
     <label class="field"><span>Domain (optional)</span>
       <input id="ipam-dom" value="${esc(ipam.domain ?? "")}" placeholder="lab"></label>
-    <div class="dsub">Guests get addresses from the range, and keep them until they are deleted;
-      changing the range never moves one. Guest names resolve as <code>name</code>${ipam.domain ? ` and <code>name.${esc(ipam.domain)}</code>` : ""}.</div>`,
+`,
     `<button class="btn primary" id="ipam-set-ok">Save</button>`);
   $("#ipam-set-ok", el).onclick = async () => {
     try {
@@ -2457,6 +2586,11 @@ setHtml(content, `
     };
   });
   renderConnBody();
+  $("#create-resource")?.addEventListener("click", () => openCreateResource());
+  $("#create-vm")?.addEventListener("click", () => openCreateVm());
+  $("#create-ct")?.addEventListener("click", () => openCreateCt());
+  $("#create-net")?.addEventListener("click", () => openCreateNetwork());
+  $("#create-pool")?.addEventListener("click", () => openCreatePool());
 }
 
 async function renderConnBody() {
@@ -2466,24 +2600,19 @@ async function renderConnBody() {
   // body only carries the list itself.
   if (connTab === "dashboard") {
     setHtml(body, `<div id="dash">${skeleton("dashboard")}</div>`);
-    $("#create-resource")?.addEventListener("click", () => openCreateResource());
     await loadDashboard();
   } else if (connTab === "vms") {
     setHtml(body, `<div id="vms-list" class="card-grid">${skeleton("cards")}</div>`);
-    $("#create-vm")?.addEventListener("click", () => openCreateVm());
     await fastLoad(loadVms);
   } else if (connTab === "containers") {
     setHtml(body, `<div id="cts-list">${skeleton("cards")}</div>`);
-    $("#create-ct")?.addEventListener("click", () => openCreateCt());
     await fastLoad(loadCts);
   } else if (connTab === "networks") {
     setHtml(body, `<div id="nets-list" class="card-grid">${skeleton("cards")}</div>`);
-    $("#create-net")?.addEventListener("click", () => openCreateNetwork());
     await fastLoad(loadNetworks);
   } else if (connTab === "storage") {
     setHtml(body, `<div id="pools-list">${skeleton("cards")}</div>`);
     renderedPools = null; // fresh container: force a full render on first load
-    $("#create-pool")?.addEventListener("click", () => openCreatePool());
     await loadPools();
   } else {
     setHtml(body, `<div id="filters-list">${skeleton("table")}</div>`);
@@ -3327,7 +3456,7 @@ async function openTemplates(pool: string) {
 /// disk, CPU/memory, network. The privileged box is shown only to someone who
 /// holds CT.Privileged here (the server checks the same thing).
 async function openCreateCt(conn = selectedConn) {
-  if (!conn) return withDaemon(() => void openCreateCt());
+  if (!conn) return withDaemon((id) => void openCreateCt(id));
   let pools: PoolSummary[] = [];
   let nets: NetworkSummary[] = [];
   let canPriv = false;
@@ -3358,7 +3487,7 @@ async function openCreateCt(conn = selectedConn) {
       <label class="field"><span>SSH public key (optional)</span><input id="ct-keys" placeholder="ssh-ed25519 AAAA…"></label>
     </div>
     ${canPriv ? `<label class="check"><input type="checkbox" id="ct-priv"> Privileged container</label>
-      <div class="dsub">A privileged container has no user namespace: its root is the host's root. Leave this off unless the workload needs it.</div>` : ""}
+      ` : ""}
     <div class="section-title">Template</div>
     ${templates.length ? `<label class="field"><span>Template</span><select id="ct-tpl">
       ${templates.map((t, i) => `<option value="${i}">${esc(t.vol.name)} (${esc(displayName(treePools[conn], t.pool))})</option>`).join("")}
@@ -3381,7 +3510,6 @@ async function openCreateCt(conn = selectedConn) {
       <option value="">None</option>
       ${nets.map((n) => `<option value="${esc(n.name)}" ${n.active ? "" : "disabled"}>${esc(n.title || n.name)}${n.active ? "" : " (inactive)"}</option>`).join("")}
     </select></label>
-    <div class="dsub">The container gets an address from the network's DHCP, which this server runs.</div>
     <label class="check"><input type="checkbox" id="ct-start" checked> Start after creating</label>
     <label class="check"><input type="checkbox" id="ct-auto"> Start with the host</label>`,
     `<button class="btn" id="ct-cancel">Cancel</button><button class="btn primary" id="ct-ok" ${templates.length ? "" : "disabled"}>${ic.plus(14)} Create</button>`);
@@ -3417,27 +3545,23 @@ async function openCreateCt(conn = selectedConn) {
       if (!ok) return;
       await refreshTreeVms();
       if (selectedConn === conn && connTab === "containers" && !selectedVm) void loadCts();
+      else if (!selectedConn && !adminSection) renderDc();
     });
   };
 }
 
-async function loadNetworks() {
-  if (!selectedConn) return;
-  try {
-    const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
-    const list = $("#nets-list");
-    if (!list) return;
-    const typeLabel = (n: NetworkSummary) => {
-      if (n.forward === "bridge") return "Bridge";
-      if (n.forward === "nat") return "NAT";
-      return "Isolated";
-    };
-    setHtml(list, nets.map((n) => `
-      <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open tabindex="0" data-net-open="${esc(n.name)}">
+/// One network card. `conn` is the owning server, carried on the card because
+/// the Datacenter tab lists networks from every server beside each other: each
+/// card's actions have to name their own, not the app's selected one.
+function netCard(n: NetworkSummary, conn: string, server?: string): string {
+  const typeLabel = n.forward === "bridge" ? "Bridge" : n.forward === "nat" ? "NAT" : "Isolated";
+  return `
+      <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open tabindex="0" data-net-open="${esc(n.name)}" data-net-conn="${esc(conn)}">
         <div class="storage-card-head">
           <span class="storage-card-icon">${ic.network()}</span>
           <span class="storage-card-title">${esc(n.title || n.name)}</span>
-          <span class="badge">${esc(typeLabel(n))}</span>
+          ${server ? `<span class="badge">${esc(server)}</span>` : ""}
+          <span class="badge">${esc(typeLabel)}</span>
           <span class="badge ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span>
         </div>
         <div class="specs">
@@ -3450,7 +3574,17 @@ async function loadNetworks() {
           <button class="btn icon" data-net-edit="${esc(n.name)}" title="Edit">${ic.edit()}</button>
           <button class="btn danger icon" data-delnet="${esc(n.name)}" title="Delete">${ic.trash()}</button>
         </div>
-      </div>`).join("") || emptyState("networks", "Create Network", "net-create-empty"));
+      </div>`;
+}
+
+async function loadNetworks() {
+  if (!selectedConn) return;
+  try {
+    const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
+    const list = $("#nets-list");
+    if (!list) return;
+    const conn = selectedConn;
+    setHtml(list, nets.map((n) => netCard(n, conn)).join("") || emptyState("networks", "Create Network", "net-create-empty"));
     const createBtn = $("#net-create-empty");
     if (createBtn) createBtn.onclick = () => openCreateNetwork();
     // The whole card opens the network's page; its buttons stop propagation.
@@ -3556,15 +3690,19 @@ function openNetworkForm(
         <option value="">Select a bridge…</option>
         ${initial.bridge ? `<option value="${esc(initial.bridge)}" selected>${esc(initial.bridge)}</option>` : ""}
       </select></label>
-      <label class="field" data-net-field="ip"><span>Network (CIDR, optional)</span><input id="net-ip" placeholder="192.168.100.1/24" value="${esc(initial.ip)}"></label>
-      <label class="field" data-net-field="dhcp-start"><span>DHCP start</span><input id="net-dhcp-start" placeholder="192.168.100.10" value="${esc(initial.dhcp_start)}"></label>
-      <label class="field" data-net-field="dhcp-end"><span>DHCP end</span><input id="net-dhcp-end" placeholder="192.168.100.200" value="${esc(initial.dhcp_end)}"></label>
+      <label class="field" data-net-field="ip"><span>Network (CIDR)</span><span style="display:flex;gap:7px;align-items:center"><input id="net-ip" placeholder="IP-Less Network" value="${esc(initial.ip)}"${uuid ? "" : " readonly"}>${uuid ? "" : `<button class="btn icon field-btn" id="net-ip-reroll" type="button" title="Pick another subnet">${ic.reroll()}</button><button class="btn icon field-btn" id="net-ip-clear" type="button" title="No subnet">${ic.trash()}</button>`}</span></label>
       <label class="field" data-net-field="dns"><span>DNS servers (NAT, comma separated)</span><input id="net-dns" placeholder="1.1.1.1, 8.8.8.8" value="${esc(initial.dns)}"></label>
     </div>`,
     `<button class="btn primary" id="net-save">${uuid ? "Save" : "Create"}</button>`,
   );
 
-  const mode = () => ($("#net-mode", el) as HTMLSelectElement).value as NetworkForm["forward"];
+  const modeEl = () => $("#net-mode", el) as HTMLSelectElement;
+  const mode = () => modeEl().value as NetworkForm["forward"];
+  // A network with a subnet is served by this daemon from the start; one
+  // without is left alone. Only NAT needs a subnet (it must route and hand out
+  // addresses); an isolated network is usually a private segment the operator
+  // routes themselves, so clearing the subnet is a first-class choice there --
+  // which is what a dummy/private routed network wants.
   const sync = () => {
     const m = mode();
     el.querySelectorAll("[data-net-field]").forEach((f: Element) => {
@@ -3575,12 +3713,21 @@ function openNetworkForm(
       } else if (m === "nat") {
         show = field !== "bridge";
       } else {
+        // Isolated: DNS forwards nowhere. Nothing else to hide -- a cleared
+        // subnet is expressed by the field being empty, not by hiding it, so
+        // the trash/re-roll pair can put one back.
         show = field !== "bridge" && field !== "dns";
       }
       (f as HTMLElement).hidden = !show;
     });
+    // The trash offers to clear a subnet, so it is shown only when there is a
+    // value to clear and the network may have none (isolated). Re-rolling is
+    // the way back from an emptied field, so it is always available and the
+    // two swap places. NAT gets no trash: it cannot run without a subnet.
+    const clear = el.querySelector("#net-ip-clear") as HTMLButtonElement | null;
+    if (clear) clear.hidden = m !== "none" || $("#net-ip", el).value === "";
   };
-  $("#net-mode", el).addEventListener("change", sync);
+  modeEl().addEventListener("change", sync);
 
   // Bridge mode picks from the host's real bridge devices.
   const bridgeSelect = $("#net-bridge", el) as HTMLSelectElement;
@@ -3603,14 +3750,58 @@ function openNetworkForm(
     })
     .catch(() => {}); // no bridges: the picker shows just the placeholder
 
+  // A new NAT or isolated network is given a subnet the daemon picks, so the
+  // user never types an address that collides with the host's LAN, a VPN or
+  // another network. It is read-only -- the only way to change it is to ask
+  // for another one, which is re-checked against every subnet in use, so the
+  // form cannot be talked into a collision. The create path generates one
+  // too, so this is only the preview. An edit keeps what it has and stays
+  // editable; bridge mode takes its addressing from the bridge.
+  if (!uuid) {
+    const ipInput = $("#net-ip", el) as HTMLInputElement;
+    const reroll = $("#net-ip-reroll", el) as HTMLButtonElement;
+    const clear = $("#net-ip-clear", el) as HTMLButtonElement;
+    const suggest = () => {
+      if (mode() === "bridge") return;
+      // Cleared first so a request that fails leaves no stale address behind
+      // for the form to submit as if it were this network's own.
+      ipInput.value = "";
+      sync();
+      api.get<{ subnet: string }>(`/proxy/${conn}/networks/suggest-subnet`)
+        .then((r) => {
+          ipInput.value = r.subnet;
+          sync();
+        })
+        .catch(() => toast("Could not get a subnet from the server", "bad"));
+    };
+    // Clearing is offered only where a network may have no subnet at all
+    // (isolated), and re-rolling is what brings one back -- so the two buttons
+    // swap places rather than either being permanently unavailable.
+    clear.addEventListener("click", () => {
+      ipInput.value = "";
+      sync();
+    });
+    suggest();
+    reroll.addEventListener("click", suggest);
+    $("#net-mode", el).addEventListener("change", suggest);
+  }
+
   $("#net-save", el).onclick = async () => {
     const form: NetworkForm = {
       name: $("#net-name", el).value,
       forward: mode(),
       bridge: (bridgeSelect as HTMLSelectElement).value,
+      // An empty value means no subnet at all: the daemon must not serve the
+      // network, and libvirt gets no <ip>. That is how an isolated network the
+      // operator routes themselves (a dummy interface, a private routed
+      // segment) is expressed -- the trash button clears it.
       ip: $("#net-ip", el).value,
-      dhcp_start: $("#net-dhcp-start", el).value,
-      dhcp_end: $("#net-dhcp-end", el).value,
+      // The DHCP range is no longer a form field: the daemon's own DHCP hands
+      // out the whole subnet (every address permanent), so a range here would
+      // only be a second, conflicting answer. Kept from the definition on an
+      // edit so an existing range is not silently dropped.
+      dhcp_start: initial.dhcp_start,
+      dhcp_end: initial.dhcp_end,
       dns: $("#net-dns", el).value,
       hosts: initial.hosts ?? [],
     };
@@ -3634,10 +3825,44 @@ function openNetworkForm(
         void refreshTreeVms();
         if (forUser) forUser.after();
         else if (selectedConn === conn && !selectedVm) void renderConn();
+        // Made on a server that is not the selected one (the Datacenter's
+        // Networks tab): repaint the view actually on screen.
+        else if (!selectedConn && !adminSection) renderDc();
       });
   };
 
   sync();
+}
+
+/// One pool card. `conn` is the owning server, carried on the card for the
+/// same reason a network card carries it: the Datacenter lists every server's
+/// pools at once. `volumeTable` is for the server's own Storage tab, which
+/// expands a pool's volumes underneath its card.
+function poolCard(p: PoolSummary, conn: string, opts: { server?: string; volumeTable?: boolean } = {}): string {
+  const used = p.allocation ?? 0;
+  const cap = p.capacity ?? 0;
+  const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
+  return `
+      <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-pool-open="${esc(p.name)}" data-pool-card="${cssId(p.name)}" data-pool-conn="${esc(conn)}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.storage()}</span>
+          <span class="storage-card-title" title="${esc(p.title || p.name)}">${esc(p.title || p.name)}</span>
+          ${opts.server ? `<span class="badge">${esc(opts.server)}</span>` : ""}
+          <span class="badge" data-pool-active>${p.active ? "Active" : "Inactive"}</span>
+        </div>
+        <div class="metric-value" data-pool-pct>${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
+        <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" data-pool-fill style="width:${usedPct.toFixed(1)}%"></div></div>
+        <div class="metric-foot">
+          <span data-pool-used>${fmtBytes(used)} used</span>
+          <span data-pool-free>${fmtBytes(p.available)} free</span>
+          <span data-pool-cap>${fmtBytes(cap)} total</span>
+        </div>
+        <div class="storage-card-actions">
+          <button class="btn" data-vols="${esc(p.name)}" data-vols-conn="${esc(conn)}">${ic.disk(14)} Volumes</button>
+          <button class="btn" data-upload="${esc(p.name)}" data-upload-conn="${esc(conn)}">${ic.upload(14)} Upload ISO</button>
+          <button class="btn danger icon" data-delpool="${esc(p.name)}" data-delpool-conn="${esc(conn)}">${ic.trash()}</button>
+        </div>
+      </div>${opts.volumeTable ? `<div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>` : ""}`;
 }
 
 async function loadPools() {
@@ -3650,32 +3875,10 @@ async function loadPools() {
     const shapeChanged = renderedPools?.join("|") !== names.join("|");
     if (shapeChanged) {
       renderedPools = names;
-      setHtml(list, pools.map((p) => {
-        const used = p.allocation ?? 0;
-        const cap = p.capacity ?? 0;
-        const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
-        return `
-      <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-pool-open="${esc(p.name)}" data-pool-card="${cssId(p.name)}">
-        <div class="storage-card-head">
-          <span class="storage-card-icon">${ic.storage()}</span>
-          <span class="storage-card-title">${esc(p.title || p.name)}</span>
-          <span class="badge" data-pool-active>${p.active ? "Active" : "Inactive"}</span>
-        </div>
-        <div class="metric-value" data-pool-pct>${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
-        <div class="meter"><div class="meter-fill" data-pool-fill style="width:${usedPct.toFixed(1)}%"></div></div>
-        <div class="metric-foot">
-          <span data-pool-used>${fmtBytes(used)} used</span>
-          <span data-pool-free>${fmtBytes(p.available)} free</span>
-          <span data-pool-cap>${fmtBytes(cap)} total</span>
-        </div>
-        <div class="storage-card-actions">
-          <button class="btn" data-vols="${esc(p.name)}">${ic.disk(14)} Volumes</button>
-          <button class="btn" data-upload="${esc(p.name)}">${ic.upload(14)} Upload ISO</button>
-          <button class="btn danger icon" data-delpool="${esc(p.name)}">${ic.trash()}</button>
-        </div>
-      </div>
-      <div id="vols-${cssId(p.name)}" style="margin-bottom:14px"></div>`;
-      }).join("") || emptyState("storage pools", "Create Pool", "pool-create-empty"));
+      // A full rebuild wipes the expanded pool's volume table, so the card is
+      // the same builder the Datacenter uses and the table is a sibling.
+      setHtml(list, pools.map((p) => poolCard(p, selectedConn!, { volumeTable: true })).join("")
+        || emptyState("storage pools", "Create Pool", "pool-create-empty"));
       $("#pool-create-empty")?.addEventListener("click", () => openCreatePool());
       // The whole card opens the pool's page; its buttons keep their own jobs.
       list.querySelectorAll("[data-pool-open]").forEach((card: Element) => {
@@ -4338,7 +4541,8 @@ async function renderVmBody(vm: string) {
     $("#vmnet-add", body).onclick = () => {
       const el = openModal("Add interface", `
         <label class="field"><span>Network</span><select id="nic-net">
-          ${nets.map((n) => `<option value="${esc(n.name)}">${esc(n.name)}${n.active ? "" : " (inactive)"}</option>`).join("")}
+          <option value="">None</option>
+          ${nets.map((n) => `<option value="${esc(n.name)}">${esc(n.title || n.name)}${n.active ? "" : " (inactive)"}</option>`).join("")}
         </select></label>
         ${ctMode ? "" : `<label class="field"><span>Model</span><select id="nic-model">
           <option value="virtio">virtio</option><option value="e1000e">e1000e</option><option value="rtl8139">rtl8139</option>
@@ -4425,8 +4629,7 @@ async function renderVmBody(vm: string) {
             <input id="ipam-ip" value="${esc(suggested)}" placeholder="blank = assign automatically"></label>
           <label class="field"><span>Hostname (optional)</span>
             <input id="ipam-name" value="${esc(current?.name ?? vm)}"></label>
-          <div class="dsub">The guest gets this address at its next DHCP exchange; nothing is restarted.
-            Every address is kept until the VM is deleted.</div>`,
+`,
           `${current ? `<button class="btn danger" id="ipam-clear">Release</button>` : ""}
            <button class="btn primary" id="ipam-ok">Save</button>`);
         const hostUrl = `/proxy/${conn}/networks/${encodeURIComponent(n.network)}/hosts`;
@@ -5059,8 +5262,7 @@ function openConnectionDialog(editId?: string) {
     <label class="field"><span>Name</span><input id="conn-name" value="${esc(existing?.name ?? "")}"></label>
     <label class="field"><span>URL (https://host:8443)</span><input id="conn-url" placeholder="https://host:8443" value="${esc(existing?.url ?? "")}"></label>
     <label class="field"><span>Auth Token</span>
-      <input id="conn-token" placeholder="${existing ? "leave blank to keep the current token" : "paste existing token or generate"}">
-      <label class="check"><input type="checkbox" id="conn-gen"> generate new token</label>
+      <input id="conn-token" placeholder="${existing ? "leave blank to keep the current token" : "paste existing token, or leave blank to generate one"}">
     </label>
     <p class="hint" id="conn-fp">${existing?.fingerprint ? `Pinned certificate: ${esc(existing.fingerprint)}` : ""}</p>`,
     `<button class="btn" id="conn-save">Save</button>`,
@@ -5070,12 +5272,14 @@ function openConnectionDialog(editId?: string) {
       const body: any = {
         name: $("#conn-name", el).value,
         url: $("#conn-url", el).value.trim(),
-        generate_token: $("#conn-gen", el).checked,
       };
-      const typedToken = $("#conn-token", el).value;
-      // On edit an empty token means "keep the current one"; the backend
-      // leaves it untouched when the field is absent.
-      if (!body.generate_token && (typedToken || !existing)) body.token = typedToken;
+      const typedToken = $("#conn-token", el).value.trim();
+      // Never ask the server to mint a token on edit: a blank field means
+      // "keep the current one", not "replace it with a new one". Creating
+      // with a blank field still generates one server-side, which is also what
+      // makes the install script carry that same token.
+      if (typedToken) body.token = typedToken;
+      else if (!existing) body.token = "";
 
       if (existing) {
         await api.put(`/connections/${existing.id}`, body);
@@ -5456,7 +5660,15 @@ async function openHardwareEditor(opts: {
 
   /// `opt`, but labelled by nickname. `fallback` names the entry used when the
   /// stored value is not in the list at all (a pool this caller cannot see).
+  ///
+  /// A network may be left unset: a NIC with no network is a NIC that attaches
+  /// to nothing, and libvirt wants a `<source>` even then, so the empty value
+  /// becomes `<source network=""/>`. A pool cannot be empty (a disk names one),
+  /// so the blank entry is offered for networks only.
   const optNamed = (kind: "pool" | "network", list: string[], sel: string) =>
+    (kind === "network"
+      ? `<option value="" ${sel ? "" : "selected"}>None</option>`
+      : "") +
     list
       .map((v) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(resolveName(kind, v))}</option>`)
       .join("");
@@ -5578,13 +5790,12 @@ async function openHardwareEditor(opts: {
         if (newDisk.mode === "existing" && !usable.some((v) => v.name === newDisk.volume)) {
           newDisk.volume = usable[0]?.name ?? "";
         }
-        const chosen = usable.find((v) => v.name === newDisk.volume);
         const mode = `<label class="field"><span>Disk</span><select id="g-disk-mode">
             <option value="new" ${newDisk.mode === "new" ? "selected" : ""}>Create a new volume</option>
             <option value="existing" ${newDisk.mode === "existing" ? "selected" : ""}>Use one of my volumes</option>
           </select></label>`;
         const pool = `<label class="field"><span>Storage Pool</span>
-            <select id="g-pool">${opt(pools.map((p) => p.name), newDisk.pool)}</select></label>`;
+            <select id="g-pool">${optNamed("pool", pools.map((p) => p.name), newDisk.pool)}</select></label>`;
         if (newDisk.mode === "existing") {
           return `<div class="hw-page active">
             <h3 class="hw-title">Hard Disk</h3>
@@ -5592,9 +5803,7 @@ async function openHardwareEditor(opts: {
             ${usable.length ? `<label class="field"><span>Volume</span><select id="g-volume">
                 ${usable.map((v) => `<option value="${esc(v.name)}" ${v.name === newDisk.volume ? "selected" : ""}>
                   ${esc(`${v.name} — ${fmtBytes(v.capacity)}`)}</option>`).join("")}
-              </select></label>
-              ${chosen && !chosen.blank && !canAdmin()
-                ? `<p class="hint">Attached as raw: only disks created empty here may be used as qcow2.</p>` : ""}`
+              </select></label>`
               : `<p class="hint">You have no free volumes in this pool${held.length ? " (the ones you have are already attached to a guest)" : ""}.
                   Create one from the pool's page, or choose "Create a new volume".</p>`}
             ${held.length ? `<p class="hint">In use, not offered: ${held.map((v) => esc(`${v.name} (${v.used_by!.join(", ")})`)).join("; ")}.</p>` : ""}
@@ -5981,15 +6190,21 @@ async function openHardwareEditor(opts: {
         void refreshTreeVms();
         if (opts.forUser) opts.forUser.after();
         else if (selectedConn === conn && !selectedVm) renderConn();
+        // Created on a server that is not the app's selected one (the
+        // Datacenter's tab, which lists every server's guests): the view that
+        // is showing needs the repaint, not the server that was never open.
+        else if (!selectedConn && !adminSection) renderDc();
       });
   };
 
   void render();
 }
 
-/// Back-compat entry point used by the VMs tab button.
+/// Back-compat entry point used by the VMs tab button. It no longer switches
+/// the app to another daemon when none is open: the form takes the connection
+/// it is given and the view stays where it was.
 function openCreateVm() {
-  withDaemon(() => void openHardwareEditor());
+  dcCreate((conn) => void openHardwareEditor({ conn }));
 }
 
 /// Modal listing the saved daemons; resolves to the chosen connection id, or
@@ -6025,18 +6240,11 @@ function pickDaemon(): Promise<string | null> {
 }
 
 /// The resource kinds offered by both the sidebar's Add Resource button and
-/// the server dashboard's Create Resource button. `daemon` adds the one kind
-/// that is only creatable from the sidebar (there is no server selected yet).
-function resourceCards(opts: { daemon?: boolean } = {}): string {
-  const daemon = opts.daemon
-    ? `<button class="create-resource-card" data-create="daemon">
-        <span class="metric-ic">${ic.server()}</span>
-        <b>Daemon</b>
-        <small>Connect a hypervisor host by URL and token</small>
-      </button>`
-    : "";
+/// the server dashboard's Create Resource button. Daemons are deliberately not
+/// one of them: adding a server is an administrative act, and the only place
+/// that offers it is the admin page's Daemons section.
+function resourceCards(): string {
   return `<div class="create-resource-grid">
-      ${daemon}
       <button class="create-resource-card" data-create="vm">
         <span class="metric-ic">${ic.vm()}</span>
         <b>Virtual Machine</b>
@@ -6055,40 +6263,43 @@ function resourceCards(opts: { daemon?: boolean } = {}): string {
     </div>`;
 }
 
-/// Wire a resource chooser's cards to their create flows. Every kind except
-/// the daemon itself needs a daemon, so it is picked first when none is open.
+/// Wire a resource chooser's cards to their create flows. Every kind offered
+/// needs a daemon, so it is picked first when none is open.
 function bindResourceCards(el: Element, close: () => void) {
   el.querySelectorAll("[data-create]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
       const kind = (b as HTMLElement).dataset.create!;
       close();
-      if (kind === "daemon") openConnectionDialog();
-      else if (kind === "vm") openCreateVm();
-      else if (kind === "network") withDaemon(() => openCreateNetwork());
-      else withDaemon(() => openCreatePool());
+      if (kind === "vm") openCreateVm();
+      else if (kind === "network") withDaemon((conn) => openCreateNetwork(conn));
+      else withDaemon((conn) => openCreatePool(conn));
     };
   });
 }
 
 /// Run a create flow against a daemon, asking which one when none is selected.
-function withDaemon(run: () => void) {
+/// Choosing a daemon here is a choice about the resource, not a navigation: the
+/// id goes into the flow and `selectedConn` is deliberately left alone, so the
+/// Datacenter page the user is standing on stays on screen behind the form.
+function withDaemon(run: (conn: string) => void) {
   if (selectedConn) {
-    run();
+    run(selectedConn);
     return;
   }
   void pickDaemon().then((id) => {
-    if (!id) return;
-    selectedConn = id;
-    renderTree();
-    run();
+    if (id) run(id);
   });
+}
+
+function dcCreate(run: (conn: string) => void) {
+  withDaemon(run);
 }
 
 /// Sidebar "Add Resource": daemon, VM, network or storage pool.
 function openAddResource() {
   const el = openModal(
     "Add Resource",
-    resourceCards({ daemon: true }),
+    resourceCards(),
     `<button class="btn" id="ar-cancel">Cancel</button>`,
   );
   $("#ar-cancel", el).onclick = () => el.remove();
@@ -6108,8 +6319,8 @@ function openCreateResource() {
   bindResourceCards(el, () => el.remove());
 }
 
-function openCreatePool() {
-  if (!selectedConn) return;
+function openCreatePool(conn = selectedConn) {
+  if (!conn) return;
   const el = openModal(
     "Create storage pool",
     `<div class="grid2">
@@ -6135,10 +6346,10 @@ function openCreatePool() {
     void runTask(`Create pool ${form.name}`, async () => {
       // Named by a fresh UUID; a pool has no <title>, so its display name
       // goes as ?title= and the daemon keeps it.
-      await api.postXml(`/proxy/${selectedConn}/pools?title=${encodeURIComponent(form.name)}`,
+      await api.postXml(`/proxy/${conn}/pools?title=${encodeURIComponent(form.name)}`,
         poolXml(form, newUuid()));
     }, { done: `Pool ${form.name} created`, notify: toast })
-      .then(() => { void refreshTreeVms(); renderConn(); });
+      .then(() => { void refreshTreeVms(); if (selectedConn === conn) renderConn(); else renderDc(); });
   };
 }
 
@@ -6351,8 +6562,7 @@ function openFetch(pool: string) {
      <label class="field"><span>Volume Name</span>
        <input id="fetch-name" placeholder="Leave blank to use the file name"></label>
      <label class="field"><span>SHA-256 (optional)</span>
-       <input id="fetch-sha" placeholder="Checked before the image is stored" spellcheck="false"></label>
-     <p class="hint">The server downloads the image itself; you can close this page while it runs.</p>`,
+       <input id="fetch-sha" placeholder="Checked before the image is stored" spellcheck="false"></label>`,
     `<button class="btn primary" id="fetch-go">Download</button>`,
   );
   const url = $("#fetch-url", el) as HTMLInputElement;
@@ -6750,18 +6960,21 @@ async function loadProfileLimits(el: Element) {
       ${limitSpecs(used, cap)}
     </div>`;
   let html = "";
-  if (q.shared) html += block("All servers", u.total, q.default, "shared across servers");
+  // Pooled: the limits are one figure for the whole pool, so per-server rows
+  // would be the same limits restated once per server. A server is listed only
+  // where it has an override of its own, which is a limit the pool does not
+  // state. Per-daemon mode has no pooled figure, so every server is listed.
+  const pooled = q.shared;
+  if (pooled) html += block("All servers", u.total, q.default, "shared across servers");
   for (const d of u.daemons) {
     const own = q.daemons?.[d.conn];
-    // Pooled: a daemon appears only where it has its own extra cap.
-    if (q.shared && !own) continue;
+    if (pooled && !own) continue;
     if (!d.online) {
       html += `<div class="pf-limit"><div class="pf-limit-head"><b>${esc(d.name)}</b><span class="dim-note">offline</span></div></div>`;
       continue;
     }
-    // The effective cap, not the override alone: in shared mode the pooled
-    // default still applies, so showing only the override would hide a limit
-    // the server enforces.
+    // An override is that daemon's own ceiling and replaces the global one, so
+    // its row shows the override alone -- not the tighter of it and the pool.
     html += block(d.name, d, effectiveLimit(q, d.conn), own ? "server-specific limit" : "");
   }
   setHtml(box, `${title}${html}`);
