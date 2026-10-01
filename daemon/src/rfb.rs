@@ -81,14 +81,16 @@ impl Frame {
     }
 }
 
-/// One update ready for the viewer: raw RGBA pixels for `rect` only.
+/// One update ready for the viewer: pixels for `rect` only.
 pub struct Update {
     pub seq: u64,
     pub w: u16,
     pub h: u16,
     pub rect: Rect,
-    /// Row-major RGBA, `rect.w * rect.h * 4` bytes — already converted from the
-    /// guest's BGRX by `raw_to_rgba`, so a consumer must not convert again.
+    /// Tightly-packed **RGB** (three bytes per pixel), not RGBA: the guest's
+    /// alpha is BGRX padding that `raw_to_rgba` overwrites with 255 and the
+    /// viewer discards, so sending it wasted a quarter of every frame. A
+    /// consumer must expand it to RGBA itself for `ImageData`.
     pub pixels: Vec<u8>,
 }
 
@@ -247,17 +249,10 @@ impl Session {
         };
         let rect = clamp_rect(rect, f.w, f.h);
 
-        // Copy just the rectangle out of the framebuffer.
-        let (fw, rw, rh) = (f.w as usize, rect.w as usize, rect.h as usize);
-        let mut pixels = vec![0u8; rw * rh * 4];
-        for row in 0..rh {
-            let src = ((rect.y as usize + row) * fw + rect.x as usize) * 4;
-            let dst = row * rw * 4;
-            let n = rw * 4;
-            if src + n <= f.rgba.len() {
-                pixels[dst..dst + n].copy_from_slice(&f.rgba[src..src + n]);
-            }
-        }
+        // Tightly-packed RGB, not RGBA: see `rect_to_rgb` -- the alpha byte is
+        // a constant the viewer discards, and shipping it was 25% of every
+        // frame. A full 1280x800 rectangle goes from 4.10 MB to 3.07 MB.
+        let pixels = rect_to_rgb(&f.rgba, f.w, rect);
 
         // Everything pending has now been delivered, so the next update only
         // carries what changes from here on. A viewer that falls behind this
@@ -430,6 +425,33 @@ pub fn raw_to_rgba(src: &[u8], ord: PixOrder, out: &mut [u8]) {
         d[2] = s[ord.b];
         d[3] = 255;
     }
+}
+
+/// Copy one rectangle of the framebuffer out as tightly-packed **RGB** (three
+/// bytes per pixel) rather than RGBA.
+///
+/// The alpha byte is not information: the guest sends BGRX, so the 4th byte is
+/// padding, and `raw_to_rgba` forces it to 255. The viewer already throws it
+/// away (`frameToRgba` hardcodes `px[i + 3] = 255`), so shipping it was a flat
+/// 25% of every frame spent on a constant. Dropping it costs one store per
+/// pixel in the browser, which is already looping.
+pub fn rect_to_rgb(fb: &[u8], fb_w: u16, rect: Rect) -> Vec<u8> {
+    let (fw, rw, rh) = (fb_w as usize, rect.w as usize, rect.h as usize);
+    let mut out = vec![0u8; rw * rh * 3];
+    for row in 0..rh {
+        let src = ((rect.y as usize + row) * fw + rect.x as usize) * 4;
+        let dst = row * rw * 3;
+        for col in 0..rw {
+            let s = src + col * 4;
+            let d = dst + col * 3;
+            if s + 3 <= fb.len() {
+                out[d] = fb[s];
+                out[d + 1] = fb[s + 1];
+                out[d + 2] = fb[s + 2];
+            }
+        }
+    }
+    out
 }
 
 /// Blit a decoded rectangle into the framebuffer at (x, y).
@@ -811,6 +833,69 @@ mod tests {
         assert_eq!(out[4..8], [0x03, 0x02, 0x01, 255]);
     }
 
+    /// The wire payload is RGB: three bytes per pixel, alpha dropped.
+    ///
+    /// This is the bandwidth fix, so it is worth pinning at the byte level: a
+    /// regression to four bytes would silently restore 33% more traffic per
+    /// frame (and ~44% once the base64 that used to sit on top is counted).
+    #[test]
+    fn the_delivered_payload_is_rgb_not_rgba() {
+        // 3x1 framebuffer, alpha deliberately varying so a stray copy of it
+        // would be visible rather than coincidentally correct.
+        let fb: Vec<u8> = vec![
+            10, 20, 30, 255, // px0 red low
+            40, 50, 60, 0, // px1 alpha 0: must NOT appear on the wire
+            70, 80, 90, 128, // px2
+        ];
+        let out = rect_to_rgb(
+            &fb,
+            3,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 3,
+                h: 1,
+            },
+        );
+        assert_eq!(out.len(), 9, "3 pixels x 3 bytes");
+        assert_eq!(out, vec![10, 20, 30, 40, 50, 60, 70, 80, 90]);
+        // A sub-rectangle takes only its own pixels, and still RGB.
+        let out = rect_to_rgb(
+            &fb,
+            3,
+            Rect {
+                x: 1,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+        );
+        assert_eq!(out, vec![40, 50, 60]);
+    }
+
+    /// A rectangle that runs past the framebuffer must not panic: the copy is
+    /// bounded per pixel, and the bytes it cannot read stay zero.
+    #[test]
+    fn rgb_copy_is_bounded_by_the_framebuffer() {
+        let fb = vec![1u8; 4 * 4 * 4]; // 4x4
+        let out = rect_to_rgb(
+            &fb,
+            4,
+            Rect {
+                x: 3,
+                y: 3,
+                w: 2,
+                h: 2,
+            },
+        );
+        assert_eq!(
+            out.len(),
+            2 * 2 * 3,
+            "the shape asked for is what is returned"
+        );
+        assert!(out.iter().all(|b| *b == 0 || *b == 1));
+    }
+
     #[test]
     fn blit_lands_at_the_right_offset() {
         // 4x2 framebuffer, write a 2x1 red rect at (1,1)
@@ -977,7 +1062,9 @@ mod tests {
         let u = sess
             .next_update(0, Duration::from_millis(50), Duration::ZERO)
             .expect("a waiting viewer must get pixels");
-        assert_eq!(u.pixels.len(), u.rect.w as usize * u.rect.h as usize * 4);
+        // Three bytes per pixel, not four: the alpha byte is a constant and is
+        // not sent (see `rect_to_rgb`).
+        assert_eq!(u.pixels.len(), u.rect.w as usize * u.rect.h as usize * 3);
         // The whole screen in a single rectangle: no strips.
         assert_eq!(
             (u.rect.x, u.rect.y, u.rect.w, u.rect.h),
@@ -1140,7 +1227,8 @@ mod tests {
         );
         // And the payload covers the whole merged rect, so the viewer's single
         // putImageData has the pixels for both corners.
-        assert_eq!(u.pixels.len(), 64 * 64 * 4);
+        // RGB, so three bytes per pixel rather than the old four.
+        assert_eq!(u.pixels.len(), 64 * 64 * 3);
     }
 
     /// A viewer parked in `next_update` must be woken when the session dies.

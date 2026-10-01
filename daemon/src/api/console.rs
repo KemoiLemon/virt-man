@@ -14,7 +14,6 @@ use axum::extract::{Json as ExtractJson, Path};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
@@ -122,17 +121,41 @@ async fn frame(
         return Ok(axum::Json(json!({"seq": 0})).into_response());
     };
 
-    Ok(axum::Json(json!({
-        "seq": u.seq,
-        "width": u.w,
-        "height": u.h,
-        "x": u.rect.x,
-        "y": u.rect.y,
-        "w": u.rect.w,
-        "h": u.rect.h,
-        "pixels": base64::engine::general_purpose::STANDARD.encode(&u.pixels),
-    }))
-    .into_response())
+    // Pixels go out as the response BODY, not inside JSON as base64.
+    //
+    // Base64 exists to carry binary through a text channel, and it costs a
+    // third again in size plus a full encode here and decode in the browser --
+    // for a full 1280x800 frame that was 4.10 MB of pixels becoming 5.46 MB of
+    // payload. A console is the one endpoint where the body is megabytes per
+    // frame, so it is the one place the encoding's cost is the whole problem:
+    // with RGB on the wire and no base64, the same frame is 3.07 MB, ~44% less.
+    //
+    // The geometry rides in response headers so the body stays the pixels
+    // exactly, with no framing bytes to parse. A `{seq: 0}` poll still answers
+    // as JSON, which the viewer detects by content type.
+    let mut resp = axum::body::Body::from(u.pixels).into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
+    // No-store: a console frame is stale the moment it is sent, and a cached
+    // one would be a wrong image rather than a slow one.
+    h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    for (name, v) in [
+        ("x-vm-seq", u.seq),
+        ("x-vm-w", u.w as u64),
+        ("x-vm-h", u.h as u64),
+        ("x-vm-x", u.rect.x as u64),
+        ("x-vm-y", u.rect.y as u64),
+        ("x-vm-rw", u.rect.w as u64),
+        ("x-vm-rh", u.rect.h as u64),
+    ] {
+        if let Ok(v) = v.to_string().parse() {
+            h.insert(name, v);
+        }
+    }
+    Ok(resp)
 }
 
 #[derive(Deserialize)]

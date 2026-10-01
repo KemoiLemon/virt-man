@@ -64,6 +64,17 @@ export async function cacheFirst(load: () => Promise<unknown>): Promise<boolean>
 
 export const api = {
   get: <T>(url: string) => request<T>("GET", url),
+  // A GET whose body is not JSON: console frames are binary, and `handle`
+  // would try to parse megabytes of pixels as text. The caller reads the
+  // response itself; the error path stays the same shape.
+  getRaw: async (url: string): Promise<Response> => {
+    const res = await fetch(url, { method: "GET", credentials: "same-origin" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, (data as any).error ?? res.statusText);
+    }
+    return res;
+  },
   post: <T>(url: string, body?: unknown) => request<T>("POST", url, body),
   put: <T>(url: string, body?: unknown) => request<T>("PUT", url, body),
   // A body only where the route names its target in it (`DELETE /acl`).

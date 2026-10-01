@@ -22,13 +22,25 @@ before(async () => {
 
 // ---- pixel decode ----------------------------------------------------------
 
-test("the daemon's RGBA payload is used as-is, never swapped again", () => {
-  // The daemon's framebuffer is already RGBA: its `raw_to_rgba` converts the
-  // guest's BGRX wire bytes once, and `next_update` copies it out unchanged.
-  // Swapping here converted a second time and rendered blue as red.
-  const bin = String.fromCharCode(0x10, 0x20, 0x30, 0x00);
+test("the daemon's RGB payload is expanded, never swapped again", () => {
+  // The daemon's `raw_to_rgba` converts the guest's BGRX wire bytes once, and
+  // the payload is then RGB: three bytes per pixel, because the alpha channel
+  // is a constant and is not sent. This side only re-adds that constant.
+  // Swapping channels here would convert a second time and render blue as red.
+  const bin = Uint8Array.from([0x10, 0x20, 0x30]);
   const px = con.frameToRgba(bin, 1, 1);
-  assert.deepEqual([...px], [0x10, 0x20, 0x30, 255], "r, g, b pass through; alpha forced");
+  assert.deepEqual([...px], [0x10, 0x20, 0x30, 255], "r, g, b pass through; alpha supplied");
+});
+
+test("three bytes per pixel on the wire, four in memory", () => {
+  // The whole point of the encoding: a frame costs 25% less to transfer. A
+  // regression to four bytes on the wire would silently restore the old
+  // bandwidth (and a regression to three in memory would misplace every pixel
+  // after the first).
+  const bin = Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  const px = con.frameToRgba(bin, 2, 2);
+  assert.equal(px.length, 4 * 4, "four pixels of RGBA in memory");
+  assert.deepEqual([...px], [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]);
 });
 
 test("a guest colour survives the daemon's conversion and this one", () => {
@@ -46,10 +58,10 @@ test("a guest colour survives the daemon's conversion and this one", () => {
   ];
   for (const [r, g, b, what] of cases) {
     // What the guest puts on the wire, given the format we request.
-    const wire = String.fromCharCode(b, g, r, 0);
-    // What the daemon's raw_to_rgba makes of it: r = wire[2], g = wire[1], b = wire[0].
-    const payload = String.fromCharCode(
-      wire.charCodeAt(2), wire.charCodeAt(1), wire.charCodeAt(0), 255);
+    const wire = [b, g, r, 0];
+    // What the daemon's raw_to_rgba makes of it: r = wire[2], g = wire[1],
+    // b = wire[0] -- and then RGB on the payload, so alpha is dropped.
+    const payload = Uint8Array.from([wire[2], wire[1], wire[0]]);
     const px = con.frameToRgba(payload, 1, 1);
     assert.deepEqual(
       [...px], [r, g, b, 255],
@@ -60,7 +72,7 @@ test("a guest colour survives the daemon's conversion and this one", () => {
 test("every decoded pixel is fully opaque", () => {
   // The guest's 4th byte is BGRX padding, not alpha. Trusting it would paint a
   // fully transparent screen.
-  const bin = String.fromCharCode(...Array.from({ length: 16 }, () => 0));
+  const bin = Uint8Array.from({ length: 12 }, () => 0);
   const px = con.frameToRgba(bin, 2, 2);
   for (let i = 3; i < px.length; i += 4) {
     assert.equal(px[i], 255, `pixel ${(i - 3) / 4} opaque`);
@@ -69,13 +81,13 @@ test("every decoded pixel is fully opaque", () => {
 
 test("a short payload decodes to null instead of a torn image", () => {
   // A truncated frame must be dropped, not painted as garbage.
-  assert.equal(con.frameToRgba("abc", 4, 4), null);
+  assert.equal(con.frameToRgba(Uint8Array.from([1, 2, 3]), 4, 4), null);
 });
 
 test("decoded buffers are ImageData-compatible", () => {
   // ImageData rejects a SharedArrayBuffer-backed array; the decode must
   // always hand back a plain ArrayBuffer.
-  const px = con.frameToRgba(String.fromCharCode(0, 0, 0, 0), 1, 1);
+  const px = con.frameToRgba(Uint8Array.from([0, 0, 0]), 1, 1);
   assert.ok(px.buffer instanceof ArrayBuffer, "backed by a plain ArrayBuffer");
   assert.equal(px.length, 4, "exactly one pixel");
 });

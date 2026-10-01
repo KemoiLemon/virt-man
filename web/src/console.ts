@@ -139,7 +139,35 @@ interface FrameUpdate {
   y: number;
   w: number;
   h: number;
-  pixels: string;
+  /// Tightly-packed RGB, three bytes per pixel. Binary on the wire rather than
+  /// base64 in JSON: see the frame endpoint for why (it was a third of every
+  /// frame, on the one endpoint that ships megabytes at a time).
+  pixels: Uint8Array;
+}
+
+/// Read one frame's geometry from the response headers and the pixels from its
+/// body. Returns null for the `{seq: 0}` poll answer, which the daemon still
+/// sends as JSON because there is nothing else to say.
+async function readFrame(res: Response): Promise<FrameUpdate | null> {
+  const ct = res.headers.get("content-type") ?? "";
+  if (!ct.includes("application/octet-stream")) {
+    const j = (await res.json()) as { seq?: number };
+    return j?.seq ? ({ seq: j.seq, pixels: new Uint8Array(0) } as FrameUpdate) : null;
+  }
+  const n = (k: string) => Number(res.headers.get(k) ?? 0);
+  const seq = n("x-vm-seq");
+  if (!seq) return null;
+  const buf = await res.arrayBuffer();
+  return {
+    seq,
+    width: n("x-vm-w"),
+    height: n("x-vm-h"),
+    x: n("x-vm-x"),
+    y: n("x-vm-y"),
+    w: n("x-vm-rw"),
+    h: n("x-vm-rh"),
+    pixels: new Uint8Array(buf),
+  };
 }
 
 let current: ConsoleHandle | null = null;
@@ -188,21 +216,24 @@ export function fitScale(guestW: number, guestH: number, stageW: number, stageH:
 // The ArrayBuffer parameter is load-bearing: TypeScript otherwise infers
 // ArrayBufferLike, which ImageData refuses because it could be shared.
 export function frameToRgba(
-  bin: string,
+  bin: Uint8Array,
   w: number,
   h: number,
 ): Uint8ClampedArray<ArrayBuffer> | null {
-  const need = w * h * 4;
+  const n = w * h;
+  const need = n * 3;
   if (bin.length < need) return null;
-  const px = new Uint8ClampedArray(new ArrayBuffer(need));
-  for (let i = 0; i < need; i += 4) {
-    px[i] = bin.charCodeAt(i);
-    px[i + 1] = bin.charCodeAt(i + 1);
-    px[i + 2] = bin.charCodeAt(i + 2);
-    // The daemon forces alpha opaque; forced again here because the guest's
-    // 4th byte is BGRX padding, and a transparent screen is worse than a
-    // wasted store.
-    px[i + 3] = 255;
+  const px = new Uint8ClampedArray(new ArrayBuffer(n * 4));
+  // RGB in, RGBA out. Three bytes per pixel on the wire (the alpha channel is
+  // a constant the daemon does not send), four in memory because that is what
+  // ImageData takes. The expansion is why the payload got smaller rather than
+  // just different: 25% less to transfer, for one store per pixel here.
+  for (let i = 0, j = 0; i < n; i++, j += 3) {
+    const d = i * 4;
+    px[d] = bin[j];
+    px[d + 1] = bin[j + 1];
+    px[d + 2] = bin[j + 2];
+    px[d + 3] = 255;
   }
   return px;
 }
@@ -305,8 +336,8 @@ export async function attachConsole(
       state.h = u.height;
       applyScale();
     }
-    if (u.w > 0 && u.h > 0 && u.pixels) {
-      const px = frameToRgba(atob(u.pixels), u.w, u.h);
+    if (u.w > 0 && u.h > 0 && u.pixels.length) {
+      const px = frameToRgba(u.pixels, u.w, u.h);
       if (px) {
         ctx ??= canvas.getContext("2d", { alpha: false });
         ctx?.putImageData(new ImageData(px, u.w, u.h), u.x, u.y);
@@ -329,8 +360,8 @@ export async function attachConsole(
       let u: FrameUpdate | null = null;
       const settle = speed().settleMs;
       try {
-        u = await api.get<FrameUpdate>(
-          `${base}/frame?since=${Math.max(0, state.seq)}&settle_ms=${settle}`,
+        u = await readFrame(
+          await api.getRaw(`${base}/frame?since=${Math.max(0, state.seq)}&settle_ms=${settle}`),
         );
       } catch {
         if (!state.live) break;
