@@ -67,6 +67,14 @@ VIRT_MAN_WEB_DATA=/tmp/vm-live VIRT_MAN_WEB_DIST=$PWD/web/dist \
   ./web/server/target/debug/virt-man-web
 ```
 
+**Start it as a BACKGROUND task, never as a plain foreground command.** The
+server runs until it is killed, so a foreground invocation blocks the agent
+forever and swallows the rest of the turn — the suite it was meant to serve
+never runs. Use the background-task tool (`bg_run`) with the same env, then
+check it is listening (`curl -sf http://127.0.0.1:8799/ -o /dev/null`) before
+pointing a suite at it, and kill that task when the suites are done. The same
+applies to any watcher, dev server or long-lived process.
+
 **Run live suites with a gap between them** (`sleep 2`). They attach real
 console sessions, and back-to-back runs collide.
 

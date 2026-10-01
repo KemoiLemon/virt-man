@@ -3,6 +3,7 @@ import { api, cacheFirst, effectiveLimit, remainingLimits, uploadWithProgress } 
 import type { ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, StagedUpload, UsageCounts, User, VolumeSummary } from "./api";
 import { adminRowMenu, adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
+import { setSpeed, speed, speedOptions } from "./console-speed";
 // The text console (xterm.js) is loaded when a container console opens:
 // it would otherwise more than double the bundle every page load pays for.
 let terminal: typeof import("./terminal") | null = null;
@@ -4123,6 +4124,11 @@ async function renderVmBody(vm: string) {
           <button class="btn icon" id="con-fit" title="Fit to window">${ic.fit()}</button>
         </span>
         <span class="console-group" style="margin-left:auto">
+          <label class="console-speed" title="${esc(speed().hint)}">
+            <span class="console-speed-label">Speed</span>
+            <select id="con-speed" aria-label="Console speed">${speedOptions()}</select>
+          </label>
+          <button class="btn icon" id="con-type" title="Type text into the guest">${ic.clipboard()}</button>
           <button class="btn" id="con-cad" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
         </span>
       </div>
@@ -4136,6 +4142,17 @@ async function renderVmBody(vm: string) {
       if (h) h.textContent = t;
     };
 
+    // The speed picker is a local preference, not a console capability: it
+    // persists and stays usable even when the viewer cannot attach, because
+    // the choice still applies to the session that eventually does connect.
+    const speedSel = $("#con-speed") as HTMLSelectElement | null;
+    if (speedSel) {
+      speedSel.onchange = () => {
+        const s = setSpeed(speedSel.value);
+        setHint(`${s.label}: ${s.hint}`);
+      };
+    }
+
     try {
       const g = await api.get<{ graphics: { kind: string } | null }>(`${guestBase(selectedConn!, vm)}/graphics`);
       const kind = g.graphics?.kind ?? "vnc";
@@ -4144,7 +4161,7 @@ async function renderVmBody(vm: string) {
       // SPICE is not RFB and has no usable browser client, so hand the guest
       // over to virt-viewer instead of pretending to render it here.
       if (kind !== "vnc") {
-        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
+        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad", "#con-type"]) {
           const el = $(id);
           if (el) el.disabled = true;
         }
@@ -4179,7 +4196,7 @@ async function renderVmBody(vm: string) {
       if (!con) {
         // The daemon refused to attach. Leave the toolbar visible but inert
         // rather than silently dead, and say why.
-        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
+        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad", "#con-type"]) {
           const el = $(id);
           if (el) el.disabled = true;
         }
@@ -4217,6 +4234,7 @@ async function renderVmBody(vm: string) {
       }, { passive: false });
 
       $("#con-cad").onclick = () => void con.sendCtrlAltDel();
+      $("#con-type").onclick = () => void typeIntoGuest(con);
 
       // Re-fit when the pane resizes, so the guest stays centred.
       const stage = $("#console-stage");
@@ -5224,6 +5242,68 @@ function askText(title: string, label: string, value = "", placeholder = ""): Pr
     };
     input.focus();
     input.select();
+  });
+}
+
+/// Type free text into a running guest as keystrokes.
+///
+/// A textarea rather than a keystroke-sniffing listener, because the point is
+/// to get text IN from outside the guest (a password manager, a config
+/// snippet, a long URL). The console still owns real typing; this is the paste
+/// half, which RFB clipboard would only deliver to a guest running a VNC
+/// clipboard agent, so it would look broken on all the others.
+///
+/// Multiline is kept: newlines become Return in the daemon, so a pasted script
+/// runs line by line like it was typed.
+async function typeIntoGuest(con: { typeText(t: string): Promise<void> }) {
+  const text = await askMultiline(
+    "Type into guest",
+    "Text",
+    "Typed as keystrokes — the guest sees a real keyboard.",
+  );
+  if (text === null || text === "") return;
+  await runTask(
+    `Type ${text.length} character(s) into the guest`,
+    () => con.typeText(text),
+    { done: "Text typed into the guest", notify: toast },
+  );
+}
+
+/// A multi-line sibling of askText. Separate rather than a parameter on it:
+/// askText's single `<input>` is what makes Enter submit and select-on-open
+/// work, and both would have to be undone for a textarea.
+function askMultiline(title: string, label: string, hint: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: string | null) => {
+      if (done) return;
+      done = true;
+      el.remove();
+      resolve(v);
+    };
+    const el = openModal(
+      title,
+      // The hint is a live description of what the action does with the text,
+      // not narration about the field.
+      `<label class="field"><span>${esc(label)}</span></label>
+       <textarea id="ask-text" rows="8" spellcheck="false" placeholder=""></textarea>
+       <div class="muted" style="font-size:11px">${esc(hint)}</div>`,
+      `<button class="btn" id="ask-cancel">Cancel</button>
+       <button class="btn primary" id="ask-ok">Type it</button>`,
+    );
+    const ta = $("#ask-text", el) as HTMLTextAreaElement;
+    // Ctrl/Cmd+Enter submits; a bare Enter must stay a newline, or a pasted
+    // multi-line snippet could never be entered.
+    ta.onkeydown = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) finish(ta.value);
+      if (e.key === "Escape") finish(null);
+    };
+    $("#ask-ok", el).onclick = () => finish(ta.value);
+    $("#ask-cancel", el).onclick = () => finish(null);
+    (el.querySelector(".x") as HTMLElement).onclick = () => finish(null);
+    el.onclick = (e: Event) => { if (e.target === el) finish(null); };
+    el.addEventListener("modal-escape", () => finish(null));
+    ta.focus();
   });
 }
 

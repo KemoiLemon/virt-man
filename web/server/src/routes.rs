@@ -341,6 +341,14 @@ mod tests {
             priv_of("POST", "/domains/web/console/key"),
             Some((vm.into(), "VM.Console"))
         );
+        // The console's own subroutes are covered by one catch-all, so a new one
+        // (the paste/type endpoint) is reachable without touching this file.
+        // Pinned because a route the classifier does not recognise is refused
+        // OUTRIGHT, which would make the typing button fail only for non-admins.
+        assert_eq!(
+            priv_of("POST", "/domains/web/console/type"),
+            Some((vm.into(), "VM.Console"))
+        );
         assert_eq!(
             priv_of("DELETE", "/domains/web"),
             Some((vm.into(), "VM.Allocate"))

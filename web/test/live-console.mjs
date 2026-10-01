@@ -120,7 +120,7 @@ if (spice) {
   });
 
   check("controls that cannot work are disabled, not left pretending", () => {
-    for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
+    for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad", "#con-type"]) {
       assert.equal(document.querySelector(id).disabled, true, `${id} disabled`);
     }
   });
@@ -164,7 +164,7 @@ if (spice) {
     });
   } else {
     check("an unavailable console disables its controls instead of going dead", () => {
-      for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad"]) {
+      for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad", "#con-type"]) {
         assert.equal(document.querySelector(id).disabled, true, `${id} disabled`);
       }
       const hint = document.querySelector("#con-hint")?.textContent ?? "";
@@ -173,15 +173,92 @@ if (spice) {
   }
 }
 
-check("the toolbar offers zoom and Ctrl+Alt+Del, and no dead preset picker", () => {
+check("the toolbar offers zoom, a speed preset, clipboard and Ctrl+Alt+Del", () => {
   assert.ok(document.querySelector("#con-cad"), "Ctrl+Alt+Del");
   assert.ok(document.querySelector("#con-fit"), "fit");
-  // The noVNC preset/clipboard controls are gone with the library itself;
-  // leaving them behind would advertise features nothing implements.
-  for (const id of ["#con-preset", "#con-paste", "#con-copy", "#con-type"]) {
+  // The speed preset is a real control again, and it has to DO something: the
+  // picker drives the daemon's damage-coalescing window, so a preset that
+  // changed nothing would be the dead picker this check used to forbid.
+  const sel = document.querySelector("#con-speed");
+  assert.ok(sel, "speed preset present");
+  assert.equal(sel.options.length, 3, "Fast, Balanced and Quality");
+  assert.equal(sel.value, "balanced", "balanced by default");
+  assert.ok(document.querySelector("#con-type"), "type-text button present");
+  // The noVNC clipboard buttons are still gone; our own type button replaced
+  // them rather than reviving them.
+  for (const id of ["#con-preset", "#con-paste", "#con-copy"]) {
     assert.equal(document.querySelector(id), null, `${id} removed`);
   }
 });
+
+check("the speed preset is offered as a themed listbox, not a native select", () => {
+  const sel = document.querySelector("#con-speed");
+  const trigger = sel.nextElementSibling;
+  assert.ok(trigger?.classList.contains("select-trigger"), "enhanceSelects built a trigger");
+  const cs = window.getComputedStyle(sel);
+  assert.equal(cs.display, "none", "the native select is hidden behind the trigger");
+});
+
+check("choosing a preset persists it across a reload", () => {
+  const sel = document.querySelector("#con-speed");
+  sel.value = "quality";
+  sel.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.equal(window.localStorage.getItem("virt-man.console-speed"), "quality",
+    "the choice is stored, so a reload keeps it");
+});
+
+// The typing flow needs a LIVE viewer: the daemon only accepts /type against a
+// running VNC session, and a guest that is shut off (which the fixture defines,
+// so the state-aware checks hold) has none. So this runs only when the viewer
+// attached; otherwise the controls must be inert, which is asserted below.
+const attached = !document.querySelector("#con-zoom-in")?.disabled;
+const typed = [];
+const realFetch = window.fetch;
+
+if (!spice && attached) {
+  window.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/type")) typed.push(JSON.parse(init?.body ?? "{}").text);
+    return realFetch(input, init);
+  };
+
+  document.querySelector("#con-type")
+    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(400);
+
+  check("the clipboard button opens a multi-line box", () => {
+    const ta = document.querySelector("#ask-text");
+    assert.ok(ta, "a textarea is offered");
+    assert.equal(ta.tagName, "TEXTAREA", "multi-line, not a one-line input");
+    assert.equal(ta.rows, 8, `room for a snippet (rows=${ta.rows})`);
+  });
+
+  const ta = document.querySelector("#ask-text");
+  if (ta) {
+    ta.value = "echo hello\n";
+    document.querySelector("#ask-ok")
+      ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await wait(900);
+  }
+
+  check("submitting types the text into the guest, newline and all", () => {
+    assert.equal(document.querySelector("#ask-text"), null, "the modal closed");
+    assert.equal(typed.length, 1, `one type request: ${JSON.stringify(typed)}`);
+    assert.equal(typed[0], "echo hello\n", "sent verbatim, in a single request");
+  });
+
+  window.fetch = realFetch;
+} else {
+  results.push(["info", spice
+    ? "guest is not VNC — typing flow not exercised"
+    : "guest is not running — typing flow not exercised"]);
+
+  check("without a live viewer the clipboard button is disabled, not a silent no-op", () => {
+    const b = document.querySelector("#con-type");
+    assert.ok(b, "the button is still shown");
+    assert.equal(b.disabled, true, "and cannot be clicked into nothing");
+  });
+}
 
 // Leaving the console must tear the session down.
 tabNamed("Summary")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

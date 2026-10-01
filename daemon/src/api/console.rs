@@ -33,6 +33,7 @@ pub fn routes() -> Router {
         .route("/domains/{name}/console/frame", get(frame))
         .route("/domains/{name}/console/pointer", post(pointer))
         .route("/domains/{name}/console/key", post(key))
+        .route("/domains/{name}/console/type", post(type_text))
         .route("/domains/{name}/console/disconnect", post(disconnect))
         .route("/domains/{name}/console/status", get(status))
         .route("/domains/{name}/console/vv", get(vv_file))
@@ -92,6 +93,10 @@ struct Since {
     /// Last sequence the caller has painted; 0 asks for a full frame.
     #[serde(default)]
     since: u64,
+    /// Console speed preset, in ms of damage-coalescing window. Absent or 0 is
+    /// "Fast": hand out the first change immediately.
+    #[serde(default)]
+    settle_ms: u64,
 }
 
 /// Long-poll for the next changed rectangle.
@@ -107,8 +112,9 @@ async fn frame(
         return Err(ApiError::bad_request(e));
     }
 
+    let settle = crate::rfb::settle_from_ms(q.settle_ms);
     // next_update parks on a condvar, so it must not run on a runtime thread.
-    let update = tokio::task::spawn_blocking(move || sess.next_update(q.since, FRAME_WAIT))
+    let update = tokio::task::spawn_blocking(move || sess.next_update(q.since, FRAME_WAIT, settle))
         .await
         .map_err(|e| ApiError::internal(format!("frame task: {e}")))?;
 
@@ -158,6 +164,39 @@ async fn key(
 ) -> Result<Response, ApiError> {
     let sess = crate::rfb::get(&name).ok_or_else(|| ApiError::not_found("no console session"))?;
     sess.key(k.keysym, k.down).map_err(ApiError::bad_request)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct TypeText {
+    text: String,
+}
+
+/// Type a string into the guest as synthetic key events ("paste").
+///
+/// Not the RFB clipboard channel: `ClientCutText` only reaches a guest that is
+/// running a VNC clipboard agent, so on a guest without one it does nothing and
+/// looks broken. Keystrokes always land on a guest that has a keyboard.
+///
+/// Bounded: each character is two writes to the guest's VNC socket, so a
+/// megabyte pasted by mistake would block the session for a long time. The cap
+/// is the caller's own typing, not a limit anyone will meet by hand.
+async fn type_text(
+    Path(name): Path<String>,
+    ExtractJson(t): ExtractJson<TypeText>,
+) -> Result<Response, ApiError> {
+    const MAX_CHARS: usize = 8192;
+    if t.text.chars().count() > MAX_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "text is too long to type ({MAX_CHARS} characters at most)"
+        )));
+    }
+    let sess = crate::rfb::get(&name).ok_or_else(|| ApiError::not_found("no console session"))?;
+    // Every write goes to the guest's socket, so keep it off the runtime.
+    tokio::task::spawn_blocking(move || sess.type_text(&t.text))
+        .await
+        .map_err(|e| ApiError::internal(format!("type task: {e}")))?
+        .map_err(ApiError::bad_request)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

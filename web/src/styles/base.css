@@ -449,6 +449,9 @@ table.grid tr:hover td { background: var(--hover); }
 }
 .console-group { display: flex; align-items: center; gap: 6px; }
 /* The preset picker is a labelled control, but must not stretch. */
+.console-speed { display: flex; align-items: center; gap: 6px; }
+.console-speed-label { font-size: 11px; color: var(--dim); letter-spacing: 1px; text-transform: uppercase; }
+.console-speed .select-trigger { min-width: 104px; }
 .console-hint { font-size: 11px; color: var(--dim); padding-bottom: 10px; }
 
 /* The screen is centred in the stage and scaled to the LOCAL viewport; the

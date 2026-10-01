@@ -140,7 +140,6 @@ test("module exposes the console contract the UI depends on", () => {
   assert.equal(typeof con.detachConsole, "function");
   assert.equal(typeof con.currentConsole, "function");
 });
-
 test("detachConsole is safe with nothing attached", () => {
   con.detachConsole();
   assert.equal(con.currentConsole(), null, "no console after detaching");
@@ -166,6 +165,29 @@ test("attachConsole reports failure instead of throwing", async () => {
     (m) => seen.push(m));
   assert.equal(handle, null, "no handle when the daemon refuses");
   assert.ok(seen.length > 0, `status reported: ${JSON.stringify(seen)}`);
+});
+
+test("a handle offers Ctrl+Alt+Del and typing text into the guest", async () => {
+  // Both are part of the ConsoleHandle contract the toolbar binds to; a
+  // missing one is a button that throws when clicked.
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    calls.push([String(url), init?.body]);
+    if (String(url).includes("/connect")) {
+      return Promise.resolve(new Response(JSON.stringify({ width: 16, height: 16 })));
+    }
+    return Promise.resolve(new Response(null, { status: 204 }));
+  };
+  const stage = document.createElement("div");
+  const handle = await con.attachConsole(stage, "vnc", "/proxy/x/domains/y/console", () => {});
+  assert.ok(handle, "a VNC viewer attached");
+  await handle.typeText("hi");
+  const typed = calls.find(([u]) => u.endsWith("/type"));
+  assert.ok(typed, `the text went to the type endpoint: ${JSON.stringify(calls)}`);
+  assert.equal(JSON.parse(typed[1]).text, "hi", "the text is sent verbatim, in one request");
+  con.detachConsole();
+  globalThis.fetch = realFetch;
 });
 
 test("zoom stepping clamps and round-trips through fit", () => {

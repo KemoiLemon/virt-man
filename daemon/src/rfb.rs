@@ -24,7 +24,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub type R<T> = Result<T, String>;
 
@@ -101,6 +101,16 @@ pub struct Session {
     tx: Mutex<Option<TcpStream>>,
     running: AtomicBool,
     error: Mutex<Option<String>>,
+    /// When the last `next_update` handed pixels out, so a viewer asking for a
+    /// settling window can be made to wait. Written under `frame`, the same
+    /// lock the wait predicate runs under, so it cannot be read mid-update.
+    pub last_sent: Mutex<Option<Instant>>,
+}
+
+/// How long a caller is willing to let damage accumulate before it is
+/// delivered. See `next_update`.
+pub fn settle_from_ms(ms: u64) -> Duration {
+    Duration::from_millis(ms.min(1000))
 }
 
 impl Session {
@@ -119,7 +129,93 @@ impl Session {
     /// the backend when the frame lands, so the pixels go out on the same hop
     /// that was already waiting. No poll interval, no second round trip, and
     /// no image compression.
-    pub fn next_update(&self, since: u64, timeout: Duration) -> Option<Update> {
+    ///
+    /// `settle` is the console speed preset (0 = Fast). It trades latency for
+    /// image coherence, and it is the only real knob this architecture has:
+    /// the daemon decodes every guest frame either way, so the saving is in how
+    /// many updates leave and how much of the screen each one redraws. Waiting
+    /// lets `Frame::touch` merge what would have been several rectangles into
+    /// one, so the browser tears less — at the cost of showing them later. A
+    /// settling delay NEVER loses pixels: damage stays merged in the
+    /// framebuffer until it is handed out, and `damage_base` still forces a
+    /// whole screen for a viewer that fell too far behind.
+    pub fn next_update(&self, since: u64, timeout: Duration, settle: Duration) -> Option<Update> {
+        if settle.is_zero() {
+            // Fast: hand out the very first change, no coalescing at all.
+            return self.take_update(since, timeout);
+        }
+        self.take_update_settled(since, timeout, settle)
+    }
+
+    /// The settled path: hold a fresh frame until `settle` has elapsed since
+    /// the previous delivery, so the damage of a repaint burst merges into one
+    /// rectangle instead of arriving as several partial paints (which is what
+    /// tearing looks like).
+    ///
+    /// The window is measured from the LAST DELIVERY, not from when this call
+    /// arrived: a viewer that re-arms the moment it gets pixels would otherwise
+    /// pay a fresh delay every time and halve the frame rate.
+    fn take_update_settled(
+        &self,
+        since: u64,
+        timeout: Duration,
+        settle: Duration,
+    ) -> Option<Update> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return None; // let the caller re-arm
+            }
+            let due = {
+                let last = *self.last_sent.lock().unwrap();
+                match last {
+                    Some(t) => (t + settle).max(now),
+                    None => now, // first frame: no reason to wait
+                }
+            };
+            if due > now {
+                // Sleep exactly the remaining window in one hop; waking on a
+                // notify is useless here, since more damage changes nothing
+                // about when this frame may leave.
+                let nap = (due - now).min(deadline - now);
+                let mut f = self.frame.lock().unwrap();
+                if !self.is_running() {
+                    return None;
+                }
+                if f.seq <= since {
+                    drop(f);
+                    std::thread::sleep(nap);
+                } else {
+                    f = self.frame_ready.wait_timeout(f, nap).ok()?.0;
+                }
+                if !self.is_running() {
+                    return None;
+                }
+                continue;
+            }
+            if let Some(u) = self.take_update(since, Duration::from_millis(1)) {
+                *self.last_sent.lock().unwrap() = Some(Instant::now());
+                return Some(u);
+            }
+            // Nothing has changed yet; re-check the clock and keep waiting.
+            let mut f = self.frame.lock().unwrap();
+            if !self.is_running() {
+                return None;
+            }
+            if f.seq > since {
+                continue;
+            }
+            f = self
+                .frame_ready
+                .wait_timeout(f, (deadline - Instant::now()).min(settle))
+                .ok()?
+                .0;
+            drop(f);
+        }
+    }
+
+    fn take_update(&self, since: u64, timeout: Duration) -> Option<Update> {
         let mut f = self.frame.lock().unwrap();
         if f.seq <= since {
             let (guard, _) = self
@@ -214,6 +310,46 @@ impl Session {
         b[4..8].copy_from_slice(&keysym.to_be_bytes());
         self.send(&b)
     }
+
+    /// Type a string as synthetic key events, one ASCII byte per keysym.
+    ///
+    /// Done here rather than in the viewer because each keystroke is a
+    /// separate 8-byte message and the two halves of a press/release pair must
+    /// not be reordered: sending this as N HTTP requests would let a release
+    /// overtake its press, and the guest would never see the key.
+    ///
+    /// Latin-1 only. Anything above U+00FF is dropped rather than sent as a
+    /// wrong character — RFB would need a keysym-offset dance for it, and a
+    /// silently wrong character pasted into a shell is worse than a missing one.
+    /// Newlines are Enter (0xff0d), not LF (0x0a), which is what a terminal
+    /// expects from a Return key.
+    pub fn type_text(&self, text: &str) -> R<()> {
+        for sym in text_keysyms(text) {
+            self.key(sym, true)?;
+            self.key(sym, false)?;
+        }
+        Ok(())
+    }
+}
+
+/// The keysyms a string types, in order. Split out so the mapping is testable
+/// without a socket.
+///
+/// Latin-1 only: anything above U+00FF is dropped rather than sent as a wrong
+/// character. RFB would need the keysym-offset dance (U+0100000 + codepoint)
+/// for it, and a silently wrong character typed into a shell is worse than a
+/// missing one.
+pub fn text_keysyms(text: &str) -> Vec<u32> {
+    text.chars()
+        .filter_map(|c| match c {
+            // Enter, not LF: a terminal treats a Return key and a pasted
+            // newline differently, and the key is what a user means.
+            '\n' | '\r' => Some(0xff0d),
+            '\t' => Some(0xff09),
+            c if (c as u32) < 0x100 => Some(c as u32),
+            _ => None,
+        })
+        .collect()
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Arc<Session>>> {
@@ -477,6 +613,7 @@ pub fn connect(id: &str, host: &str, port: u16) -> R<Arc<Session>> {
         tx: Mutex::new(Some(tx)),
         running: AtomicBool::new(true),
         error: Mutex::new(None),
+        last_sent: Mutex::new(None),
     });
 
     registry()
@@ -821,10 +958,11 @@ mod tests {
             tx: Mutex::new(None),
             running: AtomicBool::new(true),
             error: Mutex::new(None),
+            last_sent: Mutex::new(None),
         };
 
         let u = sess
-            .next_update(0, Duration::from_millis(50))
+            .next_update(0, Duration::from_millis(50), Duration::ZERO)
             .expect("a waiting viewer must get pixels");
         assert_eq!(u.pixels.len(), u.rect.w as usize * u.rect.h as usize * 4);
         // The whole screen in a single rectangle: no strips.
@@ -838,9 +976,158 @@ mod tests {
         // Caught up: nothing new, so the next call must block and time out
         // rather than hand out another full screen.
         assert!(
-            sess.next_update(u.seq, Duration::from_millis(50)).is_none(),
+            sess.next_update(u.seq, Duration::from_millis(50), Duration::ZERO)
+                .is_none(),
             "a caught-up viewer must not be sent redundant frames"
         );
+    }
+
+    /// The settling window is measured from the last DELIVERY, not from when
+    /// each request arrives: a viewer that re-arms the instant it gets pixels
+    /// must not pay the delay twice.
+    #[test]
+    fn settling_coalesces_damage_instead_of_halving_the_frame_rate() {
+        let sess = Session {
+            frame: Mutex::new(Frame {
+                rgba: vec![0u8; 16 * 16 * 4],
+                w: 16,
+                h: 16,
+                seq: 1,
+                damage: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 8,
+                    h: 8,
+                }),
+                damage_base: 0,
+            }),
+            frame_ready: Condvar::new(),
+            tx: Mutex::new(None),
+            running: AtomicBool::new(true),
+            error: Mutex::new(None),
+            // Pretend a frame just went out, so the window is already open.
+            last_sent: Mutex::new(Some(Instant::now())),
+        };
+
+        let settle = Duration::from_millis(80);
+        let started = Instant::now();
+        let u = sess
+            .next_update(0, Duration::from_secs(2), settle)
+            .expect("the held frame must arrive once the window closes");
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(60),
+            "the frame must be held for the settling window, not sent at once ({waited:?})"
+        );
+        assert!(
+            waited < Duration::from_millis(300),
+            "and released promptly after it, not at the waiter's timeout ({waited:?})"
+        );
+        assert_eq!(u.seq, 1, "the held pixels are the ones delivered");
+
+        // A Fast caller (settle 0) must not be held by another caller's
+        // window, and must not have to wait out its own timeout either.
+        let started = Instant::now();
+        let fast = sess.next_update(u.seq + 1, Duration::from_millis(30), Duration::ZERO);
+        assert!(fast.is_none(), "nothing newer than seq+1 exists yet");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "Fast waits only its own timeout, never a settling window"
+        );
+
+        // The delivery above reset the clock, so the window starts again from
+        // now: the cadence is one frame per `settle`, not one per `2 * settle`.
+        let started = Instant::now();
+        let _ = sess.next_update(0, Duration::from_secs(2), settle);
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "a fresh window after a delivery, not a doubled one ({:?})",
+            started.elapsed()
+        );
+    }
+
+    /// Typing a paste sends real keysyms, and the characters that are NOT
+    /// their own codepoint are the ones that matter: a newline must be Return
+    /// (0xff0d), not LF (0x0a), or a guest terminal gets a stray control code
+    /// instead of running the command.
+    #[test]
+    fn pasted_text_becomes_the_right_keysyms() {
+        assert_eq!(
+            text_keysyms("ls -la\n"),
+            vec![
+                0x6c, 0x73, 0x20, 0x2d, 0x6c, 0x61, 0xff0d // Return, not 0x0a
+            ]
+        );
+        assert_eq!(text_keysyms("\t"), vec![0xff09]);
+        assert_eq!(text_keysyms("a\r\nb"), vec![0x61, 0xff0d, 0xff0d, 0x62]);
+        // Latin-1 round-trips as its own codepoint...
+        assert_eq!(text_keysyms("é"), vec![0xe9]);
+    }
+
+    /// A character RFB cannot express must be DROPPED, not mangled into some
+    /// neighbouring keysym that the guest then types.
+    #[test]
+    fn characters_beyond_latin_1_are_dropped_not_mangled() {
+        assert_eq!(text_keysyms("a☃b"), vec![0x61, 0x62]);
+        assert_eq!(text_keysyms("日本語"), Vec::<u32>::new());
+        // An emoji is above the BMP, so its surrogate halves must not leak in.
+        assert_eq!(text_keysyms("🙂"), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn damage_merges_into_one_rect_while_a_viewer_is_held() {
+        // The point of the settling window: damage that arrives during it is
+        // merged by `Frame::touch`, so the viewer repaints the union once
+        // instead of drawing each partial update as it lands. That merge is
+        // what the presets buy, so assert the union rather than the timing.
+        let w = 64u16;
+        let h = 64u16;
+        let sess = Session {
+            frame: Mutex::new(Frame {
+                rgba: vec![0u8; w as usize * h as usize * 4],
+                w,
+                h,
+                seq: 0,
+                damage: None,
+                damage_base: 0,
+            }),
+            frame_ready: Condvar::new(),
+            tx: Mutex::new(None),
+            running: AtomicBool::new(true),
+            error: Mutex::new(None),
+            last_sent: Mutex::new(None),
+        };
+
+        // Two far-apart corners change before anyone looks. Sent separately
+        // that is two paints; merged it is one rectangle covering both.
+        {
+            let mut f = sess.frame.lock().unwrap();
+            f.touch(Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            });
+            f.touch(Rect {
+                x: 60,
+                y: 60,
+                w: 4,
+                h: 4,
+            });
+            f.seq = 1;
+        }
+
+        let u = sess
+            .next_update(0, Duration::from_millis(500), Duration::ZERO)
+            .expect("a changed frame must be delivered");
+        assert_eq!(
+            (u.rect.x, u.rect.y, u.rect.w, u.rect.h),
+            (0, 0, 64, 64),
+            "the two changes arrive as ONE merged rectangle, not two paints"
+        );
+        // And the payload covers the whole merged rect, so the viewer's single
+        // putImageData has the pixels for both corners.
+        assert_eq!(u.pixels.len(), 64 * 64 * 4);
     }
 
     #[test]

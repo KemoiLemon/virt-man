@@ -19,6 +19,7 @@
 // a virt-viewer file instead of being rendered here.
 
 import { api } from "./api";
+import { speed } from "./console-speed";
 import {
   LONG_PRESS_MS, MOVE_SLOP_PX, clampZoom, distance, isCoarsePointer,
   isTwoFingerTap, midpoint, pinchFactor, type Pt,
@@ -31,6 +32,8 @@ export interface ConsoleHandle {
   setZoom(z: number): void;
   refit(): void;
   sendCtrlAltDel(): Promise<void>;
+  /** Type a string into the guest as synthetic key events. */
+  typeText(text: string): Promise<void>;
   /** Stop streaming and drop the daemon-side session. */
   stop(): void;
 }
@@ -316,11 +319,19 @@ export async function attachConsole(
   /// Continuous stream. Each request parks in the daemon until a frame newer
   /// than `seq` exists, so pixels are already on the way when the guest paints:
   /// one hop per frame, no polling interval.
+  ///
+  /// `settle_ms` rides on every request rather than being set once on the
+  /// session: the preset can change mid-session (the toolbar picker does), and
+  /// a value the daemon cached at connect time would leave the change
+  /// mysteriously inert until the tab was reopened.
   const stream = async () => {
     while (state.live) {
       let u: FrameUpdate | null = null;
+      const settle = speed().settleMs;
       try {
-        u = await api.get<FrameUpdate>(`${base}/frame?since=${Math.max(0, state.seq)}`);
+        u = await api.get<FrameUpdate>(
+          `${base}/frame?since=${Math.max(0, state.seq)}&settle_ms=${settle}`,
+        );
       } catch {
         if (!state.live) break;
         // A dropped session or a transient error: back off, then surface it.
@@ -669,6 +680,12 @@ export async function attachConsole(
       const seq = [0xffe3, 0xffe9, 0xffff]; // Ctrl, Alt, Del
       for (const k of seq) await postKey(k, true);
       for (const k of [...seq].reverse()) await postKey(k, false);
+    },
+    // One request, not one per character: each keystroke is a pair of RFB
+    // messages, and N independent requests let a release overtake its press.
+    // The daemon writes them to the guest's socket in order.
+    typeText: async (text) => {
+      await api.post(`${base}/type`, { text });
     },
     stop: () => {
       state.live = false;
