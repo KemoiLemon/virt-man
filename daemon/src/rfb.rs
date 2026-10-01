@@ -277,6 +277,12 @@ impl Session {
     fn fail(&self, e: String) {
         *self.error.lock().unwrap() = Some(e);
         self.running.store(false, Ordering::Relaxed);
+        // A viewer parked in `next_update` is waiting on THIS condvar, and its
+        // wait predicate (`is_running()`) is only re-checked when it is
+        // signalled. Setting the flag alone left it asleep for the whole
+        // FRAME_WAIT -- 20 seconds of a frozen console before the browser
+        // could even be told the session was gone. Wake it so it returns now.
+        self.frame_ready.notify_all();
     }
 
     pub fn close(&self) {
@@ -284,6 +290,9 @@ impl Session {
         if let Some(s) = self.tx.lock().unwrap().take() {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
+        // Same reason as `fail`: a parked viewer must not sit out the timeout
+        // on a session that is already over.
+        self.frame_ready.notify_all();
     }
 
     fn send(&self, bytes: &[u8]) -> R<()> {
@@ -633,6 +642,10 @@ pub fn connect(id: &str, host: &str, port: u16) -> R<Arc<Session>> {
             worker.fail(e);
         }
         worker.running.store(false, Ordering::Relaxed);
+        // The third way a session ends (the other two are `fail` and `close`),
+        // and the same hazard: a parked viewer waits on this condvar, so it
+        // must be woken here too or it sits out the full FRAME_WAIT.
+        worker.frame_ready.notify_all();
         // Drop the registry entry so a later connect starts clean.
         let mut reg = registry().lock().unwrap();
         if let Some(cur) = reg.get(&vm)
@@ -1128,6 +1141,53 @@ mod tests {
         // And the payload covers the whole merged rect, so the viewer's single
         // putImageData has the pixels for both corners.
         assert_eq!(u.pixels.len(), 64 * 64 * 4);
+    }
+
+    /// A viewer parked in `next_update` must be woken when the session dies.
+    ///
+    /// Otherwise it sleeps out the whole 20s FRAME_WAIT before the browser
+    /// learns anything, which is what a console freezing for ~20 seconds and
+    /// then reconnecting looks like. `fail()` only set `running`; the condvar
+    /// is what a parked viewer is actually waiting on, and nothing signalled
+    /// it, so the predicate `is_running()` was never re-evaluated.
+    #[test]
+    fn a_dead_session_wakes_a_parked_viewer_at_once() {
+        let sess = std::sync::Arc::new(Session {
+            frame: Mutex::new(Frame {
+                rgba: vec![0u8; 16 * 16 * 4],
+                w: 16,
+                h: 16,
+                seq: 1,
+                damage: None,
+                damage_base: 1,
+            }),
+            frame_ready: Condvar::new(),
+            tx: Mutex::new(None),
+            running: AtomicBool::new(true),
+            error: Mutex::new(None),
+            last_sent: Mutex::new(None),
+        });
+
+        let waiter = {
+            let s = sess.clone();
+            std::thread::spawn(move || {
+                let t = Instant::now();
+                // A long timeout, as the real caller uses: any prompt return
+                // must come from the wakeup, not from the timeout expiring.
+                let u = s.next_update(1, Duration::from_secs(20), Duration::ZERO);
+                (u.is_some(), t.elapsed())
+            })
+        };
+        // Let the viewer park on the condvar before killing the session.
+        std::thread::sleep(Duration::from_millis(150));
+        sess.fail("VNC session dropped".into());
+
+        let (got, waited) = waiter.join().unwrap();
+        assert!(!got, "a dead session yields no frame");
+        assert!(
+            waited < Duration::from_secs(2),
+            "the parked viewer must be woken by the failure, waited {waited:?}"
+        );
     }
 
     #[test]

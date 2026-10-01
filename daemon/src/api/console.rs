@@ -213,7 +213,7 @@ async fn status(Path(name): Path<String>) -> Response {
     axum::Json(json!({"connected": live, "error": error})).into_response()
 }
 
-/// How long a relay port waits for its one connection.
+/// How long a relay port stays open for its viewer.
 const RELAY_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Deserialize)]
@@ -233,11 +233,11 @@ struct VvQuery {
 /// A virt-viewer connection file.
 ///
 /// Guest displays listen on 127.0.0.1, so a file naming that address works
-/// only on the hypervisor. Instead the file names a **one-shot relay**: a port
-/// opened for [`RELAY_TTL`] that accepts exactly one connection, only from the
-/// address that asked for the file, and splices it to the guest's display.
-/// Nothing stays exposed once the viewer connects or the minute is up, and the
-/// guest's own listener never leaves loopback.
+/// only on the hypervisor. Instead the file names a **relay**: a port opened
+/// for [`RELAY_TTL`] that splices connections from the address that asked for
+/// the file to the guest's display, and from nobody else. The guest's own
+/// listener never leaves loopback, and once the minute is up no new connection
+/// is accepted.
 async fn vv_file(
     Path(name): Path<String>,
     axum::extract::Query(q): axum::extract::Query<VvQuery>,
@@ -336,37 +336,57 @@ fn same_ip(a: std::net::IpAddr, b: std::net::IpAddr) -> bool {
     canon(a) == canon(b)
 }
 
-/// Accept one connection from `client` within `ttl` and splice it to
-/// `target`. A connection from anyone else is dropped and does not use up the
-/// relay; the listener closes at the first accepted connection or the
-/// timeout, whichever comes first.
+/// Serve `target` on `listener` for `ttl`, splicing every connection from
+/// `client` to it. A connection from anyone else is refused.
+///
+/// It must keep accepting rather than take one connection and close, because
+/// the two protocols differ in how many sockets a viewer opens:
+///
+/// - VNC (RFB) is a single TCP connection, so one splice is the whole session.
+/// - SPICE is a *set* of channels -- main, display, inputs, cursor, playback,
+///   record, usbredir -- and "each channel uses a dedicated TCP socket" to the
+///   same host and port (spice-space.org, "Spice for Newbies"). The client
+///   opens the main channel, negotiates, then opens the rest.
+///
+/// The one-shot version therefore worked for VNC and could never work for
+/// SPICE: the main channel was accepted, spliced, and the listener dropped, so
+/// every further channel was refused and virt-viewer gave up before it could
+/// display anything. Keeping the listener open for the TTL is what makes the
+/// SPICE `.vv` usable.
 async fn relay_once(
     listener: tokio::net::TcpListener,
     client: std::net::IpAddr,
     target: (String, u16),
     ttl: Duration,
 ) {
-    let accepted = tokio::time::timeout(ttl, async {
-        loop {
-            let Ok((sock, peer)) = listener.accept().await else {
-                return None;
-            };
-            if same_ip(peer.ip(), client) {
-                return Some(sock);
-            }
+    let deadline = tokio::time::Instant::now() + ttl;
+    let mut tasks = Vec::new();
+    loop {
+        let accepted = tokio::time::timeout_at(deadline, listener.accept()).await;
+        let Ok(Ok((mut inbound, peer))) = accepted else {
+            break; // TTL expired, or the listener failed: stop accepting.
+        };
+        if !same_ip(peer.ip(), client) {
             tracing::warn!("vv relay: refused {peer} (expected {client})");
+            continue;
         }
-    })
-    .await;
-    drop(listener);
-    let Ok(Some(mut inbound)) = accepted else {
-        return;
-    };
-    let Ok(mut outbound) = tokio::net::TcpStream::connect((target.0.as_str(), target.1)).await
-    else {
-        return;
-    };
-    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        let target = target.clone();
+        tasks.push(tokio::spawn(async move {
+            let Ok(mut outbound) =
+                tokio::net::TcpStream::connect((target.0.as_str(), target.1)).await
+            else {
+                return;
+            };
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        }));
+    }
+    // Wait for the channels already open. A viewer that is still connected
+    // when the TTL runs out keeps working: only *new* channels stop being
+    // accepted, which is what the window is for (the `.vv` is one-shot and
+    // gone a minute after it is handed out).
+    for t in tasks {
+        let _ = t.await;
+    }
 }
 
 #[cfg(test)]
@@ -426,8 +446,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_relay_serves_one_connection_from_the_right_address_only() {
-        // Stand-in for the guest's display: echoes five bytes.
+    async fn the_relay_serves_channels_from_the_right_address_only() {
+        // Stand-in for the guest's display: echoes five bytes per connection.
         let display = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dport = display.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -446,21 +466,20 @@ mod tests {
             ("127.0.0.1".into(), dport),
             std::time::Duration::from_secs(5),
         ));
-        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", rport))
-            .await
-            .unwrap();
-        c.write_all(b"hello").await.unwrap();
-        let mut back = [0u8; 5];
-        c.read_exact(&mut back).await.unwrap();
-        assert_eq!(&back, b"hello", "spliced to the display");
-        assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", rport))
+        // Open SEVERAL connections, as SPICE does for its channels. The
+        // one-shot relay accepted the first and then closed the port, so every
+        // later channel was refused and virt-viewer could never bring up a
+        // SPICE session at all.
+        for channel in ["main", "display", "inputs"] {
+            let mut c = tokio::net::TcpStream::connect(("127.0.0.1", rport))
                 .await
-                .is_err(),
-            "one-shot: the port closes once a viewer is attached"
-        );
-        drop(c);
-        let _ = task.await;
+                .unwrap_or_else(|e| panic!("{channel} channel refused: {e}"));
+            c.write_all(b"hello").await.unwrap();
+            let mut back = [0u8; 5];
+            c.read_exact(&mut back).await.unwrap();
+            assert_eq!(&back, b"hello", "{channel} channel spliced");
+        }
+        drop(task);
     }
 
     #[tokio::test]
