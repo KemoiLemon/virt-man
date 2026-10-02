@@ -255,6 +255,16 @@ function displayName(list: { name: string; title?: string | null }[] | undefined
   return list?.find((x) => x.name === name)?.title || name;
 }
 
+/// `displayName` against the selected server's cached lists, for a caller
+/// holding only a network or pool name (a modal title, a confirm message).
+/// The name stays the identity everywhere it is sent; this is display only.
+function shownNet(name: string): string {
+  return displayName(selectedConn ? treeNets[selectedConn] : undefined, name);
+}
+function shownPool(name: string): string {
+  return displayName(selectedConn ? treePools[selectedConn] : undefined, name);
+}
+
 /// Put the current view in the address bar, so a reload returns to it. Called
 /// by every view renderer, which is the one place all navigation passes
 /// through: the tree, cards, tabs, the context menu and the palette included.
@@ -523,10 +533,10 @@ function openCommandPalette() {
         () => selectCtRow(c.id, v.name));
     }
     for (const n of treeNets[c.id] ?? []) {
-      add(`nav-${c.id}-net-${n.name}`, `Network — ${n.name}`, c.name, ic.network(), () => selectNetRow(c.id, n.name));
+      add(`nav-${c.id}-net-${n.name}`, `Network — ${n.title || n.name}`, c.name, ic.network(), () => selectNetRow(c.id, n.name));
     }
     for (const pl of treePools[c.id] ?? []) {
-      add(`nav-${c.id}-pool-${pl.name}`, `Pool — ${pl.name}`, c.name, ic.storage(), () => selectPoolRow(c.id, pl.name));
+      add(`nav-${c.id}-pool-${pl.name}`, `Pool — ${pl.title || pl.name}`, c.name, ic.storage(), () => selectPoolRow(c.id, pl.name));
     }
   }
 
@@ -2024,7 +2034,7 @@ async function loadDcDashboard() {
       <table class="grid">
         <tr><th>Name</th><th>Server</th><th>Bridge</th><th>State</th></tr>
         ${nets.map(({ c, n }) => `
-          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${c.id}"><td>${esc(n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${c.id}"><td>${esc(n.title || n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -2210,7 +2220,7 @@ function leaveMissing(tab: "networks" | "storage", message: string) {
 /// A network's DHCP range, DNS forwarders and domain. Stored by this host's
 /// IPAM, so saving never touches the libvirt network or its guests.
 function openIpamSettings(conn: string, net: string, ipam: IpamInfo) {
-  const el = openModal(`DHCP & DNS — ${esc(net)}`, `
+  const el = openModal(`DHCP & DNS — ${esc(shownNet(net))}`, `
     <div class="grid2">
       <label class="field"><span>Range start</span><input id="ipam-rs" value="${esc(ipam.range_start)}"></label>
       <label class="field"><span>Range end</span><input id="ipam-re" value="${esc(ipam.range_end)}"></label>
@@ -2699,7 +2709,7 @@ async function loadDashboard() {
       <table class="grid">
         <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
         ${nets.map((n) => `
-          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.title || n.name)}</td><td>${esc(n.bridge)}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -2759,7 +2769,7 @@ async function loadFilters() {
         <tr><th>Network</th><th>Type</th><th>Subnet</th><th class="col-actions"></th></tr>
         ${nets.map((n) => `
           <tr>
-            <td class="tname">${esc(n.name)}</td>
+            <td class="tname">${esc(n.title || n.name)}</td>
             <td>${esc(n.forward === "bridge" ? "Bridge" : n.forward === "nat" ? "NAT" : "Isolated")}</td>
             <td>${n.ip ? esc(n.ip) : "—"}</td>
             <td class="col-actions">
@@ -3087,7 +3097,7 @@ function openFirewallEditor(netName: string) {
   void collectIpCandidates(conn).then((ips) => { ipCandidates = ips; });
 
   const el = openModal(
-    `Firewall — ${esc(netName)}`,
+    `Firewall — ${esc(shownNet(netName))}`,
     `<div id="fw-body">${skeleton("table")}</div>`,
     `<button class="btn" id="fw-cancel">Cancel</button>
      <button class="btn primary" id="fw-save">Apply</button>`,
@@ -4536,7 +4546,7 @@ async function renderVmBody(vm: string) {
           return `<tr data-nic="${i}">
             <td>${esc(n.dev ?? "—")}</td>
             <td><code>${esc(n.mac ?? "—")}</code></td>
-            <td>${esc(n.network ?? "—")}</td>
+            <td>${esc(n.network ? displayName(nets, n.network) : "—")}</td>
             <td>${esc(n.model ?? "—")}</td>
             <td>${r
               ? `${esc(r.ip)}${r.dynamic ? ` <span class="state" title="Assigned from the range when the guest first asked; kept until the VM is deleted">auto</span>` : ""}`
@@ -4643,7 +4653,7 @@ async function renderVmBody(vm: string) {
           ?? nextFreeIp(`${ipam.gateway}/${ipam.prefix}`, ipamNet.hosts.map((h) => h.ip),
             { start: ipam.range_start, end: ipam.range_end }) ?? "";
         const el = openModal(`IPAM address — ${n.mac}`, `
-          <label class="field"><span>IP address on ${esc(n.network)} (${esc(ipam.gateway)}/${ipam.prefix})</span>
+          <label class="field"><span>IP address on ${esc(n.network ? displayName(nets, n.network) : "—")} (${esc(ipam.gateway)}/${ipam.prefix})</span>
             <input id="ipam-ip" value="${esc(suggested)}" placeholder="blank = assign automatically"></label>
           <label class="field"><span>Hostname (optional)</span>
             <input id="ipam-name" value="${esc(current?.name ?? vm)}"></label>
@@ -4899,7 +4909,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       { icon: ic.container(), label: "Container", sum: "LXC" },
       { icon: ic.lock(), label: "Isolation", sum: privileged ? "privileged (host root)" : "user namespace" },
       { icon: ic.disk(), label: "Root filesystem", sum: rootfs.split("/").pop() ?? "—" },
-      ...nics.map((n) => ({ icon: ic.network(), label: "Network", sum: n.net })),
+      ...nics.map((n) => ({ icon: ic.network(), label: "Network", sum: displayName(treeNets[conn], n.net) })),
     ] : [
       { icon: ic.cpu(), label: "BIOS", sum: bios },
       { icon: ic.vm(), label: "Display", sum: display },
@@ -5139,7 +5149,7 @@ async function renameVm(name: string) {
 
 async function deleteNetwork(name: string) {
   if (!selectedConn) return;
-  if (!(await askConfirm("Delete network", `Delete network "${name}"?`, "Delete", true))) return;
+  if (!(await askConfirm("Delete network", `Delete network "${shownNet(name)}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -5151,7 +5161,7 @@ async function deleteNetwork(name: string) {
 
 async function deletePool(name: string) {
   if (!selectedConn) return;
-  if (!(await askConfirm("Delete pool", `Delete storage pool "${name}"?`, "Delete", true))) return;
+  if (!(await askConfirm("Delete pool", `Delete storage pool "${shownPool(name)}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -6451,7 +6461,7 @@ function openCreatePool(conn = selectedConn) {
 function openCreateVolume(pool: string) {
   if (!selectedConn) return;
   const el = openModal(
-    `New volume in ${pool}`,
+    `New volume in ${esc(shownPool(pool))}`,
     `<div class="grid2">
       <label class="field"><span>Name</span><input id="vol-name"></label>
       <label class="field"><span>Size (GB)</span><input id="vol-size" type="number" value="10" min="1"></label>
@@ -6651,7 +6661,7 @@ function openFetch(pool: string) {
   if (!selectedConn) return;
   const conn = selectedConn;
   const el = openModal(
-    `Download ISO into ${esc(pool)}`,
+    `Download ISO into ${esc(shownPool(pool))}`,
     `<label class="field"><span>URL</span>
        <input id="fetch-url" placeholder="https://…/image.iso" spellcheck="false"></label>
      <label class="field"><span>Volume Name</span>
@@ -6774,7 +6784,7 @@ function openUpload(pool: string) {
   if (!selectedConn) return;
   const conn = selectedConn;
   const el = openModal(
-    `Upload ISO to ${pool}`,
+    `Upload ISO to ${esc(shownPool(pool))}`,
     `<label class="field"><span>Volume Name</span>
        <input id="up-name" placeholder="Leave blank to use the file name"></label>
      <label class="field"><span>File</span><input id="up-file" type="file"></label>

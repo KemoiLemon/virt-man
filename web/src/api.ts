@@ -275,6 +275,9 @@ export interface IpRow {
   conn: string;
   conn_name: string;
   network: string;
+  /// The network's nickname (a network is named by UUID); empty when it has
+  /// none, in which case `network` is already readable.
+  network_title?: string | null;
   mac: string;
   ip: string;
   name?: string | null;

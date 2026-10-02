@@ -211,6 +211,34 @@ check("the datacenter dashboard summarises every server", () => {
   assert.ok(document.querySelector("[data-dc-dash-conn]"), "per-server row links to its dashboard");
 });
 
+// A network is named by its UUID and keeps its nickname as a `title`, so the
+// dashboard's Networking table showed a UUID for anything made or migrated
+// since. The row must read as the nickname, while `data-dash-net` keeps the
+// libvirt name the action needs.
+const conns = await (await fetch(`${base}/connections`)).json();
+const allNets = [];
+for (const c of conns) {
+  const nets = await (await fetch(`${base}/proxy/${c.id}/networks`)).json().catch(() => []);
+  for (const n of nets) allNets.push(n);
+}
+check("the dashboard network rows show the nickname, not the UUID", () => {
+  const rows = [...document.querySelectorAll("#dc-dash [data-dash-net]")];
+  if (!allNets.length) {
+    assert.equal(rows.length, 0, "no networks, so no rows to check");
+    return;
+  }
+  for (const row of rows) {
+    const name = row.dataset.dashNet;
+    const net = allNets.find((n) => n.name === name);
+    if (!net) continue;
+    const shown = row.querySelector("td")?.textContent.trim();
+    assert.equal(shown, net.title || net.name,
+      `network ${name} shows its nickname (${shown})`);
+    assert.ok(!/^[0-9a-f-]{36}$/i.test(shown),
+      `network ${name} is not shown as a bare UUID (${shown})`);
+  }
+});
+
 [...document.querySelectorAll(".tabbar .tab")]
   .find((t) => t.textContent.trim() === "Guests")
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

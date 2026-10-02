@@ -560,6 +560,9 @@ async fn ips(
         };
         for n in nets.as_array().into_iter().flatten() {
             let net = n["name"].as_str().unwrap_or("");
+            // A network is named by its UUID and keeps its nickname as a title;
+            // without it the admin table showed a UUID for the network column.
+            let net_title = n["title"].as_str().unwrap_or("");
             // A network this daemon does not serve (bridge mode) has none.
             let Ok(h) = daemon_get(c, &format!("/networks/{}/hosts", enc(net))).await else {
                 continue;
@@ -579,6 +582,7 @@ async fn ips(
                 r["conn"] = json!(c.id);
                 r["conn_name"] = json!(c.name);
                 r["network"] = json!(net);
+                r["network_title"] = json!(net_title);
                 r["owner"] = json!(owner);
                 r["owner_name"] = json!(store.user_by_id(&owner).map(|u| u.username.clone()));
                 out.push(r);

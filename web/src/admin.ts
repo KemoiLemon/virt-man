@@ -489,19 +489,23 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
     }
     try {
       const [vms, nets, pools, bridges] = await Promise.all([
-        api.get<{ name: string }[]>(`/proxy/${c.id}/domains`),
-        api.get<{ name: string }[]>(`/proxy/${c.id}/networks`),
-        api.get<{ name: string }[]>(`/proxy/${c.id}/pools`),
+        api.get<{ name: string; title?: string }[]>(`/proxy/${c.id}/domains`),
+        api.get<{ name: string; title?: string }[]>(`/proxy/${c.id}/networks`),
+        api.get<{ name: string; title?: string }[]>(`/proxy/${c.id}/pools`),
         api.get<string[]>(`/proxy/${c.id}/networks/bridges`),
       ]);
-      for (const v of vms) out.push({ path: `${node}/vms/${v.name}`, label: `${shown}/vms/${v.name}` });
-      for (const n of nets) out.push({ path: `${node}/networks/${n.name}`, label: `${shown}/networks/${n.name}` });
-      for (const p of pools) out.push({ path: `${node}/storage/${p.name}`, label: `${shown}/storage/${p.name}` });
+      // The path keeps the libvirt name -- that is what the server stores and
+      // matches a grant on -- but the label reads as the nickname, since a
+      // guest, network or pool is named by its UUID. `title || name` is the
+      // same fallback the rest of the app uses.
+      for (const v of vms) out.push({ path: `${node}/vms/${v.name}`, label: `${shown}/vms/${v.title || v.name}` });
+      for (const n of nets) out.push({ path: `${node}/networks/${n.name}`, label: `${shown}/networks/${n.title || n.name}` });
+      for (const p of pools) out.push({ path: `${node}/storage/${p.name}`, label: `${shown}/storage/${p.title || p.name}` });
       for (const b of bridges) out.push({ path: `${node}/bridges/${b}`, label: `${shown}/bridges/${b}` });
       // Containers apart: a host without the LXC driver still offers the rest.
       const cts = await api.get<{ name: string; title?: string }[]>(`/proxy/${c.id}/containers`).catch(() => []);
       for (const v of cts) {
-        out.push({ path: `${node}/containers/${v.name}`, label: `${shown}/containers/${v.name}` });
+        out.push({ path: `${node}/containers/${v.name}`, label: `${shown}/containers/${v.title || v.name}` });
       }
     } catch {
       // Offline daemon: its whole-daemon paths are still offered.
@@ -941,7 +945,7 @@ const ips_: Painter = async (ctx, area, gen) => {
           <td class="tname mono">${esc(r.ip)}</td>
           <td>${esc(r.vm_name ?? r.name ?? "—")}</td>
           <td>${esc(r.owner_name ?? "—")}</td>
-          <td>${esc(r.network)}</td>
+          <td>${esc(r.network_title || r.network)}</td>
           <td>${esc(r.conn_name)}</td>
           <td class="mono">${esc(r.mac)}</td>
           <td>${r.dynamic ? "Assigned" : "Reserved"}</td>
