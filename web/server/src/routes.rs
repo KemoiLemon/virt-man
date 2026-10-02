@@ -367,6 +367,7 @@ mod tests {
             ("POST", "/containers/web/start", "CT.PowerMgmt"),
             ("PUT", "/containers/web/xml", "CT.Config"),
             ("POST", "/containers/web/console/connect", "CT.Console"),
+            ("POST", "/containers/web/console/resize", "CT.Console"),
             ("DELETE", "/containers/web", "CT.Allocate"),
             (
                 "PUT",

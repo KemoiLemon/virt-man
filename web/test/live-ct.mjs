@@ -165,6 +165,15 @@ try {
   check("the console answers typed input", seen.includes("vm-42") || /login:/.test(seen), JSON.stringify(seen.slice(-200)));
   check("no getty spam on the console", !/can't open \/dev\/tty\d/.test(seen), JSON.stringify(seen.slice(-200)));
 
+  // The browser tells the daemon its terminal size so the pty is not left at
+  // 0x0 (libvirt never sizes an LXC console pty), which is what made the
+  // shell's line editor redraw the bottom line instead of scrolling. The value
+  // is applied to the host pty; here we assert the route reaches it through
+  // the proxy, which is the SPA's path.
+  const rz = await j("POST", `${P}/containers/${ct}/console/resize`, { cols: 100, rows: 30 });
+  check("the console accepts the browser's terminal size", rz.status === 200 && rz.body.cols === 100 && rz.body.rows === 30,
+    JSON.stringify(rz.body));
+
   // Output the container writes by itself must arrive without a keystroke.
   // It used to be read only as a side effect of sending input (no libvirt
   // event loop), so the console updated only when Enter was pressed.

@@ -13,6 +13,7 @@
 
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { fitSize } from "./console-geometry";
 
 let current: { stop: () => void } | null = null;
 
@@ -109,11 +110,24 @@ export async function attachTextConsole(
     probe.remove();
     return r.width > 0 ? { width: r.width / 10, height: r.height } : { width: 8, height: 17 };
   };
+  // The daemon's pty must match xterm's geometry. libvirt opens the LXC
+  // console as a pty at 0x0 and never sizes it, so the shell's line editor
+  // redraws the same bottom line instead of scrolling and long lines wrap
+  // nowhere near the browser. Report every change; the daemon writes it with
+  // TIOCSWINSZ. `lastSize` starts impossible, so the first fit is always sent
+  // even when it equals xterm's default 80x24 -- otherwise the pty stays 0x0.
+  let lastSize: [number, number] | null = null;
+  const reportSize = (cols: number, rows: number) => {
+    void post(`${base}/console/resize`, { cols, rows }).catch(() => undefined);
+  };
   const fit = () => {
     const c = cell();
-    const cols = Math.max(20, Math.floor(stage.clientWidth / c.width) - 1);
-    const rows = Math.max(5, Math.floor(stage.clientHeight / c.height));
-    if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
+    const size = fitSize(stage.clientWidth, stage.clientHeight, c);
+    if (size.cols !== term.cols || size.rows !== term.rows) term.resize(size.cols, size.rows);
+    if (!lastSize || size.cols !== lastSize[0] || size.rows !== lastSize[1]) {
+      lastSize = [size.cols, size.rows];
+      reportSize(size.cols, size.rows);
+    }
   };
   const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fit);
   ro?.observe(stage);
