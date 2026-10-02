@@ -217,6 +217,22 @@ check("an administrator's profile says they have no limits", () => {
   assert.match(admin.$("#pf-limits")?.textContent ?? "", /Administrators have no resource limits/);
 });
 
+// ---- the sidebar lists them all, not only the administrator's own.
+// The proxy already filters each list to what the caller may audit, so the
+// sidebar must not filter a second time: an administrator passes every check
+// and so sees the whole daemon, including resources owned by other users
+// (bob's share-vm and share-net here). Filtering again buried the resources
+// the administrator is meant to look after.
+admin.w.history.pushState(null, "", "/");
+admin.w.dispatchEvent(new admin.w.PopStateEvent("popstate"));
+await admin.wait(3000);
+check("an administrator's sidebar lists every resource, other users' included", () => {
+  const rows = [...admin.d.querySelectorAll(".tree-row.tree-vm, .tree-row.tree-res")];
+  const labels = rows.map((r) => r.textContent.trim());
+  assert.ok(labels.some((t) => t.includes("share-vm")), `bob's guest is listed (${labels.join(", ")})`);
+  assert.ok(labels.some((t) => t.includes("share-net")), `bob's network is listed (${labels.join(", ")})`);
+});
+
 // ---- cleanup
 await bob.w.fetch(`/proxy/${conn}/domains/share-vm`, { method: "DELETE" });
 await bob.w.fetch(`/proxy/${conn}/networks/${shareNet?.uuid}`, { method: "DELETE" });

@@ -1548,36 +1548,25 @@ async function refreshTreeVms() {
     }),
   );
 
-  // An administrator passes every ACL check, so the server's lists contain
-  // everyone's resources. The sidebar is for your own: anything the admin does
-  // not own lives in the admin panel, which lists every resource for an
-  // administrator. A resource with no owner record and no administrator to
-  // fall back to (a fresh install, or the loopback sidecar the live suites run
-  // on) is nobody's in particular, and staying visible is what keeps a reused
-  // ambient guest reachable. Pools are shared infrastructure and always stay.
-  const visible = <T>(xs: T[]): T[] =>
-    canAdmin()
-      ? xs.filter((x) => {
-          const r = x as { mine?: boolean; owner?: string };
-          return r.mine === true || !r.owner;
-        })
-      : xs;
-
+  // The sidebar lists whatever the server returns, which is already filtered
+  // to what the caller may see: the proxy drops every guest, network and pool
+  // the caller cannot audit, and a user holding a daemon-wide role (an
+  // administrator, or a `Sys.Audit`/`VM.Audit` grant on the daemon) passes
+  // those checks and so sees the daemon's whole inventory. Filtering again here
+  // buried an administrator's own guests under nothing and hid the resources
+  // they are meant to look after, so it is deliberately not done.
   let changed = false;
   for (const [id, vms, nets, pools, cts] of results) {
-    const v = visible(vms);
-    const n = visible(nets);
-    const c = visible(cts);
-    if (JSON.stringify(treeVms[id]) !== JSON.stringify(v)) {
-      treeVms[id] = v;
+    if (JSON.stringify(treeVms[id]) !== JSON.stringify(vms)) {
+      treeVms[id] = vms;
       changed = true;
     }
-    if (JSON.stringify(treeCts[id]) !== JSON.stringify(c)) {
-      treeCts[id] = c;
+    if (JSON.stringify(treeCts[id]) !== JSON.stringify(cts)) {
+      treeCts[id] = cts;
       changed = true;
     }
-    if (JSON.stringify(treeNets[id]) !== JSON.stringify(n)) {
-      treeNets[id] = n;
+    if (JSON.stringify(treeNets[id]) !== JSON.stringify(nets)) {
+      treeNets[id] = nets;
       changed = true;
     }
     if (JSON.stringify(treePools[id]) !== JSON.stringify(pools)) {
