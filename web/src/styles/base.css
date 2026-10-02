@@ -477,6 +477,15 @@ table.grid tr:hover td { background: var(--hover); }
 }
 /* The viewer owns the canvas' pixel size; margin centres it in the stage. */
 .console-stage canvas { display: block; margin: auto; }
+/* A container's text console is not a guest screen: there is no letterbox, so
+   the stage takes the terminal's own background instead of the VNC black. The
+   terminal is sized to whole character cells, which never divide the stage
+   exactly, so a sliver of the background shows around it -- with `#000` that
+   sliver was a black frame against the theme. xterm paints its canvas but
+   hardcodes `#000` on the viewport around it in its own stylesheet, so that is
+   overridden too (three classes beats its two, whatever the import order). */
+.console-stage.term-stage,
+.console-stage.term-stage .xterm-viewport { background: var(--code-bg); }
 /* Offer shown instead of a screen when the guest needs a native client. */
 .console-offer {
   margin: auto; padding: 24px; text-align: center; max-width: 420px;

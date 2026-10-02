@@ -16,7 +16,12 @@ let css;
 let html;
 
 before(() => {
-  const file = readdirSync("dist/assets").find((f) => f.endsWith(".css"));
+  // The app stylesheet is `index-*.css`; the lazily loaded terminal chunk also
+  // emits a `.css` (xterm's own), and `readdirSync` order is not guaranteed, so
+  // pick by name rather than by whichever comes first.
+  const files = readdirSync("dist/assets");
+  const file = files.find((f) => f.startsWith("index-") && f.endsWith(".css"))
+    ?? files.find((f) => f.endsWith(".css"));
   assert.ok(file, "dist/assets has a built stylesheet (run: pnpm build)");
   css = readFileSync(`dist/assets/${file}`, "utf8");
   html = readFileSync("index.html", "utf8");
