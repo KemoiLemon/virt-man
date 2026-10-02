@@ -32,7 +32,6 @@ use serde_json::{Value, json};
 
 use super::ApiError;
 use super::containers::lxc;
-use crate::libvirt::with_conn;
 
 pub const IDLE: Duration = Duration::from_secs(30);
 pub const KEEP: usize = 256 * 1024;
@@ -273,88 +272,120 @@ struct ResizeReq {
     rows: u16,
 }
 
-/// Set the container's console pty to the browser terminal's size.
+/// Set the container's console to the browser terminal's size.
 ///
-/// libvirt opens the LXC console as a pty but never sets its window size, so
-/// the kernel reports `0x0` and the shell's line editor (and every full-screen
-/// program) redraws against a terminal with no geometry: at the bottom it
-/// overwrites the same line instead of scrolling, and long lines never wrap
-/// where the browser wraps them. libvirt's own API has no resize call, but the
-/// pty is a host device and this daemon is on the host, so `TIOCSWINSZ` on it
-/// is the whole fix -- the same ioctl a terminal emulator would issue.
+/// A container's console is not a pty the daemon owns: `libvirt_lxc` gives the
+/// container its own console pty and **relays** bytes between it and the pty
+/// `virDomainOpenConsole` hands us. The two have independent window sizes, so
+/// setting the size on the pty we opened (the obvious thing, and what this did
+/// first) does nothing to the terminal the shell and `apt` actually use: they
+/// keep reading 80x24. With a full-screen program that is the reported bug --
+/// output fills 24 rows, the program redraws its last line in place, and it
+/// looks like the console never scrolls.
 ///
-/// The pty path comes from the domain's XML (`<console type='pty'>` names its
-/// `<source path>`), which is why this needs the domain, not the stream.
+/// So the size must be written onto the container's own console tty, and the
+/// only handle to it is a file descriptor held by a process inside the
+/// container (`/proc/<pid>/fd/<n>` pointing at `/dev/console`). The container's
+/// processes are found by the exact systemd scope libvirt puts them in:
+/// `machine-lxc\x2d<libvirt_lxc-pid>\x2d<uuid>.scope`, which is derived from
+/// the container name and its `/run/libvirt/lxc/<name>.pid`. That match is
+/// strict, so this can never touch a terminal outside the named container.
 async fn resize(
     Path(name): Path<String>,
     Json(req): Json<ResizeReq>,
 ) -> Result<Json<Value>, ApiError> {
     // A resize on a console nobody is watching is meaningless, and it would
-    // open a pty for a container that may have stopped.
+    // touch a container that may have stopped.
     live(&name).ok_or_else(|| ApiError::not_found("no console session; connect first"))?;
     let (cols, rows) = (req.cols.max(1), req.rows.max(1));
-    let path = lxc(async move {
-        with_conn(move |c| {
-            let d = crate::libvirt::domain(c, &name).map_err(|e| e.to_string())?;
-            // LIVE XML, not INACTIVE: libvirt only records the console pty's
-            // path (`<source path='/dev/pts/N'/>`) while the domain runs. The
-            // inactive definition has just `<console type='pty'>` with no
-            // source, which is why this read the wrong flag and found nothing.
-            let xml = d.get_xml_desc(0).map_err(|e| e.to_string())?;
-            Ok(console_pty(&xml).ok_or_else(|| "the container has no console pty".to_string())?)
-        })
-        .await
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    set_pty_size(&path, cols, rows).map_err(ApiError::internal)?;
-    Ok(Json(json!({"cols": cols, "rows": rows})))
-}
-
-/// The `<source path='/dev/pts/N'/>` (or the `tty` attribute) of a domain's
-/// console pty, or the pty target. None when the domain has no pty console.
-fn console_pty(xml: &str) -> Option<String> {
-    let i = xml.find("<console")?;
-    let block = &xml[i..];
-    let end = block.find('>').map(|j| j + 1).unwrap_or(block.len());
-    let open = &block[..end];
-    // A self-closing `<console type='pty' tty='/dev/pts/N'/>` carries it as an
-    // attribute; otherwise the `<source path=.../>` inside does.
-    attr(open, "tty")
-        .or_else(|| {
-            let rest = &block[end..];
-            let j = rest.find("</console>").map(|j| j + 8).unwrap_or(rest.len());
-            attr(&rest[..j], "path")
-        })
-        .filter(|p| p.starts_with("/dev/"))
-}
-
-/// The value of `name='...'` or `name="..."` in an XML tag, unescaped.
-fn attr(tag: &str, name: &str) -> Option<String> {
-    let at = tag.find(name)?;
-    // Only a whole attribute name, not `sometty` for `tty`.
-    let before = tag[..at].chars().next_back();
-    if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return None;
+    // A container just started has no process on its console yet -- `getty`
+    // appears once init has brought the container up, which can take a few
+    // seconds -- while the browser sends its size as soon as the console
+    // connects. Retry rather than dropping the size, which would leave the
+    // terminal at its default until the next browser resize. The response is
+    // fire-and-forget on the client, so holding it for a couple of seconds
+    // costs nothing.
+    let mut last = String::new();
+    for attempt in 0..20 {
+        match console_fd(&name) {
+            Ok(target) => {
+                set_pty_size(&target, cols, rows).map_err(ApiError::internal)?;
+                return Ok(Json(json!({"cols": cols, "rows": rows})));
+            }
+            Err(e) => last = e,
+        }
+        if attempt < 19 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
-    let rest = tag[at + name.len()..].trim_start();
-    let rest = rest.strip_prefix('=')?.trim_start();
-    let quote = rest.chars().next()?;
-    if quote != '\'' && quote != '"' {
-        return None;
-    }
-    let v = &rest[1..];
-    let end = v.find(quote)?;
-    Some(crate::libvirt::unescape(&v[..end]))
+    Err(ApiError::internal(last))
 }
 
-/// Write a window size onto an open pty. `TIOCSWINSZ` is the ioctl a terminal
+/// A `/proc/<pid>/fd/<n>` path on the container's console tty.
+///
+/// The pid is first confirmed to be inside the container by its cgroup scope.
+/// The scope embeds the `libvirt_lxc` pid (read from the pid file libvirt
+/// writes next to the container) and the expanded container name, both of
+/// which this daemon knows, so a host process can never match. Only an fd whose
+/// link is exactly `/dev/console` is used, so a process sharing the scope but
+/// redirected elsewhere cannot be resized by accident.
+fn console_fd(name: &str) -> Result<String, String> {
+    let pid_text = std::fs::read_to_string(format!("/run/libvirt/lxc/{name}.pid"))
+        .map_err(|e| format!("read container pid: {e}"))?;
+    let lxc_pid: u32 = pid_text
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad container pid {pid_text:?}: {e}"))?;
+    let scope = container_scope(lxc_pid, name);
+    let procs = std::fs::read_dir("/proc").map_err(|e| format!("read /proc: {e}"))?;
+    for p in procs.flatten() {
+        let pid = p.file_name();
+        let pid = pid.to_string_lossy();
+        if pid.is_empty() || !pid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(cgroup) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) else {
+            continue; // the process exited between readdir and now
+        };
+        if !cgroup.contains(&scope) {
+            continue;
+        }
+        // fds 0..2 are the console for a getty, login and the shell alike.
+        for n in 0..3 {
+            let fd = format!("/proc/{pid}/fd/{n}");
+            let Ok(link) = std::fs::read_link(&fd) else {
+                continue;
+            };
+            if link.as_os_str() == "/dev/console" {
+                return Ok(fd);
+            }
+        }
+    }
+    Err("no process on the container's console".into())
+}
+
+/// The systemd scope libvirt puts a container's processes in, as systemd spells
+/// it: `machine-lxc\x2d<libvirt_lxc-pid>\x2d<uuid>.scope`. Both halves are known
+/// here (the name, and the pid from the container's pid file), so the match is
+/// exact and a host cgroup can never satisfy it.
+fn container_scope(lxc_pid: u32, name: &str) -> String {
+    format!(
+        r"machine-lxc\x2d{lxc_pid}\x2d{}.scope",
+        name.replace('-', r"\x2d")
+    )
+}
+
+/// Write a window size onto a pty fd. `TIOCSWINSZ` is the ioctl a terminal
 /// emulator uses; the kernel then tells the foreground process (`SIGWINCH`) and
 /// reports the size back through `TIOCGWINSZ`.
+///
+/// The path is a `/proc/<pid>/fd/<n>` symlink, so opening it acts on that exact
+/// open file -- the same tty the process reads -- not on a freshly-allocated
+/// one.
 fn set_pty_size(path: &str, cols: u16, rows: u16) -> Result<(), String> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
-    // O_NOCTTY: never adopt this pty as our controlling terminal.
+    // O_NOCTTY: never adopt this tty as our controlling terminal.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -407,25 +438,30 @@ mod tests {
     }
 
     #[test]
-    fn the_console_pty_is_read_from_either_shape() {
-        // libvirt reports a running LXC console as a self-closing element with
-        // the pty on `tty`, and some versions carry it in a `<source>`.
-        let running = "<domain><devices><console type='pty' tty='/dev/pts/7'>\
-            <source path='/dev/pts/7'/><target type='lxc' port='0'/></console></devices></domain>";
-        assert_eq!(console_pty(running).as_deref(), Some("/dev/pts/7"));
-        let sourced = "<console type='pty'><source path='/dev/pts/12'/></console>";
-        assert_eq!(console_pty(sourced).as_deref(), Some("/dev/pts/12"));
-        // A domain with no console, and a tty that is not a device path.
-        assert_eq!(console_pty("<domain><devices/></domain>"), None);
-        assert_eq!(console_pty("<console type='pty' tty='console'/>"), None);
-    }
-
-    #[test]
-    fn attr_matches_a_whole_name_only() {
-        assert_eq!(attr("<console tty='/dev/pts/3'/>", "tty").as_deref(), Some("/dev/pts/3"));
-        assert_eq!(attr("<console tty=\"/dev/pts/3\"/>", "tty").as_deref(), Some("/dev/pts/3"));
-        // `sometty` must not answer for `tty`, and a missing name is None.
-        assert_eq!(attr("<console sometty='/x'/>", "tty"), None);
-        assert_eq!(attr("<console type='pty'/>", "tty"), None);
+    fn the_container_scope_matches_only_that_container() {
+        // The scope systemd gives libvirt's container processes, verified
+        // against a running Debian container (libvirt 12.7):
+        //   /machine.slice/machine-lxc\x2d60726\x2d<uuid>.scope/libvirt
+        // A host process's cgroup never contains this string, which is what
+        // makes the /proc scan safe -- it can only ever match the named
+        // container.
+        let name = "0b776cc0-f6b1-4bbd-b67b-88ccc6c24a76";
+        let scope = container_scope(60726, name);
+        assert_eq!(
+            scope,
+            r"machine-lxc\x2d60726\x2d0b776cc0\x2df6b1\x2d4bbd\x2db67b\x2d88ccc6c24a76.scope"
+        );
+        let container_line =
+            format!("0::/machine.slice/{scope}/libvirt/user.slice/user-0.slice/session-c1.scope");
+        assert!(container_line.contains(&scope), "the container's own cgroup matches");
+        // A different container on the same host, and an ordinary user session,
+        // must not.
+        assert!(!container_line.contains(&container_scope(99999, name)));
+        assert!(!container_line.contains(&container_scope(
+            60726,
+            "11111111-2222-3333-4444-555555555555"
+        )));
+        let host_line = "0::/user.slice/user-1000.slice/session-3.scope";
+        assert!(!host_line.contains(&scope), "a host session never matches");
     }
 }

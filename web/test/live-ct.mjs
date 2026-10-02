@@ -165,11 +165,12 @@ try {
   check("the console answers typed input", seen.includes("vm-42") || /login:/.test(seen), JSON.stringify(seen.slice(-200)));
   check("no getty spam on the console", !/can't open \/dev\/tty\d/.test(seen), JSON.stringify(seen.slice(-200)));
 
-  // The browser tells the daemon its terminal size so the pty is not left at
-  // 0x0 (libvirt never sizes an LXC console pty), which is what made the
-  // shell's line editor redraw the bottom line instead of scrolling. The value
-  // is applied to the host pty; here we assert the route reaches it through
-  // the proxy, which is the SPA's path.
+  // The browser tells the daemon its terminal size. libvirt gives an LXC
+  // container its own console pty and relays to the one the stream sees, so
+  // the size has to be written onto the container's console itself -- setting
+  // it on the stream's pty left the container at 80x24, which is what made apt
+  // and every full-screen program redraw the bottom line instead of scrolling.
+  // Set it before login so the shell inherits it, then check from inside.
   const rz = await j("POST", `${P}/containers/${ct}/console/resize`, { cols: 100, rows: 30 });
   check("the console accepts the browser's terminal size", rz.status === 200 && rz.body.cols === 100 && rz.body.rows === 30,
     JSON.stringify(rz.body));
@@ -196,6 +197,12 @@ try {
     await type("live-ct-suite\n");
     await until(/#\s*$/, 8000);
   }
+  // The container's own terminal must report what the browser asked for: this
+  // is the value apt reads.
+  await type("stty size\n");
+  const sized = await until(/30 100|100 30/, 6000);
+  check("…and the container's terminal adopts it", /30 100/.test(sized),
+    JSON.stringify(sized.slice(-120)));
   // One command, then no input at all while it prints a line a second.
   await type("for i in 1 2 3; do sleep 1; echo tick-$i; done\n");
   const t0 = Date.now();
