@@ -647,14 +647,14 @@ moves our rule to the head whenever it is missing *or* behind a reject — a rul
 that exists but is behind the reject admits nothing, because a forward's first
 packet is NEW.
 
-**The daemon shell is a host login, and only an administrator's.** (`daemon/src/api/shell.rs`, `daemon/src/pam.rs`.) A Shell tab on a server page opens a login shell on the hypervisor host. Things that bite:
+**The daemon shell is a host login, and only an administrator's.** (`daemon/src/api/shell.rs`.) A Shell tab on a server page opens a login shell on the hypervisor host. Things that bite:
 
-- **PAM authenticates, and the shell runs as the user who authenticated** — uid, gid, `getgrouplist` groups, home, `execve` of their login shell with `-` on argv[0]. Never a fixed user; authenticating as root is the only way to get a root shell. `daemon/install.sh` writes `/etc/pam.d/virt-man-daemon` (`pam_unix` auth+account); a source checkout with no file falls back to the `login` stack.
-- **The browser sends host credentials to the daemon, never to the web server's store.** The web server has its own users and hashed passwords for libvirt actions; those are unrelated to host accounts and must not be treated as a host login.
+- **The pty runs the host's `login(1)`; the terminal is the login UI.** The daemon never sees a password and runs no PAM conversation of its own — it only starts `login` in a pty. `login` prints `login:`/`Password:`, authenticates through the host's PAM and execs the account's shell. So the daemon must run as **root** (its normal mode): `login` refuses a non-root caller with "for superuser only", and a non-root daemon cannot `setuid`/`setgroups` to the target account anyway. Do not reintroduce a credentials form in the SPA.
+- **`/connect` takes no body fields but the optional size.** If a `login` prompt never appears, check the daemon is root before anything else; a non-root daemon starts `login`, `login` exits, and the session closes immediately with "the session ended".
 - **Every `/shell` route is `Special::AdminOnly`** in `web/server/src/routes.rs` on `Sys.Modify`. There is no narrower privilege, on purpose — nothing in the ACL honestly means "a host shell". A route there that is missing from the table is refused for everyone.
 - **A session belongs to the page.** A random id names it; `pagehide` in `terminal.ts` beacons a disconnect, `leaveCurrentView()` and `renderConn()`'s `connTab !== "shell"` guard close it on any navigation, and an unread session closes after `IDLE` (30 s). The pump `kill(-pid, SIGHUP)`s the whole process group, so background jobs die with the page too.
-- **The child after `forkpty` only calls async-signal-safe functions** (`close_range`, `setgid`/`setgroups`/`setuid`/`chdir`/`execve`, `write`, `_exit`). It must not allocate or lock — the daemon is multithreaded. The pipes are CLOEXEC and the reason for a failed `exec` travels back over a pipe.
-- **`daemon/src/lib.rs` exists for the integration test** (`tests/shell.rs`), which drives the real routes over a throwaway HTTP server. The ignored suite needs a host account: `sudo -E SHELL_TEST_USER=… SHELL_TEST_PASS=… cargo test --test shell -- --ignored`.
+- **The child after `forkpty` only calls async-signal-safe functions** (`close_range`, `dup2`, `execve`, `write`, `_exit`) and parks its error pipe at fd 3 before sweeping the rest, so a failed `execve` is reported rather than looking like a clean start.
+- **`daemon/src/lib.rs` exists for integration tests.** A shell test needs a root daemon, so there is no runnable-by-default suite here; drive `/connect` against a root daemon and read back the `login:` prompt.
 
 **Access logs record every guest connection, cheaply.** (`daemon/src/ipam/flows.rs`,
 `web/server/src/access.rs`.) The daemon subscribes to conntrack NEW/DESTROY

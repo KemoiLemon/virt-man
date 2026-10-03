@@ -224,22 +224,20 @@ export async function attachTextConsole(
   return true;
 }
 
-/// Open a shell on the daemon's host as `user`. The daemon authenticates the
-/// credentials through the host's PAM and starts a login shell only on
-/// success, so this is a fresh login every time — nothing is remembered here.
-/// `base` is `/proxy/<conn>/shell`. Replaces any terminal already attached.
+/// Open a login shell on the daemon's host. The daemon runs the host's
+/// `login(1)` in the pty, so the terminal *is* the login UI: it shows the real
+/// `login:` / `Password:` prompt, and the password never passes through this
+/// code. `base` is `/proxy/<conn>/shell`. Replaces any terminal attached.
 /// Resolves once the session is mounted, or `false` when it was refused.
 export async function attachDaemonShell(
   stage: HTMLElement,
   base: string,
-  user: string,
-  password: string,
   status: (msg: string | null) => void,
 ): Promise<boolean> {
   detachTextConsole();
   let r: { id: string; offset: number };
   try {
-    r = await post<{ id: string; offset: number }>(`${base}/connect`, { user, password });
+    r = await post<{ id: string; offset: number }>(`${base}/connect`, {});
   } catch (e) {
     status((e as Error).message);
     return false;

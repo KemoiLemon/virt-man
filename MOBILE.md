@@ -157,8 +157,9 @@ optional.
 
 The daemon shell (`terminal.ts`) mounts in the same `.console-stage` and talks
 to xterm's own textarea, so the software keyboard covers it without a second
-path; its only control above the terminal is a login form, and its fields take
-the 16 px `(pointer: coarse)` size from the same rule as every other field.
+path; the terminal shows the host's own `login:` prompt, so there is no form
+above it and its fields take the 16 px `(pointer: coarse)` size from the same
+rule as every other field.
 
 ### Touch hygiene
 

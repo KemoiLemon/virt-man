@@ -48,12 +48,6 @@ done
 if ! pkg-config --exists libvirt 2>/dev/null; then
   die "libvirt development headers not found (pkg-config libvirt)"
 fi
-# The daemon shell binds Linux-PAM. Build needs the -dev package that provides
-# libpam.so (Debian/Ubuntu: libpam0g-dev, Alpine: linux-pam-dev); the runtime
-# libpam.so.0 alone is not enough to link against.
-if ! pkg-config --exists pam 2>/dev/null && [[ ! -e /usr/lib/libpam.so && ! -e /usr/lib/x86_64-linux-gnu/libpam.so ]]; then
-  die "Linux-PAM development files not found (pkg-config pam; on Debian/Ubuntu install libpam0g-dev, on Alpine linux-pam-dev)"
-fi
 
 # --- build -----------------------------------------------------------------
 cd "$(dirname "$0")"
@@ -122,13 +116,6 @@ cert_dir = "$TLS_DIR"
 cert = "$TLS_DIR/cert.pem"
 key = "$TLS_DIR/key.pem"
 EOF
-
-# --- PAM service -----------------------------------------------------------
-# The daemon shell authenticates each session against the host's PAM. The file
-# only names the local-login stack; the daemon grants nothing a normal login
-# would not. Missing it falls back to the host's `login` stack at runtime.
-say "installing PAM service /etc/pam.d/virt-man-daemon"
-install -Dm644 virt-man-daemon.pam "$DESTDIR/etc/pam.d/virt-man-daemon"
 
 # --- systemd service -------------------------------------------------------
 if [[ -n "$SKIP_SYSTEMD" ]]; then

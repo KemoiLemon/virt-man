@@ -8,7 +8,6 @@ mod firmware;
 mod ipam;
 mod libvirt;
 mod migrate;
-mod pam;
 mod rfb;
 mod titles;
 mod tls;

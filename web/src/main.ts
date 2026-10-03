@@ -2640,24 +2640,15 @@ async function renderConnBody() {
 }
 
 /// Daemon shell: a login shell on the server's host, reached through the
-/// daemon. The daemon authenticates each session against the host's own PAM,
-/// so these are host credentials, not app credentials, and nothing is
-/// remembered after the session.
+/// daemon. The daemon runs the host's own `login(1)` in the pty, so the
+/// terminal is the login UI — it shows `login:` and `Password:` itself, and
+/// the password never passes through the app.
 function renderShellTab(body: Element, conn: string) {
-  const saved = localStorage.getItem(`virt-man-shell-user:${conn}`) ?? "";
-  // The form stays on the pane; the terminal replaces the stage below it. A
-  // session is opened by the form and closed by leaving the tab (or page).
+  // The terminal is the whole pane; waiting for the session is its own line.
   setHtml(body, `
-    <form class="shell-form" id="shell-form">
-      <label class="field"><span>Host user</span>
-        <input id="shell-user" value="${esc(saved)}" autocomplete="username" spellcheck="false"></label>
-      <label class="field"><span>Password</span>
-        <input id="shell-pass" type="password" autocomplete="current-password"></label>
-      <button class="btn primary" type="submit" id="shell-open">${ic.terminal(14)} Open shell</button>
-    </form>
-    <div class="shell-msg" id="shell-msg"></div>
-    <div class="console-stage term-stage" id="shell-stage" tabindex="0"></div>`);
-
+    <div class="console-stage term-stage" id="shell-stage" tabindex="0">
+      <div class="console-msg" id="shell-msg">connecting…</div>
+    </div>`);
   const msg = (m: string | null) => {
     const el = $("#shell-msg");
     if (el) {
@@ -2665,32 +2656,10 @@ function renderShellTab(body: Element, conn: string) {
       el.classList.toggle("hidden", !m);
     }
   };
-  const form = $("#shell-form") as HTMLFormElement;
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const user = ($("#shell-user") as HTMLInputElement).value.trim();
-    const password = ($("#shell-pass") as HTMLInputElement).value;
-    if (!user) {
-      msg("Enter the host user to log in as.");
-      return;
-    }
-    localStorage.setItem(`virt-man-shell-user:${conn}`, user);
-    // Drop it from the field: it has been sent, and it lives only in this
-    // one request.
-    ($("#shell-pass") as HTMLInputElement).value = "";
-    msg(null);
-    void (async () => {
-      terminal ??= await import("./terminal");
-      await terminal.attachDaemonShell(
-        $("#shell-stage"),
-        `/proxy/${conn}/shell`,
-        user,
-        password,
-        msg,
-      );
-    })();
-  });
-  $("#shell-user")?.focus();
+  void (async () => {
+    terminal ??= await import("./terminal");
+    await terminal.attachDaemonShell($("#shell-stage"), `/proxy/${conn}/shell`, msg);
+  })();
 }
 
 /// Daemon dashboard: host CPU/RAM with sparklines, then counts and summaries

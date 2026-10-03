@@ -55,13 +55,13 @@ say "package manager: $PM"
 # rootfs: e2fsprogs (mkfs.ext4), util-linux (unshare, mount), tar with xz and
 # zstd, openssl (password hashes and the TLS cert).
 apt_daemon=(libvirt-daemon-system libvirt-daemon-driver-qemu libvirt-daemon-driver-lxc libvirt-dev
-  qemu-system-x86 ovmf nftables iproute2 e2fsprogs util-linux tar xz-utils zstd openssl libpam-runtime)
+  qemu-system-x86 ovmf nftables iproute2 e2fsprogs util-linux tar xz-utils zstd openssl)
 apt_web=(nodejs npm)
-apt_build=(build-essential pkg-config curl ca-certificates libpam0g-dev)
+apt_build=(build-essential pkg-config curl ca-certificates)
 apk_daemon=(libvirt-daemon libvirt-qemu libvirt-lxc libvirt-dev qemu-system-x86_64 ovmf
-  nftables iproute2 e2fsprogs util-linux-misc tar xz zstd openssl dbus linux-pam)
+  nftables iproute2 e2fsprogs util-linux-misc tar xz zstd openssl dbus)
 apk_web=(nodejs npm)
-apk_build=(build-base pkgconf curl ca-certificates bash sudo linux-pam-dev)
+apk_build=(build-base pkgconf curl ca-certificates bash sudo)
 
 pkgs=()
 case "$PM" in

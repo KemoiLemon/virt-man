@@ -12,7 +12,6 @@ pub mod firmware;
 pub mod ipam;
 pub mod libvirt;
 pub mod migrate;
-pub mod pam;
 pub mod rfb;
 pub mod titles;
 pub mod tls;

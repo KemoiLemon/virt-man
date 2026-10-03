@@ -150,9 +150,9 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
         (_, ["metrics"] | ["flows"]) if get => with(node, "Sys.Audit", Special::AdminOnly),
         // nwfilters are host-wide rule sets any guest can reference.
         (_, ["filters", ..]) => with(node, "Sys.Modify", Special::AdminOnly),
-        // The daemon shell is a login shell on the hypervisor host, reached
-        // through the daemon. It re-authenticates through the host's own PAM
-        // on every connect; this only decides who may ask at all.
+        // The daemon shell runs the host's own login(1) in a pty, so the
+        // terminal is the login UI and the host's account policy decides who
+        // gets in. This only decides who may ask for a shell at all.
         (_, ["shell", ..]) => with(node, "Sys.Modify", Special::AdminOnly),
 
         // Guests.

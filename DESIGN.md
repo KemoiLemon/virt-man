@@ -154,27 +154,26 @@ mode. The remote HTTPS service always has auth on.
 ## The daemon shell
 
 A shell on the hypervisor host, offered as a **Shell tab on a server page**.
-It is deliberately a different thing from a guest console: the browser sends a
-host username and password, the daemon verifies them through the host's own
-PAM, and only then starts a login shell in a pty **as that exact user** — uid,
-gid, supplementary groups, home and login profile included. Authenticating as
-root gives a root shell; authenticating as an ordinary host user gives that
-user. `daemon/install.sh` installs the `/etc/pam.d/virt-man-daemon` service
-(the ordinary `pam_unix` password + account check), because "the shell runs as
-the account it authenticated as" is the whole security property.
+The PTY runs the host's own **`login(1)`**, so the terminal *is* the login UI:
+the browser shows a plain terminal, `login` prints `login:` and `Password:`,
+reads them with echo off, authenticates through the host's PAM stack and execs
+the account's login shell. The daemon holds no credentials, runs no PAM
+conversation of its own and decides nothing about who may log in — the host's
+account policy does. There is no credentials form in the app.
 
 Three decisions in it are load-bearing:
 
-- **PAM, not the web app's own identity.** The web server has users and hashed
-  passwords of its own (`store.json`), but those authorise *libvirt actions*
-  and are unrelated to host accounts. A host shell has to be a host login, and
-  only the host's PAM knows whether an account may log in. So a session is a
-  fresh login every time; nothing is cached, no ticket is minted, and the
-  password is sent once and never stored.
-- **The daemon is the only part that sees a host password.** It is the
-  privileged process; forwarding credentials through the proxy would spread
-  the secret. The browser talks to `/proxy/<conn>/shell/…`, the proxy attaches
-  the daemon token and nothing else, and the daemon runs PAM.
+- **`login(1)`, not a PAM conversation of our own.** `login` is the host's own
+  interactive front end to PAM: it already knows the account policy, the
+  echo-off prompt, the retries and the messages. Reimplementing that in the
+  daemon would mean owning a password prompt and its edge cases to no benefit,
+  and it would have to run as root anyway for `setuid`/`setgroups` to the
+  target account. Because `login` is setuid-root on the distributions that ship
+  it that way, the shell also works when the daemon itself is not root.
+- **The daemon is the only part that can offer it, and it runs the process as
+  root.** The daemon is the privileged process; the web backend never sees a
+  host password on this path. The `virt-man-daemon.service` unit already runs
+  as root, which is what lets `login` do its job.
 - **The shell belongs to the page.** A random id names the session, its pty is
   private, and it dies when the browser leaves: tab switching, Back, or a
   closed tab (`pagehide` beacons a disconnect) all tear down the process
@@ -192,16 +191,13 @@ Two smaller ones, each because the obvious alternative is wrong:
   with an async-signal-safe child.** The rest of the daemon is async, but the
   shell is a long-lived syscall loop per session, and a sync `std` thread is
   what the container console already uses for exactly that.
-- **PAM is bound by hand**, not through a crate: four calls (`pam_start`,
-  `pam_authenticate`, `pam_acct_mgmt`, `pam_end`) plus one conversation
-  function, in `daemon/src/pam.rs`. The daemon already owns other small C
-  bindings (`libc`), so a dependency for this would be more surface than the
-  thing it saves.
+- **The child parks its error pipe at fd 3 before `close_range(4, …)`.** The
+  pipe must outlive the fd sweep or a failed `execve` would look like a clean
+  one; fd 0/1/2 are the pty `forkpty` already pointed at the child. Everything
+  else is CLOEXEC.
 
-A source checkout that has not run the installer falls back to the host's
-`login` PAM stack, so a hand-built daemon still works; a packaged install
-always has the dedicated file. The pty is a real controlling terminal, so
-interactive programs and job control behave.
+The pty is a real controlling terminal, so interactive programs, job control
+and terminal resizing all behave.
 
 ## The console: the most-revised decision
 

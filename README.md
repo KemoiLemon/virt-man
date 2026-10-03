@@ -8,7 +8,7 @@ proxy) sits on top.
 
 | Part | Path | What it is |
 |---|---|---|
-| daemon | `daemon/` | Rust + axum; token-authenticated HTTPS API over libvirt (VMs and LXC containers, networks, storage pools, volumes, container templates, lifecycle, native VNC console + virt-viewer handoff for SPICE, a text console for containers, a PAM-authenticated host shell, host metrics) |
+| daemon | `daemon/` | Rust + axum; token-authenticated HTTPS API over libvirt (VMs and LXC containers, networks, storage pools, volumes, container templates, lifecycle, native VNC console + virt-viewer handoff for SPICE, a text console for containers, a host login shell, host metrics) |
 | web UI | `web/` | Vite + TS SPA, served by the Rust backend in `web/server/` (users, RBAC, API keys, daemon connections + TLS-pinned proxy, daemon dashboard) |
 
 ## Install
@@ -45,11 +45,6 @@ distribution. Package names were checked on Debian 13 (trixie) and Alpine
 | daemon: VMs | `libvirt-daemon-system libvirt-daemon-driver-qemu libvirt-dev qemu-system-x86 ovmf` | `libvirt-daemon libvirt-qemu libvirt-dev qemu-system-x86_64 ovmf dbus` |
 | daemon: containers | `libvirt-daemon-driver-lxc e2fsprogs util-linux tar xz-utils zstd` | `libvirt-lxc e2fsprogs util-linux-misc tar xz zstd` |
 | daemon: networking | `nftables iproute2 openssl` | `nftables iproute2 openssl` |
-| daemon: shell | `libpam0g-dev` (build), `libpam-runtime` (run) | `linux-pam-dev` (build), `linux-pam` (run) |
-
-> Building the daemon by hand (`cd daemon && cargo build`) needs the PAM
-> development package too, or the link fails with `unable to find library
-> -lpam`: `apt install libpam0g-dev` / `apk add linux-pam-dev`.
 | web UI | `nodejs npm`, then `npm i -g pnpm` | `nodejs npm`, then `npm i -g pnpm` |
 | both | Rust ≥ 1.88 (via rustup: the distro's is older) | Rust ≥ 1.88 (via rustup: the distro's is older) |
 
