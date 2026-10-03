@@ -30,6 +30,14 @@ export interface HwField {
    */
   hideWhenBlank?: boolean;
   /**
+   * An optional, rarely-set field. It is hidden until the user asks to see
+   * advanced options (a per-device toggle), so a form opens with its essentials
+   * rather than every option the device could take at once. A field that
+   * already carries a value is always shown, so a definition read back from
+   * libvirt is never silently hiding something it sets.
+   */
+  advanced?: boolean;
+  /**
    * Render the value but do not accept edits. For fields the form derives
    * rather than the user setting directly; the value still round-trips.
    */
@@ -168,11 +176,11 @@ export const HW_CATALOG: HwType[] = [
         ],
         showWhen: { key: "model", value: "virtio" },
       },
-      { key: "vram", label: "VRAM (KiB)", type: "text", placeholder: "libvirt default", showWhen: { key: "model", value: "virtio" } },
-      { key: "ram", label: "RAM (KiB)", type: "text", placeholder: "65536", showWhen: { key: "model", value: "qxl" } },
-      { key: "vgamem", label: "VGA Memory (KiB)", type: "text", placeholder: "16384", showWhen: { key: "model", value: "qxl" } },
-      { key: "vram64", label: "VRAM64 (KiB)", type: "text", placeholder: "libvirt default", showWhen: { key: "model", value: "qxl" } },
-      { key: "heads", label: "Heads", type: "number", min: 1, max: 16, placeholder: "1", showWhen: { key: "model", value: "qxl" } },
+      { key: "vram", label: "VRAM (KiB)", type: "text", placeholder: "libvirt default", showWhen: { key: "model", value: "virtio" }, advanced: true },
+      { key: "ram", label: "RAM (KiB)", type: "text", placeholder: "65536", showWhen: { key: "model", value: "qxl" }, advanced: true },
+      { key: "vgamem", label: "VGA Memory (KiB)", type: "text", placeholder: "16384", showWhen: { key: "model", value: "qxl" }, advanced: true },
+      { key: "vram64", label: "VRAM64 (KiB)", type: "text", placeholder: "libvirt default", showWhen: { key: "model", value: "qxl" }, advanced: true },
+      { key: "heads", label: "Heads", type: "number", min: 1, max: 16, placeholder: "1", showWhen: { key: "model", value: "qxl" }, advanced: true },
       {
         // Turns on the 3D path. libvirt pairs it with a `*-gl` device (the form
         // keeps the two in step), and a guest that actually renders in 3D needs
@@ -186,8 +194,8 @@ export const HW_CATALOG: HwType[] = [
         ],
         showWhen: { key: "model", value: "virtio" },
       },
-      { key: "blob", label: "Blob Resources", type: "select", value: "", options: [{ value: "", label: "Default" }, { value: "on", label: "on" }, { value: "off", label: "off" }], showWhen: { key: "model", value: "virtio" } },
-      { key: "edid", label: "EDID", type: "select", value: "", options: [{ value: "", label: "Default" }, { value: "on", label: "on" }, { value: "off", label: "off" }] },
+      { key: "blob", label: "Blob Resources", type: "select", value: "", options: [{ value: "", label: "Default" }, { value: "on", label: "on" }, { value: "off", label: "off" }], showWhen: { key: "model", value: "virtio" }, advanced: true },
+      { key: "edid", label: "EDID", type: "select", value: "", options: [{ value: "", label: "Default" }, { value: "on", label: "on" }, { value: "off", label: "off" }], advanced: true },
     ],
   },
   {

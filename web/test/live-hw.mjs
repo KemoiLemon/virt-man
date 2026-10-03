@@ -305,9 +305,17 @@ check("the video form offers a model picker", () => {
 modelSel.value = "qxl";
 modelSel.onchange();
 await wait(400);
-// The QXL size field appears only for QXL.
+// The QXL size options are extras, so they sit behind the advanced toggle
+// rather than crowding a form that is usually just the model.
+check("the QXL sizes stay behind the advanced toggle", () => {
+  assert.ok(document.querySelector(".hw-inline .hw-page.active #hw-adv"), "the toggle is offered");
+  assert.ok(!document.querySelector('.hw-inline .hw-page.active [data-field="ram"]'),
+    "the RAM field is hidden while collapsed");
+});
+document.querySelector(".hw-inline .hw-page.active #hw-adv")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(400);
 const ramField = document.querySelector('.hw-inline .hw-page.active [data-field="ram"]');
-check("a QXL option appears with the QXL model", () => {
+check("the QXL options appear once advanced is shown", () => {
   assert.ok(ramField, "the RAM field is shown");
 });
 ramField.value = "65536";

@@ -15,7 +15,7 @@ import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
 import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type CtTab, type DcTab, type Route } from "./route";
 import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
-import type { HwDevice } from "./hardware";
+import type { HwDevice, HwField } from "./hardware";
 import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
@@ -5517,6 +5517,29 @@ function gfxNote(kind: "vnc" | "spice"): string {
     : "VNC is what the built-in console speaks, over the daemon's own compression.";
 }
 
+/// Whether a device field is shown, given a way to read the current value of
+/// any field on the device (its own `fields` map for an existing device, the
+/// `draft` for the Add Hardware chooser) and whether advanced options are being
+/// shown.
+///
+/// Three gates, checked here so the device page and the chooser cannot drift:
+/// `showWhen` (a field only applies to some other field's value), `hideWhenBlank`
+/// (a derived field with nothing to show), and `advanced` (an optional extra,
+/// hidden until the user asks for it -- or already set, so a definition read
+/// back from libvirt never hides something it carries). Keeping the extras
+/// behind `advanced` is what makes a form open with its essentials instead of
+/// every option the device could take at once.
+function visibleField(
+  f: HwField,
+  value: (key: string) => string,
+  showAdvanced: boolean,
+): boolean {
+  if (f.showWhen && value(f.showWhen.key) !== f.showWhen.value) return false;
+  if (f.hideWhenBlank && !value(f.key).trim()) return false;
+  if (f.advanced && !showAdvanced && !value(f.key).trim()) return false;
+  return true;
+}
+
 /// Proxmox-style hardware editor: device list on the LEFT, the selected
 /// device's form on the right. Used for both "Create VM" and editing an
 /// existing guest's hardware, so the two can never drift apart.
@@ -5537,6 +5560,9 @@ async function openHardwareEditor(opts: {
 
   // Existing guest: read its current definition so the form starts populated.
   let baseXml = "";
+  // Per-device-kind state for the "advanced options" toggle, so a device page
+  // opens with its essentials and reveals the optional extras only when asked.
+  const showAdvanced: Record<string, boolean> = {};
   // A new guest starts with a video adapter like `domainXml` used to write: the
   // editor owns `<video>` now, so nothing else puts one in.
   let devices: HwDevice[] = [{ kind: "video", fields: { model: "virtio", device: "virtio-vga" } }];
@@ -5808,8 +5834,13 @@ async function openHardwareEditor(opts: {
       }
       // After the pool is settled, so the path is looked up in the right one.
       if (d.kind === "disk" || d.kind === "cdrom") await resolveDevicePath(d);
+      // The value reader is the device's own fields, with each field's declared
+      // default standing in for one it does not carry.
+      const fieldVal = (k: string) =>
+        d.fields[k] ?? t.fields.find((x) => x.key === k)?.value ?? "";
+      const showAdv = showAdvanced[d.kind] ?? false;
       const fields = await Promise.all(t.fields
-        .filter((f) => !f.hideWhenBlank || (d.fields[f.key] ?? "").trim())
+        .filter((f) => visibleField(f, fieldVal, showAdv))
         .map(async (f) => {
         const val = d.fields[f.key] ?? f.value ?? "";
         if (f.type === "select") {
@@ -5846,10 +5877,18 @@ async function openHardwareEditor(opts: {
             ${f.min != null ? `min="${f.min}"` : ""}${maxAttr(bound)}
             placeholder="${esc(f.placeholder ?? "")}"></label>`;
       }));
+      // The "advanced options" toggle only appears for a device that has any.
+      const hasAdvanced = t.fields.some((f) => f.advanced);
+      const advToggle = hasAdvanced
+        ? `<button class="btn hw-adv-toggle" id="hw-adv">${showAdv ? "Hide advanced options" : "Show advanced options"}</button>`
+        : "";
       return `<div class="hw-page active">
         <h3 class="hw-title">${esc(t.label)}</h3>
         ${fields.join("")}
-        <div class="actions"><button class="btn danger" id="hw-remove">${ic.trash(14)} Remove device</button></div>
+        <div class="actions">
+          ${advToggle}
+          <button class="btn danger" id="hw-remove">${ic.trash(14)} Remove device</button>
+        </div>
       </div>`;
     }
 
@@ -6018,6 +6057,11 @@ async function openHardwareEditor(opts: {
         page = "general";
         void render();
       };
+      const adv = $("#hw-adv", root);
+      if (adv) adv.onclick = () => {
+        showAdvanced[devices[i].kind] = !showAdvanced[devices[i].kind];
+        void render();
+      };
     }
   }
 
@@ -6025,6 +6069,9 @@ async function openHardwareEditor(opts: {
   function openAddHardware() {
     let kind = HW_CATALOG[0].id;
     const draft: Record<string, string> = {};
+    // Whether the optional extras are revealed for the current kind. Reset when
+    // the kind changes: it is a per-device choice, not a global one.
+    let addAdvanced = false;
     // Single-instance devices (memballoon, watchdog, tpm, …) already present
     // cannot be added again: libvirt rejects the duplicate at define time.
     const alreadyAdded = (id: string) =>
@@ -6041,11 +6088,12 @@ async function openHardwareEditor(opts: {
         if (draft[key] !== undefined) return draft[key];
         return t.fields.find((x) => x.key === key)?.value ?? "";
       };
-      // showWhen keeps the form to only the fields relevant to the current
-      // mode (e.g. an existing-volume disk shows pool+volume, a new-volume
-      // disk shows pool+size+format).
-      const visible = t.fields.filter((f) =>
-        !f.showWhen || fieldValue(f.showWhen.key) === f.showWhen.value);
+      // `visibleField` keeps the form to the fields relevant to the current
+      // choices (e.g. an existing-volume disk shows pool+volume, a new-volume
+      // disk shows pool+size+format, and an optional extra stays behind the
+      // "advanced" toggle). The chooser reads from `draft`, so an option stays
+      // hidden until the user is editing it.
+      const visible = t.fields.filter((f) => visibleField(f, fieldValue, addAdvanced));
       const fields = await Promise.all(visible.map(async (f) => {
         const val = draft[f.key] ?? f.value ?? "";
         if (f.type === "select") {
@@ -6095,6 +6143,9 @@ async function openHardwareEditor(opts: {
         <div class="add-hw-form">
           <div class="hw-title">${esc(t.label)}</div>
           <div class="add-hw-fields">${fields.join("")}</div>
+          ${t.fields.some((f) => f.advanced)
+            ? `<button class="btn hw-adv-toggle" id="ah-adv">${addAdvanced ? "Hide advanced options" : "Show advanced options"}</button>`
+            : ""}
           <div class="field add-hw-preview"><span>LIBVIRT XML PREVIEW</span>
             <code>${esc(preview)}</code></div>
         </div>
@@ -6106,9 +6157,15 @@ async function openHardwareEditor(opts: {
         (b as HTMLElement).onclick = () => {
           kind = (b as HTMLElement).dataset.at!;
           for (const k of Object.keys(draft)) delete draft[k];
+          addAdvanced = false;
           void renderAdd();
         };
       });
+      const advToggle = add.querySelector("#ah-adv");
+      if (advToggle) (advToggle as HTMLElement).onclick = () => {
+        addAdvanced = !addAdvanced;
+        void renderAdd();
+      };
       add.querySelectorAll("[data-af]").forEach((n: Element) => {
         (n as HTMLElement).onchange = () => {
           const key = (n as HTMLElement).dataset.af!;

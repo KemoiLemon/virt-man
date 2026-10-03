@@ -163,3 +163,8 @@
   white-space: pre-wrap; word-break: break-all;
   -webkit-user-select: text; user-select: text;
 }
+
+/* The advanced-options toggle sits above the device actions, left of them, so
+   the extras it reveals read as part of the same form rather than a stray
+   button among the destructive ones. */
+.hw-adv-toggle { margin-right: auto; }
