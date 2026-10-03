@@ -426,7 +426,9 @@ Non-trivial logic leaves one runnable check behind. Prefer a real
 
 - **Conventional commits** (`feat(web):`, `fix(daemon):`, `style(daemon):`).
   Explain the *cause* in the body, not just the change.
-- Branch `dev` on `ssh://git@git.kemoi.top:2222/kemoi/virt-man.git`.
+- **Commit and push** finished work — do not leave it uncommitted in the
+  working tree. Branch `dev` on
+  `ssh://git@git.kemoi.top:2222/kemoi/virt-man.git`.
 - `rustfmt` and `clippy --all-targets` clean before committing Rust.
 - Comments explain *why*, especially where the obvious approach is wrong.
   Several comments in this codebase exist to stop a future reader "fixing"
