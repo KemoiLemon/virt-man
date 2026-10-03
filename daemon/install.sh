@@ -48,6 +48,12 @@ done
 if ! pkg-config --exists libvirt 2>/dev/null; then
   die "libvirt development headers not found (pkg-config libvirt)"
 fi
+# The daemon shell binds Linux-PAM. Build needs the -dev package that provides
+# libpam.so (Debian/Ubuntu: libpam0g-dev, Alpine: linux-pam-dev); the runtime
+# libpam.so.0 alone is not enough to link against.
+if ! pkg-config --exists pam 2>/dev/null && [[ ! -e /usr/lib/libpam.so && ! -e /usr/lib/x86_64-linux-gnu/libpam.so ]]; then
+  die "Linux-PAM development files not found (pkg-config pam; on Debian/Ubuntu install libpam0g-dev, on Alpine linux-pam-dev)"
+fi
 
 # --- build -----------------------------------------------------------------
 cd "$(dirname "$0")"

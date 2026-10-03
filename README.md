@@ -46,6 +46,10 @@ distribution. Package names were checked on Debian 13 (trixie) and Alpine
 | daemon: containers | `libvirt-daemon-driver-lxc e2fsprogs util-linux tar xz-utils zstd` | `libvirt-lxc e2fsprogs util-linux-misc tar xz zstd` |
 | daemon: networking | `nftables iproute2 openssl` | `nftables iproute2 openssl` |
 | daemon: shell | `libpam0g-dev` (build), `libpam-runtime` (run) | `linux-pam-dev` (build), `linux-pam` (run) |
+
+> Building the daemon by hand (`cd daemon && cargo build`) needs the PAM
+> development package too, or the link fails with `unable to find library
+> -lpam`: `apt install libpam0g-dev` / `apk add linux-pam-dev`.
 | web UI | `nodejs npm`, then `npm i -g pnpm` | `nodejs npm`, then `npm i -g pnpm` |
 | both | Rust ≥ 1.88 (via rustup: the distro's is older) | Rust ≥ 1.88 (via rustup: the distro's is older) |
 
