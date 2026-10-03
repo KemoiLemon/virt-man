@@ -1,6 +1,6 @@
 import { openCropDialog } from "./crop";
 import { api, cacheFirst, effectiveLimit, remainingLimits, uploadWithProgress } from "./api";
-import type { ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, StagedUpload, UsageCounts, User, VolumeSummary } from "./api";
+import type { AdminResource, ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, StagedUpload, UsageCounts, User, VolumeSummary } from "./api";
 import { adminRowMenu, adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
 import { setSpeed, speed, speedOptions } from "./console-speed";
@@ -2140,6 +2140,8 @@ const adminCtx: AdminCtx = {
   go: (section, tab) => openAdmin(section, tab),
   createVm: (conn, owner, after) => void openHardwareEditor({ conn, forUser: { owner, after } }),
   createNetwork: (conn, owner, after) => openCreateNetwork(conn, { owner, after }),
+  createPool: (conn, after) => openCreatePool(conn, after),
+  deleteResource: (kind, conn, pool, name, after) => void adminDeleteResource(kind, conn, pool, name, after),
   tab: () => adminTab,
   refreshMe: async () => {
     user = await api.get<User>("/auth/me");
@@ -5086,8 +5088,10 @@ async function act(url: string, method: "POST" | "DELETE" = "POST") {
 }
 
 /// Result of `DELETE /domains/{name}`: which backing stores went, which were
-/// deliberately kept (with a reason), and which could not be removed.
+/// deliberately kept (with a reason), and which could not be removed. `stopped`
+/// says the daemon had to shut a running guest down before it could be removed.
 interface DomainDeleteResult {
+  stopped?: boolean;
   removed?: string[];
   kept?: { disk: string; reason: string }[];
   failed?: { disk: string; error: string }[];
@@ -5102,8 +5106,30 @@ function keepReasonText(reason: string): string {
   return reason;
 }
 
-async function deleteVm(name: string) {
-  if (!selectedConn) return;
+/// Turn a delete result into the lines to report. Shared by the guest view and
+/// the admin panel, so a partial cleanup reads the same wherever it was
+/// started. `stopped` is named because "it was running and I stopped it" is
+/// something the user should know happened.
+function deleteOutcomeLines(res: DomainDeleteResult | undefined): { lines: string[]; bad: boolean } {
+  const removed = res?.removed ?? [];
+  const kept = res?.kept ?? [];
+  const failed = res?.failed ?? [];
+  // Report the whole outcome, not just "Deleted": a partial cleanup that
+  // looks complete is how a stale disk gets forgotten about.
+  const lines: string[] = [];
+  if (res?.stopped) lines.push("Stopped the running guest first");
+  if (removed.length) lines.push(`Deleted ${removed.length} disk(s)`);
+  if (kept.length) {
+    lines.push(`Kept ${kept.map((k) => `${k.disk} (${keepReasonText(k.reason)})`).join(", ")}`);
+  }
+  if (failed.length) lines.push(`Could not delete ${failed.map((f) => f.disk).join(", ")}`);
+  return { lines, bad: failed.length > 0 };
+}
+
+/// Delete a VM on `conn`. Shared by the guest view (`selectedConn`) and the
+/// admin panel, so the two cannot drift apart — including stopping a running
+/// guest first, which the daemon does.
+async function deleteVmOn(conn: string, name: string, after: () => void) {
   if (!(await askConfirm("Delete VM", `Delete VM "${name}"?`, "Delete", true))) return;
   const removeStorage = await askConfirm(
     "Remove storage",
@@ -5113,49 +5139,56 @@ async function deleteVm(name: string) {
     "Delete disks",
     true,
   );
-  try {
+  // A running guest is stopped before it is removed, which can take a few
+  // seconds, so this runs as a task with its own progress rather than leaving
+  // the button looking hung. The full outcome -- stopped, removed, kept and
+  // why -- becomes the success message, or a partial disk cleanup would look
+  // like a clean delete.
+  let outcome = `VM ${name} deleted`;
+  await runTask(`Delete VM ${name}`, async (set) => {
+    set("Stopping the guest if it is running…");
     const res = await api.del<DomainDeleteResult>(
-      `/proxy/${selectedConn}/domains/${encodeURIComponent(name)}?remove_storage=${removeStorage}`);
-    selectedVm = null;
-    const removed = res?.removed ?? [];
-    const kept = res?.kept ?? [];
-    const failed = res?.failed ?? [];
-
-    // Report the whole outcome, not just "Deleted": a partial cleanup that
-    // looks complete is how a stale disk gets forgotten about.
-    const lines: string[] = [];
-    if (removed.length) lines.push(`Deleted ${removed.length} disk(s)`);
-    if (kept.length) {
-      lines.push(`Kept ${kept.map((k) => `${k.disk} (${keepReasonText(k.reason)})`).join(", ")}`);
-    }
-    if (failed.length) lines.push(`Could not delete ${failed.map((f) => f.disk).join(", ")}`);
-    toast(lines.length ? lines.join("\n") : "Deleted", failed.length ? "bad" : "ok");
-
-    renderConn();
-    // The kept disks are still on the host, so keep the sidebar counts honest.
-    void refreshTreeVms();
-  } catch (e) {
-    toast((e as Error).message, "bad");
-  }
+      `/proxy/${conn}/domains/${encodeURIComponent(name)}?remove_storage=${removeStorage}`);
+    if (selectedConn === conn && selectedVm === name) selectedVm = null;
+    const lines = deleteOutcomeLines(res).lines;
+    if (lines.length) outcome = `VM ${name} deleted\n${lines.join("\n")}`;
+  }, { done: "", notify: toast }).then((ok) => {
+    if (ok) toast(outcome);
+  });
+  after();
+  // The kept disks are still on the host, so keep the sidebar counts honest.
+  void refreshTreeVms();
 }
 
-/// Delete a container. Its rootfs is the container, so it always goes with
-/// it; its template stays in its pool.
-async function deleteCt(name: string) {
-  const conn = selectedConn;
-  if (!conn) return;
+async function deleteVm(name: string) {
+  if (!selectedConn) return;
+  await deleteVmOn(selectedConn, name, renderConn);
+}
+
+/// Delete a container on `conn`. Its rootfs is the container, so it always goes
+/// with it; its template stays in its pool. Shared with the admin panel.
+async function deleteCtOn(conn: string, name: string, after: () => void) {
   const shown = displayName(treeCts[conn], name);
   if (!(await askConfirm("Delete container",
     `Delete container "${shown}" and its root filesystem? The template it was made from is kept.`, "Delete", true))) return;
-  void runTask(`Delete container ${shown}`, async () => {
+  // A running container is stopped before removal, so say so; the delete is a
+  // task because that stop can take a few seconds.
+  let outcome = `Container ${shown} deleted`;
+  await runTask(`Delete container ${shown}`, async () => {
     const res = await api.del<DomainDeleteResult>(`${guestBase(conn, name, true)}`);
     const failed = res?.failed ?? [];
     if (failed.length) throw new Error(`deleted, but its rootfs could not be: ${failed.map((f) => f.disk).join(", ")}`);
-  }, { done: `Container ${shown} deleted`, notify: toast }).then(async () => {
-    if (selectedVm === name) { selectedVm = null; ctMode = false; }
-    await refreshTreeVms();
-    if (selectedConn === conn && !selectedVm) renderConn();
-  });
+    if (res?.stopped) outcome = `Container ${shown} deleted (stopped it first)`;
+  }, { done: "", notify: toast }).then((ok) => { if (ok) toast(outcome); });
+  if (selectedConn === conn && selectedVm === name) { selectedVm = null; ctMode = false; }
+  await refreshTreeVms();
+  after();
+}
+
+async function deleteCt(name: string) {
+  const conn = selectedConn;
+  if (!conn) return;
+  await deleteCtOn(conn, name, () => { if (selectedConn === conn && !selectedVm) renderConn(); });
 }
 
 /// Rename a domain. libvirt can only rename shut-off persistent guests, so
@@ -5178,13 +5211,28 @@ async function renameVm(name: string) {
   }
 }
 
+async function deleteNetworkOn(conn: string, name: string, shown: string, after: () => void) {
+  if (!(await askConfirm("Delete network", `Delete network "${shown}"?`, "Delete", true))) return;
+  try {
+    await api.del(`/proxy/${conn}/networks/${encodeURIComponent(name)}`);
+    toast("Deleted");
+    after();
+  } catch (e) {
+    toast((e as Error).message, "bad");
+  }
+}
+
 async function deleteNetwork(name: string) {
   if (!selectedConn) return;
-  if (!(await askConfirm("Delete network", `Delete network "${shownNet(name)}"?`, "Delete", true))) return;
+  await deleteNetworkOn(selectedConn, name, shownNet(name), loadNetworks);
+}
+
+async function deletePoolOn(conn: string, name: string, shown: string, after: () => void) {
+  if (!(await askConfirm("Delete pool", `Delete storage pool "${shown}"?`, "Delete", true))) return;
   try {
-    await api.del(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}`);
+    await api.del(`/proxy/${conn}/pools/${encodeURIComponent(name)}`);
     toast("Deleted");
-    loadNetworks();
+    after();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
@@ -5192,11 +5240,15 @@ async function deleteNetwork(name: string) {
 
 async function deletePool(name: string) {
   if (!selectedConn) return;
-  if (!(await askConfirm("Delete pool", `Delete storage pool "${shownPool(name)}"?`, "Delete", true))) return;
+  await deletePoolOn(selectedConn, name, shownPool(name), loadPools);
+}
+
+async function deleteVolumeOn(conn: string, pool: string, name: string, after: () => void) {
+  if (!(await askConfirm("Delete volume", `Delete volume "${name}"?`, "Delete", true))) return;
   try {
-    await api.del(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}`);
+    await api.del(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}`);
     toast("Deleted");
-    loadPools();
+    after();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
@@ -5204,14 +5256,20 @@ async function deletePool(name: string) {
 
 async function deleteVolume(pool: string, name: string) {
   if (!selectedConn) return;
-  if (!(await askConfirm("Delete volume", `Delete volume "${name}"?`, "Delete", true))) return;
-  try {
-    await api.del(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}`);
-    toast("Deleted");
-    loadVolumes(pool);
-  } catch (e) {
-    toast((e as Error).message, "bad");
-  }
+  await deleteVolumeOn(selectedConn, pool, name, () => loadVolumes(pool));
+}
+
+/// Delete one resource from the admin panel. It routes to the same delete the
+/// resource's own view uses — including starting a running guest's stop — with
+/// the connection named explicitly and `after` repainting the admin page
+/// instead of navigating to the resource.
+async function adminDeleteResource(kind: AdminResource["kind"], conn: string, pool: string, name: string, after: () => void) {
+  const shown = name;
+  if (kind === "vm") await deleteVmOn(conn, name, after);
+  else if (kind === "ct") await deleteCtOn(conn, name, after);
+  else if (kind === "network") await deleteNetworkOn(conn, name, shown, after);
+  else if (kind === "pool") await deletePoolOn(conn, name, shown, after);
+  else await deleteVolumeOn(conn, pool, name, after);
 }
 
 async function deleteConnection(id: string) {
@@ -6555,7 +6613,10 @@ function openCreateResource() {
   bindResourceCards(el, () => el.remove());
 }
 
-function openCreatePool(conn = selectedConn) {
+/// Define a storage pool on `conn`. `after` is the admin panel's repaint, which
+/// also keeps the flow on the admin page; without it the pool's own server view
+/// is refreshed as before.
+function openCreatePool(conn = selectedConn, after?: () => void) {
   if (!conn) return;
   const el = openModal(
     "Create storage pool",
@@ -6585,7 +6646,11 @@ function openCreatePool(conn = selectedConn) {
       await api.postXml(`/proxy/${conn}/pools?title=${encodeURIComponent(form.name)}`,
         poolXml(form, newUuid()));
     }, { done: `Pool ${form.name} created`, notify: toast })
-      .then(() => { void refreshTreeVms(); if (selectedConn === conn) renderConn(); else renderDc(); });
+      .then(() => {
+        if (after) { after(); return; }
+        void refreshTreeVms();
+        if (selectedConn === conn) renderConn(); else renderDc();
+      });
   };
 }
 

@@ -134,6 +134,13 @@ async fn delete(
         .get("remove_storage")
         .map(|v| v == "true")
         .unwrap_or(false);
+    // Stop a running guest before removing it. Undefining a live domain leaves
+    // it running and transient -- an orphan with no definition to manage -- so
+    // a delete asks the guest to shut down, waits (bounded), then forces it off
+    // and undefines. A delete therefore always ends with the guest gone.
+    let stopped = crate::libvirt::stop_guest(&name, std::time::Duration::from_secs(30))
+        .await
+        .map_err(ApiError::internal)?;
     let v = with_conn(move |c| {
         let d = crate::libvirt::domain(c, &name)?;
         let xml = d.get_xml_desc(0)?;
@@ -173,6 +180,8 @@ async fn delete(
         Ok(json!({
             "name": name,
             "undefined": true,
+            // Whether the guest had to be stopped first, so the UI can say so.
+            "stopped": stopped,
             "storage_removed": remove_storage,
             // What went, what was deliberately kept and why, and what could
             // not be removed — so the UI can tell the whole truth.
@@ -540,5 +549,98 @@ mod tests {
         // A shut-off guest's inactive XML has no <target dev>.
         let no_target = "<interface type='network'>\n      <mac address='52:54:00:12:34:56'/>\n      <model type='virtio'/>\n    </interface>";
         assert_eq!(interface_info(no_target).0, None);
+    }
+
+    /// Deleting a *running* guest stops it first.
+    ///
+    /// Undefining a live domain leaves it running and transient -- an orphan
+    /// with no definition to manage it by -- which is what this guards against.
+    /// A tiny direct-kernel guest boots and is deleted while active; the test
+    /// checks it was reported `stopped`, and that neither its definition nor a
+    /// running domain survives. Real libvirt; never leaves anything behind.
+    /// `sudo -E cargo test --bins -- --ignored deleting_a_running`
+    #[tokio::test]
+    #[ignore = "needs root and a reachable qemu:///system"]
+    async fn deleting_a_running_guest_stops_it_first() {
+        use std::collections::HashMap;
+        // A guest that cannot start without a bootable kernel is no use here, so
+        // use the host kernel. If there is none, skip rather than fail.
+        let kernel = ["/boot/vmlinuz-linux", "/boot/vmlinuz", "/boot/vmlinuz-linux-lts"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).exists());
+        let Some(kernel) = kernel else {
+            eprintln!("skipping: no /boot kernel to boot the probe guest from");
+            return;
+        };
+        let xml = format!(
+            "<domain type='kvm'><name>delproberun</name><memory unit='KiB'>262144</memory><vcpu>1</vcpu>\
+             <os><type arch='x86_64' machine='q35'>hvm</type>\
+             <kernel>{kernel}</kernel><cmdline>console=ttyS0 quiet</cmdline></os>\
+             <features><acpi/></features>\
+             <devices><serial type='pty'><target port='0'/></serial></devices></domain>"
+        );
+        with_conn({
+            let xml = xml.clone();
+            move |c| {
+                // Clean up any leftover from an interrupted run.
+                if let Ok(d) = crate::libvirt::domain(c, "delproberun") {
+                    let _ = d.destroy();
+                    let _ = d.undefine_flags(
+                        virt::sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
+                            | virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM,
+                    );
+                }
+                Domain::define_xml(c, &xml)?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("define probe");
+        with_conn(|c| {
+            crate::libvirt::domain(c, "delproberun")?.create()?;
+            Ok(())
+        })
+        .await
+        .expect("start probe");
+
+        // Delete it while it is running. The handler must stop it first.
+        let res = match delete(Path("delproberun".into()), Query(HashMap::new())).await {
+            Ok(r) => r,
+            Err(e) => {
+                // Clean up before failing so a broken run leaves nothing.
+                let _ = with_conn(|c| {
+                    if let Ok(d) = crate::libvirt::domain(c, "delproberun") {
+                        let _ = d.destroy();
+                        let _ = d.undefine_flags(
+                            virt::sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
+                                | virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM,
+                        );
+                    }
+                    Ok(())
+                })
+                .await;
+                panic!("delete refused: {}", e.message);
+            }
+        };
+        let stopped = res.0["stopped"].as_bool().unwrap_or(false);
+        let undefined = res.0["undefined"].as_bool().unwrap_or(false);
+
+        // After the delete: the domain must be gone, not left running.
+        let survives = with_conn(|c| {
+            Ok(match crate::libvirt::domain(c, "delproberun") {
+                Ok(d) => (true, d.is_active().unwrap_or(false)),
+                Err(_) => (false, false),
+            })
+        })
+        .await
+        .expect("probe after delete");
+
+        assert!(stopped, "the delete reported stopping the running guest");
+        assert!(undefined, "the delete undefined the guest");
+        assert!(
+            !survives.0,
+            "no definition survives a running guest's delete"
+        );
+        assert!(!survives.1, "and no running domain is left behind");
     }
 }

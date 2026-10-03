@@ -468,12 +468,21 @@ async fn create(Json(req): Json<CreateReq>) -> Result<Json<Value>, ApiError> {
 
 /// Delete a container, and its rootfs with it (the rootfs is the container;
 /// there is no "keep the disk" for one). Templates are never touched.
+///
+/// A running container is stopped first, the same way a running VM is: the
+/// rootfs cannot be unmounted or deleted while its processes hold it, and
+/// undefining a live domain would leave it orphaned. So this asks the
+/// container to shut down, waits (bounded), then forces it off before the
+/// definition and its rootfs go.
 async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    let stopped = lxc(crate::libvirt::stop_guest(
+        &name,
+        std::time::Duration::from_secs(30),
+    ))
+    .await
+    .map_err(ApiError::internal)?;
     let (uuid, image, name) = lxc(with_conn(move |c| {
         let d = crate::libvirt::domain(c, &name)?;
-        if d.is_active().unwrap_or(false) {
-            return Err("stop the container before deleting it".to_string().into());
-        }
         let xml = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?;
         let uuid = d.get_uuid_string()?;
         d.undefine()?;
@@ -498,7 +507,7 @@ async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
         }
     }
     Ok(Json(json!({
-        "name": name, "undefined": true, "storage_removed": true,
+        "name": name, "undefined": true, "stopped": stopped, "storage_removed": true,
         "removed": removed, "kept": [], "failed": failed,
     })))
 }

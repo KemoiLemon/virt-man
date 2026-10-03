@@ -44,6 +44,11 @@ export interface AdminCtx {
   /// `after` runs once the resource exists (to repaint this page).
   createVm(conn: string, owner: string, after: () => void): void;
   createNetwork(conn: string, owner: string, after: () => void): void;
+  /// Define a storage pool on `conn` (pools are admin-defined and not owned).
+  createPool(conn: string, after: () => void): void;
+  /// Delete one resource, using the same confirmation and running-guest stop
+  /// as its own view; `after` repaints this page.
+  deleteResource(kind: AdminResource["kind"], conn: string, pool: string, name: string, after: () => void): void;
   /// The identity changed (your own groups, roles): refresh it and re-render.
   refreshMe(): Promise<void>;
   /// Put this section's primary action in the page header, inline with the
@@ -666,19 +671,23 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
     const tabs = `<div class="tabbar">
       ${conns.map((c) => `<button class="tab ${c.id === conn ? "active" : ""}" data-res-tab="${esc(c.id)}">
           ${c.online === false ? ic.offline(14) : ic.server(14)} ${esc(c.name)} <span class="tab-count">${counts.get(c.id) ?? 0}</span></button>`).join("")}
-      ${kind === "pool" || kind === "ct" ? "" : `<div class="tabbar-actions">
-        <button class="btn primary" id="res-new">${ic.plus(14)} ${kind === "vm" ? "VM" : "Network"} for user</button>
+      ${kind === "ct" ? "" : `<div class="tabbar-actions">
+        <button class="btn primary" id="res-new">${ic.plus(14)} ${kind === "vm" ? "VM" : kind === "network" ? "Network" : "Storage pool"}${kind === "pool" ? "" : " for user"}</button>
       </div>`}
     </div>`;
 
     const paint = () => {
       const shown = rows.filter((r) => !resOwner || r.kind === "pool" || r.owner === resOwner);
-      const actions = (r: AdminResource, i: number) => r.kind === "pool" ? "" : `
+      // Every resource can be deleted from here; the rest of the row's actions
+      // depend on its kind. Pools are administrator-defined and own no user, so
+      // they carry delete alone; volumes add only an owner change.
+      const actions = (r: AdminResource, i: number) => `
         <div class="row-actions">
-          <button class="btn icon" data-owner-res="${i}" title="Change owner">${ic.user()}</button>
+          ${r.kind === "pool" ? "" : `<button class="btn icon" data-owner-res="${i}" title="Change owner">${ic.user()}</button>`}
           ${r.kind === "volume" ? "" : `
             <button class="btn icon" data-share-res="${i}" title="Share">${ic.perms()}</button>
             <button class="btn icon ${r.suspended ? "on" : ""}" data-suspend-res="${i}" title="${r.suspended ? "Restore access" : "Suspend access"}">${r.suspended ? ic.start() : ic.suspend()}</button>`}
+          <button class="btn danger icon" data-del-res="${i}" title="Delete">${ic.trash()}</button>
         </div>`;
       const state = (r: AdminResource) => r.suspended
         ? `<span class="state bad">Suspended</span>`
@@ -751,10 +760,19 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
         paint();
       };
       const create = ctx.$("#res-new", area);
-      if (create) create.onclick = () => createFor(ctx, kind as "vm" | "network", conn, () => ctx.go(section, conn));
+      if (create) {
+        create.onclick = () => {
+          if (kind === "pool") ctx.createPool(conn, () => ctx.go(section, conn));
+          else createFor(ctx, kind as "vm" | "network", conn, () => ctx.go(section, conn));
+        };
+      }
       bind(area, "data-open-res", (i) => {
         const r = shown[Number(i)];
         ctx.openResource(r.kind as "vm" | "ct" | "network" | "pool", r.conn, r.name);
+      });
+      bind(area, "data-del-res", (i) => {
+        const r = shown[Number(i)];
+        ctx.deleteResource(r.kind, r.conn, r.pool ?? "", r.name, () => ctx.go(section, conn));
       });
       bind(area, "data-owner-res", (i) => void changeOwner(ctx, shown[Number(i)], section));
       bind(area, "data-share-res", (i) => {

@@ -211,6 +211,82 @@ pub fn domain_state_name(state: virt::sys::virDomainState) -> &'static str {
     }
 }
 
+/// Stop a running guest the way a person would, so it can be removed cleanly.
+///
+/// Deletion used to undefine a running domain outright: libvirt keeps the
+/// domain running and merely makes it transient, so the guest was left
+/// orphaned with no definition to manage it by. Instead, ask for a graceful
+/// shutdown (ACPI / the guest's own init), watch it for up to `grace`, and only
+/// then force it off. Returns `true` when the guest was running and had to be
+/// stopped, `false` when it was already inactive.
+///
+/// Each step opens its own short connection (`with_conn`), so the wait holds no
+/// connection open: `grace` is a ceiling on the poll loop, not a held lock.
+pub async fn stop_guest(name: &str, grace: std::time::Duration) -> Result<bool, String> {
+    // Phase 1: request shutdown and confirm it was sent.
+    let was_active = with_conn({
+        let name = name.to_string();
+        move |c| {
+            let d = crate::libvirt::domain(c, &name)?;
+            if !d.is_active().unwrap_or(false) {
+                return Ok(false);
+            }
+            // A graceful shutdown is a request to the guest's own init. Some
+            // guests have no ACPI handler, so a failure here is not fatal --
+            // the force stop below is what guarantees it stops.
+            if let Err(e) = d.shutdown() {
+                tracing::warn!("graceful shutdown of {name} failed ({e}); will force it");
+            }
+            Ok(true)
+        }
+    })
+    .await?;
+    if !was_active {
+        return Ok(false);
+    }
+
+    // Phase 2: watch it stop, polling on its own connection. A domain that has
+    // vanished (a concurrent delete, or the guest's own exit cleaning up) is
+    // stopped, not an error.
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let still_up = with_conn({
+            let name = name.to_string();
+            move |c| {
+                Ok(match crate::libvirt::domain(c, &name) {
+                    Ok(d) => d.is_active().unwrap_or(false),
+                    Err(_) => false,
+                })
+            }
+        })
+        .await?;
+        if !still_up {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    // Phase 3: it would not go quietly, so take it down.
+    with_conn({
+        let name = name.to_string();
+        move |c| {
+            // It may have stopped (or been removed) between the last poll and now.
+            let Ok(d) = crate::libvirt::domain(c, &name) else {
+                return Ok(());
+            };
+            if d.is_active().unwrap_or(false) {
+                d.destroy()?;
+            }
+            Ok(())
+        }
+    })
+    .await?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Graphics {
     pub kind: String,

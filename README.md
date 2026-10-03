@@ -75,6 +75,16 @@ on the host (a user namespace). A privileged container, whose root is the
 host's root, needs the `CT.Privileged` permission (the `CTPrivileged` role),
 which only an administrator can grant.
 
+## Administration
+
+The admin panel (`/admin`) manages users, groups, roles, permissions, daemons,
+quotas and API keys, and gives a per-daemon view of every VM, container,
+network and storage pool. From there an administrator can define a storage
+pool, create a VM or network *for* a user, and delete any resource — actions
+that go through the same forms and confirms as the resource's own page.
+Deleting a running guest stops it first, then removes it and (optionally) its
+disks.
+
 ## Documentation
 
 - `DESIGN.md` — architecture and the reasoning behind it, including reversed

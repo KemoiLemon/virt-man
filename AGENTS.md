@@ -26,6 +26,8 @@ cd web/server && cargo clippy && cargo test
 #   arg is the base URL; defaults to http://127.0.0.1:8799
 cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   also: live-layout, live-tabs, live-hw, live-dc-vm, live-console, live-route,
+#   live-admin-head, live-admin-res (the admin panel's per-section action in the
+#   header, and its resource create/delete controls),
 #   live-vmnet (needs sudo: checks tc and the IPAM store; boots its own guest),
 #   live-ipam (needs sudo + the Alpine live ISO: a real udhcpc against our DHCP,
 #   and the access log of what that guest then fetched),
@@ -221,6 +223,37 @@ buttons there pass an explicit `conn` to the form (`withDaemon`) and the view
 stays put: a create is not a request to switch the whole app to that daemon.
 The card builders (`netCard`, `poolCard`) are shared with a server's own tabs,
 which is why they take the owning connection as an argument.
+
+**The admin panel creates and deletes resources too.** (`web/src/admin.ts`,
+`web/src/main.ts` `adminCtx`.) The VM, Network and Storage Pools sections are
+each tabbed by daemon, and each row carries a delete action; Storage Pools also
+has a create button (pools are administrator-defined and own no user, so no
+"for user" step). Every action goes through the resource's *own* form or delete
+with the connection named explicitly and an `after` callback that repaints the
+admin page — it never navigates to the resource. Things that bite:
+
+- **`AdminCtx` is the only surface `admin.ts` has into `main.ts`.** A new
+  create or delete needs a method there (`createPool`, `deleteResource`) and a
+  binding in `adminCtx`, not an import back into `main.ts`.
+- **`deleteResource` reuses `deleteVmOn`/`deleteCtOn`/`deleteNetworkOn`/
+  `deletePoolOn`/`deleteVolumeOn`**, which are the same functions the guest,
+  network and pool views call, so the two surfaces cannot drift — including the
+  running-guest stop below.
+- **A pool has no `AdminResource.owner`**, so `/resources` skips it in the
+  ownership annotation; it is listed from the daemon's own pool list, which is
+  why a freshly created pool shows up without an ownership record.
+
+**Deleting a running guest stops it first.** (`daemon/src/libvirt.rs`
+`stop_guest`, `daemon/src/api/domains.rs` `delete`, `containers.rs` `delete`.)
+Deletion used to `undefine` a live domain outright: libvirt keeps the domain
+running and merely makes it transient, so the guest was left orphaned with no
+definition to manage it by — and a container's rootfs could not even be
+unmounted. Now a delete asks the guest to shut down (`shutdown()`), polls for
+up to 30 s, then force-`destroy()`s it, and only then undefines and cleans up
+storage. The delete response carries `stopped` so the UI can say a running
+guest was stopped. A container's delete runs the same stop inside the LXC
+driver scope before reading its inactive XML and unmounting the rootfs. The SPA
+wraps the guest delete in `runTask` because that stop can take seconds.
 
 **Pages paint from cache, then from the daemon.** A remote daemon costs a
 round trip per read, so opening a view used to show nothing until it answered.
