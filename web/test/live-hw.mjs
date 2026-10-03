@@ -283,6 +283,116 @@ check("and again carries exactly one display, VNC", () => {
   assert.deepEqual(afterVnc, ["vnc"], `guest carries ${JSON.stringify(afterVnc)}`);
 });
 
+// The video adapter is a device now, so its model and options can be changed
+// without the XML tab. Open it, switch it to QXL with a size, and read the
+// guest back: exactly one `<video>`, of the chosen model.
+const videoDeviceRow = [...document.querySelectorAll(".hw-inline .hw-item[data-hw]")]
+  .find((r) => /video/i.test(r.textContent) && r.dataset.hw.startsWith("dev-"));
+check("the video adapter is listed as a device", () => {
+  assert.ok(videoDeviceRow, `no video device row among ${[...document.querySelectorAll('.hw-inline .hw-item[data-hw]')].map((r) => r.textContent.trim().slice(0, 30)).join(" | ")}`);
+  assert.match(videoDeviceRow.textContent, /Video/i);
+});
+videoDeviceRow?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(600);
+const modelSel = document.querySelector('.hw-inline .hw-page.active [data-field="model"]');
+check("the video form offers a model picker", () => {
+  assert.ok(modelSel, "a model select is present");
+  const models = [...modelSel.options].map((o) => o.value);
+  for (const m of ["virtio", "qxl", "vga", "cirrus", "none"]) {
+    assert.ok(models.includes(m), `${m} offered`);
+  }
+});
+modelSel.value = "qxl";
+modelSel.onchange();
+await wait(400);
+// The QXL size field appears only for QXL.
+const ramField = document.querySelector('.hw-inline .hw-page.active [data-field="ram"]');
+check("a QXL option appears with the QXL model", () => {
+  assert.ok(ramField, "the RAM field is shown");
+});
+ramField.value = "65536";
+ramField.onchange();
+await wait(300);
+const saveVideo = document.querySelector(".hw-inline #hw-save");
+const beforeVideo = document.querySelectorAll(".toast").length;
+saveVideo.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(4000);
+const videoToast = [...document.querySelectorAll(".toast")].slice(beforeVideo).map((t) => t.textContent.trim()).join(" | ");
+check("the video change saves", () => {
+  assert.ok(!/administrators|refused/i.test(videoToast), `refused: ${videoToast}`);
+  assert.match(videoToast, /saved|Hardware saved/i, `no success reported ("${videoToast}")`);
+});
+const videos = async () => {
+  const res = await fetch(
+    new URL(`/proxy/${fixture.conn}/domains/${encodeURIComponent(fixture.name)}/xml`, base).toString());
+  const { xml } = await res.json();
+  return {
+    count: (xml.match(/<video\b/g) || []).length,
+    model: xml.match(/<video\b[\s\S]*?<\/video>/)?.[0].match(/<model\b[^>]*type=['"]([^'"]+)/)?.[1] ?? "",
+    ram: xml.match(/<video\b[\s\S]*?<\/video>/)?.[0].match(/<model\b[^>]*ram=['"]([^'"]+)/)?.[1] ?? "",
+  };
+};
+const afterVideo = await videos();
+check("the guest carries exactly one video device, of the chosen model", () => {
+  assert.equal(afterVideo.count, 1, `guest carries ${afterVideo.count} video devices`);
+  assert.equal(afterVideo.model, "qxl", `model is ${afterVideo.model}`);
+  assert.equal(afterVideo.ram, "65536", `ram is ${afterVideo.ram}`);
+});
+
+// A `*-gl` device and 3D acceleration are one setting: choosing the gl device
+// must turn acceleration on by itself, or the save is refused by libvirt.
+const videoModelSel = () => document.querySelector('.hw-inline .hw-page.active [data-field="model"]');
+const videoDeviceSel = () => document.querySelector('.hw-inline .hw-page.active [data-field="device"]');
+// Reopen the video device after the save above rebuilt the editor.
+const reopenVideo = async () => {
+  const row = [...document.querySelectorAll(".hw-inline .hw-item[data-hw]")]
+    .find((r) => /video/i.test(r.textContent) && r.dataset.hw.startsWith("dev-"));
+  assert.ok(row, "the Video row is still there");
+  row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await wait(600);
+};
+await reopenVideo();
+videoModelSel().value = "virtio";
+videoModelSel().onchange();
+await wait(400);
+check("a virtio video device offers its concrete device", () => {
+  const sel = videoDeviceSel();
+  assert.ok(sel, "the virtio device picker is present");
+  assert.ok([...sel.options].some((o) => o.value === "virtio-vga-gl"), "virtio-vga-gl is offered");
+});
+videoDeviceSel().value = "virtio-vga-gl";
+videoDeviceSel().onchange();
+await wait(400);
+const accelSel = () => document.querySelector('.hw-inline .hw-page.active [data-field="accel3d"]');
+check("choosing a gl device turns 3D acceleration on", () => {
+  assert.equal(accelSel()?.value, "yes", `accel3d is ${accelSel()?.value}`);
+});
+const saveGl = document.querySelector(".hw-inline #hw-save");
+const beforeGl = document.querySelectorAll(".toast").length;
+saveGl.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(4000);
+const glToast = [...document.querySelectorAll(".toast")].slice(beforeGl).map((t) => t.textContent.trim()).join(" | ");
+check("the gl video device saves", () => {
+  assert.ok(!/administrators|refused|3d acceleration/i.test(glToast), `refused: ${glToast}`);
+  assert.match(glToast, /saved|Hardware saved/i, `no success reported ("${glToast}")`);
+});
+const glVideo = await (async () => {
+  const res = await fetch(
+    new URL(`/proxy/${fixture.conn}/domains/${encodeURIComponent(fixture.name)}/xml`, base).toString());
+  const { xml } = await res.json();
+  const block = xml.match(/<video\b[\s\S]*?<\/video>/)?.[0] ?? "";
+  return {
+    model: block.match(/<model\b[^>]*type=['"]([^'"]+)/)?.[1] ?? "",
+    device: block.match(/<model\b[^>]*device=['"]([^'"]+)/)?.[1] ?? "",
+    accel: block.match(/accel3d=['"]([^'"]+)/)?.[1] ?? "",
+  };
+})();
+check("the guest carries the gl device with 3d enabled", () => {
+  assert.equal(glVideo.model, "virtio", `model is ${glVideo.model}`);
+  assert.equal(glVideo.device, "virtio-vga-gl", `device is ${glVideo.device}`);
+  assert.equal(glVideo.accel, "yes", `accel3d is ${glVideo.accel}`);
+});
+
 for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }

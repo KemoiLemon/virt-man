@@ -471,7 +471,89 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                 one_of(d, "model", AUDIO_TYPES)?;
                 harmless_subtree(d)?;
             }
-            "video" | "watchdog" | "memballoon" | "controller" => {
+            // The video adapter: `model` is one of libvirt's models, and its
+            // numeric attributes (`ram`, `vgamem`, `vram64`, `vram`, `heads`)
+            // size guest-side video memory. `accel3d` asks the host's GPU to
+            // render for the guest, which is guest-side from the app's point of
+            // view, but it is only meaningful with a `*-gl` device and a
+            // render node -- and the `rendernode` attribute is a host path, so
+            // the shared `host_ref` test below refuses it exactly as it refuses
+            // a disk for naming an arbitrary file. That keeps the whole of the
+            // video subtree an administrator's to point at the host, while a
+            // non-admin keeps every model and every guest-side option.
+            "video" => {
+                attrs_only(d, &[])?;
+                for m in elements(d) {
+                    match m.tag_name().name() {
+                        "model" => {
+                            attrs_only(
+                                m,
+                                &[
+                                    "type", "ram", "vgamem", "vram64", "device", "vram",
+                                    "heads", "primary", "blob", "edid",
+                                ],
+                            )?;
+                            // Only the models the form offers. A model the form
+                            // cannot write (xen, vbox, gop) is refused, so the
+                            // allowlist stays in step with `HW_CATALOG` rather
+                            // than with libvirt's whole schema.
+                            let t = attr(m, "type");
+                            if !matches!(
+                                t,
+                                "vga" | "cirrus" | "vmvga" | "none" | "bochs" | "ramfb"
+                                    | "qxl" | "virtio"
+                            ) {
+                                return Err(refuse(&format!("model type='{t}' on a video device")));
+                            }
+                            // A `vhost-user-*` virtio device reads a host chardev,
+                            // which this app never defines: an administrator's
+                            // to ask for through the XML tab.
+                            if !matches!(
+                                attr(m, "device"),
+                                "" | "virtio-vga" | "virtio-vga-gl" | "virtio-gpu"
+                                    | "virtio-gpu-gl"
+                            ) {
+                                return Err(refuse(&format!(
+                                    "video device='{}'",
+                                    attr(m, "device")
+                                )));
+                            }
+                            // `acceleration` lives *inside* `model`: that is
+                            // where libvirt reads it, and where the form writes
+                            // it. `rendernode` is a host path and the
+                            // `host_ref` scan below refuses it.
+                            for a in elements(m) {
+                                if a.tag_name().name() != "acceleration" {
+                                    return Err(refuse(&format!(
+                                        "<{}> in a video model",
+                                        a.tag_name().name()
+                                    )));
+                                }
+                                plain(a, &["accel3d", "accel2d", "rendernode"])?;
+                            }
+                        }
+                        "acceleration" => {
+                            // `rendernode` is a host path and is caught by the
+                            // `host_ref` scan below.
+                            plain(m, &["accel3d", "accel2d", "rendernode"])?;
+                        }
+                        "resolution" => plain(m, &["x", "y"])?,
+                        "alias" => plain(m, &["name"])?,
+                        "address" => plain(
+                            m,
+                            &["type", "domain", "bus", "slot", "function"],
+                        )?,
+                        other => return Err(refuse(&format!("<{other}> in a video device"))),
+                    }
+                }
+                let host_ref = d.descendants().any(|x| {
+                    x.attributes().any(|a| a.value().starts_with('/'))
+                });
+                if host_ref {
+                    return Err(refuse("a device that names something on the host"));
+                }
+            }
+            "watchdog" | "memballoon" | "controller" => {
                 harmless_subtree(d)?;
                 let host_ref = d.descendants().any(|x| {
                     matches!(x.tag_name().name(), "source" | "backend" | "driver")
@@ -1076,6 +1158,61 @@ mod tests {
             check_domain(&spice).is_ok(),
             "libvirt's read-back of a SPICE guest"
         );
+    }
+
+    #[test]
+    fn a_video_device_may_name_every_model_but_only_guest_side_options() {
+        // A video adapter is guest-side: the model, its memory sizes and the
+        // 3D flag are all allowed for a non-admin. Every model the form offers
+        // must pass, with the options that model takes.
+        for good in [
+            r#"<video><model type="virtio"/></video>"#,
+            r#"<video><model type="virtio" device="virtio-vga-gl" vram="65536" blob="on" edid="on"><acceleration accel3d="yes"/></model></video>"#,
+            r#"<video><model type="qxl" ram="65536" vgamem="16384" vram64="32768" heads="2"/></video>"#,
+            r#"<video><model type="vga"/></video>"#,
+            r#"<video><model type="cirrus"/></video>"#,
+            r#"<video><model type="vmvga"/></video>"#,
+            r#"<video><model type="bochs" heads="1"/></video>"#,
+            r#"<video><model type="ramfb"/></video>"#,
+            r#"<video><model type="none"/></video>"#,
+        ] {
+            assert!(check_domain(&with_device(good)).is_ok(), "{good}");
+        }
+        // A render node names a host file, so it stays an administrator's; a
+        // vhost-user device reads a host chardev this app never defines.
+        for (bad, why) in [
+            (
+                r#"<video><model type="virtio" device="virtio-vga-gl"><acceleration accel3d="yes" rendernode="/dev/dri/renderD128"/></model></video>"#,
+                "a render node",
+            ),
+            (
+                r#"<video><model type="virtio" device="vhost-user-vga"/></video>"#,
+                "a vhost-user device",
+            ),
+            (
+                r#"<video><model type="gop"/></video>"#,
+                "an unsupported model",
+            ),
+        ] {
+            assert!(check_domain(&with_device(bad)).is_err(), "{why} allowed");
+        }
+    }
+
+    #[test]
+    fn the_forms_video_output_passes() {        // What `videoXml` in web/src/hardware.ts writes, verbatim, including
+        // the `<address>` libvirt adds on read-back. The allowlist must accept
+        // it or a non-admin could never edit a guest's display adapter.
+        for dev in [
+            "<video>\n      <model type=\"virtio\"/>\n      <address type=\"pci\"/>\n    </video>",
+            "<video>\n      <model type=\"virtio\" device=\"virtio-vga-gl\" blob=\"on\" edid=\"on\">\n        <acceleration accel3d=\"yes\"/>\n      </model>\n      <address type=\"pci\"/>\n    </video>",
+            "<video>\n      <model type=\"qxl\" ram=\"65536\" vgamem=\"16384\" vram64=\"32768\" heads=\"2\"/>\n      <address type=\"pci\"/>\n    </video>",
+            "<video><model type=\"none\"/></video>",
+        ] {
+            assert!(
+                check_domain(&with_device(dev)).is_ok(),
+                "the form's own output: {dev}"
+            );
+        }
     }
 
     #[test]

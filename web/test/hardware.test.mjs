@@ -459,3 +459,93 @@ test("network boot is not offered without a NIC", () => {
   assert.deepEqual(hw.bootChoices([], withNic).map((c) => c.value), ["hd", "cdrom", "network"]);
 });
 
+
+test("a video device is single-instance and offers only the common models", () => {
+  const t = hw.hwType("video");
+  assert.ok(t, "video is in the catalogue");
+  assert.ok(t.single, "libvirt allows only one video device");
+  const models = t.fields.find((f) => f.key === "model").options.map((o) => o.value);
+  for (const m of ["virtio", "qxl", "vga", "cirrus", "vmvga", "bochs", "ramfb", "none"]) {
+    assert.ok(models.includes(m), `${m} offered`);
+  }
+});
+
+test("the video model decides which attributes reach the XML", () => {
+  // Only QXL takes ram/vgamem/vram64: writing one on another model is refused
+  // by libvirt, so a round trip must not smuggle it in.
+  const qxl = hw.deviceXml({ kind: "video", fields: { model: "qxl", ram: "65536", vgamem: "16384", vram64: "32768", heads: "2" } });
+  assert.match(qxl, /<model type="qxl"/);
+  assert.match(qxl, /ram="65536"/);
+  assert.match(qxl, /vgamem="16384"/);
+  assert.match(qxl, /vram64="32768"/);
+  assert.match(qxl, /heads="2"/);
+  // Each attribute exactly once: an earlier build wrote `heads` from both the
+  // QXL group and the shared group, which libvirt rejects as a duplicate.
+  assert.equal((qxl.match(/\bheads=/g) || []).length, 1, `one heads in ${qxl}`);
+
+  // virtio takes the concrete device and its own options; a QXL attribute set
+  // on it must not leak through.
+  const virtio = hw.deviceXml({ kind: "video", fields: { model: "virtio", device: "virtio-vga-gl", ram: "111", accel3d: "yes", blob: "on" } });
+  assert.match(virtio, /<model type="virtio"/);
+  assert.match(virtio, /device="virtio-vga-gl"/);
+  assert.match(virtio, /blob="on"/);
+  assert.match(virtio, /<acceleration accel3d="yes"\/>/);
+  // The acceleration element is a child of <model>: as a sibling the schema
+  // accepts it but libvirt ignores it, and a -gl device is then refused with
+  // "can be only with enabled 3d acceleration".
+  assert.match(virtio, /<model[^>]*>[\s\S]*<acceleration accel3d="yes"\/>[\s\S]*<\/model>/, "acceleration is inside <model>");
+  assert.doesNotMatch(virtio, /ram="111"/, "a QXL attribute is not written on virtio");
+
+  // virtio-vga is libvirt's own default, so it is left implicit.
+  const plain = hw.deviceXml({ kind: "video", fields: { model: "virtio" } });
+  assert.doesNotMatch(plain, /device=/);
+
+  // A bare model takes no acceleration element and no numeric attributes.
+  const vga = hw.deviceXml({ kind: "video", fields: { model: "vga", ram: "1" } });
+  assert.match(vga, /<model type="vga"\/>/);
+  assert.doesNotMatch(vga, /acceleration|ram=/);
+
+  assert.match(hw.deviceXml({ kind: "video", fields: { model: "none" } }), /<model type="none"\/>/);
+});
+
+test("a non-numeric video size is refused before it reaches libvirt", () => {
+  assert.equal(hw.validateDevice({ kind: "video", fields: { model: "qxl", ram: "lots" } }),
+    "Video ram must be a number");
+  assert.equal(hw.validateDevice({ kind: "video", fields: { model: "qxl", ram: "65536" } }), null);
+});
+
+test("a video device round-trips through the XML", () => {
+  const xml = `  <devices>\n    <video>\n      <model type="qxl" ram="65536" vgamem="16384"/>\n      <address type="pci" domain="0x0000" bus="0x00" slot="0x01" function="0x0"/>\n    </video>\n  </devices>`;
+  const found = hw.devicesFromXml(xml).filter((d) => d.kind === "video");
+  assert.equal(found.length, 1, "one video device");
+  assert.equal(found[0].fields.model, "qxl");
+  assert.equal(found[0].fields.ram, "65536");
+  assert.equal(found[0].fields.vgamem, "16384");
+  // Rebuilding from what was parsed keeps the model and its sizes.
+  const again = hw.deviceXml(found[0]);
+  assert.match(again, /<model type="qxl"/);
+  assert.match(again, /ram="65536"/);
+});
+
+test("a video device with 3D acceleration round-trips", () => {
+  const xml = `<video><model type="virtio" device="virtio-vga-gl"/><acceleration accel3d="yes"/></video>`;
+  const d = hw.devicesFromXml(xml).find((x) => x.kind === "video");
+  assert.equal(d.fields.device, "virtio-vga-gl");
+  assert.equal(d.fields.accel3d, "yes");
+  assert.match(hw.deviceXml(d), /accel3d="yes"/);
+});
+
+test("libvirt's own video read-back round-trips without losing it", () => {
+  // What libvirt writes after a guest has been defined: a `primary` flag and a
+  // resolved `heads` that the form does not set. Both are carried through, so a
+  // hardware save does not silently drop the adapter or its role.
+  const xml = `<video><model type='virtio' heads='1' primary='yes' device='virtio-vga'/>`
+    + `<address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x0'/></video>`;
+  const [d] = hw.devicesFromXml(xml).filter((x) => x.kind === "video");
+  assert.ok(d, "the video device is found");
+  const out = hw.deviceXml(d);
+  assert.match(out, /<model type="virtio"/);
+  assert.match(out, /primary="yes"/, "the primary flag survives");
+  assert.match(out, /heads="1"/, "the resolved head count survives");
+  assert.doesNotMatch(out, /device="virtio-vga"/, "libvirt's default device is not re-written");
+});

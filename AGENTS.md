@@ -498,6 +498,32 @@ applies every change to the running guest *and* its definition
 - The hardware editor rebuilds every `<interface>`, so it carries `<bandwidth>`
   through (`devicesFromXml`/`deviceXml`), or a hardware save would lift limits.
 
+**The video adapter is a device, and its model decides its attributes.**
+(`web/src/hardware.ts` `videoXml`, `HW_CATALOG` "video"; `xmlcheck.rs`.) It is
+the one `<video>`, added like any other device, so the model and its options are
+editable without the XML tab; a guest with none gets a `virtio` one seeded when
+the editor opens (libvirt wants exactly one). libvirt ties each attribute to its
+model — `ram`/`vgamem`/`vram64` are QXL's, `device`/`blob` are virtio's — and
+refuses a mismatched one, so the form hides fields by model rather than writing
+whatever is set. Two things that cost real time:
+
+- **`<acceleration>` is a child of `<model>`, not a sibling.** As a sibling the
+  schema accepts it and the qemu driver ignores it, so a `virtio-vga-gl` device
+  was refused with "can be only with enabled 3d acceleration" *while naming
+  `<acceleration accel3d='yes'/>`* — the error pointed at the one thing that was
+  already right. `videoXml` writes it inside `<model>`.
+- **A `*-gl` device and `accel3d='yes'` are one setting.** The form moves them
+  together (choosing a gl device turns 3D on, and turning 3D on upgrades the
+  device), so the save cannot be refused for a mismatch the form allowed.
+
+`rendernode` is a host DRI path and a `vhost-user-*` device reads a host
+chardev, so both stay administrators' (`xmlcheck`'s `host_ref` scan and the
+`device` allowlist); every model and every guest-side option is a non-admin's.
+`accel3d` is harmless on any display, but a `*-gl` guest needs a GL-capable
+display (`egl-headless`, or SPICE with `<gl enable='yes'/>`) to actually start;
+this app writes neither, so a -gl guest defines and then fails at start with
+libvirt's own reason.
+
 **Guests are given disks by path, not by pool+volume.** `web/src/xml.ts` and
 `hardware.ts` write `<disk type='file'><source file='/…/x.qcow2'/>`. A
 `<disk type='volume'>` reference is resolvable only if the libvirt on that host

@@ -4901,7 +4901,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       ...nics.map((n) => ({ icon: ic.network(), label: "Network", sum: displayName(treeNets[conn], n.net) })),
     ] : [
       { icon: ic.cpu(), label: "BIOS", sum: bios },
-      { icon: ic.vm(), label: "Display", sum: display },
+      { icon: ic.vm(), label: "Graphics", sum: display },
       ...devices.map((x) => ({
         icon: ic[hwType(x.kind)?.icon ?? "cpu"](),
         label: hwType(x.kind)?.label ?? x.kind,
@@ -5537,7 +5537,9 @@ async function openHardwareEditor(opts: {
 
   // Existing guest: read its current definition so the form starts populated.
   let baseXml = "";
-  let devices: HwDevice[] = [];
+  // A new guest starts with a video adapter like `domainXml` used to write: the
+  // editor owns `<video>` now, so nothing else puts one in.
+  let devices: HwDevice[] = [{ kind: "video", fields: { model: "virtio", device: "virtio-vga" } }];
   let general = {
     name: "",
     cpus: 2,
@@ -5552,6 +5554,12 @@ async function openHardwareEditor(opts: {
         `/proxy/${conn}/domains/${encodeURIComponent(opts.vm)}/xml`);
       baseXml = xml;
       devices = devicesFromXml(xml);
+      // A guest defined before video was editable may carry no `<video>` at
+      // all; give the editor one to show, so saving hardware does not leave the
+      // guest without a display adapter.
+      if (!devices.some((d) => d.kind === "video")) {
+        devices.push({ kind: "video", fields: { model: "virtio", device: "virtio-vga" } });
+      }
       general = {
         // The display name: the title when the guest has one.
         name: unescapeXml(xml.match(/<title>([^<]*)<\/title>/)?.[1] ?? "") || opts.vm,
@@ -5762,7 +5770,7 @@ async function openHardwareEditor(opts: {
         key: "disk", icon: ic.disk(), label: "Hard Disk",
         sum: newDisk.mode === "existing" ? (newDisk.volume || "choose a volume") : `${newDisk.size_gb} GB ${newDisk.format}`,
       }]),
-      { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics },
+      { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics.toUpperCase() },
       { key: "firmware", icon: ic.cpu(), label: "BIOS", sum: general.firmware === "uefi" ? "UEFI (OVMF)" : "BIOS (SeaBIOS)" },
     ];
     const rows = fixed.map((f) => `
@@ -5900,7 +5908,7 @@ async function openHardwareEditor(opts: {
       case "display":
         return `<div class="hw-page active">
           <h3 class="hw-title">Display</h3>
-          <label class="field"><span>Graphics</span>
+          <label class="field"><span>Protocol</span>
             <select id="g-gfx">${opt(["vnc", "spice"], general.graphics)}</select></label>
           <p class="muted hw-note" id="g-gfx-note">${gfxNote(general.graphics)}</p>
         </div>`;
@@ -5984,6 +5992,22 @@ async function openHardwareEditor(opts: {
             val = String(clamp(val, 1, cap.disk));
           }
           devices[i].fields[key] = val;
+          // A `*-gl` video device and 3D acceleration are one setting: libvirt
+          // refuses a gl frontend without enabled 3d (and a plain device with
+          // 3d is upgraded to gl). Moving one moves the other, so the save
+          // cannot be refused for a mismatch the form let them create.
+          if (devices[i].kind === "video") {
+            const f = devices[i].fields;
+            if (key === "device" && f.device.endsWith("-gl")) f.accel3d = "yes";
+            if (key === "device" && !f.device.endsWith("-gl")) f.accel3d = "";
+            if (key === "accel3d") {
+              if (f.accel3d === "yes" && !f.device.endsWith("-gl")) {
+                f.device = f.device === "virtio-gpu" ? "virtio-gpu-gl" : "virtio-vga-gl";
+              } else if (f.accel3d !== "yes" && f.device.endsWith("-gl")) {
+                f.device = f.device === "virtio-gpu-gl" ? "virtio-gpu" : "virtio-vga";
+              }
+            }
+          }
           // Changing the pool invalidates the volume list.
           void render();
         };
@@ -6087,7 +6111,21 @@ async function openHardwareEditor(opts: {
       });
       add.querySelectorAll("[data-af]").forEach((n: Element) => {
         (n as HTMLElement).onchange = () => {
-          draft[(n as HTMLElement).dataset.af!] = (n as HTMLInputElement).value;
+          const key = (n as HTMLElement).dataset.af!;
+          draft[key] = (n as HTMLInputElement).value;
+          // Keep a gl device and 3D acceleration in step; see the device page.
+          if (kind === "video") {
+            if (key === "device" && draft.device.endsWith("-gl")) draft.accel3d = "yes";
+            if (key === "device" && !draft.device.endsWith("-gl")) draft.accel3d = "";
+            if (key === "accel3d") {
+              const gl = (draft.device ?? "").endsWith("-gl");
+              if (draft.accel3d === "yes" && !gl) {
+                draft.device = draft.device === "virtio-gpu" ? "virtio-gpu-gl" : "virtio-vga-gl";
+              } else if (draft.accel3d !== "yes" && gl) {
+                draft.device = draft.device === "virtio-gpu-gl" ? "virtio-gpu" : "virtio-vga";
+              }
+            }
+          }
           void renderAdd();
         };
       });
@@ -6167,6 +6205,11 @@ async function openHardwareEditor(opts: {
           .replace(/<channel\b[\s\S]*?org\.qemu\.guest_agent[\s\S]*?<\/channel>\s*/g, "")
           .replace(/<tpm\b[\s\S]*?<\/tpm>\s*/g, "")
           .replace(/<watchdog\b(?:[^>]*\/>|[\s\S]*?<\/watchdog>)\s*/g, "")
+          // The video adapter is owned by the device catalogue now, so it is
+          // stripped and re-added through `withDevices` like the rest. Leaving
+          // it in place would splice a second `<video>` into a definition that
+          // already has one, and libvirt allows only one.
+          .replace(/<video\b(?:[^>]*\/>|[\s\S]*?<\/video>)\s*/g, "")
           // The graphics device is stripped and re-added below, like the rest.
           // Leaving the old one in place appended the new one instead of
           // replacing it, so a guest ended up with *both* a VNC and a SPICE

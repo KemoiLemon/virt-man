@@ -129,6 +129,68 @@ export const HW_CATALOG: HwType[] = [
     ],
   },
   {
+    id: "video",
+    label: "Video",
+    blurb: "The guest's display adapter: model, video RAM and acceleration",
+    icon: "vm",
+    single: true,
+    fields: [
+      {
+        // Only the models people actually choose, so no field promises a
+        // backend this host might refuse. `none` is here because it is the
+        // right answer for a headless guest, and `bochs`/`ramfb` are the two
+        // small framebuffers worth offering (ramfb is what drives a display
+        // before the OS loads a driver).
+        key: "model", label: "Model", type: "select", value: "virtio",
+        options: [
+          { value: "virtio", label: "virtio" },
+          { value: "qxl", label: "qxl" },
+          { value: "vga", label: "vga" },
+          { value: "cirrus", label: "cirrus" },
+          { value: "vmvga", label: "vmvga" },
+          { value: "bochs", label: "bochs" },
+          { value: "ramfb", label: "ramfb" },
+          { value: "none", label: "none" },
+        ],
+      },
+      {
+        // The concrete qemu device behind `virtio`. `virtio-vga-gl` is what
+        // turns on the 3D path; `virtio-gpu` has no VGA compatibility, so it is
+        // right for a guest whose display never goes through VGA. The
+        // vhost-user devices need a chardev this form does not define, so they
+        // stay administrators' to ask for through the XML tab.
+        key: "device", label: "Virtio Device", type: "select", value: "virtio-vga",
+        options: [
+          { value: "virtio-vga", label: "virtio-vga" },
+          { value: "virtio-vga-gl", label: "virtio-vga-gl (3D)" },
+          { value: "virtio-gpu", label: "virtio-gpu" },
+          { value: "virtio-gpu-gl", label: "virtio-gpu-gl (3D)" },
+        ],
+        showWhen: { key: "model", value: "virtio" },
+      },
+      { key: "vram", label: "VRAM (KiB)", type: "text", placeholder: "libvirt default", showWhen: { key: "model", value: "virtio" } },
+      { key: "ram", label: "RAM (KiB)", type: "text", placeholder: "65536", showWhen: { key: "model", value: "qxl" } },
+      { key: "vgamem", label: "VGA Memory (KiB)", type: "text", placeholder: "16384", showWhen: { key: "model", value: "qxl" } },
+      { key: "vram64", label: "VRAM64 (KiB)", type: "text", placeholder: "libvirt default", showWhen: { key: "model", value: "qxl" } },
+      { key: "heads", label: "Heads", type: "number", min: 1, max: 16, placeholder: "1", showWhen: { key: "model", value: "qxl" } },
+      {
+        // Turns on the 3D path. libvirt pairs it with a `*-gl` device (the form
+        // keeps the two in step), and a guest that actually renders in 3D needs
+        // a GL-capable display as well. The absolute path that would pin a
+        // render node stays an administrator's to set through the XML tab.
+        key: "accel3d", label: "3D Acceleration", type: "select", value: "",
+        options: [
+          { value: "", label: "Default" },
+          { value: "yes", label: "on" },
+          { value: "no", label: "off" },
+        ],
+        showWhen: { key: "model", value: "virtio" },
+      },
+      { key: "blob", label: "Blob Resources", type: "select", value: "", options: [{ value: "", label: "Default" }, { value: "on", label: "on" }, { value: "off", label: "off" }], showWhen: { key: "model", value: "virtio" } },
+      { key: "edid", label: "EDID", type: "select", value: "", options: [{ value: "", label: "Default" }, { value: "on", label: "on" }, { value: "off", label: "off" }] },
+    ],
+  },
+  {
     id: "hostdev",
     label: "PCI Passthrough",
     blurb: "Assign a host PCI device to the guest",
@@ -230,6 +292,70 @@ function diskTarget(bus: string, index: number): string {
   return `${prefix}${String.fromCharCode("a".charCodeAt(0) + index)}`;
 }
 
+/// The `<video>` element for a device, with only the attributes the chosen
+/// model actually accepts.
+///
+/// libvirt's schema ties each attribute to its model: `ram`, `vgamem`, `vram64`
+/// and `heads` are the QXL group; `device`, `blob` and `accel3d` are virtio's.
+/// Writing a QXL attribute on a virtio model is refused by libvirt, which is why
+/// the form hides fields rather than trusting the user to leave them blank.
+/// `model='none'` takes nothing at all.
+export function videoXml(d: HwDevice): string {
+  const f = (k: string) => (d.fields[k] ?? "").trim();
+  const model = f("model") || "virtio";
+  if (model === "none") return `<video><model type="none"/></video>`;
+  // A numeric attribute only goes in when it is a plain number: a stray value
+  // would otherwise reach libvirt as-is and fail the define.
+  const num = (k: string) => (/^\d+$/.test(f(k)) ? ` ${k}="${esc(f(k))}"` : "");
+  const attrs: string[] = [];
+  if (model === "qxl") {
+    // `ram`, `vgamem` and `vram64` are QXL-only; `heads` is in the shared
+    // optional group below, so it is not repeated here.
+    for (const k of ["ram", "vgamem", "vram64"]) attrs.push(num(k));
+  }
+  if (model === "virtio") {
+    // `device` names the qemu device; the default (`virtio-vga`) is what
+    // libvirt picks anyway, so it is only written when it differs.
+    const dev = f("device") || "virtio-vga";
+    if (dev !== "virtio-vga") attrs.push(` device="${esc(dev)}"`);
+    if (f("vram")) attrs.push(num("vram"));
+    for (const k of ["blob", "edid"]) {
+      if (f(k)) attrs.push(` ${k}="${esc(f(k))}"`);
+    }
+  } else {
+    if (f("edid")) attrs.push(` edid="${esc(f("edid"))}"`);
+  }
+  // `primary` is libvirt's annotation; carry it through when the definition
+  // already had it. `yes`/`no` only: anything else is left out.
+  if (f("primary") === "yes" || f("primary") === "no") {
+    attrs.push(` primary="${f("primary")}"`);
+  }
+  // `heads` and `vram` are in libvirt's shared optional group, so any model
+  // that is not `virtio` (which already wrote `vram` above) may carry them.
+  if (model !== "virtio") {
+    for (const k of ["heads", "vram"]) attrs.push(num(k));
+  } else {
+    attrs.push(num("heads"));
+  }
+  // `acceleration` is a child of `model`, not a sibling: libvirt reads the 3D
+  // flag from inside the model element, and a sibling `<acceleration>` is
+  // accepted by the schema yet ignored by the parser -- so a `-gl` device came
+  // back as "the 'virtio-vga-gl' frontend can be only with enabled 3d
+  // acceleration" even though the XML named one.
+  const accel = model === "virtio" && f("accel3d") === "yes"
+    ? `<acceleration accel3d="yes"/>`
+    : "";
+  // Self-closing when there is no acceleration child: an empty paired tag is
+  // valid but noisier, and libvirt writes the self-closing form itself.
+  const modelTag = accel
+    ? `<model type="${esc(model)}"${attrs.join("")}>\n        ${accel}\n      </model>`
+    : `<model type="${esc(model)}"${attrs.join("")}/>`;
+  return `<video>
+      ${modelTag}
+      <address type="pci"/>
+    </video>`;
+}
+
 /**
  * Build the libvirt `<devices>` fragment for one device. Kept beside the
  * catalogue so a field rename can never silently stop reaching the XML.
@@ -301,6 +427,8 @@ export function deviceXml(d: HwDevice, index = 1): string {
       return `<rng model="virtio">
       <backend model="random">${esc(f("backend") || "/dev/urandom")}</backend>
     </rng>`;
+    case "video":
+      return videoXml(d);
     case "memballoon":
       return `<memballoon model="${esc(f("model") || "virtio")}"/>`;
     case "channel":
@@ -350,6 +478,17 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
     case "channel": return "org.qemu.guest_agent.0";
     case "tpm": return `emulated ${f("version") || "2.0"}`;
     case "watchdog": return `${f("model") || "i6300esb"} (${f("action") || "reset"})`;
+    case "video": {
+      const model = f("model") || "virtio";
+      // The virtio device is the part people set, so name it when it is not the
+      // plain default; the 3D flag rides alongside because it changes what the
+      // guest can do and is otherwise invisible in the list.
+      if (model === "virtio") {
+        const dev = f("device") || "virtio-vga";
+        return f("accel3d") === "yes" ? `${dev} + 3D` : dev;
+      }
+      return model;
+    }
     default: return d.kind;
   }
 }
@@ -385,6 +524,15 @@ export function validateDevice(d: HwDevice): string | null {
     case "interface": return null;
     case "hostdev": return need(["bus", "slot", "function"], "PCI passthrough");
     case "usb": return need(["vendor", "product"], "USB passthrough");
+    case "video": {
+      // The numeric attributes reach libvirt as written, so a non-numeric value
+      // must be caught here rather than failing the define after the round trip.
+      for (const k of ["vram", "ram", "vgamem", "vram64", "heads"]) {
+        const v = (d.fields[k] ?? "").trim();
+        if (v && !/^\d+$/.test(v)) return `Video ${k} must be a number`;
+      }
+      return null;
+    }
     default: return null;
   }
 }
@@ -565,6 +713,36 @@ export function devicesFromXml(xml: string): HwDevice[] {
   if (/<memballoon\b/.test(xml)) {
     const tag = xml.match(/<memballoon\b[^>]*>/)?.[0] ?? "";
     out.push({ kind: "memballoon", fields: { model: attr(tag, "model") } });
+  }
+  // Exactly one video, edited as a device so its options round-trip. libvirt
+  // writes it with a `<model>`, an `<acceleration>` when 3D is on, and an
+  // `<address>`; only the model's own attributes are read back, and the
+  // `<address>` is left for `withDevices` to regenerate rather than copied.
+  {
+    const block = xml.match(/<video\b[\s\S]*?<\/video>/)?.[0];
+    if (block) {
+      const model = block.match(/<model\b[^>]*>/)?.[0] ?? "";
+      const accel = block.match(/<acceleration\b[^>]*\/?>/)?.[0] ?? "";
+      out.push({
+        kind: "video",
+        fields: {
+          model: attr(model, "type"),
+          device: attr(model, "device"),
+          vram: attr(model, "vram"),
+          ram: attr(model, "ram"),
+          vgamem: attr(model, "vgamem"),
+          vram64: attr(model, "vram64"),
+          heads: attr(model, "heads"),
+          blob: attr(model, "blob"),
+          edid: attr(model, "edid"),
+          // `primary` is libvirt's own annotation of which adapter drives the
+          // console; it is read back so a save does not drop it and make
+          // libvirt re-decide for a guest with more than one adapter.
+          primary: attr(model, "primary"),
+          accel3d: attr(accel, "accel3d"),
+        },
+      });
+    }
   }
   if (/org\.qemu\.guest_agent/.test(xml)) out.push({ kind: "channel", fields: {} });
   if (/<tpm\b/.test(xml)) {

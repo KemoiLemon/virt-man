@@ -179,7 +179,6 @@ ${BOOT_ORDER_XML}
     ${disks}
     ${net}
     <graphics type="${f.graphics}" port="${graphicsPort}" autoport="yes" listen="127.0.0.1"/>
-    <video><model type="virtio"/></video>
     <serial type="pty"><target port="0"/></serial>
     <console type="pty"><target type="serial" port="0"/></console>
     ${HOTPLUG_PORTS}
