@@ -443,7 +443,7 @@ await (async () => {
     const tabs = [...bar.querySelectorAll(".tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall"],
+      ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall", "Shell"],
       "all connection tabs render",
     );
     assert.equal(

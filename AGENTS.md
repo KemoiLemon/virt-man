@@ -645,6 +645,15 @@ moves our rule to the head whenever it is missing *or* behind a reject — a rul
 that exists but is behind the reject admits nothing, because a forward's first
 packet is NEW.
 
+**The daemon shell is a host login, and only an administrator's.** (`daemon/src/api/shell.rs`, `daemon/src/pam.rs`.) A Shell tab on a server page opens a login shell on the hypervisor host. Things that bite:
+
+- **PAM authenticates, and the shell runs as the user who authenticated** — uid, gid, `getgrouplist` groups, home, `execve` of their login shell with `-` on argv[0]. Never a fixed user; authenticating as root is the only way to get a root shell. `daemon/install.sh` writes `/etc/pam.d/virt-man-daemon` (`pam_unix` auth+account); a source checkout with no file falls back to the `login` stack.
+- **The browser sends host credentials to the daemon, never to the web server's store.** The web server has its own users and hashed passwords for libvirt actions; those are unrelated to host accounts and must not be treated as a host login.
+- **Every `/shell` route is `Special::AdminOnly`** in `web/server/src/routes.rs` on `Sys.Modify`. There is no narrower privilege, on purpose — nothing in the ACL honestly means "a host shell". A route there that is missing from the table is refused for everyone.
+- **A session belongs to the page.** A random id names it; `pagehide` in `terminal.ts` beacons a disconnect, `leaveCurrentView()` and `renderConn()`'s `connTab !== "shell"` guard close it on any navigation, and an unread session closes after `IDLE` (30 s). The pump `kill(-pid, SIGHUP)`s the whole process group, so background jobs die with the page too.
+- **The child after `forkpty` only calls async-signal-safe functions** (`close_range`, `setgid`/`setgroups`/`setuid`/`chdir`/`execve`, `write`, `_exit`). It must not allocate or lock — the daemon is multithreaded. The pipes are CLOEXEC and the reason for a failed `exec` travels back over a pipe.
+- **`daemon/src/lib.rs` exists for the integration test** (`tests/shell.rs`), which drives the real routes over a throwaway HTTP server. The ignored suite needs a host account: `sudo -E SHELL_TEST_USER=… SHELL_TEST_PASS=… cargo test --test shell -- --ignored`.
+
 **Access logs record every guest connection, cheaply.** (`daemon/src/ipam/flows.rs`,
 `web/server/src/access.rs`.) The daemon subscribes to conntrack NEW/DESTROY
 netlink events (one message per *connection*, not per packet; NAT already makes

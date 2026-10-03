@@ -155,6 +155,11 @@ keyboard uses, so a tapped key and a typed one cannot behave differently.
 Without `Esc`, `Tab` and the arrows a guest shell is unusable, so they are not
 optional.
 
+The daemon shell (`terminal.ts`) mounts in the same `.console-stage` and talks
+to xterm's own textarea, so the software keyboard covers it without a second
+path; its only control above the terminal is a login form, and its fields take
+the 16 px `(pointer: coarse)` size from the same rule as every other field.
+
 ### Touch hygiene
 
 `base.css` turns off the tap highlight and sets `touch-action: manipulation`,

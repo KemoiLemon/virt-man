@@ -3,6 +3,14 @@ name = "virt-man-daemon"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "virt_man_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "virt-man-daemon"
+path = "src/main.rs"
+
 [dependencies]
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }

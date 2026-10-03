@@ -117,6 +117,13 @@ cert = "$TLS_DIR/cert.pem"
 key = "$TLS_DIR/key.pem"
 EOF
 
+# --- PAM service -----------------------------------------------------------
+# The daemon shell authenticates each session against the host's PAM. The file
+# only names the local-login stack; the daemon grants nothing a normal login
+# would not. Missing it falls back to the host's `login` stack at runtime.
+say "installing PAM service /etc/pam.d/virt-man-daemon"
+install -Dm644 virt-man-daemon.pam "$DESTDIR/etc/pam.d/virt-man-daemon"
+
 # --- systemd service -------------------------------------------------------
 if [[ -n "$SKIP_SYSTEMD" ]]; then
   say "SKIP_SYSTEMD set — not touching systemd"

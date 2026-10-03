@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod networks;
 pub mod nics;
 pub mod pools;
+pub mod shell;
 pub mod templates;
 pub mod volumes;
 
@@ -166,6 +167,7 @@ pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
         .merge(guest)
         .merge(containers::routes())
         .merge(ct_console::routes())
+        .merge(shell::routes())
         .route(
             "/containers/{name}/{*rest}",
             axum::routing::any(move |req: axum::extract::Request| {

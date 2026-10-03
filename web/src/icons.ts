@@ -46,6 +46,7 @@ import Settings from "@phosphor-icons/core/assets/fill/gear-fill.svg?raw";
 import Shield from "@phosphor-icons/core/assets/fill/shield-fill.svg?raw";
 import ShieldUser from "@phosphor-icons/core/assets/fill/user-gear-fill.svg?raw";
 import SunMoon from "@phosphor-icons/core/assets/fill/circle-half-fill.svg?raw";
+import Terminal from "@phosphor-icons/core/assets/fill/terminal-window-fill.svg?raw";
 import Timer from "@phosphor-icons/core/assets/fill/timer-fill.svg?raw";
 import Trash2 from "@phosphor-icons/core/assets/fill/trash-fill.svg?raw";
 import Upload from "@phosphor-icons/core/assets/fill/upload-simple-fill.svg?raw";
@@ -152,6 +153,8 @@ export const ic = {
   xml: svg(FileCode),
   options: svg(Settings),
   firewall: svg(Shield),
+  /// A shell on the daemon's host.
+  terminal: svg(Terminal),
   down: svg(ArrowDown),
   up: svg(ArrowUp),
   bidir: svg(ArrowLeftRight),

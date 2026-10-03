@@ -20,6 +20,12 @@ pub struct FirewallState {
     pub lock: Arc<Mutex<()>>,
 }
 
+impl Default for FirewallState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FirewallState {
     pub fn new() -> Self {
         Self {

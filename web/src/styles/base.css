@@ -501,6 +501,23 @@ table.grid tr:hover td { background: var(--hover); }
   background: var(--shade); padding: 10px 16px; border: 1px solid var(--line);
 }
 
+/* ------------------------------------------------------ daemon shell
+   A login form above a terminal. The form is one row: what a shell needs is
+   a host user and a password, and nothing else belongs between them. */
+.shell-form {
+  display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap;
+  padding-bottom: 10px;
+}
+.shell-form .field { flex: 0 1 220px; }
+.shell-form .btn { flex: 0 0 auto; padding: 8px 12px; }
+/* A refusal or a session that ended. Unlike a form hint this carries state
+   the user cannot infer, so it stays until the next attempt. */
+.shell-msg {
+  color: var(--bad); font-size: 12px; padding-bottom: 10px;
+  white-space: pre-wrap;
+}
+.shell-msg:empty { display: none; }
+
 /* --------------------------------------------------------------- avatars */
 .avatar {
   width: 32px; height: 32px; min-width: 32px; overflow: hidden;

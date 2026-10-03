@@ -150,6 +150,10 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
         (_, ["metrics"] | ["flows"]) if get => with(node, "Sys.Audit", Special::AdminOnly),
         // nwfilters are host-wide rule sets any guest can reference.
         (_, ["filters", ..]) => with(node, "Sys.Modify", Special::AdminOnly),
+        // The daemon shell is a login shell on the hypervisor host, reached
+        // through the daemon. It re-authenticates through the host's own PAM
+        // on every connect; this only decides who may ask at all.
+        (_, ["shell", ..]) => with(node, "Sys.Modify", Special::AdminOnly),
 
         // Guests.
         (_, ["domains"]) if get => with(vms, "Sys.Audit", Special::ListVms),
@@ -485,5 +489,25 @@ mod tests {
             classify("c", "GET", "/filters").unwrap().special,
             Special::AdminOnly
         );
+    }
+
+    /// The daemon shell is a login shell on the host, so every one of its
+    /// routes is administrator-only whatever the ACL says — and it must be
+    /// classified at all, or the proxy refuses it outright (which would make
+    /// the Shell tab fail for everyone, admins included).
+    #[test]
+    fn the_daemon_shell_is_admin_only() {
+        for (m, p) in [
+            ("POST", "/shell/connect"),
+            ("GET", "/shell/abc/read"),
+            ("POST", "/shell/abc/write"),
+            ("POST", "/shell/abc/resize"),
+            ("POST", "/shell/abc/disconnect"),
+        ] {
+            let n = classify("c", m, p).unwrap_or_else(|| panic!("{m} {p} not classified"));
+            assert_eq!(n.path, "/nodes/c", "{m} {p}");
+            assert_eq!(n.privilege, "Sys.Modify", "{m} {p}");
+            assert_eq!(n.special, Special::AdminOnly, "{m} {p}");
+        }
     }
 }

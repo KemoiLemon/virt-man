@@ -27,6 +27,7 @@ test("every view round-trips through its path", () => {
     { view: "conn", conn: "c1", tab: "networks" },
     { view: "conn", conn: "c1", tab: "storage" },
     { view: "conn", conn: "c1", tab: "firewall" },
+    { view: "conn", conn: "c1", tab: "shell" },
     { view: "vm", conn: "c1", vm: "web1", tab: "summary" },
     { view: "vm", conn: "c1", vm: "web1", tab: "console" },
     { view: "vm", conn: "c1", vm: "web1", tab: "hardware" },
@@ -62,8 +63,7 @@ test("paths use the node's name and read the way they were asked for", () => {
   assert.equal(r.routeToPath({ view: "pool", conn: "c1", pool: "ISOs" }, nodes), "/Main/storage/ISOs");
 });
 
-test("a container's hardware tab has its own path; an unknown tab lands on its summary", () => {
-  assert.equal(r.routeToPath({ view: "ct", conn: "c1", ct: "web", tab: "hardware" }, nodes), "/Main/containers/web/hardware");
+test("a container's hardware tab has its own path; an unknown tab lands on its summary", () => {  assert.equal(r.routeToPath({ view: "ct", conn: "c1", ct: "web", tab: "hardware" }, nodes), "/Main/containers/web/hardware");
   assert.deepEqual(r.parsePath("/Main/containers/web/nonsense", nodes),
     { view: "ct", conn: "c1", ct: "web", tab: "summary" });
 });

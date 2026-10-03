@@ -166,6 +166,11 @@ function closeConsole() {
 /// left streaming in the background.
 function leaveCurrentView() {
   if (vmTab === "console") closeConsole();
+  // A shell belongs to the page that opened it: leaving the server closes it,
+  // whether the user switched tabs, opened a guest, or went to the admin page.
+  // The renderConn guard covers the tab-bar clicks that do not come through
+  // here.
+  if (connTab === "shell") terminal?.detachTextConsole();
 }
 
 /// Never wrap a view that shows live statistics (CPU, memory, rates): a cached
@@ -315,7 +320,7 @@ function applyRoute(r: Route) {
     return;
   }
   if (r.view === "dc") dcTab = r.tab;
-  else if (r.view === "conn") connTab = r.tab;
+  else if (r.view === "conn") connTab = r.tab === "shell" && !canAdmin() ? "dashboard" : r.tab;
   else if (r.view === "vm") { selectedVm = nameOf(treeVms[r.conn], r.vm); vmTab = r.tab; }
   else if (r.view === "ct") { selectedVm = nameOf(treeCts[r.conn], r.ct); ctMode = true; vmTab = r.tab; }
   else if (r.view === "net") selectedNet = nameOf(treeNets[r.conn], r.net);
@@ -508,6 +513,7 @@ function openCommandPalette() {
     ["networks", "Networks", ic.network()],
     ["storage", "Storage", ic.storage()],
     ["firewall", "Firewall", ic.firewall()],
+    ["shell", "Shell", ic.terminal()],
   ];
   const vmTabs: [typeof vmTab, string, string][] = [
     ["summary", "Summary", ic.vm()],
@@ -519,6 +525,9 @@ function openCommandPalette() {
   ];
   for (const c of connections) {
     for (const [tab, label, icon] of connTabs) {
+      // The shell is an administrator's tool; the tab is hidden for anyone
+      // else, and the daemon refuses it regardless.
+      if (tab === "shell" && !canAdmin()) continue;
       add(`nav-${c.id}-${tab}`, `${c.name} — ${label}`, "Server", icon, () => selectServer(c.id, tab));
     }
     for (const v of treeVms[c.id] ?? []) {
@@ -2548,6 +2557,10 @@ async function renderConn() {
   if (isOffline(selectedConn)) return renderOffline();
   const conn = connections.find((c) => c.id === selectedConn);
   if (!conn) return;
+  // Switching away from the Shell tab must close its session. Most navigation
+  // goes through leaveCurrentView; the tab-bar handler re-renders directly, so
+  // this is the funnel that covers it.
+  if (connTab !== "shell") terminal?.detachTextConsole();
   // Server view owns the pane: invalidates any in-flight resource render.
   beginRender();
   syncUrl();
@@ -2565,6 +2578,7 @@ setHtml(content, `
       <button class="tab ${connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
       <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
       <button class="tab ${connTab === "firewall" ? "active" : ""}" data-tab="firewall">${ic.firewall(14)} Firewall</button>
+      ${canAdmin() ? `<button class="tab ${connTab === "shell" ? "active" : ""}" data-tab="shell">${ic.terminal(14)} Shell</button>` : ""}
       <div class="tabbar-actions">
         ${connTab === "dashboard" ? `<button class="btn primary" id="create-resource">${ic.plus(14)} Create Resource</button>` : ""}
         ${connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
@@ -2598,7 +2612,12 @@ async function renderConnBody() {
   const body = $("#conn-body");
   // The create buttons live on the tab bar (rendered by renderConn), so the
   // body only carries the list itself.
-  if (connTab === "dashboard") {
+  if (connTab === "shell") {
+    // Re-rendering replaces the whole body, stage included; drop any live
+    // session first, or its read loop outlives the element it painted into.
+    terminal?.detachTextConsole();
+    renderShellTab(body, selectedConn);
+  } else if (connTab === "dashboard") {
     setHtml(body, `<div id="dash">${skeleton("dashboard")}</div>`);
     await loadDashboard();
   } else if (connTab === "vms") {
@@ -2618,6 +2637,60 @@ async function renderConnBody() {
     setHtml(body, `<div id="filters-list">${skeleton("table")}</div>`);
     await fastLoad(loadFilters);
   }
+}
+
+/// Daemon shell: a login shell on the server's host, reached through the
+/// daemon. The daemon authenticates each session against the host's own PAM,
+/// so these are host credentials, not app credentials, and nothing is
+/// remembered after the session.
+function renderShellTab(body: Element, conn: string) {
+  const saved = localStorage.getItem(`virt-man-shell-user:${conn}`) ?? "";
+  // The form stays on the pane; the terminal replaces the stage below it. A
+  // session is opened by the form and closed by leaving the tab (or page).
+  setHtml(body, `
+    <form class="shell-form" id="shell-form">
+      <label class="field"><span>Host user</span>
+        <input id="shell-user" value="${esc(saved)}" autocomplete="username" spellcheck="false"></label>
+      <label class="field"><span>Password</span>
+        <input id="shell-pass" type="password" autocomplete="current-password"></label>
+      <button class="btn primary" type="submit" id="shell-open">${ic.terminal(14)} Open shell</button>
+    </form>
+    <div class="shell-msg" id="shell-msg"></div>
+    <div class="console-stage term-stage" id="shell-stage" tabindex="0"></div>`);
+
+  const msg = (m: string | null) => {
+    const el = $("#shell-msg");
+    if (el) {
+      el.textContent = m ?? "";
+      el.classList.toggle("hidden", !m);
+    }
+  };
+  const form = $("#shell-form") as HTMLFormElement;
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const user = ($("#shell-user") as HTMLInputElement).value.trim();
+    const password = ($("#shell-pass") as HTMLInputElement).value;
+    if (!user) {
+      msg("Enter the host user to log in as.");
+      return;
+    }
+    localStorage.setItem(`virt-man-shell-user:${conn}`, user);
+    // Drop it from the field: it has been sent, and it lives only in this
+    // one request.
+    ($("#shell-pass") as HTMLInputElement).value = "";
+    msg(null);
+    void (async () => {
+      terminal ??= await import("./terminal");
+      await terminal.attachDaemonShell(
+        $("#shell-stage"),
+        `/proxy/${conn}/shell`,
+        user,
+        password,
+        msg,
+      );
+    })();
+  });
+  $("#shell-user")?.focus();
 }
 
 /// Daemon dashboard: host CPU/RAM with sparklines, then counts and summaries
@@ -7238,7 +7311,8 @@ function startPolling() {
       else if (connTab === "containers") loadCts();
       else if (connTab === "networks") loadNetworks();
       else if (connTab === "storage") loadPools();
-      else loadFilters();
+      // The shell is a live session, not data to re-read; nothing to poll.
+      else if (connTab === "firewall") loadFilters();
     } else if (selectedConn && selectedVm && vmTab === "summary") {
       renderVmBody(selectedVm);
     }

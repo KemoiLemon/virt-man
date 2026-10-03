@@ -6,7 +6,7 @@
 //   /containers                    datacenter containers tab
 //   /networks, /storage            datacenter networks and storage tabs
 //   /<node>                        server dashboard
-//   /<node>/vms|containers|networks|storage|firewall
+//   /<node>/vms|containers|networks|storage|firewall|shell
 //   /<node>/vms/<vm>               guest summary
 //   /<node>/vms/<vm>/<tab>         console | hardware | options | network | xml
 //   /<node>/containers/<ct>[/<tab>] console | hardware | options | network | xml
@@ -21,7 +21,7 @@
 // instead: a reload of /users would otherwise get JSON, not the app.
 
 export type DcTab = "dashboard" | "guests" | "containers" | "networks" | "storage";
-export type ConnTab = "dashboard" | "vms" | "containers" | "networks" | "storage" | "firewall";
+export type ConnTab = "dashboard" | "vms" | "containers" | "networks" | "storage" | "firewall" | "shell";
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 /// A container's Hardware tab edits its resources, not devices.
 export type CtTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
@@ -71,7 +71,7 @@ export const RESERVED = new Set([
 /// a node segment: a server named "networks" is addressed by its id instead.
 const DC_TABS: DcTab[] = ["guests", "containers", "networks", "storage"];
 
-const CONN_TABS: ConnTab[] = ["vms", "containers", "networks", "storage", "firewall"];
+const CONN_TABS: ConnTab[] = ["vms", "containers", "networks", "storage", "firewall", "shell"];
 const VM_TABS: VmTab[] = ["hardware", "options", "network", "console", "xml"];
 const CT_TABS: CtTab[] = ["hardware", "options", "network", "console", "xml"];
 

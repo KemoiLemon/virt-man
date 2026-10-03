@@ -1,0 +1,18 @@
+//! Library face of virt-man-daemon, so integration tests (`tests/`) can drive
+//! the modules directly. The binary in `src/main.rs` remains the real entry
+//! point and owns `main()`; this exposes the same modules under a crate name.
+
+pub mod api;
+pub mod auth;
+pub mod config;
+pub mod ct;
+pub mod disks;
+pub mod firewall;
+pub mod firmware;
+pub mod ipam;
+pub mod libvirt;
+pub mod migrate;
+pub mod pam;
+pub mod rfb;
+pub mod titles;
+pub mod tls;
