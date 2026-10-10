@@ -15,3 +15,4 @@ pub mod migrate;
 pub mod rfb;
 pub mod titles;
 pub mod tls;
+pub mod volume_titles;

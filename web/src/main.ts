@@ -260,12 +260,18 @@ function displayName(list: { name: string; title?: string | null }[] | undefined
   return list?.find((x) => x.name === name)?.title || name;
 }
 
+
 /// `displayName` against the selected server's cached lists, for a caller
 /// holding only a network or pool name (a modal title, a confirm message).
 /// The name stays the identity everywhere it is sent; this is display only.
 function shownNet(name: string): string {
   return displayName(selectedConn ? treeNets[selectedConn] : undefined, name);
 }
+const volumeNames: Record<string, string> = {};
+function shownVolume(pool: string, name: string): string {
+  return volumeNames[`${pool}/${name}`] || name;
+}
+
 function shownPool(name: string): string {
   return displayName(selectedConn ? treePools[selectedConn] : undefined, name);
 }
@@ -2476,6 +2482,7 @@ async function renderPoolPage() {
       api.get<PoolSummary>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}`),
       api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}/volumes`),
     ]);
+    for (const v of vols) volumeNames[`${name}/${v.name}`] = v.title || v.name;
     // Same guard as the network page: never paint over a newer view.
     if (!stillCurrent(gen)) return;
     if (!p) return leaveMissing("storage", `Pool "${name}" no longer exists`);
@@ -2516,9 +2523,10 @@ async function renderPoolPage() {
       <table class="grid">
         <tr><th>Volume</th><th>Content</th><th>Size</th><th>Allocated</th><th></th></tr>
         ${vols.map((v) => `
-          <tr><td>${esc(v.name)}</td><td>${esc(CONTENT_LABEL[v.content ?? "images"] ?? "Disk image")}</td>
+          <tr><td>${esc(v.title || v.name)}</td><td>${esc(CONTENT_LABEL[v.content ?? "images"] ?? "Disk image")}</td>
           <td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
-          <td><button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No volumes.</td></tr>`}
+          <td><button class="btn icon" data-pvol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
+          <button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No volumes.</td></tr>`}
       </table>`);
 
     $("#pool-upload", content).onclick = () => openUpload(name);
@@ -2529,6 +2537,9 @@ async function renderPoolPage() {
       await deletePool(name);
       backToConn();
     };
+    content.querySelectorAll("[data-pvol-title]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => void renameVolume(name, (b as HTMLElement).dataset.pvolTitle!).then(() => renderPoolPage());
+    });
     content.querySelectorAll("[data-pvol-del]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => {
         void deleteVolume(name, (b as HTMLElement).dataset.pvolDel!).then(() => renderPoolPage());
@@ -3995,13 +4006,18 @@ async function loadVolumes(pool: string) {
   }
   try {
     const vols = await api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
+    for (const v of vols) volumeNames[`${pool}/${v.name}`] = v.title || v.name;
 setHtml(target, `<table class="grid">
       <tr><th>Volume</th><th>Size</th><th>Allocated</th><th></th></tr>
       ${vols.map((v) => `
-        <tr><td>${esc(v.name)}</td><td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
-        <td><button class="btn danger icon" data-delvol="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
+        <tr><td>${esc(v.title || v.name)}</td><td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
+        <td><button class="btn icon" data-vol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
+        <button class="btn danger icon" data-delvol="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
     </table>
     <div class="actions"><button class="btn" id="create-vol" data-pool="${esc(pool)}">New volume</button></div>`);
+    target.querySelectorAll("[data-vol-title]").forEach((b: Element) => {
+      (b as HTMLElement).onclick = () => void renameVolume(pool, (b as HTMLElement).dataset.volTitle!).then(() => loadVolumes(pool));
+    });
     target.querySelectorAll("[data-delvol]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => deleteVolume(pool, (b as HTMLElement).dataset.delvol!);
     });
@@ -5244,7 +5260,7 @@ async function deletePool(name: string) {
 }
 
 async function deleteVolumeOn(conn: string, pool: string, name: string, after: () => void) {
-  if (!(await askConfirm("Delete volume", `Delete volume "${name}"?`, "Delete", true))) return;
+  if (!(await askConfirm("Delete volume", `Delete volume "${shownVolume(pool, name)}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -5252,6 +5268,17 @@ async function deleteVolumeOn(conn: string, pool: string, name: string, after: (
   } catch (e) {
     toast((e as Error).message, "bad");
   }
+}
+
+async function renameVolume(pool: string, name: string) {
+  if (!selectedConn) return;
+  const title = await askText("Volume nickname", "Nickname", shownVolume(pool, name));
+  if (title == null) return;
+  try {
+    await api.put(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}/title`, { title });
+    volumeNames[`${pool}/${name}`] = title.trim() || name;
+    toast("Volume nickname saved");
+  } catch (e) { toast((e as Error).message, "bad"); }
 }
 
 async function deleteVolume(pool: string, name: string) {
@@ -5579,6 +5606,7 @@ async function createPendingVolumes(
   devices: HwDevice[],
   set: (msg: string) => void,
   made: { pool: string; name: string }[] = [],
+  nicknameBased = false,
 ) {
   for (let i = 0; i < devices.length; i++) {
     const d = devices[i];
@@ -5586,7 +5614,9 @@ async function createPendingVolumes(
     const pool = (d.fields.pool ?? "").trim();
     const sizeGb = Math.max(1, +(d.fields.size_gb ?? "") || 1);
     const format = (d.fields.format ?? "qcow2") === "raw" ? "raw" : "qcow2";
-    const name = `${vmName}-disk${i + 1}-${sizeGb}gb.${format}`;
+    const name = nicknameBased
+      ? `${vmName}-disk${newUuid()}.${format}`
+      : `${vmName}-disk${i + 1}-${sizeGb}gb.${format}`;
     set(`creating ${sizeGb} GB volume ${name}`);
     const vol = await api.post<{ name: string; path: string }>(
       `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`,
@@ -5868,7 +5898,7 @@ async function openHardwareEditor(opts: {
   const resolveName = (kind: "pool" | "network", name: string): string => {
     if (!name) return name;
     const list = kind === "pool" ? pools : nets;
-    return displayName(list, name);
+    return list.find((x) => x.name === name)?.title || name;
   };
 
   /// `opt`, but labelled by nickname. `fallback` names the entry used when the
@@ -6028,7 +6058,7 @@ async function openHardwareEditor(opts: {
             ${mode}${pool}
             ${usable.length ? `<label class="field"><span>Volume</span><select id="g-volume">
                 ${usable.map((v) => `<option value="${esc(v.name)}" ${v.name === newDisk.volume ? "selected" : ""}>
-                  ${esc(`${v.name} — ${fmtBytes(v.capacity)}`)}</option>`).join("")}
+                  ${esc(`${v.title || v.name} — ${fmtBytes(v.capacity)}`)}</option>`).join("")}
               </select></label>`
               : `<p class="hint">You have no free volumes in this pool${held.length ? " (the ones you have are already attached to a guest)" : ""}.
                   Create one from the pool's page, or choose "Create a new volume".</p>`}
@@ -6404,9 +6434,8 @@ async function openHardwareEditor(opts: {
       return toast("Choose a volume for the hard disk, or create a new one", "bad");
     }
     // A new guest is named by a fresh UUID in libvirt, with the name typed
-    // here as its title, so two guests may share a display name. Its disk and
-    // variable store are named after the UUID too: that name is unique on the
-    // host, a display name is not.
+    // here as its title, so two guests may share a display name. The VM UUID
+    // remains its libvirt identity; new disks use the nickname plus random IDs.
     const vmUuid = newUuid();
     const form: DomainForm = {
       uuid: vmUuid,
@@ -6447,7 +6476,7 @@ async function openHardwareEditor(opts: {
         set(`creating ${newDisk.size_gb} GB volume`);
         disk = await api.post<{ name: string; path: string }>(
           `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
-          { xml: volumeXml({ name: `${vmUuid}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+          { xml: volumeXml({ name: `${general.name.trim()}-${newUuid()}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
         // Only a volume made here is deleted again if the create is refused;
         // a chosen one was the user's before and stays theirs.
         made.push({ pool: newDisk.pool, name: disk.name });
@@ -6458,7 +6487,7 @@ async function openHardwareEditor(opts: {
       // refused permission to open it and the guest will not start.
       form.disk_path = disk.path;
       // Create any additional "new volume" disks before defining the domain.
-      await createPendingVolumes(conn, vmUuid, devices, set, made);
+      await createPendingVolumes(conn, form.name, devices, set, made, true);
       set("defining domain");
       // Defined shut off: creating a guest must not also boot it, so a
       // mis-sized or mis-configured VM cannot start eating resources before

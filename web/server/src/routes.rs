@@ -267,6 +267,7 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
                     with(p, "Datastore.AllocateSpace", Special::CreateVolume { pool })
                 }
                 (_, ["volumes", _] | ["volumes", _, "hash"]) if get => need(p, "Datastore.Audit"),
+                ("PUT", ["volumes", _, "title"]) => need(p, "Datastore.AllocateSpace"),
                 ("DELETE", ["volumes", vol]) => with(
                     p,
                     "Datastore.AllocateSpace",

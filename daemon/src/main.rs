@@ -11,6 +11,7 @@ mod migrate;
 mod rfb;
 mod titles;
 mod tls;
+mod volume_titles;
 
 use std::os::unix::fs::PermissionsExt;
 use tracing_subscriber::EnvFilter;

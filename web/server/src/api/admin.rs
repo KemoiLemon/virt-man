@@ -388,7 +388,7 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
                 seen.push((Kind::Volume, c.id.clone(), pool.clone(), name.clone()));
                 out.push(json!({
                     "kind": "volume", "conn": c.id, "conn_name": c.name, "pool": pool,
-                    "name": name, "capacity": v["capacity"], "path": v["path"],
+                    "name": name, "title": v["title"], "capacity": v["capacity"], "path": v["path"],
                 }));
             }
         }

@@ -400,6 +400,7 @@ export interface PoolSummary {
 
 export interface VolumeSummary {
   name: string;
+  title?: string | null;
   path: string;
   capacity: number;
   allocation: number;

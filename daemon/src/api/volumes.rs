@@ -21,6 +21,10 @@ pub fn routes() -> Router {
     Router::new()
         .route("/pools/{pool}/volumes", get(list).post(create))
         .route("/pools/{pool}/volumes/{vol}", get(get_one).delete(delete))
+        .route(
+            "/pools/{pool}/volumes/{vol}/title",
+            axum::routing::put(set_title),
+        )
         .route("/pools/{pool}/volumes/{vol}/upload", post(upload))
         .route("/pools/{pool}/volumes/{vol}/hash", get(hash))
 }
@@ -43,6 +47,7 @@ async fn list(Path(pool): Path<String>) -> Result<Json<Value>, ApiError> {
             let used_by = crate::disks::holders_of(&held, &pool, &name, &path);
             arr.push(json!({
                 "name": name,
+                "title": crate::volume_titles::get(&pool, &name),
                 "path": path,
                 "capacity": vol.get_info().map(|i| i.capacity).unwrap_or(0),
                 "allocation": vol.get_info().map(|i| i.allocation).unwrap_or(0),
@@ -64,6 +69,7 @@ async fn get_one(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value
         let v = StorageVol::lookup_by_name(&p, &vol)?;
         Ok(json!({
             "name": v.get_name().unwrap_or_default(),
+            "title": crate::volume_titles::get(&pool, &vol),
             "path": v.get_path().unwrap_or_default(),
             "capacity": v.get_info().map(|i| i.capacity).unwrap_or(0),
             "allocation": v.get_info().map(|i| i.allocation).unwrap_or(0),
@@ -96,6 +102,27 @@ async fn create(
     Ok(Json(v))
 }
 
+#[derive(serde::Deserialize)]
+struct TitleReq {
+    title: String,
+}
+
+async fn set_title(
+    Path((pool, vol)): Path<(String, String)>,
+    Json(req): Json<TitleReq>,
+) -> Result<Json<Value>, ApiError> {
+    let v = with_conn(move |c| {
+        let p = crate::libvirt::pool(c, &pool)?;
+        let pool_uuid = p.get_uuid_string()?;
+        StorageVol::lookup_by_name(&p, &vol)?;
+        crate::volume_titles::set(&pool_uuid, &vol, &req.title)?;
+        Ok(json!({"name": vol, "title": req.title.trim()}))
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(v))
+}
+
 async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
     // Refuse while any guest still has this disk attached: deleting it would
     // corrupt that guest's next boot, and the guest would look fine until it
@@ -122,6 +149,8 @@ async fn delete(Path((pool, vol)): Path<(String, String)>) -> Result<Json<Value>
         let p = crate::libvirt::pool(c, &pool)?;
         let v = StorageVol::lookup_by_name(&p, &vol)?;
         v.delete(0)?;
+        let pool_uuid = p.get_uuid_string()?;
+        crate::volume_titles::set(&pool_uuid, &vol, "")?;
         Ok(json!({"name": vol, "deleted": true}))
     })
     .await

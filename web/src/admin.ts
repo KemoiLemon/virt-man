@@ -735,7 +735,7 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
               <tr><th>Volume</th><th>Owner</th><th>Size</th><th class="col-actions"></th></tr>
               ${vols.map((v) => {
                 const i = shown.indexOf(v);
-                return `<tr><td class="tname">${esc(v.name)}</td><td>${esc(v.owner_name ?? "—")}</td>
+                return `<tr><td class="tname">${esc(v.title || v.name)}</td><td>${esc(v.owner_name ?? "—")}</td>
                   <td>${v.capacity != null ? fmtBytes(v.capacity) : "—"}</td><td class="col-actions">${actions(v, i)}</td></tr>`;
               }).join("")}
             </table>` : ""}
