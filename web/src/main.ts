@@ -3624,10 +3624,10 @@ function netCard(n: NetworkSummary, conn: string, server?: string): string {
           <div class="spec"><b>Subnet</b><span>${n.ip ? esc(n.ip) : "—"}</span></div>
         </div>
         <div class="storage-card-actions net-actions">
-          <button class="btn icon ${n.active ? "on" : ""}" data-net-toggle="${esc(n.name)}" data-net-action="${n.active ? "stop" : "start"}" title="${n.active ? "Stop" : "Start"}">${n.active ? ic.stop() : ic.start()}</button>
-          <button class="btn icon ${n.autostart ? "on" : ""}" data-net-autostart="${esc(n.name)}" title="${n.autostart ? "Autostart on" : "Autostart off"}">${ic.autostart()}</button>
-          <button class="btn icon" data-net-edit="${esc(n.name)}" title="Edit">${ic.edit()}</button>
-          <button class="btn danger icon" data-delnet="${esc(n.name)}" title="Delete">${ic.trash()}</button>
+          <button class="btn icon ${n.active ? "on" : ""}" data-net-toggle="${esc(n.name)}" data-net-conn="${esc(conn)}" data-net-action="${n.active ? "stop" : "start"}" title="${n.active ? "Stop" : "Start"}">${n.active ? ic.stop() : ic.start()}</button>
+          <button class="btn icon ${n.autostart ? "on" : ""}" data-net-autostart="${esc(n.name)}" data-net-conn="${esc(conn)}" title="${n.autostart ? "Autostart on" : "Autostart off"}">${ic.autostart()}</button>
+          <button class="btn icon" data-net-edit="${esc(n.name)}" data-net-conn="${esc(conn)}" title="Edit">${ic.edit()}</button>
+          <button class="btn danger icon" data-delnet="${esc(n.name)}" data-delnet-conn="${esc(conn)}" title="Delete">${ic.trash()}</button>
         </div>
       </div>`;
 }
@@ -3650,19 +3650,34 @@ async function loadNetworks() {
       };
     });
     list.querySelectorAll("[data-net-toggle]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => netAction(
-        (b as HTMLElement).dataset.netAction === "start" ? "start" : "stop",
-        (b as HTMLElement).dataset.netToggle!,
-      );
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        const el = b as HTMLElement;
+        void netActionOn(el.dataset.netConn!, el.dataset.netAction === "start" ? "start" : "stop", el.dataset.netToggle!);
+      };
     });
     list.querySelectorAll("[data-net-autostart]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => toggleAutostart((b as HTMLElement).dataset.netAutostart!);
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        const el = b as HTMLElement;
+        void toggleAutostartOn(el.dataset.netConn!, el.dataset.netAutostart!);
+      };
     });
     list.querySelectorAll("[data-net-edit]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => openEditNetwork((b as HTMLElement).dataset.netEdit!);
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        const el = b as HTMLElement;
+        selectedConn = el.dataset.netConn!;
+        void openEditNetwork(el.dataset.netEdit!);
+      };
     });
     list.querySelectorAll("[data-delnet]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => deleteNetwork((b as HTMLElement).dataset.delnet!);
+      (b as HTMLElement).onclick = (e) => {
+        e.stopPropagation();
+        const el = b as HTMLElement;
+        selectedConn = el.dataset.delnetConn!;
+        void deleteNetwork(el.dataset.delnet!);
+      };
     });
   } catch (e) {
     const list = $("#nets-list");
@@ -3672,9 +3687,13 @@ async function loadNetworks() {
 
 async function netAction(action: "start" | "stop", name: string) {
   if (!selectedConn) return;
+  await netActionOn(selectedConn, action, name);
+}
+
+async function netActionOn(conn: string, action: "start" | "stop", name: string) {
   try {
-    await api.post(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/${action}`);
-    await loadNetworks();
+    await api.post(`/proxy/${conn}/networks/${encodeURIComponent(name)}/${action}`);
+    if (selectedConn === conn) await loadNetworks();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
@@ -3682,13 +3701,17 @@ async function netAction(action: "start" | "stop", name: string) {
 
 async function toggleAutostart(name: string) {
   if (!selectedConn) return;
-  const net = (await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`))
+  await toggleAutostartOn(selectedConn, name);
+}
+
+async function toggleAutostartOn(conn: string, name: string) {
+  const net = (await api.get<NetworkSummary[]>(`/proxy/${conn}/networks`))
     .find((n) => n.name === name);
   if (!net) return;
   try {
-    await api.post(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/autostart`,
+    await api.post(`/proxy/${conn}/networks/${encodeURIComponent(name)}/autostart`,
       { autostart: !net.autostart });
-    await loadNetworks();
+    if (selectedConn === conn) await loadNetworks();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
@@ -3741,6 +3764,7 @@ function openNetworkForm(
         <option value="bridge" ${initial.forward === "bridge" ? "selected" : ""}>Bridge</option>
         <option value="none" ${initial.forward === "none" ? "selected" : ""}>Isolated</option>
       </select></label>
+      ${uuid ? "" : `<label class="check"><input id="net-autostart" type="checkbox" checked> Start on host boot</label>`}
       <label class="field" data-net-field="bridge"><span>Bridge</span><select id="net-bridge">
         <option value="">Select a bridge…</option>
         ${initial.bridge ? `<option value="${esc(initial.bridge)}" selected>${esc(initial.bridge)}</option>` : ""}
@@ -3871,9 +3895,11 @@ function openNetworkForm(
     const libvirt = uuid ? (libvirtName || initial.name) : id;
     const xml = networkXml(form, id, libvirt);
     const owner = uuid ? null : forUser?.owner ?? null;
+    const autostart = !uuid && (el.querySelector("#net-autostart") as HTMLInputElement).checked;
     void runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
       if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(libvirt)}/xml`, xml);
       else await api.postXml(`/proxy/${conn}/networks`, xml);
+      if (autostart) await api.post(`/proxy/${conn}/networks/${encodeURIComponent(libvirt)}/autostart`, { autostart: true });
       if (owner) await assignOwner(conn, "network", libvirt, owner);
     }, { done: `Network ${form.name} ${uuid ? "updated" : "created"}`, notify: toast })
       .then(() => {
@@ -5272,7 +5298,7 @@ async function deleteVolumeOn(conn: string, pool: string, name: string, after: (
 
 async function renameVolume(pool: string, name: string) {
   if (!selectedConn) return;
-  const title = await askText("Volume nickname", "Nickname", shownVolume(pool, name));
+  const title = await askText("Volume nickname", "Nickname", shownVolume(pool, name) === name ? "" : shownVolume(pool, name));
   if (title == null) return;
   try {
     await api.put(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}/title`, { title });
@@ -5291,7 +5317,7 @@ async function deleteVolume(pool: string, name: string) {
 /// the connection named explicitly and `after` repainting the admin page
 /// instead of navigating to the resource.
 async function adminDeleteResource(kind: AdminResource["kind"], conn: string, pool: string, name: string, after: () => void) {
-  const shown = name;
+  const shown = kind === "volume" ? shownVolume(pool, name) : name;
   if (kind === "vm") await deleteVmOn(conn, name, after);
   else if (kind === "ct") await deleteCtOn(conn, name, after);
   else if (kind === "network") await deleteNetworkOn(conn, name, shown, after);
@@ -5615,7 +5641,7 @@ async function createPendingVolumes(
     const sizeGb = Math.max(1, +(d.fields.size_gb ?? "") || 1);
     const format = (d.fields.format ?? "qcow2") === "raw" ? "raw" : "qcow2";
     const name = nicknameBased
-      ? `${vmName}-disk${newUuid()}.${format}`
+      ? `${vmName}-disk${newUuid().slice(0, 8)}.${format}`
       : `${vmName}-disk${i + 1}-${sizeGb}gb.${format}`;
     set(`creating ${sizeGb} GB volume ${name}`);
     const vol = await api.post<{ name: string; path: string }>(
@@ -6476,7 +6502,7 @@ async function openHardwareEditor(opts: {
         set(`creating ${newDisk.size_gb} GB volume`);
         disk = await api.post<{ name: string; path: string }>(
           `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
-          { xml: volumeXml({ name: `${general.name.trim()}-${newUuid()}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+          { xml: volumeXml({ name: `${general.name.trim()}-${newUuid().slice(0, 8)}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
         // Only a volume made here is deleted again if the create is refused;
         // a chosen one was the user's before and stays theirs.
         made.push({ pool: newDisk.pool, name: disk.name });
