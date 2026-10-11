@@ -1063,17 +1063,45 @@ const keys_: Painter = async (ctx, area) => {
          </select></label>
        </div>
        ${privGroups().map(([grp, ps]) => `
-         <div class="section-title">${esc(grp)}</div>
-         <div class="check-list">${ps.map((p) => `<label class="check"><input type="checkbox" data-kpriv="${esc(p)}"> ${esc(p.split(".")[1])}</label>`).join("")}</div>`).join("")}`,
+         <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">${esc(grp)}
+           <span class="perm-choice"><button type="button" data-kmaster="${esc(grp)}" data-value="yes">Yes</button><button type="button" data-kmaster="${esc(grp)}" data-value="no">No</button></span>
+         </div>
+         <table class="grid"><tbody>${ps.map((p) => `<tr><td>${esc(p.split(".")[1])}</td><td class="col-actions"><span class="perm-choice">
+           <button type="button" data-kpriv="${esc(p)}" data-value="yes">Yes</button><button type="button" data-kpriv="${esc(p)}" data-value="no">No</button>
+         </span></td></tr>`).join("")}</tbody></table>`).join("")}`,
       `<button class="btn" id="k-cancel">Cancel</button><button class="btn primary" id="k-save">Create</button>`,
     );
+    const selected = new Set<string>();
+    const sync = () => {
+      el.querySelectorAll<HTMLButtonElement>("[data-kpriv]").forEach((b) => {
+        b.setAttribute("aria-pressed", String((b.dataset.value === "yes") === selected.has(b.dataset.kpriv!)));
+      });
+      for (const [group, ps] of privGroups()) {
+        const all = ps.every((p) => selected.has(p));
+        const none = ps.every((p) => !selected.has(p));
+        el.querySelectorAll<HTMLButtonElement>(`[data-kmaster="${group}"]`).forEach((b) => {
+          b.setAttribute("aria-pressed", String(b.dataset.value === "yes" ? all : none));
+        });
+      }
+    };
+    el.querySelectorAll<HTMLButtonElement>("[data-kpriv]").forEach((b) => b.onclick = () => {
+      if (b.dataset.value === "yes") selected.add(b.dataset.kpriv!); else selected.delete(b.dataset.kpriv!);
+      sync();
+    });
+    el.querySelectorAll<HTMLButtonElement>("[data-kmaster]").forEach((b) => b.onclick = () => {
+      for (const p of privGroups().find(([group]) => group === b.dataset.kmaster)?.[1] ?? []) {
+        if (b.dataset.value === "yes") selected.add(p); else selected.delete(p);
+      }
+      sync();
+    });
+    sync();
     ctx.$("#k-cancel", el).onclick = () => el.remove();
     ctx.$("#k-save", el).onclick = async () => {
       try {
         const k = await api.post<ApiKey>("/keys", {
           name: ctx.$("#k-name", el).value.trim(),
           user_id: ctx.$("#k-owner", el).value,
-          privs: [...el.querySelectorAll<HTMLInputElement>("[data-kpriv]")].filter((c) => c.checked).map((c) => c.dataset.kpriv!),
+          privs: [...selected],
         });
         el.remove();
         ctx.showSecret(`API key — ${k.name}`, k.key ?? "");

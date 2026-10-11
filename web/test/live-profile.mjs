@@ -479,12 +479,13 @@ click(document.querySelector('#tree [data-admin-section="keys"]'));
 await wait(900);
 click(document.querySelector("#add-key"));
 await wait(300);
-check("a key can be limited to privileges; the name may be blank", () => {
+check("a key can be limited with Yes/No privilege controls; name may be blank", () => {
   const m = topModal();
   assert.ok(m.querySelector("#k-owner"), "owner picker");
-  assert.ok(m.querySelector('[data-kpriv="VM.Audit"]'), "privilege checkboxes");
+  assert.ok(m.querySelector('[data-kpriv="VM.Audit"][data-value="yes"]'), "privilege Yes button");
+  assert.ok(m.querySelector('[data-kmaster="Sys"][data-value="yes"]'), "subsystem master Yes button");
   assert.match(m.querySelector("#k-name").placeholder, /blank/i);
-  m.querySelector('[data-kpriv="Sys.Audit"]').checked = true;
+  click(m.querySelector('[data-kpriv="Sys.Audit"][data-value="yes"]'));
 });
 click(topModal().querySelector("#k-save"));
 await wait(1500);
