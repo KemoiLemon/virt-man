@@ -1059,7 +1059,7 @@ const keys_: Painter = async (ctx, area) => {
       `<div class="grid2">
          <label class="field"><span>Name</span><input id="k-name" placeholder="blank for a random name"></label>
           <label class="field"><span>Owner</span><select id="k-owner">
-            <option value="">Ownerless</option>
+            <option value="" selected>None</option>
             ${users.map((u) => option(u.id, u.username, u.id === ctx.me()?.id)).join("")}
          </select></label>
        </div>
