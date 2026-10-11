@@ -96,9 +96,7 @@ async fn create(
     Ok(Json(role_json(&def)))
 }
 
-/// Retune a custom role. Built-in roles are fixed: migration and new
-/// accounts rely on them meaning one thing, so custom access belongs in a
-/// custom role.
+/// Retune a role while preserving whether it is built in.
 async fn update(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -109,9 +107,7 @@ async fn update(
     let Some(idx) = store.roles.iter().position(|r| r.name == name) else {
         return Err(ApiError::not_found("no such role"));
     };
-    if store.roles[idx].builtin {
-        return Err(ApiError::bad_request("built-in roles cannot be changed"));
-    }
+    let builtin = store.roles[idx].builtin;
     let next = match req.name.trim() {
         "" => name.clone(),
         n => valid_name(n)?,
@@ -129,7 +125,7 @@ async fn update(
     let before = store.roles[idx].clone();
     store.roles[idx] = RoleDef {
         name: next.clone(),
-        builtin: false,
+        builtin,
         privs,
         scopes: Default::default(),
     };
@@ -158,9 +154,6 @@ async fn remove(
     let Some(pos) = store.roles.iter().position(|r| r.name == name) else {
         return Err(ApiError::not_found("no such role"));
     };
-    if store.roles[pos].builtin {
-        return Err(ApiError::bad_request("cannot delete a built-in role"));
-    }
     // Refuse while any grant uses it, rather than leaving grants that name a
     // role that no longer resolves (which would silently deny).
     let uses = store.acl.iter().filter(|e| e.role == name).count();
@@ -169,7 +162,10 @@ async fn remove(
             "{uses} permission(s) still use this role"
         )));
     }
-    store.roles.remove(pos);
+    let removed = store.roles.remove(pos);
+    if removed.builtin && !store.removed_builtin_roles.contains(&name) {
+        store.removed_builtin_roles.push(name.clone());
+    }
     store.save(&state.data_dir)?;
     Ok(Json(json!({"deleted": name})))
 }

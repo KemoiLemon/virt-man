@@ -239,7 +239,6 @@ const users_: Painter = async (ctx, area) => {
           <td class="col-actions"><div class="row-actions">
             <button class="btn icon" data-edit-user="${u.id}" title="Edit">${ic.edit()}</button>
             <button class="btn icon" data-user-password="${u.id}" title="Change password">${ic.key()}</button>
-            ${limitsApply(u) ? `<button class="btn icon" data-user-quota="${u.id}" title="Limits">${ic.quota()}</button>` : ""}
             <button class="btn danger icon" data-del-user="${u.id}" title="Delete">${ic.trash()}</button>
           </div></td>
         </tr>`).join("")}
@@ -248,10 +247,6 @@ const users_: Painter = async (ctx, area) => {
   ctx.$("#add-user").onclick = () => openUser(ctx, null);
   bind(area, "data-edit-user", (id) => openUser(ctx, users.find((u) => u.id === id) ?? null));
   bind(area, "data-user-password", (id) => openPassword(ctx, users.find((u) => u.id === id) ?? null));
-  bind(area, "data-user-quota", (id) => {
-    const u = users.find((x) => x.id === id);
-    if (u) openQuota(ctx, u);
-  });
   bind(area, "data-del-user", async (id) => {
     const u = users.find((x) => x.id === id);
     if (!await ctx.askConfirm("Delete user",
@@ -439,13 +434,12 @@ const roles_: Painter = async (ctx, area) => {
       <tr><th>Role</th><th>Privileges</th><th class="col-actions"></th></tr>
       ${roles.map((r) => `
         <tr>
-          <td class="tname">${esc(r.name)}${r.builtin ? ` <span class="badge">built-in</span>` : ""}</td>
+          <td class="tname">${esc(r.name)}</td>
           <td class="priv-cell">${r.privs.length === privileges.length ? `<span class="perm w">ALL</span>`
             : r.privs.map((p) => `<span class="priv">${esc(p)}</span>`).join("") || `<span class="dim-note">none</span>`}</td>
           <td class="col-actions"><div class="row-actions">
-            ${r.builtin ? `<button class="btn icon" data-view-role="${esc(r.name)}" title="View">${ic.logs()}</button>`
-              : `<button class="btn icon" data-edit-role="${esc(r.name)}" title="Edit">${ic.edit()}</button>
-                 <button class="btn danger icon" data-del-role="${esc(r.name)}" title="Delete">${ic.trash()}</button>`}
+            <button class="btn icon" data-edit-role="${esc(r.name)}" title="Edit">${ic.edit()}</button>
+            <button class="btn danger icon" data-del-role="${esc(r.name)}" title="Delete">${ic.trash()}</button>
           </div></td>
         </tr>`).join("")}
     </table>`);
@@ -453,7 +447,6 @@ const roles_: Painter = async (ctx, area) => {
   ctx.$("#add-role").onclick = () => openRole(ctx, null);
   const find = (n: string) => roles.find((r) => r.name === n) ?? null;
   bind(area, "data-edit-role", (n) => openRole(ctx, find(n)));
-  bind(area, "data-view-role", (n) => openRole(ctx, find(n)));
   bind(area, "data-del-role", async (n) => {
     if (!await ctx.askConfirm("Delete role", `Delete the role "${n}"?`, "Delete", true)) return;
     try {
@@ -465,7 +458,7 @@ const roles_: Painter = async (ctx, area) => {
 };
 
 function openRole(ctx: AdminCtx, r: RoleDef | null) {
-  const ro = r?.builtin ?? false;
+  const ro = false;
   const el = ctx.openModal(
     r ? `Role — ${esc(r.name)}` : "New role",
     `<label class="field"><span>Name</span><input id="r-name" value="${esc(r?.name ?? "")}" ${ro ? "disabled" : ""} placeholder="BackupOperator"></label>

@@ -100,6 +100,10 @@ pub struct Store {
     pub avatar_seq: u64,
     #[serde(default)]
     pub roles: Vec<RoleDef>,
+    /// Built-in roles an administrator explicitly removed. Without this,
+    /// startup seeding would recreate them on every restart.
+    #[serde(default)]
+    pub removed_builtin_roles: Vec<String>,
     /// Newest-last append-only action log. `#[serde(default)]` so a store
     /// written before this existed still loads.
     #[serde(default)]
@@ -139,14 +143,16 @@ impl Store {
         Ok(store)
     }
 
-    /// Add any missing built-in role, and put the built-ins back to their
-    /// definition: they are what migration and new accounts rely on meaning a
-    /// fixed thing, so custom access belongs in a custom role.
+    /// Add missing built-in roles unless an administrator explicitly removed
+    /// them. Existing definitions may have been edited by an administrator.
     pub fn seed_builtin_roles(&mut self) {
         for def in perm::builtin_roles() {
-            match self.roles.iter_mut().find(|r| r.name == def.name) {
-                Some(r) => *r = def,
-                None => self.roles.push(def),
+            if self.removed_builtin_roles.contains(&def.name) {
+                self.roles.retain(|r| r.name != def.name);
+                continue;
+            }
+            if !self.roles.iter().any(|r| r.name == def.name) {
+                self.roles.push(def);
             }
         }
     }
@@ -632,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn a_retuned_builtin_role_is_restored_on_load() {
+    fn an_edited_builtin_role_is_preserved_when_seeding() {
         let mut s = store();
         s.roles
             .iter_mut()
@@ -641,7 +647,16 @@ mod tests {
             .privs
             .clear();
         s.seed_builtin_roles();
-        assert!(s.is_admin(&user("a")));
+        assert!(!s.is_admin(&user("a")));
+    }
+
+    #[test]
+    fn a_removed_builtin_role_stays_removed_when_seeding() {
+        let mut s = store();
+        s.roles.retain(|r| r.name != perm::DEFAULT_ROLE);
+        s.removed_builtin_roles.push(perm::DEFAULT_ROLE.into());
+        s.seed_builtin_roles();
+        assert!(!s.roles.iter().any(|r| r.name == perm::DEFAULT_ROLE));
     }
 
     /// An install from before ACLs: roles with scope maps, a user override,
