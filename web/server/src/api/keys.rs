@@ -85,11 +85,19 @@ async fn create_any_key(
     Json(req): Json<CreateKeyReq>,
 ) -> Result<Json<Value>, ApiError> {
     super::enforce(&state, &user, "/", "Permissions.Modify")?;
-    let owner = Some(req.user_id.clone().unwrap_or_else(|| user.id.clone()));
+    let owner = req
+        .user_id
+        .clone()
+        .map(|id| (!id.is_empty()).then_some(id))
+        .unwrap_or_else(|| Some(user.id.clone()));
     issue_key(&state, owner, req)
 }
 
-fn issue_key(state: &AppState, owner_id: Option<String>, req: CreateKeyReq) -> Result<Json<Value>, ApiError> {
+fn issue_key(
+    state: &AppState,
+    owner_id: Option<String>,
+    req: CreateKeyReq,
+) -> Result<Json<Value>, ApiError> {
     let name = match req.name.trim() {
         "" => random_name(),
         n => n.to_string(),
@@ -97,7 +105,10 @@ fn issue_key(state: &AppState, owner_id: Option<String>, req: CreateKeyReq) -> R
     let privs = super::roles::validate_privs(&req.privs)?;
 
     let mut store = state.write();
-    if owner_id.as_deref().is_some_and(|id| store.user_by_id(id).is_none()) {
+    if owner_id
+        .as_deref()
+        .is_some_and(|id| store.user_by_id(id).is_none())
+    {
         return Err(ApiError::bad_request("no such user"));
     }
     // The plaintext key is returned exactly once.
