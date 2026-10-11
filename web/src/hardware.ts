@@ -597,7 +597,10 @@ export function bootTargets(xml: string): Record<string, string> {
     const names = blocks.filter((m) => m[1] === kind).map((m) => {
       if (kind === "disk") {
         const target = m[0].match(/<target\b[^>]*dev=['"]([^'"]+)['"]/);
-        if (target) return target[1];
+        if (target) {
+          out.hdVolume = name(m[0]);
+          return target[1];
+        }
       }
       return name(m[0]);
     }).filter(Boolean);

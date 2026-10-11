@@ -4342,13 +4342,22 @@ async function renderVmBody(vm: string) {
         api.get<any>(`${guestBase(selectedConn!, vm)}`),
       ]);
       const pick = (re: RegExp, fallback = "—") => xml.match(re)?.[1] ?? fallback;
-      const title = pick(/<title>([^<]*)<\/title>/, "");
+      const title = unescapeXml(pick(/<title>([^<]*)<\/title>/, ""));
       const description = pick(/<description>([^<]*)<\/description>/, "");
       // Boot order: disk then CD, as a fresh guest boots, plus whatever else
       // has been added. libvirt tries the <boot> elements top to bottom.
       const bootOrder: string[] = [...xml.matchAll(/<boot dev='([^']*)'\/>/g)].map((m) => m[1]);
       if (bootOrder.length === 0) bootOrder.push("hd", "cdrom");
       const bootNames = bootTargets(xml);
+      const bootDisk = xml.match(/<disk\b[^>]*device=['"]disk['"][\s\S]*?<\/disk>/)?.[0] ?? "";
+      const bootSrc = bootDisk.match(/<source\b[^>]*>/)?.[0] ?? "";
+      const bootVolume = bootSrc.match(/volume=['"]([^'"]+)['"]/)?.[1] ?? bootSrc.match(/file=['"]([^'"]+)['"]/)?.[1]?.split("/").pop();
+      const bootPool = bootSrc.match(/pool=['"]([^'"]+)['"]/)?.[1];
+      if (bootVolume && bootPool) {
+        const vols = await api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(bootPool)}/volumes`).catch(() => []);
+        const nickname = vols.find((v) => v.name === bootVolume)?.title;
+        if (nickname) bootNames.hd = `${bootNames.hd} — ${nickname}`;
+      }
       // A network boot entry is named by its network, which `bootTargets`
       // reports as the libvirt name. Swap in the nickname the rest of the page
       // uses, keeping the MAC: the entry reads "LAN 52:54:...". Uses the bare
@@ -4377,12 +4386,12 @@ async function renderVmBody(vm: string) {
         <div class="hwtable">
           <div class="hwrow">
             <span class="hwrow-ic">${ic.vm()}</span>
-            <div class="hwrow-label"><b>Name</b><i>Renamed via the dedicated endpoint</i></div>
+            <div class="hwrow-label"><b>Resource name</b><i>Renamed via the dedicated endpoint</i></div>
             <div class="hwctl"><input id="opt-name" value="${esc(vm)}"></div>
           </div>
           <div class="hwrow">
             <span class="hwrow-ic">${ic.edit()}</span>
-            <div class="hwrow-label"><b>Title</b></div>
+            <div class="hwrow-label"><b>Nickname</b></div>
             <div class="hwctl"><input id="opt-title" value="${esc(title)}" placeholder="short label"></div>
           </div>
           <div class="hwrow">
@@ -4542,9 +4551,9 @@ async function renderVmBody(vm: string) {
           // libvirt requires title/description right after <name>.
           next = next.replace(/(<name>[^<]*<\/name>)/, `$1\n${meta}`);
         }
-        void runTask(`Update options for ${target}`, async () => {
+        void runTask(`Update options for ${displayName(guestList(selectedConn!), target)}`, async () => {
           await api.putXml(`${guestBase(selectedConn!, target)}/xml`, next);
-        }, { done: `Options for ${target} saved`, notify: toast });
+        }, { done: `Options for ${displayName(guestList(selectedConn!), target)} saved`, notify: toast });
       });
     } catch (e) {
       setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -5172,12 +5181,13 @@ function deleteOutcomeLines(res: DomainDeleteResult | undefined): { lines: strin
 /// admin panel, so the two cannot drift apart — including stopping a running
 /// guest first, which the daemon does.
 async function deleteVmOn(conn: string, name: string, after: () => void) {
-  if (!(await askConfirm("Delete VM", `Delete VM "${name}"?`, "Delete", true))) return;
+  const shown = displayName(guestList(conn), name);
+  if (!(await askConfirm("Delete VM", `Delete VM "${shown}"?`, "Delete", true))) return;
   const removeStorage = await askConfirm(
     "Remove storage",
     // Say what will NOT go: an ISO the guest boots from is shared media, and a
     // disk another guest uses is not this VM's to delete.
-    `Also delete the disks belonging to "${name}"? ISOs and disks other guests use are kept.`,
+    `Also delete the disks belonging to "${shown}"? ISOs and disks other guests use are kept.`,
     "Delete disks",
     true,
   );
@@ -5186,14 +5196,14 @@ async function deleteVmOn(conn: string, name: string, after: () => void) {
   // the button looking hung. The full outcome -- stopped, removed, kept and
   // why -- becomes the success message, or a partial disk cleanup would look
   // like a clean delete.
-  let outcome = `VM ${name} deleted`;
-  await runTask(`Delete VM ${name}`, async (set) => {
+  let outcome = `VM ${shown} deleted`;
+  await runTask(`Delete VM ${shown}`,  async (set) => {
     set("Stopping the guest if it is running…");
     const res = await api.del<DomainDeleteResult>(
       `/proxy/${conn}/domains/${encodeURIComponent(name)}?remove_storage=${removeStorage}`);
     if (selectedConn === conn && selectedVm === name) selectedVm = null;
     const lines = deleteOutcomeLines(res).lines;
-    if (lines.length) outcome = `VM ${name} deleted\n${lines.join("\n")}`;
+    if (lines.length) outcome = `VM ${shown} deleted\n${lines.join("\n")}`;
   }, { done: "", notify: toast }).then((ok) => {
     if (ok) toast(outcome);
   });
@@ -5237,7 +5247,7 @@ async function deleteCt(name: string) {
 /// the daemon rejects a running one and the caller surfaces that reason.
 async function renameVm(name: string) {
   if (!selectedConn) return;
-  const next = await askText("Rename VM", "New name", name, "alpine-worker");
+  const next = await askText("Rename VM", "New name", displayName(guestList(selectedConn), name), "alpine-worker");
   if (!next || next === name) return;
   try {
     await api.post(`/proxy/${selectedConn}/domains/${encodeURIComponent(name)}/rename`, { name: next });
@@ -6388,13 +6398,13 @@ async function openHardwareEditor(opts: {
       // Close only the modal; the inline editor stays visible and the
       // post-task renderVm() below refreshes it from the new definition.
       modal?.remove();
-      void runTask(`Update ${general.name.trim() || oldName}`, async (set) => {
+      void runTask(`Update ${shown || displayName(guestList(conn), oldName)}`, async (set) => {
         let target = oldName;
         if (renamed) {
           // Rename through the dedicated endpoint: it swaps the persistent
           // definition while keeping the UUID. A name baked into the XML PUT
           // below would instead define a second domain with a clashing UUID.
-          set(`renaming ${oldName} → ${general.name.trim()}`);
+          set(`renaming ${displayName(guestList(conn), oldName)} → ${general.name.trim()}`);
           await api.post(
             `/proxy/${conn}/domains/${encodeURIComponent(oldName)}/rename`,
             { name: general.name.trim() });
@@ -6439,7 +6449,7 @@ async function openHardwareEditor(opts: {
           .replace(/<currentMemory([^>]*)>\d+<\/currentMemory>/, `<currentMemory$1>${general.memory_mb * 1024}</currentMemory>`)
           .replace(/<name>[^<]*<\/name>/, `<name>${esc(target)}</name>`);
         // The display name lives in the title for a UUID-named guest.
-        const titled = byUuid ? withTitle(stripped, shown || target) : stripped;
+        const titled = byUuid ? withTitle(stripped, shown || displayName(guestList(conn), oldName)) : stripped;
         // The graphics device is not a catalogue device (there is exactly one,
         // edited on the Display page), so it is re-added here rather than
         // through `withDevices`.
