@@ -7317,7 +7317,7 @@ async function loadProfileLimits(el: Element) {
   const q = u.quota ?? { shared: false, default: {}, daemons: {} };
   const any = (l: import("./api").Limit) => [l.vms, l.vcpus, l.memory_mb, l.storage_gb, l.networks, l.forwards].some((x) => x != null);
   if (!any(q.default) && !Object.values(q.daemons ?? {}).some(any)) {
-    setHtml(box, `${title}<p class="hint">You have no resource limits.</p>`);
+    setHtml(box, "");
     return;
   }
   const block = (name: string, used: Used, cap: import("./api").Limit, note = "") => `
