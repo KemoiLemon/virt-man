@@ -403,15 +403,24 @@ check("roles list the built-ins with their privileges, fixed", () => {
 });
 click(document.querySelector("#add-role"));
 await wait(300);
-check("the role editor offers every enforced privilege as a checkbox", () => {
+check("the role editor offers Yes/No choices for every enforced privilege", () => {
   const privs = [...topModal().querySelectorAll("[data-priv]")].map((c) => c.dataset.priv);
   for (const want of ["VM.Allocate", "VM.Audit", "VM.PowerMgmt", "Network.Use", "Bridge.Use", "Datastore.AllocateSpace"]) {
     assert.ok(privs.includes(want), `${want} offered`);
   }
 });
 topModal().querySelector("#r-name").value = "ProbeRole";
-topModal().querySelector('[data-priv="VM.Audit"]').checked = true;
-topModal().querySelector('[data-priv="VM.Console"]').checked = true;
+click(topModal().querySelector('[data-priv="VM.Audit"][data-value="yes"]'));
+click(topModal().querySelector('[data-priv="VM.Console"][data-value="yes"]'));
+check("subsystem master Yes selects all its privileges", () => {
+  click(topModal().querySelector('[data-master="VM"][data-value="yes"]'));
+  for (const b of topModal().querySelectorAll('[data-priv^="VM."][data-value="yes"]')) {
+    assert.equal(b.getAttribute("aria-pressed"), "true");
+  }
+  click(topModal().querySelector('[data-master="VM"][data-value="no"]'));
+  click(topModal().querySelector('[data-priv="VM.Audit"][data-value="yes"]'));
+  click(topModal().querySelector('[data-priv="VM.Console"][data-value="yes"]'));
+});
 click(topModal().querySelector("#r-save"));
 await wait(1500);
 const rolesAfter = await window.fetch("/roles").then((r) => r.json());

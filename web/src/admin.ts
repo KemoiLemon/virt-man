@@ -450,18 +450,45 @@ function openRole(ctx: AdminCtx, r: RoleDef | null) {
     r ? `Role — ${esc(r.name)}` : "New role",
     `<label class="field"><span>Name</span><input id="r-name" value="${esc(r?.name ?? "")}" ${ro ? "disabled" : ""} placeholder="BackupOperator"></label>
      ${privGroups().map(([grp, ps]) => `
-       <div class="section-title">${esc(grp)}</div>
-       <div class="check-list">${ps.map((p) => `<label class="check"><input type="checkbox" data-priv="${esc(p)}"
-         ${r?.privs.includes(p) ? "checked" : ""} ${ro ? "disabled" : ""}> ${esc(p.split(".")[1])}</label>`).join("")}</div>`).join("")}`,
+       <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">${esc(grp)}
+         <span class="perm-choice"><button type="button" data-master="${esc(grp)}" data-value="yes" ${ro ? "disabled" : ""}>Yes</button><button type="button" data-master="${esc(grp)}" data-value="no" ${ro ? "disabled" : ""}>No</button></span>
+       </div>
+       <table class="grid"><tbody>${ps.map((p) => `<tr><td>${esc(p.split(".")[1])}</td><td class="col-actions"><span class="perm-choice">
+         <button type="button" data-priv="${esc(p)}" data-value="yes" ${ro ? "disabled" : ""}>Yes</button><button type="button" data-priv="${esc(p)}" data-value="no" ${ro ? "disabled" : ""}>No</button>
+       </span></td></tr>`).join("")}</tbody></table>`).join("")}`,
     ro ? `<button class="btn primary" id="r-cancel">Close</button>`
       : `<button class="btn" id="r-cancel">Cancel</button><button class="btn primary" id="r-save">Save</button>`,
   );
+  const selected = new Set(r?.privs ?? []);
+  const sync = () => {
+    el.querySelectorAll<HTMLButtonElement>("[data-priv]").forEach((b) => {
+      b.setAttribute("aria-pressed", String((b.dataset.value === "yes") === selected.has(b.dataset.priv!)));
+    });
+    for (const [group, ps] of privGroups()) {
+      const all = ps.every((p) => selected.has(p));
+      const none = ps.every((p) => !selected.has(p));
+      el.querySelectorAll<HTMLButtonElement>(`[data-master="${group}"]`).forEach((b) => {
+        b.setAttribute("aria-pressed", String(b.dataset.value === "yes" ? all : none));
+      });
+    }
+  };
+  el.querySelectorAll<HTMLButtonElement>("[data-priv]").forEach((b) => b.onclick = () => {
+    if (b.dataset.value === "yes") selected.add(b.dataset.priv!); else selected.delete(b.dataset.priv!);
+    sync();
+  });
+  el.querySelectorAll<HTMLButtonElement>("[data-master]").forEach((b) => b.onclick = () => {
+    for (const p of privGroups().find(([group]) => group === b.dataset.master)?.[1] ?? []) {
+      if (b.dataset.value === "yes") selected.add(p); else selected.delete(p);
+    }
+    sync();
+  });
+  sync();
   ctx.$("#r-cancel", el).onclick = () => el.remove();
   const save = ctx.$("#r-save", el);
   if (save) save.onclick = async () => {
     const body = {
       name: ctx.$("#r-name", el).value.trim(),
-      privs: [...el.querySelectorAll<HTMLInputElement>("[data-priv]")].filter((c) => c.checked).map((c) => c.dataset.priv!),
+      privs: [...selected],
     };
     try {
       if (r) await api.put(`/roles/${encodeURIComponent(r.name)}`, body);
