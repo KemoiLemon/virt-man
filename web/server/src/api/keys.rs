@@ -40,7 +40,7 @@ async fn my_keys(
         .read()
         .api_keys
         .iter()
-        .filter(|k| k.user_id == user.id)
+        .filter(|k| k.user_id.as_deref() == Some(user.id.as_str()))
         .map(key_json)
         .collect();
     Json(json!(keys))
@@ -75,7 +75,7 @@ async fn create_key(
     axum::extract::Extension(user): axum::extract::Extension<User>,
     Json(req): Json<CreateKeyReq>,
 ) -> Result<Json<Value>, ApiError> {
-    issue_key(&state, &user.id, req)
+    issue_key(&state, Some(user.id.clone()), req)
 }
 
 /// Admin: mint a key for any user, with its own scope ceiling.
@@ -85,11 +85,11 @@ async fn create_any_key(
     Json(req): Json<CreateKeyReq>,
 ) -> Result<Json<Value>, ApiError> {
     super::enforce(&state, &user, "/", "Permissions.Modify")?;
-    let owner = req.user_id.clone().unwrap_or_else(|| user.id.clone());
-    issue_key(&state, &owner, req)
+    let owner = Some(req.user_id.clone().unwrap_or_else(|| user.id.clone()));
+    issue_key(&state, owner, req)
 }
 
-fn issue_key(state: &AppState, owner_id: &str, req: CreateKeyReq) -> Result<Json<Value>, ApiError> {
+fn issue_key(state: &AppState, owner_id: Option<String>, req: CreateKeyReq) -> Result<Json<Value>, ApiError> {
     let name = match req.name.trim() {
         "" => random_name(),
         n => n.to_string(),
@@ -97,14 +97,14 @@ fn issue_key(state: &AppState, owner_id: &str, req: CreateKeyReq) -> Result<Json
     let privs = super::roles::validate_privs(&req.privs)?;
 
     let mut store = state.write();
-    if store.user_by_id(owner_id).is_none() {
+    if owner_id.as_deref().is_some_and(|id| store.user_by_id(id).is_none()) {
         return Err(ApiError::bad_request("no such user"));
     }
     // The plaintext key is returned exactly once.
     let key = format!("vm_{}", random_hex(24));
     let api_key = ApiKey {
         id: random_hex(8),
-        user_id: owner_id.to_string(),
+        user_id: owner_id.clone(),
         name,
         hash: sha256_hex(key.as_bytes()),
         prefix: key[..11].to_string(),
@@ -132,7 +132,7 @@ async fn delete_key(
     let Some(pos) = store
         .api_keys
         .iter()
-        .position(|k| k.id == id && k.user_id == user.id)
+        .position(|k| k.id == id && k.user_id.as_deref() == Some(user.id.as_str()))
     else {
         return Err(ApiError::not_found("no such API key"));
     };

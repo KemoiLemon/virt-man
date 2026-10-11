@@ -312,7 +312,7 @@ export interface ApiKey {
   id: string;
   name: string;
   prefix: string;
-  user_id?: string;
+  user_id?: string | null;
   privs?: string[];
   key?: string;
 }

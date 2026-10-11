@@ -60,11 +60,18 @@ fn api_key_user(state: &AppState, req: &Request) -> Option<User> {
     let hash = sha256_hex(key.as_bytes());
     let store = state.read();
     let api_key = store.api_keys.iter().find(|k| k.hash == hash)?;
-    let mut user = store.user_by_id(&api_key.user_id).cloned()?;
+    let mut user = match api_key.user_id.as_deref() {
+        Some(id) => store.user_by_id(id).cloned()?,
+        None => {
+            let mut user = User::new("ownerless-api-key".into(), String::new(), "API key".into());
+            user.id = format!("key:{}", api_key.id);
+            user
+        }
+    };
     // A key can only narrow its owner: `Store::privs` intersects with this,
     // so every check sees the cap without knowing a key was involved. An empty
     // list means "whatever the owner has".
-    if !api_key.privs.is_empty() {
+    if api_key.user_id.is_none() || !api_key.privs.is_empty() {
         user.key_privs = Some(api_key.privs.iter().cloned().collect());
     }
     Some(user)

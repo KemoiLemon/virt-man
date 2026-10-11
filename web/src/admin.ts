@@ -1058,8 +1058,9 @@ const keys_: Painter = async (ctx, area) => {
       "New API key",
       `<div class="grid2">
          <label class="field"><span>Name</span><input id="k-name" placeholder="blank for a random name"></label>
-         <label class="field"><span>Owner</span><select id="k-owner">
-           ${users.map((u) => option(u.id, u.username, u.id === ctx.me()?.id)).join("")}
+          <label class="field"><span>Owner</span><select id="k-owner">
+            <option value="">Ownerless</option>
+            ${users.map((u) => option(u.id, u.username, u.id === ctx.me()?.id)).join("")}
          </select></label>
        </div>
        ${privGroups().map(([grp, ps]) => `
@@ -1100,7 +1101,7 @@ const keys_: Painter = async (ctx, area) => {
       try {
         const k = await api.post<ApiKey>("/keys", {
           name: ctx.$("#k-name", el).value.trim(),
-          user_id: ctx.$("#k-owner", el).value,
+          user_id: ctx.$("#k-owner", el).value || null,
           privs: [...selected],
         });
         el.remove();

@@ -55,7 +55,7 @@ pub struct Connection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKey {
     pub id: String,
-    pub user_id: String,
+    pub user_id: Option<String>,
     pub name: String,
     /// sha256 hex of the key; the key itself is shown only once.
     pub hash: String,
