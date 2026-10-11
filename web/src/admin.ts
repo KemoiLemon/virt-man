@@ -238,6 +238,7 @@ const users_: Painter = async (ctx, area) => {
           <td>${limitsApply(u) ? quotaSummary(u.quota) : `<span class="dim-note">—</span>`}</td>
           <td class="col-actions"><div class="row-actions">
             <button class="btn icon" data-edit-user="${u.id}" title="Edit">${ic.edit()}</button>
+            <button class="btn icon" data-user-password="${u.id}" title="Change password">${ic.key()}</button>
             <button class="btn icon" data-user-perms="${u.id}" title="Permissions">${ic.perms()}</button>
             ${limitsApply(u) ? `<button class="btn icon" data-user-quota="${u.id}" title="Limits">${ic.quota()}</button>` : ""}
             <button class="btn danger icon" data-del-user="${u.id}" title="Delete">${ic.trash()}</button>
@@ -247,6 +248,7 @@ const users_: Painter = async (ctx, area) => {
   ctx.head(`<button class="btn primary" id="add-user">${ic.plus(14)} Add user</button>`);
   ctx.$("#add-user").onclick = () => openUser(ctx, null);
   bind(area, "data-edit-user", (id) => openUser(ctx, users.find((u) => u.id === id) ?? null));
+  bind(area, "data-user-password", (id) => openPassword(ctx, users.find((u) => u.id === id) ?? null));
   bind(area, "data-user-perms", (id) => openGrant(ctx, { ugid: `user:${id}` }));
   bind(area, "data-user-quota", (id) => {
     const u = users.find((x) => x.id === id);
@@ -280,7 +282,7 @@ function quotaSummary(q?: Quota): string {
   const d = q?.default ?? {};
   const set = [d.vms, d.vcpus, d.memory_mb, d.storage_gb, d.networks, d.forwards].some((x) => x != null);
   const over = Object.keys(q?.daemons ?? {}).length;
-  if (!set && !over) return `<span class="dim-note">Unlimited</span>`;
+  if (!set && !over) return `<span class="dim-note">—</span>`;
   const parts = [
     d.vms != null ? `${d.vms} VM` : "",
     d.vcpus != null ? `${d.vcpus} vCPU` : "",
@@ -289,6 +291,28 @@ function quotaSummary(q?: Quota): string {
     d.forwards != null ? `${d.forwards} forward${d.forwards === 1 ? "" : "s"}` : "",
   ].filter(Boolean);
   return `${esc(parts.join(" · ") || "—")}${q?.shared ? ` <span class="badge">pooled</span>` : ""}${over ? ` <span class="badge">+${over} daemon</span>` : ""}`;
+}
+
+function openPassword(ctx: AdminCtx, u: User | null) {
+  if (!u) return;
+  const el = ctx.openModal(
+    `Change password — ${esc(u.username)}`,
+    `<label class="field"><span>New password (min 8)</span><input id="u-new-pass" type="password" autocomplete="new-password"></label>`,
+    `<button class="btn" id="up-cancel">Cancel</button><button class="btn primary" id="up-save">Change password</button>`,
+  );
+  ctx.$("#up-cancel", el).onclick = () => el.remove();
+  ctx.$("#up-save", el).onclick = async () => {
+    const password = ctx.$("#u-new-pass", el).value;
+    if (password.length < 8) {
+      ctx.toast("Password must be at least 8 characters", "bad");
+      return;
+    }
+    try {
+      await api.put(`/users/${u.id}`, { password });
+      el.remove();
+      ctx.toast("Password changed");
+    } catch (e) { ctx.toast((e as Error).message, "bad"); }
+  };
 }
 
 function openUser(ctx: AdminCtx, u: User | null) {
