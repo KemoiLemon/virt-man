@@ -366,7 +366,7 @@ test("a boot entry names the device it actually boots", () => {
     </disk>
   </devices></domain>`;
   const t = hw.bootTargets(xml);
-  assert.equal(t.hd, "boot.qcow2", "the first disk, not the second");
+  assert.equal(t.hd, "vda", "the first disk target, not its volume name");
   assert.equal(t.cdrom, "alpine.iso");
   // No interface in this XML, so there is nothing for a network boot to use.
   assert.equal(t.network, undefined);
@@ -401,18 +401,28 @@ test("a guest with no disks names nothing", () => {
   assert.deepEqual(t, {}, "an empty cdrom must not be named");
 });
 
+test("disk boot labels use target devices rather than volume names", () => {
+  const xml = `<domain><devices>
+    <disk type='file' device='disk'><source file='/pool/ubuntu.qcow2'/><target dev='vda' bus='virtio'/></disk>
+    <disk type='file' device='disk'><source file='/pool/data.qcow2'/><target dev='vdb' bus='virtio'/></disk>
+    <disk type='file' device='cdrom'><source file='/pool/install.iso'/><target dev='sda' bus='sata'/></disk>
+  </devices></domain>`;
+  assert.equal(hw.bootTargets(xml).hd, "vda");
+  assert.equal(hw.bootTargets(xml).cdrom, "install.iso");
+});
+
 test("the boot dropdown names the device and hides what is already added", () => {
   // Three things the old kind-only list got wrong: "Hard Disk" does not say
   // *which* disk libvirt will boot when several are attached; offering a kind
   // already in the order adds a second entry resolving to the same device; and
   // offering a kind the guest has no device for adds a `<boot>` element libvirt
   // accepts and never uses.
-  const names = { hd: "Debian-13.qcow2", cdrom: "debian-netinst.iso", network: "internet 52:54:00:05:55:c9" };
+  const names = { hd: "vda", cdrom: "debian-netinst.iso", network: "internet 52:54:00:05:55:c9" };
 
   // Nothing added yet: each kind offered, named where it has a device.
   const all = hw.bootChoices([], names);
   assert.deepEqual(all.map((c) => c.value), ["hd", "cdrom", "network"]);
-  assert.equal(all[0].label, "Debian-13.qcow2 (Hard Disk)", "the real disk is named");
+  assert.equal(all[0].label, "vda (Hard Disk)", "the target disk is named");
   assert.equal(all[1].label, "debian-netinst.iso (CD/DVD)");
   // A network entry names the network and its MAC.
   assert.equal(all[2].label, "internet 52:54:00:05:55:c9 (Network)");

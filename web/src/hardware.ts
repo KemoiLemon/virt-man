@@ -594,7 +594,13 @@ export function bootTargets(xml: string): Record<string, string> {
   const blocks = [...xml.matchAll(/<disk\b[^>]*device=['"](disk|cdrom)['"][\s\S]*?<\/disk>/g)];
   const out: Record<string, string> = {};
   for (const kind of ["disk", "cdrom"] as const) {
-    const names = blocks.filter((m) => m[1] === kind).map((m) => name(m[0])).filter(Boolean);
+    const names = blocks.filter((m) => m[1] === kind).map((m) => {
+      if (kind === "disk") {
+        const target = m[0].match(/<target\b[^>]*dev=['"]([^'"]+)['"]/);
+        if (target) return target[1];
+      }
+      return name(m[0]);
+    }).filter(Boolean);
     // More than one disk: it is the first that boots, so it is the one named.
     if (names.length) out[kind === "disk" ? "hd" : "cdrom"] = names[0];
   }
