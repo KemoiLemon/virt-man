@@ -239,7 +239,6 @@ const users_: Painter = async (ctx, area) => {
           <td class="col-actions"><div class="row-actions">
             <button class="btn icon" data-edit-user="${u.id}" title="Edit">${ic.edit()}</button>
             <button class="btn icon" data-user-password="${u.id}" title="Change password">${ic.key()}</button>
-            <button class="btn icon" data-user-perms="${u.id}" title="Permissions">${ic.perms()}</button>
             ${limitsApply(u) ? `<button class="btn icon" data-user-quota="${u.id}" title="Limits">${ic.quota()}</button>` : ""}
             <button class="btn danger icon" data-del-user="${u.id}" title="Delete">${ic.trash()}</button>
           </div></td>
@@ -249,7 +248,6 @@ const users_: Painter = async (ctx, area) => {
   ctx.$("#add-user").onclick = () => openUser(ctx, null);
   bind(area, "data-edit-user", (id) => openUser(ctx, users.find((u) => u.id === id) ?? null));
   bind(area, "data-user-password", (id) => openPassword(ctx, users.find((u) => u.id === id) ?? null));
-  bind(area, "data-user-perms", (id) => openGrant(ctx, { ugid: `user:${id}` }));
   bind(area, "data-user-quota", (id) => {
     const u = users.find((x) => x.id === id);
     if (u) openQuota(ctx, u);
@@ -374,7 +372,6 @@ const groups_: Painter = async (ctx, area) => {
           <td>${g.members.map((m) => `<span class="role-tag">${esc(userName(m))}</span>`).join("") || `<span class="dim-note">—</span>`}</td>
           <td class="col-actions"><div class="row-actions">
             <button class="btn icon" data-edit-group="${esc(g.name)}" title="Edit">${ic.edit()}</button>
-            <button class="btn icon" data-group-perms="${esc(g.name)}" title="Permissions">${ic.perms()}</button>
             <button class="btn danger icon" data-del-group="${esc(g.name)}" title="Delete">${ic.trash()}</button>
           </div></td>
         </tr>`).join("") || `<tr><td colspan="4" class="empty">No groups. A group gets permissions like a user does, and every member has them.</td></tr>`}
@@ -382,7 +379,6 @@ const groups_: Painter = async (ctx, area) => {
   ctx.head(`<button class="btn primary" id="add-group">${ic.plus(14)} Add group</button>`);
   ctx.$("#add-group").onclick = () => openGroup(ctx, null);
   bind(area, "data-edit-group", (n) => openGroup(ctx, groups.find((g) => g.name === n) ?? null));
-  bind(area, "data-group-perms", (n) => openGrant(ctx, { ugid: `group:${n}` }));
   bind(area, "data-del-group", async (n) => {
     if (!await ctx.askConfirm("Delete group", `Delete @${n} and every permission granted to it?`, "Delete", true)) return;
     try {
@@ -682,7 +678,6 @@ const daemons_: Painter = async (ctx, area) => {
           <td class="mono">${c.fingerprint ? `${esc(c.fingerprint.slice(0, 17))}…` : "—"}</td>
           <td class="col-actions"><div class="row-actions">
             <button class="btn icon" data-edit-conn="${c.id}" title="Edit">${ic.edit()}</button>
-            <button class="btn icon" data-conn-perms="${c.id}" title="Permissions">${ic.perms()}</button>
             <button class="btn danger icon" data-del-conn="${c.id}" title="Remove">${ic.trash()}</button>
           </div></td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No daemons yet.</td></tr>`}
@@ -690,7 +685,6 @@ const daemons_: Painter = async (ctx, area) => {
   ctx.head(`<button class="btn primary" id="add-daemon">${ic.plus(14)} Add daemon</button>`);
   ctx.$("#add-daemon").onclick = () => ctx.openConnectionDialog();
   bind(area, "data-edit-conn", (id) => ctx.openConnectionDialog(id));
-  bind(area, "data-conn-perms", (id) => void openGrant(ctx, { path: `/nodes/${id}` }));
   bind(area, "data-del-conn", (id) => void ctx.deleteConnection(id));
 };
 
@@ -736,7 +730,6 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
         <div class="row-actions">
           ${r.kind === "pool" ? "" : `<button class="btn icon" data-owner-res="${i}" title="Change owner">${ic.user()}</button>`}
           ${r.kind === "volume" ? "" : `
-            <button class="btn icon" data-share-res="${i}" title="Share">${ic.perms()}</button>
             <button class="btn icon ${r.suspended ? "on" : ""}" data-suspend-res="${i}" title="${r.suspended ? "Restore access" : "Suspend access"}">${r.suspended ? ic.start() : ic.suspend()}</button>`}
           <button class="btn danger icon" data-del-res="${i}" title="Delete">${ic.trash()}</button>
         </div>`;
@@ -826,11 +819,6 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
         ctx.deleteResource(r.kind, r.conn, r.pool ?? "", r.name, () => ctx.go(section, conn));
       });
       bind(area, "data-owner-res", (i) => void changeOwner(ctx, shown[Number(i)], section));
-      bind(area, "data-share-res", (i) => {
-        const r = shown[Number(i)];
-        const seg = r.kind === "vm" ? "vms" : r.kind === "ct" ? "containers" : "networks";
-        void openGrant(ctx, { path: `/nodes/${r.conn}/${seg}/${r.name}` });
-      });
       bind(area, "data-suspend-res", async (i) => {
         const r = shown[Number(i)];
         const to = !r.suspended;
