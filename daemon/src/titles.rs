@@ -4,13 +4,13 @@
 //! unlike a guest or a network a pool definition has no `<title>` to keep the
 //! display name in -- libvirt accepts one and silently drops it (measured,
 //! libvirt 12.7). So the daemon keeps them itself, keyed by UUID, in
-//! `/etc/virt-man/titles.json`, and reports them in the pool list.
+//! `/etc/virt-man-daemon/titles.json`, and reports them in the pool list.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-pub const TITLES_PATH: &str = "/etc/virt-man/titles.json";
+pub const TITLES_PATH: &str = "/etc/virt-man-daemon/titles.json";
 
 fn store() -> &'static Mutex<(PathBuf, HashMap<String, String>)> {
     static S: OnceLock<Mutex<(PathBuf, HashMap<String, String>)>> = OnceLock::new();

@@ -10,7 +10,7 @@ PREFIX="${VIRT_MAN_PREFIX:-/usr/local}"
 DESTDIR="${DESTDIR:-}"
 SKIP_SYSTEMD="${SKIP_SYSTEMD:-}"
 
-ETC="/etc/virt-man"
+ETC="/etc/virt-man-daemon"
 TLS_DIR="$ETC/tls"
 TOKEN_PATH="$ETC/token"
 CONFIG_PATH="$ETC/daemon.toml"
@@ -58,11 +58,14 @@ run_build cargo build --release
 say "installing $BIN_NAME to $DESTDIR$PREFIX/bin"
 install -Dm755 "target/release/$BIN_NAME" "$DESTDIR$PREFIX/bin/$BIN_NAME"
 
+# Legacy files are migrated by Config::load, which handles symlinks, structured
+# config rewrites and interrupted copies consistently. Do not duplicate it here.
+
 # --- token -----------------------------------------------------------------
 install -d -m 700 "$DESTDIR$ETC"
 if [[ -n "${VIRT_MAN_TOKEN:-}" ]]; then
   say "using supplied VIRT_MAN_TOKEN"
-  printf '%s\n' "$VIRT_MAN_TOKEN" > "$DESTDIR$TOKEN_PATH"
+  (umask 077; printf '%s\n' "$VIRT_MAN_TOKEN" > "$DESTDIR$TOKEN_PATH")
 elif [[ -s "$DESTDIR$TOKEN_PATH" ]]; then
   say "keeping existing token at $DESTDIR$TOKEN_PATH"
 else
@@ -93,19 +96,20 @@ else
   say "generating self-signed TLS cert (SANs: $san)"
   # A proper end-entity leaf (CA:FALSE) so rustls clients can pin it as a
   # trust anchor without tripping its "CA used as end entity" check.
-  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+  (umask 077; openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
     -keyout "$DESTDIR$TLS_DIR/key.pem" -out "$DESTDIR$TLS_DIR/cert.pem" \
     -subj "/CN=$hostname_" \
     -addext "subjectAltName=$san" \
     -addext "basicConstraints=critical,CA:FALSE" \
     -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
-    -addext "extendedKeyUsage=serverAuth"
+    -addext "extendedKeyUsage=serverAuth")
   chmod 600 "$DESTDIR$TLS_DIR/key.pem"
   chmod 644 "$DESTDIR$TLS_DIR/cert.pem"
 fi
 
 # --- config ----------------------------------------------------------------
 say "writing $DESTDIR$CONFIG_PATH"
+if [[ ! -e "$DESTDIR$CONFIG_PATH" ]]; then
 cat > "$DESTDIR$CONFIG_PATH" <<EOF
 # virt-man-daemon config (managed by install.sh; edit freely and restart).
 http_addr = "$HTTP_ADDR"
@@ -116,6 +120,9 @@ cert_dir = "$TLS_DIR"
 cert = "$TLS_DIR/cert.pem"
 key = "$TLS_DIR/key.pem"
 EOF
+else
+  say "keeping existing config at $DESTDIR$CONFIG_PATH"
+fi
 
 # --- systemd service -------------------------------------------------------
 if [[ -n "$SKIP_SYSTEMD" ]]; then

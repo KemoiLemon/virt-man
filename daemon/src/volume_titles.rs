@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-pub const TITLES_PATH: &str = "/etc/virt-man/volume-titles.json";
+pub const TITLES_PATH: &str = "/etc/virt-man-daemon/volume-titles.json";
 type Titles = HashMap<String, String>;
 
 fn key(pool: &str, volume: &str) -> String {

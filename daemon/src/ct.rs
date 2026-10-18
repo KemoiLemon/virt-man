@@ -38,8 +38,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-pub const MOUNT_ROOT: &str = "/run/virt-man/ct";
-pub const IDMAP_PATH: &str = "/etc/virt-man/idmap.json";
+pub const MOUNT_ROOT: &str = "/run/virt-man-daemon/ct";
+pub const IDMAP_PATH: &str = "/etc/virt-man-daemon/idmap.json";
 /// Each container's namespace gets this many ids, as Proxmox and LXD do.
 pub const ID_COUNT: u32 = 65536;
 /// Ranges start here: far above any real account or `/etc/subuid` range, so
@@ -263,7 +263,7 @@ pub fn ensure_mounted(uuid: &str, image: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(MOUNT_ROOT).map_err(|e| format!("{MOUNT_ROOT}: {e}"))?;
     // 0711: the mapped root must be able to walk to its own rootfs.
     use std::os::unix::fs::PermissionsExt;
-    for d in ["/run/virt-man", MOUNT_ROOT] {
+    for d in ["/run/virt-man-daemon", MOUNT_ROOT] {
         let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o711));
     }
     let dir = mount_dir(uuid);
@@ -603,7 +603,7 @@ mod tests {
         assert!(x.contains(&format!("target='{ID_BASE}'")));
         assert_eq!(rootfs_of(&x).as_deref(), Some("/p/u.raw"));
         assert!(x.contains("<title>web &lt;1&gt;</title>"), "{x}");
-        assert!(x.contains("<source dir='/run/virt-man/ct/u'/>"));
+        assert!(x.contains("<source dir='/run/virt-man-daemon/ct/u'/>"));
         assert!(
             x.contains("<privnet/>"),
             "never the host's network namespace"

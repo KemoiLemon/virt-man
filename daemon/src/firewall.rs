@@ -5,7 +5,7 @@
 //! rules are enforced directly on the host with nftables. The daemon renders
 //! the whole set as one atomic `nft -f` script in its own `virt-man` table,
 //! which is separate from libvirt's `libvirt_network` table so the two never
-//! fight. Rules persist in `/etc/virt-man/firewall.json` and are re-applied at
+//! fight. Rules persist in `/etc/virt-man-daemon/firewall.json` and are re-applied at
 //! startup (nftables itself is not persistent across reboot).
 //!
 //! Direction semantics, mirroring a firewall appliance:
@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-pub const FIREWALL_PATH: &str = "/etc/virt-man/firewall.json";
+pub const FIREWALL_PATH: &str = "/etc/virt-man-daemon/firewall.json";
 
 /// Everything persisted to disk: network rules/forwards and per-VM rules.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -474,7 +474,12 @@ fn render_forward(f: &Forward, subnet: &str) -> Option<String> {
     }
     let l4 = if f.proto == "udp" { "udp" } else { "tcp" };
     m.push(format!("{l4} dport {}", f.wan_port));
-    Some(format!("{} dnat to {}:{}", m.join(" "), f.lan_ip, f.lan_port))
+    Some(format!(
+        "{} dnat to {}:{}",
+        m.join(" "),
+        f.lan_ip,
+        f.lan_port
+    ))
 }
 
 /// Apply a ruleset with `nft -f` (atomic: a syntax error aborts the whole

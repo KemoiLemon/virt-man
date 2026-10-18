@@ -1,6 +1,6 @@
 //! IPAM state: what each managed network hands out, and to whom.
 //!
-//! One JSON file (`/etc/virt-man/ipam.json`), owned by the daemon. It replaces
+//! One JSON file (`/etc/virt-man-daemon/ipam.json`), owned by the daemon. It replaces
 //! the `<dhcp>` section libvirt used to keep in the network definition: editing
 //! a reservation there meant `virNetworkUpdate` or a redefine, and a redefine
 //! restarts the network and unplugs every guest on it.
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-pub const IPAM_PATH: &str = "/etc/virt-man/ipam.json";
+pub const IPAM_PATH: &str = "/etc/virt-man-daemon/ipam.json";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Store {
