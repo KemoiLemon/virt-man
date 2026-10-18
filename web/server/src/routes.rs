@@ -144,7 +144,9 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
     match (method, s.as_slice()) {
         // Host and daemon.
         (_, ["health"] | ["version"]) if get => need(node, "Sys.Audit"),
+        (_, ["features"]) if get => need(node, "Sys.Audit"),
         (_, ["host", "stats"]) if get => need(node, "Sys.Audit"),
+        (_, ["host", "pools", ..]) => with(node, "Sys.Audit", Special::AdminOnly),
         // Every guest on the host in one answer. The web server's samplers
         // read these directly; through the proxy they are an admin's view.
         (_, ["metrics"] | ["flows"]) if get => with(node, "Sys.Audit", Special::AdminOnly),
@@ -154,6 +156,29 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
         // terminal is the login UI and the host's account policy decides who
         // gets in. This only decides who may ask for a shell at all.
         (_, ["shell", ..]) => with(node, "Sys.Modify", Special::AdminOnly),
+        // Direct QEMU is isolated from libvirt and remains host-admin only.
+        (_, ["qemu", "vms"]) if get => with(node.clone(), "Sys.Audit", Special::AdminOnly),
+        ("POST", ["qemu", "vms"]) => with(node.clone(), "Sys.Modify", Special::AdminOnly),
+        (_, ["qemu", "vms", _, "state"]) if get => {
+            with(node.clone(), "Sys.Audit", Special::AdminOnly)
+        }
+        (_, ["qemu", "vms", _, "network"]) if get => {
+            with(node.clone(), "Sys.Audit", Special::AdminOnly)
+        }
+        ("PUT", ["qemu", "vms", _, "network"]) => {
+            with(node.clone(), "Sys.Modify", Special::AdminOnly)
+        }
+        (_, ["qemu", "vms", _, "firewall"]) if get => {
+            with(node.clone(), "Sys.Audit", Special::AdminOnly)
+        }
+        ("PUT", ["qemu", "vms", _, "firewall"]) => {
+            with(node.clone(), "Sys.Modify", Special::AdminOnly)
+        }
+        ("POST", ["qemu", "vms", _, "nics"]) | ("DELETE", ["qemu", "vms", _, "nics", _]) => {
+            with(node.clone(), "Sys.Modify", Special::AdminOnly)
+        }
+        ("POST", ["qemu", "vms", _, "start" | "shutdown" | "force-stop"])
+        | ("DELETE", ["qemu", "vms", _]) => with(node.clone(), "Sys.Modify", Special::AdminOnly),
 
         // Guests.
         (_, ["domains"]) if get => with(vms, "Sys.Audit", Special::ListVms),
@@ -303,6 +328,12 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn feature_status_is_auditable() {
+        let classified = classify("node", "GET", "/features").unwrap();
+        assert_eq!(classified.privilege, "Sys.Audit");
+    }
+
     /// `classify` takes the path as written. That is only safe because the
     /// proxy first rewrites a UUID to the resource's name (`canonical_path`):
     /// the daemon resolves a UUID to a guest, and grants, ownership and
@@ -429,6 +460,39 @@ mod tests {
         assert_eq!(priv_of("GET", "/secret"), None);
         assert_eq!(priv_of("POST", "/domains/web/migrate"), None);
         assert_eq!(priv_of("PATCH", "/domains/web"), None);
+        assert_eq!(classify("c", "GET", "/qemu/vms/not-a-route"), None);
+        assert_eq!(classify("c", "POST", "/qemu/vms/x/reboot"), None);
+    }
+
+    #[test]
+    fn qemu_routes_are_method_classified_and_admin_only() {
+        for (method, path, privilege) in [
+            ("GET", "/qemu/vms", "Sys.Audit"),
+            ("POST", "/qemu/vms", "Sys.Modify"),
+            ("GET", "/qemu/vms/x/state", "Sys.Audit"),
+            ("GET", "/qemu/vms/x/network", "Sys.Audit"),
+            ("PUT", "/qemu/vms/x/network", "Sys.Modify"),
+            ("GET", "/qemu/vms/x/firewall", "Sys.Audit"),
+            ("PUT", "/qemu/vms/x/firewall", "Sys.Modify"),
+            ("POST", "/qemu/vms/x/nics", "Sys.Modify"),
+            ("DELETE", "/qemu/vms/x/nics/nic0", "Sys.Modify"),
+            ("POST", "/qemu/vms/x/start", "Sys.Modify"),
+            ("POST", "/qemu/vms/x/shutdown", "Sys.Modify"),
+            ("POST", "/qemu/vms/x/force-stop", "Sys.Modify"),
+            ("DELETE", "/qemu/vms/x", "Sys.Modify"),
+        ] {
+            let n = classify("c", method, path).expect(path);
+            assert_eq!(n.privilege, privilege, "{method} {path}");
+            assert_eq!(n.special, Special::AdminOnly, "{method} {path}");
+        }
+        assert!(classify("c", "PUT", "/qemu/vms/x/state").is_none());
+        for (method, path) in [
+            ("POST", "/qemu/vms/x/network"),
+            ("DELETE", "/qemu/vms/x/nics"),
+            ("PATCH", "/qemu/vms/x/firewall"),
+        ] {
+            assert!(classify("c", method, path).is_none(), "{method} {path}");
+        }
     }
 
     #[test]
@@ -490,6 +554,12 @@ mod tests {
             classify("c", "GET", "/filters").unwrap().special,
             Special::AdminOnly
         );
+        for path in ["/host/pools", "/host/pools/images"] {
+            let n = classify("c", "GET", path).unwrap();
+            assert_eq!(n.special, Special::AdminOnly);
+        }
+        assert!(classify("c", "POST", "/host/pools").is_some());
+        assert!(classify("c", "GET", "/host/pools/not-configured").is_some());
     }
 
     /// The daemon shell is a login shell on the host, so every one of its
