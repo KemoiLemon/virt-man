@@ -475,6 +475,7 @@ async fn create(State(ipam): State<Ipam>, body: String) -> Result<Json<Value>, A
         let n = Network::define_xml(c, &libvirt_xml)?;
         let name = n.get_name().unwrap_or_default();
         n.create()?;
+        n.set_autostart(true)?;
         Ok(json!({"name": name, "started": true}))
     })
     .await

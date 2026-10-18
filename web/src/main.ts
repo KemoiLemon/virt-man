@@ -1321,7 +1321,6 @@ function vmMenu(connId: string, vmName: string): CtxItem[] {
 function netMenu(connId: string, netName: string): CtxItem[] {
   const net = (treeNets[connId] ?? []).find((n) => n.name === netName);
   const active = net?.active === true;
-  const autostart = net?.autostart === true;
   // The editors read the selected server; point it at this network's owner
   // first, since a dashboard row can belong to a server that is not selected.
   const onConn = (f: () => void) => () => { selectedConn = connId; f(); };
@@ -1330,19 +1329,6 @@ function netMenu(connId: string, netName: string): CtxItem[] {
     {
       label: active ? "Stop" : "Start", icon: active ? ic.stop() : ic.start(), separator: true,
       run: () => void treeNetPower(connId, netName, active ? "stop" : "start"),
-    },
-    {
-      label: autostart ? "Disable autostart" : "Enable autostart", icon: ic.autostart(),
-      run: async () => {
-        try {
-          await api.post(`/proxy/${connId}/networks/${encodeURIComponent(netName)}/autostart`,
-            { autostart: !autostart });
-          toast("OK");
-        } catch (e) {
-          return toast((e as Error).message, "bad");
-        }
-        await refreshTreeVms();
-      },
     },
     { label: "Edit network", icon: ic.edit(), separator: true, run: onConn(() => void openEditNetwork(netName)) },
     { label: "Firewall rules", icon: ic.firewall(), run: onConn(() => openFirewallEditor(netName)) },
@@ -1837,15 +1823,6 @@ function bindDcNetCards(root: Element) {
       renderDc();
     };
   });
-  root.querySelectorAll<HTMLElement>("[data-net-autostart]").forEach((b) => {
-    b.onclick = async (e) => {
-      e.stopPropagation();
-      selectedConn = b.dataset.netConn!;
-      renderTree();
-      await toggleAutostart(b.dataset.netAutostart!);
-      renderDc();
-    };
-  });
   root.querySelectorAll<HTMLElement>("[data-net-edit]").forEach((b) => {
     b.onclick = (e) => {
       e.stopPropagation();
@@ -2298,7 +2275,6 @@ async function renderNetPage() {
       </div>
       <div class="actions" style="margin-top:12px">
         <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
-        <button class="btn ${net.autostart ? "on" : ""}" id="net-autostart">${ic.autostart(14)} Autostart ${net.autostart ? "on" : "off"}</button>
         <button class="btn primary" id="net-edit">${ic.edit(14)} Edit</button>
         <button class="btn" id="net-fw">${ic.firewall(14)} Firewall</button>
         <button class="btn danger" id="net-del">${ic.trash(14)} Delete</button>
@@ -2417,10 +2393,6 @@ async function renderNetPage() {
 
     $("#net-toggle", content).onclick = async () => {
       await netAction(net.active ? "stop" : "start", name);
-      void renderNetPage();
-    };
-    $("#net-autostart", content).onclick = async () => {
-      await toggleAutostart(name);
       void renderNetPage();
     };
     $("#net-edit", content).onclick = () => openEditNetwork(name);
@@ -3625,7 +3597,6 @@ function netCard(n: NetworkSummary, conn: string, server?: string): string {
         </div>
         <div class="storage-card-actions net-actions">
           <button class="btn icon ${n.active ? "on" : ""}" data-net-toggle="${esc(n.name)}" data-net-conn="${esc(conn)}" data-net-action="${n.active ? "stop" : "start"}" title="${n.active ? "Stop" : "Start"}">${n.active ? ic.stop() : ic.start()}</button>
-          <button class="btn icon ${n.autostart ? "on" : ""}" data-net-autostart="${esc(n.name)}" data-net-conn="${esc(conn)}" title="${n.autostart ? "Autostart on" : "Autostart off"}">${ic.autostart()}</button>
           <button class="btn icon" data-net-edit="${esc(n.name)}" data-net-conn="${esc(conn)}" title="Edit">${ic.edit()}</button>
           <button class="btn danger icon" data-delnet="${esc(n.name)}" data-delnet-conn="${esc(conn)}" title="Delete">${ic.trash()}</button>
         </div>
@@ -3654,13 +3625,6 @@ async function loadNetworks() {
         e.stopPropagation();
         const el = b as HTMLElement;
         void netActionOn(el.dataset.netConn!, el.dataset.netAction === "start" ? "start" : "stop", el.dataset.netToggle!);
-      };
-    });
-    list.querySelectorAll("[data-net-autostart]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = (e) => {
-        e.stopPropagation();
-        const el = b as HTMLElement;
-        void toggleAutostartOn(el.dataset.netConn!, el.dataset.netAutostart!);
       };
     });
     list.querySelectorAll("[data-net-edit]").forEach((b: Element) => {
@@ -3693,24 +3657,6 @@ async function netAction(action: "start" | "stop", name: string) {
 async function netActionOn(conn: string, action: "start" | "stop", name: string) {
   try {
     await api.post(`/proxy/${conn}/networks/${encodeURIComponent(name)}/${action}`);
-    if (selectedConn === conn) await loadNetworks();
-  } catch (e) {
-    toast((e as Error).message, "bad");
-  }
-}
-
-async function toggleAutostart(name: string) {
-  if (!selectedConn) return;
-  await toggleAutostartOn(selectedConn, name);
-}
-
-async function toggleAutostartOn(conn: string, name: string) {
-  const net = (await api.get<NetworkSummary[]>(`/proxy/${conn}/networks`))
-    .find((n) => n.name === name);
-  if (!net) return;
-  try {
-    await api.post(`/proxy/${conn}/networks/${encodeURIComponent(name)}/autostart`,
-      { autostart: !net.autostart });
     if (selectedConn === conn) await loadNetworks();
   } catch (e) {
     toast((e as Error).message, "bad");
@@ -3764,7 +3710,6 @@ function openNetworkForm(
         <option value="bridge" ${initial.forward === "bridge" ? "selected" : ""}>Bridge</option>
         <option value="none" ${initial.forward === "none" ? "selected" : ""}>Isolated</option>
       </select></label>
-      ${uuid ? "" : `<label class="check"><input id="net-autostart" type="checkbox" checked> Start on host boot</label>`}
       <label class="field" data-net-field="bridge"><span>Bridge</span><select id="net-bridge">
         <option value="">Select a bridge…</option>
         ${initial.bridge ? `<option value="${esc(initial.bridge)}" selected>${esc(initial.bridge)}</option>` : ""}
@@ -3895,11 +3840,9 @@ function openNetworkForm(
     const libvirt = uuid ? (libvirtName || initial.name) : id;
     const xml = networkXml(form, id, libvirt);
     const owner = uuid ? null : forUser?.owner ?? null;
-    const autostart = !uuid && (el.querySelector("#net-autostart") as HTMLInputElement).checked;
     void runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
       if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(libvirt)}/xml`, xml);
       else await api.postXml(`/proxy/${conn}/networks`, xml);
-      if (autostart) await api.post(`/proxy/${conn}/networks/${encodeURIComponent(libvirt)}/autostart`, { autostart: true });
       if (owner) await assignOwner(conn, "network", libvirt, owner);
     }, { done: `Network ${form.name} ${uuid ? "updated" : "created"}`, notify: toast })
       .then(() => {

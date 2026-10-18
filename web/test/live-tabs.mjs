@@ -99,9 +99,6 @@ check("Networks tab renders cards with type, subnet and merged controls", () => 
   assert.equal(first.querySelectorAll("[data-net-toggle]").length, 1, "exactly one toggle");
   assert.ok(toggle.querySelector("svg"), "toggle has an icon");
   assert.equal(toggle.textContent.trim(), "", "toggle is icon-only");
-  const auto = first.querySelector("[data-net-autostart]");
-  assert.ok(auto, "autostart button");
-  assert.ok(auto.querySelector("svg"), "autostart has an icon");
   assert.ok(first.querySelector("[data-net-edit]"), "edit button");
   assert.ok(first.querySelector("[data-delnet]"), "delete button");
 });
@@ -111,18 +108,12 @@ check("the network list has no create card (creating is the tab bar's button)", 
   assert.ok(document.querySelector("#create-net"), "the tab bar's Create Network remains");
 });
 
-check("start/stop and autostart highlights follow their state", () => {
+check("start/stop highlight follows its state", () => {
   for (const c of document.querySelectorAll("#nets-list .net-card")) {
     const toggle = c.querySelector("[data-net-toggle]");
     const cardActive = c.querySelector(".storage-card-head .badge.on")?.textContent.trim() === "Active";
     assert.equal(toggle.classList.contains("on"), cardActive,
       `toggle highlight matches the active badge`);
-    const auto = c.querySelector("[data-net-autostart]");
-    assert.equal(
-      auto.classList.contains("on"),
-      /Autostart on/.test(auto.title),
-      `autostart highlight matches its title (${auto.title})`,
-    );
   }
 });
 

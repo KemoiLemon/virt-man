@@ -131,6 +131,7 @@ async fn create(
         }
         p.build(0).ok();
         p.create(0)?;
+        p.set_autostart(true)?;
         Ok(json!({"name": name, "uuid": uuid, "started": true}))
     })
     .await
