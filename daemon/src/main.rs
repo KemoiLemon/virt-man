@@ -8,6 +8,8 @@ mod firmware;
 mod ipam;
 mod libvirt;
 mod migrate;
+mod qemu;
+mod qemu_network;
 mod rfb;
 mod titles;
 mod tls;
@@ -54,6 +56,7 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("libvirt event thread: {e}"))?;
 
     let cfg = config::Config::load()?;
+    let qemu_manager = qemu::Manager::new(cfg.data_dir.clone(), cfg.qemu_state_root.clone())?;
     let auth = auth::Auth::from_file(&cfg.token_path)?;
 
     // Re-apply any persisted firewall rules at startup: nftables is not
@@ -97,7 +100,7 @@ async fn run() -> Result<(), String> {
         let owners = ipam.clone();
         ipam::flows::listen(ipam.flows.clone(), move |ip| owners.owner(ip));
     }
-    let app = api::build(auth, ipam);
+    let app = api::build(auth, ipam, qemu_manager);
 
     // Unix socket listener.
     let sock_path = cfg.unix_socket_path();

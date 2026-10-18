@@ -12,6 +12,8 @@ pub mod firmware;
 pub mod ipam;
 pub mod libvirt;
 pub mod migrate;
+pub mod qemu;
+pub mod qemu_network;
 pub mod rfb;
 pub mod titles;
 pub mod tls;

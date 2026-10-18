@@ -35,6 +35,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 # crypto provider is the aws-lc-rs one axum-server already brings.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "stream"] }
 socket2 = { version = "0.6", features = ["all"] }
+uuid = { version = "1", features = ["v4"] }
 # Already in the tree through axum; `oneshot` re-dispatches /containers to
 # the /domains handlers under the LXC driver.
 tower = { version = "0.5", features = ["util"] }

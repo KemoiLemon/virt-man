@@ -8,10 +8,12 @@ pub mod filters;
 pub mod firewall;
 pub mod health;
 pub mod host;
+pub mod host_pools;
 pub mod metrics;
 pub mod networks;
 pub mod nics;
 pub mod pools;
+pub mod qemu;
 pub mod shell;
 pub mod templates;
 pub mod volumes;
@@ -148,7 +150,11 @@ fn encode(s: &str) -> String {
         .collect()
 }
 
-pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
+pub fn build(
+    auth: Auth,
+    ipam: crate::ipam::server::Ipam,
+    qemu_manager: crate::qemu::Manager,
+) -> Router {
     let fw = firewall::FirewallState::new();
     // The guest routes, shared by VMs (`/domains`) and containers, which
     // reach them through `containers::forward` under the LXC driver.
@@ -162,7 +168,9 @@ pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
     let for_ct = guest.clone();
     let authed = Router::new()
         .merge(health::routes())
+        .route("/features", axum::routing::get(feature_status))
         .merge(host::routes())
+        .merge(host_pools::routes())
         .merge(metrics::routes())
         .merge(guest)
         .merge(containers::routes())
@@ -181,6 +189,7 @@ pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
         .merge(pools::routes())
         .merge(volumes::routes())
         .merge(fetch::routes())
+        .merge(qemu::routes(qemu_manager))
         .layer(middleware::from_fn(crate::auth::require_token));
 
     // console authenticates via ?token= (browsers can't set WS headers), so it
@@ -191,6 +200,28 @@ pub fn build(auth: Auth, ipam: crate::ipam::server::Ipam) -> Router {
         // Outermost, so the rewrite happens before routing picks a handler.
         .layer(middleware::from_fn(resolve_uuids))
         .layer(Extension(auth))
+}
+
+/// Report the runtime boundary explicitly: container endpoints currently use
+/// libvirt's LXC driver; the direct-QEMU manager is VM-only.
+async fn feature_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "containers": {
+            "status": "supported",
+            "backend": "libvirt-lxc",
+            "direct_qemu": "unsupported"
+        }
+    }))
+}
+
+#[cfg(test)]
+mod feature_tests {
+    #[tokio::test]
+    async fn feature_status_does_not_claim_direct_qemu_container_support() {
+        let status = super::feature_status().await.0;
+        assert_eq!(status["containers"]["backend"], "libvirt-lxc");
+        assert_eq!(status["containers"]["direct_qemu"], "unsupported");
+    }
 }
 
 #[cfg(test)]
