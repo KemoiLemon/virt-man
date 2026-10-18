@@ -489,8 +489,8 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                             attrs_only(
                                 m,
                                 &[
-                                    "type", "ram", "vgamem", "vram64", "device", "vram",
-                                    "heads", "primary", "blob", "edid",
+                                    "type", "ram", "vgamem", "vram64", "device", "vram", "heads",
+                                    "primary", "blob", "edid",
                                 ],
                             )?;
                             // Only the models the form offers. A model the form
@@ -500,8 +500,14 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                             let t = attr(m, "type");
                             if !matches!(
                                 t,
-                                "vga" | "cirrus" | "vmvga" | "none" | "bochs" | "ramfb"
-                                    | "qxl" | "virtio"
+                                "vga"
+                                    | "cirrus"
+                                    | "vmvga"
+                                    | "none"
+                                    | "bochs"
+                                    | "ramfb"
+                                    | "qxl"
+                                    | "virtio"
                             ) {
                                 return Err(refuse(&format!("model type='{t}' on a video device")));
                             }
@@ -510,7 +516,9 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                             // to ask for through the XML tab.
                             if !matches!(
                                 attr(m, "device"),
-                                "" | "virtio-vga" | "virtio-vga-gl" | "virtio-gpu"
+                                "" | "virtio-vga"
+                                    | "virtio-vga-gl"
+                                    | "virtio-gpu"
                                     | "virtio-gpu-gl"
                             ) {
                                 return Err(refuse(&format!(
@@ -539,16 +547,13 @@ fn check_devices(devs: Node, spec: &mut DomainSpec) -> Result<(), String> {
                         }
                         "resolution" => plain(m, &["x", "y"])?,
                         "alias" => plain(m, &["name"])?,
-                        "address" => plain(
-                            m,
-                            &["type", "domain", "bus", "slot", "function"],
-                        )?,
+                        "address" => plain(m, &["type", "domain", "bus", "slot", "function"])?,
                         other => return Err(refuse(&format!("<{other}> in a video device"))),
                     }
                 }
-                let host_ref = d.descendants().any(|x| {
-                    x.attributes().any(|a| a.value().starts_with('/'))
-                });
+                let host_ref = d
+                    .descendants()
+                    .any(|x| x.attributes().any(|a| a.value().starts_with('/')));
                 if host_ref {
                     return Err(refuse("a device that names something on the host"));
                 }
@@ -1199,7 +1204,8 @@ mod tests {
     }
 
     #[test]
-    fn the_forms_video_output_passes() {        // What `videoXml` in web/src/hardware.ts writes, verbatim, including
+    fn the_forms_video_output_passes() {
+        // What `videoXml` in web/src/hardware.ts writes, verbatim, including
         // the `<address>` libvirt adds on read-back. The allowlist must accept
         // it or a non-admin could never edit a guest's display adapter.
         for dev in [

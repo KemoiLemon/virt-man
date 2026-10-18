@@ -79,7 +79,10 @@ mod tests {
             return; // this host happens to have every candidate
         };
         let xml = format!("<loader readonly='yes'>{absent}</loader>");
-        assert_eq!(resolve(&xml), format!("<loader readonly='yes'>{best}</loader>"));
+        assert_eq!(
+            resolve(&xml),
+            format!("<loader readonly='yes'>{best}</loader>")
+        );
     }
 
     #[test]
@@ -97,7 +100,10 @@ mod tests {
         assert!(out.contains(best), "{out}");
         assert!(!out.contains(absent), "{out}");
         // The guest's own variable store is not a template: untouched.
-        assert!(out.contains("/var/lib/libvirt/qemu/nvram/web_VARS.fd"), "{out}");
+        assert!(
+            out.contains("/var/lib/libvirt/qemu/nvram/web_VARS.fd"),
+            "{out}"
+        );
     }
 
     #[test]

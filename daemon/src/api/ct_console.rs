@@ -453,7 +453,10 @@ mod tests {
         );
         let container_line =
             format!("0::/machine.slice/{scope}/libvirt/user.slice/user-0.slice/session-c1.scope");
-        assert!(container_line.contains(&scope), "the container's own cgroup matches");
+        assert!(
+            container_line.contains(&scope),
+            "the container's own cgroup matches"
+        );
         // A different container on the same host, and an ordinary user session,
         // must not.
         assert!(!container_line.contains(&container_scope(99999, name)));

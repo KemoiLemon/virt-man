@@ -565,9 +565,13 @@ mod tests {
         use std::collections::HashMap;
         // A guest that cannot start without a bootable kernel is no use here, so
         // use the host kernel. If there is none, skip rather than fail.
-        let kernel = ["/boot/vmlinuz-linux", "/boot/vmlinuz", "/boot/vmlinuz-linux-lts"]
-            .into_iter()
-            .find(|p| std::path::Path::new(p).exists());
+        let kernel = [
+            "/boot/vmlinuz-linux",
+            "/boot/vmlinuz",
+            "/boot/vmlinuz-linux-lts",
+        ]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists());
         let Some(kernel) = kernel else {
             eprintln!("skipping: no /boot kernel to boot the probe guest from");
             return;

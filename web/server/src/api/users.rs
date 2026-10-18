@@ -238,7 +238,9 @@ async fn remove(
         g.members.retain(|m| m != &id);
     }
     store.users.remove(pos);
-    store.api_keys.retain(|k| k.user_id.as_deref() != Some(id.as_str()));
+    store
+        .api_keys
+        .retain(|k| k.user_id.as_deref() != Some(id.as_str()));
     store.sessions.retain(|_, uid| uid != &id);
     store.save(&state.data_dir)?;
     Ok(Json(json!({"deleted": id})))
