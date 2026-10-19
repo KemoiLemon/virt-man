@@ -11,16 +11,19 @@
 // tree already lists the guest on first paint.
 
 import { randomUUID } from "node:crypto";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 const FIXTURE = "vmtest-suite";
 const TEST_NET_TITLE = "vmtest-net";
+const TEST_POOL_TITLE = "vmtest-pool";
 
-function api(base, path, init) {
-  return fetch(new URL(path, base).toString(), init);
+function api(base, path, init, f = fetch) {
+  return f(new URL(path, base).toString(), init);
 }
 
-async function json(base, path, init) {
-  const res = await api(base, path, init);
+async function json(base, path, init, f = fetch) {
+  const res = await api(base, path, init, f);
   const text = await res.text();
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
   try {
@@ -32,13 +35,119 @@ async function json(base, path, init) {
 
 /// The daemon connection the SPA will show. The suites all drive the first
 /// server, so the fixture must provision against that same one.
-async function firstConn(base) {
-  const conns = await json(base, "/connections");
+async function firstConn(base, f = fetch) {
+  const conns = await json(base, "/connections", undefined, f);
   if (!Array.isArray(conns) || !conns.length) {
     throw new Error(
       "no saved server on this backend — add one (or seed /auth/setup) before running live suites");
   }
   return conns[0].id;
+}
+
+/// Where a test pool roots. Inside the repo, so it is an absolute directory the
+/// daemon accepts: `/tmp`, `/var/tmp`, `/var/lib/virt-man*` and the daemon's own
+/// state are in its deny list. Created here as the suite's own user, so the
+/// suite can remove it again afterwards even though the daemon (root) writes the
+/// volumes into it.
+function testPoolDir() {
+  const dir = join(process.cwd(), "test", "_pools", `${process.pid}-${randomUUID().slice(0, 8)}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/// The pool's directory, read back from its rendered definition. The list does
+/// not carry it, and a reused pool still needs it to drop a file in by hand.
+async function poolRoot(base, conn, name, f) {
+  try {
+    const { xml } = await json(
+      base, `/proxy/${conn}/pools/${encodeURIComponent(name)}/xml`, undefined, f);
+    return xml.match(/<path>([^<]*)<\/path>/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/// A native directory pool for the suite's volumes.
+///
+/// Pools are the daemon's own directories now, and a greenfield host has none,
+/// so a suite that needs storage provisions one. Any active pool is reused
+/// (`created:false`, so cleanup leaves it alone); otherwise a `vmtest-pool` is
+/// created at a throwaway directory. A non-admin can only reuse: creation is
+/// administrator-only, so pass `opts.fetch`/`opts.conn` from a logged-in page
+/// and this returns the pool that administrator already made.
+///
+/// Returns `{ created, name, uuid, title, path, conn }`. Pass the object back to
+/// `removeTestPool`.
+export async function ensureTestPool(base, opts = {}) {
+  const f = opts.fetch ?? fetch;
+  const conn = opts.conn ?? (await firstConn(base, f));
+  const pools = await json(base, `/proxy/${conn}/pools`, undefined, f).catch(() => []);
+  const existing = Array.isArray(pools) ? pools.find((p) => p.active) : null;
+  if (existing) {
+    return {
+      created: false,
+      name: existing.name,
+      uuid: existing.uuid ?? existing.name,
+      title: existing.title || existing.name,
+      path: await poolRoot(base, conn, existing.name, f),
+      conn,
+    };
+  }
+
+  const name = randomUUID();
+  const dir = testPoolDir();
+  // A pool is named by its UUID; what a person typed is its title.
+  const xml = `<pool type='dir'><name>${name}</name>` +
+    `<target><path>${dir}</path></target></pool>`;
+  try {
+    await json(
+      base,
+      `/proxy/${conn}/pools?title=${encodeURIComponent(TEST_POOL_TITLE)}`,
+      { method: "POST", headers: { "Content-Type": "application/xml" }, body: xml },
+      f,
+    );
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new Error(
+      `could not create the test pool '${TEST_POOL_TITLE}' at ${dir}: ${e.message}. ` +
+      "A non-admin needs an administrator-created pool to reuse.");
+  }
+
+  let made = null;
+  for (let i = 0; i < 30 && !made; i++) {
+    const list = await json(base, `/proxy/${conn}/pools`, undefined, f).catch(() => []);
+    made = Array.isArray(list) ? list.find((p) => p.name === name && p.active) : null;
+    if (!made) await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!made) {
+    throw new Error(`the test pool ${name} was created but is not active`);
+  }
+  return { created: true, name, uuid: name, title: TEST_POOL_TITLE, path: dir, conn };
+}
+
+/// Delete the pool `ensureTestPool` created, and the throwaway directory with
+/// it. A reused pool is never touched, and a failed delete must not fail the
+/// suite. The daemon removes only the definition; the files are ours to drop.
+export async function removeTestPool(base, pool, opts = {}) {
+  if (!pool?.created) return;
+  try {
+    await json(
+      base,
+      `/proxy/${pool.conn}/pools/${encodeURIComponent(pool.name)}`,
+      { method: "DELETE" },
+      opts.fetch ?? fetch,
+    );
+  } catch {
+    // Best effort: leaving a test pool behind is better than throwing during
+    // cleanup, but its directory is still ours to remove.
+  }
+  if (pool.path) {
+    try {
+      rmSync(pool.path, { recursive: true, force: true });
+    } catch {
+      // Root-owned leftovers are better than a cleanup that throws.
+    }
+  }
 }
 
 /// Pick a pool to hold the fixture's disk, preferring an active dir pool.

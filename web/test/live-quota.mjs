@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestPool, removeTestPool } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "https://127.0.0.1:8006";
 const USER = process.env.VM_LOW_USER;
@@ -73,8 +74,13 @@ await wait(2500);
 const me = await window.fetch("/auth/me").then((r) => r.json());
 const conns = await window.fetch("/connections").then((r) => r.json());
 const conn = conns[0]?.id;
-const pools = await window.fetch(`/proxy/${conn}/pools`).then((r) => r.json());
-const volsBefore = await window.fetch(`/proxy/${conn}/pools/${encodeURIComponent(pools[0].name)}/volumes`).then((r) => r.json());
+// Storage is a native directory pool now, and a limited user cannot create one:
+// reuse the administrator's active pool and keep the flow identical.
+const asPage = (u, i) => window.fetch(u, i);
+const testPool = await ensureTestPool(base, { conn, fetch: asPage });
+const pool = testPool.name;
+const volsPath = `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`;
+const volsBefore = await window.fetch(volsPath).then((r) => r.json());
 check("signed in as a limited non-admin", () => {
   assert.equal(me.admin, false);
   assert.equal(me.quota?.default?.vcpus, 2, `vCPU limit is 2 (${JSON.stringify(me.quota)})`);
@@ -120,7 +126,7 @@ check("the failure says which limit, the ask, the use, what is left, and the ser
 });
 
 const doms = await window.fetch(`/proxy/${conn}/domains`).then((r) => r.json());
-const volsAfter = await window.fetch(`/proxy/${conn}/pools/${encodeURIComponent(pools[0].name)}/volumes`).then((r) => r.json());
+const volsAfter = await window.fetch(volsPath).then((r) => r.json());
 check("no guest was defined", () => assert.ok(!doms.some((d) => d.name === "quota-probe"), "no quota-probe guest"));
 check("the disk made on the way was removed again", () => {
   const leftover = volsAfter.filter((v) => /^quota-probe/.test(v.name));
@@ -141,13 +147,18 @@ check("the activity log records the same reason", () => {
   assert.match(e.message, /vCPU limit reached/);
 });
 
-// A permission refusal is descriptive too: another user's resource.
+// A permission refusal is descriptive too: another user's resource. A pool
+// root is a host-level choice, so creating one now needs Sys.Modify rather than
+// a storage grant — an owner of Datastore.* must not be able to expose a
+// host directory as a pool.
 const nope = await window.fetch(`/proxy/${conn}/pools`, { method: "POST", body: "<pool/>" });
 const nopeBody = await nope.json();
 check("a permission refusal says what was missing and on what", () => {
   assert.equal(nope.status, 403);
-  assert.match(nopeBody.error, /^you do not have permission to manage storage pools \(storage on '[^']+'; needs Datastore\.Allocate\)\. Ask an administrator to grant it\.$/);
+  assert.match(nopeBody.error, /^you do not have permission to manage servers \(storage on '[^']+'; needs Sys\.Modify\)\. Ask an administrator to grant it\.$/);
 });
+
+await removeTestPool(base, testPool, { fetch: asPage });
 
 for (const [s, m] of results) console.log(`${s === "pass" ? "✔" : "✖"} ${m}`);
 const fails = results.filter(([s]) => s === "FAIL");

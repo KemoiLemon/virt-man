@@ -13,6 +13,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestPool, removeTestPool } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
 const VM = "vmtest-ops-spice";
@@ -21,6 +22,14 @@ execFileSync("npx", ["vite", "build", "--logLevel", "error", "--outDir", "test/_
   { stdio: "ignore", env: { ...process.env, VM_IIFE: "1" } });
 const code = readFileSync("test/_live/app.iife.js", "utf8");
 const conn = (await (await fetch(base + "/connections")).json())[0];
+// The ISO fetch needs a pool; a native pool is a directory the daemon accepts,
+// so provision one rather than assuming a libvirt `default` pool exists.
+const testPool = await ensureTestPool(base, { conn: conn.id });
+const pool = testPool.name;
+const poolDir = testPool.path;
+const volumesPath = `${base}/proxy/${conn.id}/pools/${encodeURIComponent(pool)}/volumes`;
+const poolVolumes = async () => (await (await fetch(volumesPath)).json()).map((v) => v.name);
+if (!poolDir) throw new Error(`pool ${pool} has no readable target directory`);
 const sh = (...a) => execFileSync("sudo", a, { stdio: ["ignore", "pipe", "ignore"] }).toString();
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (f, ms) => { const t = Date.now(); while (Date.now() - t < ms) { if (await f()) return true; await wait(100); } return false; };
@@ -122,7 +131,7 @@ try {
   const sha = execFileSync("sha256sum", [join(tmp, "img.iso")]).toString().split(" ")[0];
   isoServer = spawn("python3", ["-m", "http.server", "8782", "--bind", "127.0.0.1"], { cwd: tmp, stdio: "ignore" });
   await until(async () => (await fetch("http://127.0.0.1:8782/img.iso").catch(() => null))?.ok, 5000);
-  w = await openApp(`/${encodeURIComponent(conn.name)}/storage/default`);
+  w = await openApp(`/${encodeURIComponent(conn.name)}/storage/${encodeURIComponent(pool)}`);
   d = w.document;
   await until(() => d.getElementById("pool-fetch"), 8000);
   d.getElementById("pool-fetch").click();
@@ -134,24 +143,30 @@ try {
   check("a URL download shows its progress card on the pool page", await until(() => d.querySelector("#pool-fetches [data-fetch-id]"), 5000));
   check("…and ends Stored", await until(() => /Stored/.test(d.querySelector("#pool-fetches .metric-value")?.textContent ?? ""), 30000),
     d.querySelector("#pool-fetches")?.textContent.replace(/\s+/g, " "));
-  const onDisk = sh("sha256sum", `/var/lib/libvirt/images/${VOL}`).split(" ")[0];
+  const onDisk = sh("sha256sum", join(poolDir, VOL)).split(" ")[0];
   check("the stored volume is byte-identical to the source", onDisk === sha);
   w.close();
 
-  const bad = await fetch(`${base}/proxy/${conn.id}/pools/default/fetch`, { method: "POST", headers: { "content-type": "application/json" },
+  const bad = await fetch(`${base}/proxy/${conn.id}/pools/${encodeURIComponent(pool)}/fetch`, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ url: "http://127.0.0.1:8782/img.iso", name: "vmtest-ops-bad.iso", sha256: "0".repeat(64) }) });
   const badId = (await bad.json()).id;
   const failed = await until(async () => (await (await fetch(`${base}/proxy/${conn.id}/fetches`)).json()).find((j) => j.id === badId)?.phase === "failed", 20000);
-  check("a SHA-256 mismatch fails the download and stores nothing", failed && !sh("virsh", "vol-list", "default").includes("vmtest-ops-bad.iso"));
-  const dup = await fetch(`${base}/proxy/${conn.id}/pools/default/fetch`, { method: "POST", headers: { "content-type": "application/json" },
+  check("a SHA-256 mismatch fails the download and stores nothing",
+    failed && !(await poolVolumes()).includes("vmtest-ops-bad.iso"));
+  const dup = await fetch(`${base}/proxy/${conn.id}/pools/${encodeURIComponent(pool)}/fetch`, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ url: "http://127.0.0.1:8782/img.iso", name: VOL }) });
   check("an existing volume is never overwritten", dup.status === 409);
 } finally {
   isoServer?.kill();
   try { sh("virsh", "destroy", VM); } catch { /* already off */ }
   try { sh("virsh", "undefine", VM); } catch { /* already gone */ }
-  try { sh("virsh", "vol-delete", "--pool", "default", VOL); } catch { /* not created */ }
+  // Stop's the daemon's own; let it come back before asking it to delete.
   try { sh("systemctl", "start", "virt-man-daemon"); } catch { /* running */ }
+  for (const vol of [VOL, "vmtest-ops-bad.iso"]) {
+    await fetch(`${base}/proxy/${conn.id}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(vol)}`,
+      { method: "DELETE" }).catch(() => undefined);
+  }
+  await removeTestPool(base, testPool);
   rmSync(tmp, { recursive: true, force: true });
 }
 

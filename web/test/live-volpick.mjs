@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestPool, removeTestPool } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "https://127.0.0.1:8006";
 const [USER, PASS] = [process.env.VM_LOW_USER, process.env.VM_LOW_PASS];
@@ -60,8 +61,12 @@ click(d.querySelector("#login-btn"));
 await wait(2500);
 
 const conn = (await json("/connections")).body[0].id;
-const pool = (await json(`/proxy/${conn}/pools`)).body.find((p) => p.name !== "ISOs")?.name
-  ?? (await json(`/proxy/${conn}/pools`)).body[0].name;
+// Pools are administrator-created and a non-admin can only reuse one. This
+// suite signs in as a limited user, so pass that page's fetch: creation is
+// refused for it, and an existing active pool is reused.
+const asPage = (u, i) => w.fetch(u, i);
+const testPool = await ensureTestPool(base, { conn, fetch: asPage });
+const pool = testPool.name;
 const volXml = (n) => `<volume><name>${n}</name><capacity>1073741824</capacity><target><format type="qcow2"/></target></volume>`;
 const mine = (await json(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ xml: volXml("pick-disk.qcow2") }) })).body;
@@ -163,10 +168,12 @@ check("no second disk was created", () => {
   assert.ok(!volsAfter.some((v) => v.name === `${pickVm?.uuid}.qcow2`), "no UUID-named disk");
 });
 
-// cleanup: the guest (with its storage -- the chosen volume), then the net.
+// cleanup: the guest (with its storage -- the chosen volume), then the net,
+// then the pool only when this run made it.
 if (pickVm) await w.fetch(`/proxy/${conn}/domains/${pickVm.uuid}?remove_storage=true`, { method: "DELETE" });
 await w.fetch(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/pick-disk.qcow2`, { method: "DELETE" });
 await w.fetch(`/proxy/${conn}/networks/pick-net`, { method: "DELETE" });
+await removeTestPool(base, testPool, { fetch: asPage });
 
 for (const [s, m] of results) console.log(`${s === "pass" ? "✔" : "✖"} ${m}`);
 const fails = results.filter(([s]) => s === "FAIL");

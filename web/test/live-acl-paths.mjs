@@ -64,7 +64,7 @@ check("no daemon id in any label", !labels.some((l) => l.includes(conn.id)),
   labels.filter((l) => l.includes(conn.id)).join(" | "));
 
 // The collection paths a daemon always offers, under its own name.
-for (const k of ["vms", "containers", "networks", "storage", "bridges"]) {
+for (const k of ["vms", "networks", "storage", "bridges"]) {
   check(`/nodes/<name>/${k} is offered`, labels.includes(`/nodes/${conn.name}/${k}`));
 }
 

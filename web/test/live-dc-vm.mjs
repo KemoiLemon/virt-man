@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
-import { ensureTestVm, removeTestVm } from "./_fixture.mjs";
+import { ensureTestPool, ensureTestVm, removeTestPool, removeTestVm } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8807";
 
@@ -48,7 +48,9 @@ globalThis.document = document;
 window.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
 // Live suites own their fixture: reuse a guest if the host has one,
 // otherwise define a disposable one so the run never depends on
-// whatever happens to be on this machine.
+// whatever happens to be on this machine. The Storage tab needs a pool, so one
+// is provisioned first.
+const testPool = await ensureTestPool(base);
 const fixture = await ensureTestVm(base);
 window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
@@ -101,10 +103,10 @@ await wait(1200);
 
 // ---- Guests get their own tab ---------------------------------------------
 
-check("Datacenter has Dashboard, Guests, Containers, Networks and Storage tabs, and no Servers tab", () => {
+check("Datacenter has Dashboard, Guests, Networks and Storage tabs, and no Servers tab", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
   // Servers moved to the admin page's Daemons section.
-  assert.deepEqual(tabs, ["Dashboard", "Guests", "Containers", "Networks", "Storage"], `tabs (${tabs})`);
+  assert.deepEqual(tabs, ["Dashboard", "Guests", "Networks", "Storage"], `tabs (${tabs})`);
   // The landing dashboard has no guest cards either; guests are their own tab.
   assert.equal(document.querySelectorAll("[data-dc-vm]").length, 0,
     "guests are not listed on the Dashboard tab");
@@ -115,14 +117,14 @@ check("each datacenter tab has its own URL, and reloading one lands on it", () =
   // view has a path; the RESERVED/DC_TABS list is what keeps it from being
   // read back as a node name.
   const paths = {};
-  for (const name of ["Guests", "Containers", "Networks", "Storage"]) {
+  for (const name of ["Guests", "Networks", "Storage"]) {
     [...document.querySelectorAll(".tabbar .tab")]
       .find((t) => t.textContent.trim() === name)
       ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     paths[name] = window.location.pathname;
   }
   assert.deepEqual(paths,
-    { Guests: "/guests", Containers: "/containers", Networks: "/networks", Storage: "/storage" },
+    { Guests: "/guests", Networks: "/networks", Storage: "/storage" },
     JSON.stringify(paths));
 });
 
@@ -320,13 +322,14 @@ check("server rows are selectable", () => {
 await wait(1400);
 check("clicking a server opens its view", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall"], `server tabs render (${tabs})`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall"], `server tabs render (${tabs})`);
 });
 
 for (const [state, name2] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name2}`);
 }
 await removeTestVm(base, fixture);
+await removeTestPool(base, testPool);
 const failed = results.filter(([s]) => s === "FAIL");
 // Exit before closing the window: pending app timers still reference it.
 if (failed.length) { console.error(`\n${failed.length} check(s) failed`); process.exit(1); }

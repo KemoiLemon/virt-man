@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
-import { ensureTestVm, removeTestVm } from "./_fixture.mjs";
+import { ensureTestPool, ensureTestVm, removeTestPool, removeTestVm } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8811";
 
@@ -38,7 +38,9 @@ window.fetch = (input, init) => {
 };
 // Live suites own their fixture: reuse a guest if the host has one,
 // otherwise define a disposable one so the run never depends on
-// whatever happens to be on this machine.
+// whatever happens to be on this machine. The storage tab and the pool page
+// checks need a pool, so one is provisioned first.
+const testPool = await ensureTestPool(base);
 const fixture = await ensureTestVm(base);
 window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
@@ -59,7 +61,7 @@ await wait(1500);
 
 check("server view has a Dashboard tab first, then the resource tabs", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall", "Shell"], `tabs: ${tabs}`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall", "Shell"], `tabs: ${tabs}`);
   assert.ok(tabNamed("Dashboard").querySelector("svg"), "Dashboard tab has an icon");
   assert.ok(tabNamed("Firewall").querySelector("svg"), "Firewall tab has an icon");
 });
@@ -363,6 +365,7 @@ for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }
 await removeTestVm(base, fixture);
+await removeTestPool(base, testPool);
 const failed = results.filter(([s]) => s === "FAIL");
 window.close();
 if (failed.length) { console.error(`\n${failed.length} check(s) failed`); process.exit(1); }

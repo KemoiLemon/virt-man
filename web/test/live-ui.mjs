@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
-import { ensureTestVm, removeTestVm } from "./_fixture.mjs";
+import { ensureTestPool, ensureTestVm, removeTestPool, removeTestVm } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
 
@@ -54,7 +54,9 @@ window.fetch = (input, init) => {
 };
 // Live suites own their fixture: reuse a guest if the host has one,
 // otherwise define a disposable one so the run never depends on
-// whatever happens to be on this machine.
+// whatever happens to be on this machine. A pool is needed for the storage
+// checks and for the fixture's disk, so it is provisioned first.
+const testPool = await ensureTestPool(base);
 const fixture = await ensureTestVm(base);
 window.eval(code);
 const wait = (ms) => new Promise((r) => window.setTimeout(r, ms));
@@ -339,28 +341,6 @@ await (async () => {
     document.querySelector(".ctxmenu")?.remove();
   });
 
-  // Container cards come from the tree's cache, which is empty on a host with
-  // no containers -- so assert the tab's quick statistics, which describe the
-  // list either way. Same widget as the Guests tab, with containers counted.
-  document.querySelector('[data-dctab="containers"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  check("the Containers tab carries the same quick statistics", () => {
-    const cards = [...document.querySelectorAll("#content .cards .card")];
-    const labels = cards.map((c) => c.querySelector("i")?.textContent.trim());
-    for (const want of ["SERVERS", "CONTAINERS", "RUNNING", "STOPPED"]) {
-      assert.ok(labels.includes(want), `${want} card present (${labels})`);
-    }
-    assert.ok(!labels.includes("GUESTS"), "counts containers, not guests");
-    const total = cards.find((c) => c.querySelector("i")?.textContent.trim() === "CONTAINERS");
-    const running = cards.find((c) => c.querySelector("i")?.textContent.trim() === "RUNNING");
-    const stopped = cards.find((c) => c.querySelector("i")?.textContent.trim() === "STOPPED");
-    assert.ok(total.querySelector(".card-ic svg"), "the totals carry the container icon");
-    assert.equal(
-      Number(running.querySelector("b").textContent) + Number(stopped.querySelector("b").textContent),
-      Number(total.querySelector("b").textContent),
-      "running + stopped is the total",
-    );
-  });
-
   // Resource surfaces in the content pane get the same menu as their tree row.
   const dcRow = document.querySelector("#dc-row");
   dcRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -443,7 +423,7 @@ await (async () => {
     const tabs = [...bar.querySelectorAll(".tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall", "Shell"],
+      ["Dashboard", "VMs", "Networks", "Storage", "Firewall", "Shell"],
       "all connection tabs render",
     );
     assert.equal(
@@ -706,6 +686,7 @@ for (const [state, name] of results) {
   console.log(`${state === "pass" ? "✔" : state === "info" ? "·" : "✖"} ${name}`);
 }
 await removeTestVm(base, fixture);
+await removeTestPool(base, testPool);
 const failed = results.filter(([s]) => s === "FAIL");
 window.close();
 if (failed.length) {

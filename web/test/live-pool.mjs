@@ -1,29 +1,26 @@
-// A storage pool must report the filesystem as it is, not as libvirt last
-// cached it.
+// A storage pool is a directory, and a read is a scan of it.
 //
-// This is the gap that matters on this host: the ISO pool directory is fed by
-// aria2 and friends, so files appear without going through the volume API, and
-// libvirt will not notice them until something refreshes the pool. A pool page
-// polls every second, so the wrong answer would repeat forever rather than fix
-// itself.
-//
-// The suite provisions its own scratch pool through the daemon API, writes into
-// it with plain filesystem calls (which is what an external downloader does),
-// and never calls the refresh endpoint — refreshing on read is the behaviour
-// under test.
+// Nothing here talks to libvirt's storage driver: files arrive by `cp`, aria2 or
+// a sync without going through the volume API, and a pool page polls every
+// second, so a cached answer would repeat forever rather than fix itself. The
+// suite provisions its own scratch pool through the daemon, writes into it with
+// plain filesystem calls (which is what an external downloader does), and never
+// calls the refresh endpoint — reading the directory is the behaviour under
+// test. `allocation` is the blocks the files in that directory hold, not the
+// filesystem's used space.
 //
 // Usage: node test/live-pool.mjs [baseUrl]
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+import {
+  lstatSync, readFileSync, readdirSync, rmSync, statfsSync, writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestPool, removeTestPool } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
-const poolName = `vmtest-pool-${Date.now()}`;
-// Disk-backed, not tmpfs: the pool's space figures come from the filesystem, and
-// this keeps them meaningful.
-const poolDir = `/var/tmp/${poolName}`;
 
 const results = [];
 const check = async (name, fn) => {
@@ -42,88 +39,69 @@ async function json(path, init) {
   return text ? JSON.parse(text) : null;
 }
 
-/// Used bytes of the filesystem holding the pool, which is exactly what a `dir`
-/// pool reports as its own `allocation`. Comparing against this rather than a
-/// before/after delta is deliberate: the pool sits on the root filesystem, so
-/// unrelated churn can free more than a test writes and a delta would flake.
-function fsUsed() {
-  const s = statfsSync(poolDir);
-  return (s.blocks - s.bfree) * s.bsize;
-}
-
 const conns = await json("/connections");
 if (!Array.isArray(conns) || !conns.length) {
   throw new Error("no saved server on this backend — add one before running live suites");
 }
 const conn = conns[0].id;
+const pool = await ensureTestPool(base, { conn });
+const poolDir = pool.path;
+if (!poolDir) throw new Error(`pool ${pool.name} did not report a target directory`);
 const proxy = (p) => `/proxy/${conn}${p}`;
-const poolPath = proxy(`/pools/${encodeURIComponent(poolName)}`);
+const volumesPath = proxy(`/pools/${encodeURIComponent(pool.name)}/volumes`);
+const poolPath = proxy(`/pools/${encodeURIComponent(pool.name)}`);
 
+const apiVolume = `vmtest-api-${Date.now()}.raw`;
 const outsideFile = "arrived-from-outside.iso";
-// Size matters twice over. A `dir` pool reports its *filesystem's* used space,
-// and the pool sits on the root filesystem, so the assertion below survives only
-// if the write is far bigger than unrelated churn; and btrfs commits that figure
-// lazily, hence the sync. Measured without a refresh-on-read this leaves the
-// pool reporting a value ~445 MB short, so the check is sharp at this size.
-const outsideBytes = 256 * 1024 * 1024;
+// Small on purpose: allocation is now the blocks these files hold, so the
+// assertion below does not need a write large enough to beat filesystem churn
+// (the old libvirt-backed check compared against the whole filesystem).
+const outsideBytes = 1024 * 1024;
+const outsideBlob = Buffer.alloc(outsideBytes);
+for (let i = 0; i < outsideBlob.length; i++) outsideBlob[i] = (i * 7) % 256;
 
-function cleanup() {
-  rmSync(poolDir, { recursive: true, force: true });
+/// What the daemon reports as the pool's allocation: every regular file's
+/// blocks, dot-prefixed temporaries included (`pools.rs` `allocation_of`).
+function blocksInPool() {
+  return readdirSync(poolDir)
+    .map((name) => lstatSync(join(poolDir, name)))
+    .filter((m) => m.isFile())
+    .reduce((sum, m) => sum + m.blocks * 512, 0);
 }
 
-/// Delete any scratch pool a previous run left behind.
-///
-/// `vmtest-pool-*` is this suite's own namespace, so this can only match its own
-/// leaks — but those matter: a stale pool sorts ahead of `default` in the tree,
-/// and a suite that clicks the first pool row then inspects the wrong page.
-/// Leaving one behind broke live-upload exactly that way.
-async function sweepStalePools() {
-  const pools = await json(proxy("/pools")).catch(() => []);
-  for (const p of pools) {
-    if (String(p.name).startsWith("vmtest-pool-")) {
-      await fetch(new URL(proxy(`/pools/${encodeURIComponent(p.name)}`), base), {
-        method: "DELETE",
-      }).catch(() => undefined);
-      rmSync(`/var/tmp/${p.name}`, { recursive: true, force: true });
-    }
-  }
+function fsUsed() {
+  const s = statfsSync(poolDir);
+  return (s.blocks - s.bfree) * s.bsize;
 }
 
-await sweepStalePools();
-cleanup();
-mkdirSync(poolDir, { recursive: true });
-
-// Everything below is inside try/finally: a failure part-way through must
-// still delete the scratch pool, or the next suite inherits a pool it did
-// not create. That is not hypothetical — a leaked pool here broke
-// live-upload, whose pool-page checks then inspected the wrong pool.
 try {
-  // A dir pool whose target is our scratch directory. `build` creates the
-  // directory and `create` starts it, both of which the daemon does for us.
-  await json(proxy("/pools"), {
-    method: "POST",
-    headers: { "Content-Type": "application/xml" },
-    body: `<pool type='dir'><name>${poolName}</name><target><path>${poolDir}</path></target></pool>`,
-  });
-  console.log(`scratch pool ${poolName} at ${poolDir}`);
+  const names = async () => (await json(volumesPath)).map((v) => v.name);
 
-  const names = async () => (await json(proxy(`/pools/${poolName}/volumes`))).map((v) => v.name);
-
-  await check("a new pool starts empty", async () => {
-    assert.deepEqual(await names(), [], "expected no volumes in a fresh pool");
+  await check("a volume created through the API is a file in the pool directory", async () => {
+    const made = await json(volumesPath, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        xml: `<volume><name>${apiVolume}</name><capacity unit="MiB">1</capacity>` +
+          `<target><format type="raw"/></target></volume>`,
+      }),
+    });
+    assert.equal(made.path, join(poolDir, apiVolume), "the API reports the file it wrote");
+    const vols = await json(volumesPath);
+    const v = vols.find((x) => x.name === apiVolume);
+    assert.ok(v, `not listed: ${JSON.stringify(vols.map((x) => x.name))}`);
+    assert.equal(v.capacity, 1024 * 1024, "capacity is the file's own length");
   });
 
   // ------------------------------------------------- the filesystem action
   // Written directly, never through the volume API: exactly what an aria2 or scp
-  // download into the pool directory looks like to libvirt.
-  const blob = Buffer.alloc(outsideBytes);
-  for (let i = 0; i < blob.length; i++) blob[i] = (i * 7) % 256;
-  writeFileSync(`${poolDir}/${outsideFile}`, blob);
+  // download into the pool directory looks like.
+  writeFileSync(join(poolDir, outsideFile), outsideBlob);
   execFileSync("sync");
 
   await check("a file written straight into the pool is listed without a refresh", async () => {
     // No call to POST /pools/{name}/refresh anywhere in this suite: the read
-    // itself has to bring the pool up to date.
+    // itself scans the directory.
     const listed = await names();
     assert.ok(
       listed.includes(outsideFile),
@@ -131,37 +109,42 @@ try {
     );
   });
 
-  await check("the pool's space figures match the filesystem, not a cached value", async () => {
-    const onDisk = fsUsed();
+  await check("the pool's allocation is the sum of its files' blocks", async () => {
+    const expected = blocksInPool();
     const reported = (await json(poolPath)).allocation;
-    // A stale answer is the value cached when the pool was created, which is now
-    // short by the file written above; a fresh one is the filesystem's own used
-    // space, give or take whatever else touched it between these two reads.
-    const gap = Math.abs(reported - onDisk);
-    // Read within ~100 ms of each other, so churn between them is negligible
-    // while a cached answer is out by the whole file.
-    assert.ok(
-      gap <= 16 * 1024 * 1024,
-      `pool allocation looks cached: reported=${reported} filesystem=${onDisk} ` +
-        `(gap ${gap} bytes, and this test just wrote ${outsideBytes})`,
+    assert.equal(
+      reported, expected,
+      `allocation is not the files' st_blocks: reported=${reported} blocks=${expected}`,
     );
+    // A `dir` pool's allocation used to be the filesystem's used space. It is
+    // not any more, and on a host with an OS installed the two differ hugely.
+    const used = fsUsed();
+    if (used > expected + 64 * 1024 * 1024) {
+      assert.ok(reported < used, `allocation looks like filesystem used: ${reported} vs ${used}`);
+    }
   });
 
   await check("the extra volume reports its own size", async () => {
-    const vols = await json(proxy(`/pools/${poolName}/volumes`));
+    const vols = await json(volumesPath);
     const v = vols.find((x) => x.name === outsideFile);
     assert.ok(v, "volume listed");
-    assert.ok(v.capacity >= outsideBytes, `capacity too small: ${v.capacity}`);
+    assert.equal(v.capacity, outsideBytes, `capacity is the file length: ${v.capacity}`);
   });
 
   await check("removing the file outside the volume API is reflected too", async () => {
-    rmSync(`${poolDir}/${outsideFile}`);
+    rmSync(join(poolDir, outsideFile));
     const listed = await names();
     assert.ok(!listed.includes(outsideFile), `stale entry still listed: ${JSON.stringify(listed)}`);
   });
 
+  await check("deleting a volume through the API removes its file", async () => {
+    await json(`${volumesPath}/${encodeURIComponent(apiVolume)}`, { method: "DELETE" });
+    assert.ok(!(await names()).includes(apiVolume), "still listed after delete");
+    assert.throws(() => lstatSync(join(poolDir, apiVolume)), "file still on disk");
+  });
+
   // ------------------------------------------------------- the user-visible half
-  // The pool page must render what the refreshing read returns, otherwise the
+  // The pool page must render what the scanning read returns, otherwise the
   // daemon is right and the user still sees a stale table.
   execFileSync("npx", ["vite", "build", "--logLevel", "error", "--outDir", "test/_live"], {
     cwd: process.cwd(), stdio: "inherit", env: { ...process.env, VM_IIFE: "1" },
@@ -194,9 +177,9 @@ try {
   // Write a second file, then let the page's own polling pick it up. This is the
   // real sequence: something lands in the pool while the page is open.
   const lateFile = "arrived-while-watching.raw";
-  writeFileSync(`${poolDir}/${lateFile}`, Buffer.alloc(1024));
+  writeFileSync(join(poolDir, lateFile), Buffer.alloc(1024));
 
-  document.querySelector(`.tree-pool[data-pool="${poolName}"]`)
+  document.querySelector(`.tree-pool[data-pool="${pool.name}"]`)
     ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await wait(2500);
 
@@ -210,10 +193,10 @@ try {
     );
   });
 
+  rmSync(join(poolDir, lateFile), { force: true });
   window.close();
 } finally {
-  await fetch(new URL(poolPath, base), { method: "DELETE" }).catch(() => undefined);
-  cleanup();
+  await removeTestPool(base, pool);
 }
 
 for (const [status, name] of results) {

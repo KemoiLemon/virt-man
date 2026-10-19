@@ -10,10 +10,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestPool, removeTestPool } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
 // Where the backend stages bodies. Must be the instance the base URL points at,
@@ -61,8 +62,10 @@ const conns = await json("/connections");
 if (!Array.isArray(conns) || !conns.length) {
   throw new Error("no saved server on this backend — add one before running live suites");
 }
-const conn = conns[0].id;
-const pool = "default";
+const testPool = await ensureTestPool(base, { conn: conns[0].id });
+const conn = testPool.conn;
+const pool = testPool.name;
+const poolUrl = `/proxy/${conn}/pools/${encodeURIComponent(pool)}`;
 
 // Deterministic bytes, so a failure reproduces and the expected hash can be
 // computed rather than merely echoed back by the server under test.
@@ -79,7 +82,7 @@ const body = { bytes, headers: { "Content-Type": "application/octet-stream" } };
 
 async function stageUpload(target) {
   return classify(
-    `/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(target)}`,
+    `/uploads?conn=${conn}&pool=${encodeURIComponent(pool)}&name=${encodeURIComponent(target)}`,
     { method: "POST", headers: body.headers, body: bytes },
   );
 }
@@ -141,7 +144,7 @@ await check("a transfer finishes with no client watching it", async () => {
   // reading the result, nothing here polls it.
   const solo = `vmtest-solo-${Date.now()}.iso`;
 trackVolume(solo);
-  const st = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(solo)}`, {
+  const st = await json(`/uploads?conn=${conn}&pool=${encodeURIComponent(pool)}&name=${encodeURIComponent(solo)}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: bytes,
@@ -152,17 +155,24 @@ trackVolume(solo);
   const job = await json(`/uploads/${st.id}`);
   assert.equal(job.phase, "done", `stranded without a client: ${job.phase} ${job.error ?? ""}`);
   assert.equal(job.sha256, want, "and still verified");
-  await fetch(new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(solo)}`, base),
+  await fetch(new URL(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(solo)}`, base),
     { method: "DELETE" }).catch(() => undefined);
   await fetch(new URL(`/uploads/${st.id}`, base), { method: "DELETE" }).catch(() => undefined);
 });
 
 await check("the daemon really holds those exact bytes", async () => {
   const remote = await json(
-    `/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(name)}/hash`,
+    `${poolUrl}/volumes/${encodeURIComponent(name)}/hash`,
   );
   assert.equal(remote.sha256, want, "daemon content matches the source byte for byte");
   assert.equal(remote.size, size, "and the full length");
+
+  // A native pool stores a volume as a regular file, so the list's own path can
+  // be measured on disk as well as hashed through the API.
+  const vols = await json(`${poolUrl}/volumes`);
+  const v = vols.find((x) => x.name === name);
+  assert.ok(v?.path, `volume ${name} is listed with its path`);
+  assert.equal(statSync(v.path).size, size, "the file on disk has the full length");
 });
 
 const stagedParts = () => new Set(readdirSync(uploadsDir).filter((f) => f.endsWith(".part")));
@@ -201,7 +211,7 @@ await check("the transfer is recorded in the activity log", async () => {
 const auditName = `vmtest-audit-${Date.now()}.raw`;
 
 await check("a volume deletion through the proxy is recorded", async () => {
-  await json(`/proxy/${conn}/pools/${pool}/volumes`, {
+  await json(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -210,7 +220,7 @@ await check("a volume deletion through the proxy is recorded", async () => {
     }),
   });
   const del = await fetch(
-    new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(auditName)}`, base),
+    new URL(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(auditName)}`, base),
     { method: "DELETE" },
   );
   assert.ok(del.ok, `delete failed: HTTP ${del.status}`);
@@ -230,7 +240,7 @@ await check("a refused deletion is recorded as failed with the daemon's reason",
   // able to find afterwards.
   const missing = `vmtest-absent-${Date.now()}.raw`;
   const res = await fetch(
-    new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(missing)}`, base),
+    new URL(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(missing)}`, base),
     { method: "DELETE" },
   );
   assert.ok(!res.ok, "deleting a missing volume should not succeed");
@@ -244,7 +254,7 @@ await check("a refused deletion is recorded as failed with the daemon's reason",
 
 // Leave the daemon as we found it.
 await fetch(
-  new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(name)}`, base),
+  new URL(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}`, base),
   { method: "DELETE" },
 ).catch(() => undefined);
 rmSync(dir, { recursive: true, force: true });
@@ -293,9 +303,9 @@ const newPage = async () => {
 /// Click the pool row for the pool this suite uses.
 ///
 /// Deliberately not `document.querySelector(".tree-pool")`: that returns
-/// whichever pool sorts first, so a scratch or test pool appearing ahead of
-/// "default" sends this suite's UI checks to the wrong page. Clicking the row by
-/// name makes the suite independent of what else is on the host.
+/// whichever pool sorts first, so a scratch or test pool appearing ahead of the
+/// one under test sends this suite's UI checks to the wrong page. Clicking the
+/// row by name makes the suite independent of what else is on the host.
 const openPoolPage = (doc, win) =>
   doc.querySelector(`.tree-pool[data-pool="${pool}"]`)
     ?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
@@ -328,7 +338,7 @@ await wait(200);
 
 // Stage a body with the API, then let the SPA render it: this is exactly what
 // the pool window shows for a transfer the browser has already handed off.
-uiStaged = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(uiName)}`, {
+uiStaged = await json(`/uploads?conn=${conn}&pool=${encodeURIComponent(pool)}&name=${encodeURIComponent(uiName)}`, {
   method: "POST",
   headers: { "Content-Type": "application/octet-stream" },
   body: bytes,
@@ -406,7 +416,7 @@ await check("a freshly loaded page rediscovers work already in progress", async 
   // page remembered it.
   const pending = `vmtest-pending-${Date.now()}.iso`;
 trackVolume(pending);
-  const st = await json(`/uploads?conn=${conn}&pool=${pool}&name=${encodeURIComponent(pending)}`, {
+  const st = await json(`/uploads?conn=${conn}&pool=${encodeURIComponent(pool)}&name=${encodeURIComponent(pending)}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: bytes,
@@ -429,7 +439,7 @@ trackVolume(pending);
 
 window.close();
 await fetch(
-  new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(uiName)}`, base),
+  new URL(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(uiName)}`, base),
   { method: "DELETE" },
 ).catch(() => undefined);
 
@@ -438,7 +448,7 @@ await fetch(
 // accumulate there run after run.
 for (const vol of createdVolumes) {
   await fetch(
-    new URL(`/proxy/${conn}/pools/${pool}/volumes/${encodeURIComponent(vol)}`, base),
+    new URL(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(vol)}`, base),
     { method: "DELETE" },
   ).catch(() => undefined);
 }
@@ -449,6 +459,8 @@ for (const vol of createdVolumes) {
 for (const id of completedJobIds) {
   await fetch(new URL(`/uploads/${id}`, base), { method: "DELETE" }).catch(() => undefined);
 }
+
+await removeTestPool(base, testPool);
 
 for (const [status, name] of results) {
   console.log(`${status === "pass" ? "\u2714" : "\u2716"} ${name}`);
