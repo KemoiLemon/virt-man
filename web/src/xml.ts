@@ -156,7 +156,16 @@ export function domainXml(f: DomainForm): string {
     </disk>`;
   }
 
-  const net = f.network
+  // A guest attaches by bridge now: the networks are the daemon's own and no
+  // libvirt network exists to name. `bridge` is written when the form knows it;
+  // the network form stays for a definition that still names one.
+  const net = f.bridge
+    ? `
+    <interface type="bridge">
+      <source bridge="${esc(f.bridge)}"/>
+      <model type="virtio"/>
+    </interface>`
+    : f.network
     ? `
     <interface type="network">
       <source network="${esc(f.network)}"/>

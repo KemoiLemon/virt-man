@@ -411,6 +411,22 @@ test("a NAT network keeps its bridge name through the editor", () => {
   assert.doesNotMatch(created, /<bridge/, "a new network still lets libvirt pick one");
 });
 
+// A guest attaches to the network's bridge now: these networks are the
+// daemon's own and libvirt has none to name. The network form stays for a
+// definition that still names one, and a form with a bridge prefers it.
+test("a guest NIC is written as a bridge when the form knows it", () => {
+  const base = { name: "g", cpus: 1, memory_mb: 512, graphics: "vnc", disks: [] };
+  const bridged = xml.domainXml({ ...base, network: "net-a", bridge: "vbr0123456789ab" });
+  assert.match(bridged, /<interface type="bridge">/);
+  assert.match(bridged, /<source bridge="vbr0123456789ab"\/>/);
+  assert.doesNotMatch(bridged, /<source network=/, "the bridge is what is attached to");
+  const legacy = xml.domainXml({ ...base, network: "lab", bridge: "" });
+  assert.match(legacy, /<interface type="network">/);
+  assert.match(legacy, /<source network="lab"\/>/);
+  const none = xml.domainXml({ ...base, network: "", bridge: "" });
+  assert.doesNotMatch(none, /<interface /);
+});
+
 // Named by UUID: a new guest, network or pool is named in libvirt by its UUID,
 // with what the user typed as its title, so two can share a display name.
 test("a guest with a UUID is named by it, titled by its display name", () => {

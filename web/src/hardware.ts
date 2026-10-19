@@ -121,7 +121,7 @@ export const HW_CATALOG: HwType[] = [
   {
     id: "interface",
     label: "Network Device",
-    blurb: "Attach a virtual NIC to a libvirt network",
+    blurb: "Attach a virtual NIC to a network",
     icon: "network",
     fields: [
       { key: "network", label: "Network", type: "select", options: [] },
@@ -418,8 +418,13 @@ export function deviceXml(d: HwDevice, index = 1): string {
       // Rate limits are set from the VM's Network tab, not this form. Carry
       // them through verbatim, or saving hardware would silently lift them.
       const bw = d.fields.bandwidth ?? "";
-      return `<interface type="network">
-      <source network="${esc(f("network"))}"/>
+      // A guest attaches to the network's bridge: these networks are not
+      // defined in libvirt. A NIC with no bridge is the "attach to nothing"
+      // NIC, which keeps libvirt's empty-network source.
+      const bridge = f("bridge");
+      const attach = bridge ? `bridge="${esc(bridge)}"` : `network="${esc(f("network"))}"`;
+      return `<interface type="${bridge ? "bridge" : "network"}">
+      <source ${attach}/>
       <model type="${esc(f("model") || "virtio")}"/>${mac ? `\n      <mac address="${esc(mac)}"/>` : ""}${bw ? `\n      ${bw}` : ""}
     </interface>`;
     }
@@ -478,7 +483,14 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
       const vol = f("volume");
       return vol ? `${named("pool", f("pool"))}/${vol}` : "empty";
     }
-    case "interface": return `${f("network") ? named("network", f("network")) : "No network"} (${f("model") || "virtio"})`;
+    case "interface": {
+      // A NIC read from XML names the bridge until the editor maps it to the
+      // network, so the summary must not claim it has no network.
+      const on = f("network")
+        ? named("network", f("network"))
+        : f("bridge") ? `bridge ${f("bridge")}` : "No network";
+      return `${on} (${f("model") || "virtio"})`;
+    }
     case "hostdev": return `${f("domain")}:${f("bus")}:${f("slot")}.${f("function")}`;
     case "usb": return `${f("vendor")}:${f("product")}`;
     case "rng": return f("backend") || "/dev/urandom";
@@ -610,17 +622,19 @@ export function bootTargets(xml: string): Record<string, string> {
   // A network boot tries the first NIC, so it is described the way the Network
   // tab describes one: which network it is on, and its MAC when the XML carries
   // it (libvirt only writes one once the guest has been started, or if it was
-  // set explicitly). The name is the network's libvirt name; the caller shows
-  // the nickname for it with whatever resolver it already has.
+  // set explicitly). A guest attached by bridge names the bridge; the caller
+  // shows the network's nickname for it with whatever resolver it already has.
   const nic = xml.match(/<interface\b[^>]*>[\s\S]*?<\/interface>/)?.[0];
   if (nic) {
-    const net = nic.match(/<source\b[^>]*network=['"]([^'"]*)['"]/)?.[1] ?? "";
+    const src = nic.match(/<source\b[^>]*>/)?.[0] ?? "";
+    const named = (n: string) => src.match(new RegExp(`${n}\\s*=\\s*['"]([^'"]*)['"]`))?.[1] ?? "";
+    const net = named("network") || named("bridge");
     const mac = nic.match(/<mac\b[^>]*address=['"]([^'"]*)['"]/)?.[1] ?? "";
     if (net || mac) out.network = [net, mac].filter(Boolean).join(" ");
-    // The bare network name, alongside the formatted label above, so a caller
-    // can swap it for the network's nickname without parsing the label apart. A
-    // libvirt name cannot contain a space today, but splitting on one would
-    // break silently if that ever changed.
+    // The bare name, alongside the formatted label above, so a caller can swap
+    // it for the network's nickname without parsing the label apart. A libvirt
+    // name cannot contain a space today, but splitting on one would break
+    // silently if that ever changed.
     if (net) out.networkName = net;
   }
   // No `fd`: the editor cannot attach a floppy, so naming a device for it would
@@ -715,12 +729,18 @@ export function devicesFromXml(xml: string): HwDevice[] {
     if (!pool || !volume) continue;
     out.push({ kind, fields: { pool, volume, format, bus } });
   }
-  for (const m of xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)) {
+  // A NIC attaches by bridge (what this app writes) or by libvirt network (an
+  // older definition). Both are kept, and the editor maps a bridge to the
+  // network that owns it; an unknown operator bridge keeps its name so it
+  // round-trips.
+  for (const m of xml.matchAll(/<interface\b[^>]*type=['"](?:network|bridge)['"][\s\S]*?<\/interface>/g)) {
     const block = m[0];
+    const src = block.match(/<source\b[^>]*>/)?.[0] ?? "";
     out.push({
       kind: "interface",
       fields: {
-        network: attr(block.match(/<source\b[^>]*>/)?.[0] ?? "", "network"),
+        network: attr(src, "network"),
+        bridge: attr(src, "bridge"),
         model: attr(block.match(/<model\b[^>]*>/)?.[0] ?? "", "type"),
         mac: attr(block.match(/<mac\b[^>]*>/)?.[0] ?? "", "address"),
         bandwidth: sanitizeBandwidth(block.match(/<bandwidth\b[\s\S]*?<\/bandwidth>/)?.[0] ?? ""),

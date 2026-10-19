@@ -290,20 +290,26 @@ fn record_delete(state: &AppState, user: &User, path_and_query: &str, status: u1
     }
 }
 
-/// UUID -> libvirt name, per connection, from the daemon's own lists.
+/// UUID -> libvirt name, per connection and resource kind, from the daemon's
+/// own lists.
 ///
-/// The daemon answers a guest, network or pool by its UUID as well as its
-/// name. The permission check here is keyed by name (grants, ownership and
-/// suspension are recorded under it), so a request by UUID must be checked
+/// The daemon answers a guest, container, network or pool by its UUID as well
+/// as its name. The permission check here is keyed by name (grants, ownership
+/// and suspension are recorded under it), so a request by UUID must be checked
 /// as the name it resolves to -- otherwise it reaches an ACL path that
 /// carries none of them, and a "NoAccess on this guest" carve-out, or a
 /// suspension, would not apply to the same guest addressed by UUID.
+///
+/// The kind is part of the key: a caller may name a network with the UUID a
+/// guest or pool already has, and looking it up in one shared map let that
+/// network shadow the guest's link. A `/domains/...` path only ever consults
+/// the domain list.
 /// ponytail: refreshed on a miss, or after 5 s; a name/UUID pairing only
 /// changes when something is renamed, which re-reads on the next miss.
 #[derive(Default)]
 struct UuidNames {
-    at: HashMap<String, Instant>,
-    map: HashMap<(String, String), String>,
+    at: HashMap<(String, &'static str), Instant>,
+    map: HashMap<(String, &'static str, String), String>,
 }
 
 fn uuid_names() -> &'static Mutex<UuidNames> {
@@ -311,19 +317,22 @@ fn uuid_names() -> &'static Mutex<UuidNames> {
     M.get_or_init(Default::default)
 }
 
-/// The libvirt name for `uuid` on this daemon, if it is one. Not a UUID, or
-/// not found: None, and the request goes on as written (the daemon then
-/// answers "not found" for an unknown one).
-async fn resolve_uuid(conn: &crate::store::Connection, uuid: &str) -> Option<String> {
+/// The libvirt name for `uuid` of this `kind` on this daemon, if it is one.
+/// Not a UUID, or not found: None, and the request goes on as written (the
+/// daemon then answers "not found" for an unknown one).
+async fn resolve_uuid(
+    conn: &crate::store::Connection,
+    kind: &'static str,
+    uuid: &str,
+) -> Option<String> {
     if !crate::guard::is_uuid(uuid) {
         return None;
     }
-    let key = (conn.id.clone(), uuid.to_ascii_lowercase());
+    let at_key = (conn.id.clone(), kind);
+    let key = (conn.id.clone(), kind, uuid.to_ascii_lowercase());
     {
         let c = uuid_names().lock().expect("uuid map poisoned");
-        let fresh =
-            c.at.get(&conn.id)
-                .is_some_and(|t| t.elapsed().as_secs() < 5);
+        let fresh = c.at.get(&at_key).is_some_and(|t| t.elapsed().as_secs() < 5);
         if let Some(n) = c.map.get(&key) {
             return Some(n.clone());
         }
@@ -331,46 +340,55 @@ async fn resolve_uuid(conn: &crate::store::Connection, uuid: &str) -> Option<Str
             return None;
         }
     }
-    // A miss: re-read every list for this daemon once.
+    // A miss: re-read that one kind's list for this daemon.
     let mut map = HashMap::new();
-    // Containers too: a UUID names one thing on a host, whichever list it is in.
-    for list in ["/domains", "/containers", "/networks", "/pools"] {
-        if let Ok(v) = crate::guard::daemon_get(conn, list).await {
-            for x in v.as_array().into_iter().flatten() {
-                if let (Some(u), Some(n)) = (x["uuid"].as_str(), x["name"].as_str()) {
-                    map.insert((conn.id.clone(), u.to_ascii_lowercase()), n.to_string());
-                }
+    if let Ok(v) = crate::guard::daemon_get(conn, &format!("/{kind}")).await {
+        for x in v.as_array().into_iter().flatten() {
+            if let (Some(u), Some(n)) = (x["uuid"].as_str(), x["name"].as_str()) {
+                map.insert(
+                    (conn.id.clone(), kind, u.to_ascii_lowercase()),
+                    n.to_string(),
+                );
             }
         }
     }
     let mut c = uuid_names().lock().expect("uuid map poisoned");
-    c.map.retain(|(id, _), _| id != &conn.id);
+    c.map
+        .retain(|(id, k, _), _| !(id == &conn.id && *k == kind));
     c.map.extend(map);
-    c.at.insert(conn.id.clone(), Instant::now());
+    c.at.insert(at_key, Instant::now());
     c.map.get(&key).cloned()
+}
+
+/// The list whose UUIDs `rest` names, if any. `/networks/bridges` is a
+/// collection of interfaces, not a network id.
+fn uuid_kind(rest: &str) -> Option<&'static str> {
+    let mut seg = rest.trim_start_matches('/').split('/');
+    match seg.next()? {
+        "domains" => Some("domains"),
+        "containers" => Some("containers"),
+        "pools" => Some("pools"),
+        "networks" if seg.next() != Some("bridges") => Some("networks"),
+        _ => None,
+    }
 }
 
 /// Rewrite a daemon path so a UUID naming a guest, network or pool becomes
 /// that resource's name: the permission check and the daemon then agree on
 /// which resource it is. Anything else is returned unchanged.
 async fn canonical_path(conn: &crate::store::Connection, rest: &str) -> String {
+    let Some(kind) = uuid_kind(rest) else {
+        return rest.to_string();
+    };
     let mut seg: Vec<String> = rest
         .trim_start_matches('/')
         .split('/')
         .map(str::to_string)
         .collect();
-    let named = match seg.first().map(String::as_str) {
-        Some("domains") | Some("containers") | Some("pools") => true,
-        Some("networks") => seg.get(1).map(String::as_str) != Some("bridges"),
-        _ => false,
-    };
-    if !named {
-        return rest.to_string();
-    }
     let Some(id) = seg.get(1).cloned() else {
         return rest.to_string();
     };
-    match resolve_uuid(conn, &crate::routes::decode(&id)).await {
+    match resolve_uuid(conn, kind, &crate::routes::decode(&id)).await {
         Some(name) => {
             seg[1] = crate::guard::enc(&name);
             format!("/{}", seg.join("/"))
@@ -568,6 +586,22 @@ async fn proxy(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_uuid_lookup_only_reads_the_kind_its_path_names() {
+        // A network may be named with a UUID a guest or pool already has; the
+        // path's kind decides which list is consulted, so the network cannot
+        // shadow the guest's link.
+        assert_eq!(super::uuid_kind("/domains/x"), Some("domains"));
+        assert_eq!(super::uuid_kind("/containers/x"), Some("containers"));
+        assert_eq!(super::uuid_kind("/networks/x"), Some("networks"));
+        assert_eq!(super::uuid_kind("/networks/x/hosts"), Some("networks"));
+        assert_eq!(super::uuid_kind("/pools/x/volumes"), Some("pools"));
+        // A collection of interfaces, and paths that name no resource.
+        assert_eq!(super::uuid_kind("/networks/bridges"), None);
+        assert_eq!(super::uuid_kind("/host/stats"), None);
+        assert_eq!(super::uuid_kind("/"), None);
+    }
+
     #[test]
     fn a_loopback_daemon_hands_out_the_host_the_browser_used() {
         let mut h = super::HeaderMap::new();

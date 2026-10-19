@@ -28,7 +28,12 @@ pub struct DomainSpec {
     pub uuid: Option<String>,
     pub vcpus: u64,
     pub memory_mb: u64,
+    /// Networks named by `type='network'` interfaces (what an older
+    /// definition carries; libvirt networks no longer exist on this host).
     pub networks: Vec<String>,
+    /// Bridges named by `type='bridge'` interfaces: the shape this app writes,
+    /// one bridge per managed network.
+    pub bridges: Vec<String>,
     pub disks: Vec<DiskSpec>,
 }
 
@@ -356,18 +361,27 @@ fn check_disk(d: Node, spec: &mut DomainSpec) -> Result<(), String> {
 
 fn check_interface(i: Node, spec: &mut DomainSpec) -> Result<(), String> {
     attrs_only(i, &["type"])?;
-    // Only libvirt networks: a `bridge` or `direct` interface would plug the
-    // guest into a host device without going through a network the user may
-    // use. Bridge access is granted through a network that uses the bridge.
-    one_of(i, "type", &["network"])?;
+    // Two shapes: `network` names a libvirt network (an older definition; none
+    // exist on this host any more) and `bridge` names a Linux bridge, which is
+    // how a network is attached now. A `direct` interface hands the guest a
+    // host device with no network to check the caller's privilege against, so
+    // it stays an administrator's.
+    one_of(i, "type", &["network", "bridge"])?;
+    let on_bridge = attr(i, "type") == "bridge";
     let mut net = None;
+    let mut bridge = None;
     for c in elements(i) {
         match c.tag_name().name() {
             "source" => {
                 // Libvirt adds `bridge` (the resolved device) to a running
-                // guest's live XML; it is informational, the network decides.
+                // network guest's live XML; it is informational, the network
+                // decides. For a bridge interface it is the attachment itself.
                 plain(c, &["network", "bridge", "portid"])?;
-                net = Some(attr(c, "network").to_string());
+                if on_bridge {
+                    bridge = Some(attr(c, "bridge").to_string());
+                } else {
+                    net = Some(attr(c, "network").to_string());
+                }
             }
             "model" => plain(c, &["type"])?,
             "mac" => plain(c, &["address"])?,
@@ -389,6 +403,18 @@ fn check_interface(i: Node, spec: &mut DomainSpec) -> Result<(), String> {
             }
             other => return Err(refuse(&format!("<{other}> in an interface"))),
         }
+    }
+    if on_bridge {
+        // A bridge interface with no bridge is meaningless, and an empty name
+        // is not "no bridge" the way `<source network=""/>` is: there is no
+        // safe default, and the caller would be attached to nothing.
+        return match bridge {
+            Some(b) if !b.is_empty() => {
+                spec.bridges.push(b);
+                Ok(())
+            }
+            _ => Err("a bridge interface needs a <source bridge='…'/>".into()),
+        };
     }
     // A NIC may name no network. libvirt's schema requires a `<source>`, not a
     // named one, so `<source network=""/>` is how a NIC attaches to nothing --
@@ -709,7 +735,11 @@ pub struct ContainerSpec {
     pub uuid: Option<String>,
     pub vcpus: u64,
     pub memory_mb: u64,
+    /// Networks named by `type='network'` interfaces (older definitions).
     pub networks: Vec<String>,
+    /// Bridges named by `type='bridge'` interfaces: the shape the daemon
+    /// writes, one bridge per managed network.
+    pub bridges: Vec<String>,
     /// No `<idmap>`: the container's root is the host's root. Allowed only
     /// with `CT.Privileged` -- the caller checks that, this only reports it.
     pub privileged: bool,
@@ -852,6 +882,7 @@ pub fn check_container(xml: &str) -> Result<ContainerSpec, String> {
         return Err("a container needs <vcpu> and <memory>".into());
     }
     spec.networks = vm.networks;
+    spec.bridges = vm.bridges;
     Ok(spec)
 }
 
@@ -1244,10 +1275,9 @@ mod tests {
                 r#"<disk type="network" device="disk"><driver name="qemu" type="raw"/><source protocol="nbd" name="x"/><target dev="vdb"/></disk>"#,
                 "network disk",
             ),
-            (
-                r#"<interface type="bridge"><source bridge="br0"/></interface>"#,
-                "bridge NIC",
-            ),
+            // A bridge NIC is not refused here: the proxy checks the bridge
+            // against the networks the caller may use (see `guard`), and an
+            // unknown bridge is refused there.
             (
                 r#"<interface type="direct"><source dev="eth0" mode="bridge"/></interface>"#,
                 "macvtap",
@@ -1382,6 +1412,50 @@ mod tests {
         );
     }
 
+    /// A bridge interface is how a network is attached now: the bridge it names
+    /// is recorded, so the caller's privilege is checked against the network
+    /// that owns it. A bridge NIC with no bridge is refused rather than treated
+    /// as "attached to nothing" -- `<source network=""/>` is a libvirt
+    /// convention with no bridge equivalent.
+    #[test]
+    fn a_bridge_interface_is_recorded_and_needs_a_bridge() {
+        let with_nic = |nic: &str| {
+            form_domain().replace(
+                "    <interface type=\"network\">\n      <source network=\"default\"/>\n      <model type=\"virtio\"/>\n      <bandwidth><inbound average=\"12800\"/></bandwidth>\n    </interface>",
+                nic,
+            )
+        };
+        let bridged = with_nic(
+            r#"<interface type="bridge">
+      <mac address="52:54:00:aa:bb:cc"/>
+      <source bridge="vbr0123456789ab"/>
+      <model type="virtio"/>
+      <bandwidth><inbound average="12800"/></bandwidth>
+    </interface>"#,
+        );
+        assert_ne!(
+            bridged,
+            form_domain(),
+            "the fixture must actually be substituted"
+        );
+        let s = check_domain(&bridged).expect("a bridge NIC is what the forms write");
+        assert_eq!(s.bridges, ["vbr0123456789ab"]);
+        assert!(s.networks.is_empty(), "the bridge is not a network name");
+        for bad in [
+            r#"<interface type="bridge"><source bridge=""/><model type="virtio"/></interface>"#,
+            r#"<interface type="bridge"><source/><model type="virtio"/></interface>"#,
+        ] {
+            assert!(check_domain(&with_nic(bad)).is_err(), "{bad} was accepted");
+        }
+        let direct = with_nic(
+            r#"<interface type="direct"><source dev="eth0" mode="bridge"/><model type="virtio"/></interface>"#,
+        );
+        assert!(
+            check_domain(&direct).is_err(),
+            "a direct NIC is still refused"
+        );
+    }
+
     #[test]
     fn host_network_modes_are_refused() {
         for (xml, why) in [
@@ -1510,7 +1584,16 @@ mod tests {
         let s = check_container(CT).unwrap();
         assert!(!s.privileged);
         assert_eq!((s.vcpus, s.memory_mb), (1, 256));
+        // An older definition still names a libvirt network.
         assert_eq!(s.networks, vec!["internet"]);
+        assert!(s.bridges.is_empty());
+        // What the daemon writes now: the network's bridge.
+        let bridged = CT
+            .replace("type='network'", "type='bridge'")
+            .replace("network='internet'", "bridge='vbr0123456789ab'");
+        let b = check_container(&bridged).expect("the daemon's own container XML");
+        assert_eq!(b.bridges, ["vbr0123456789ab"]);
+        assert!(b.networks.is_empty());
     }
 
     #[test]
@@ -1523,6 +1606,8 @@ mod tests {
 
     #[test]
     fn a_container_cannot_reach_the_host() {
+        // A bridge NIC is not a host escape: the proxy checks the bridge
+        // against the networks the caller may use (see `guard`).
         let with = |from: &str, to: &str| CT.replace(from, to);
         let host_mount = with(
             "<interface",
@@ -1532,7 +1617,6 @@ mod tests {
             ("host bind mount", host_mount),
             ("hostdev", with("<console", "<hostdev mode='capabilities' type='storage'><source><block>/dev/sda</block></source></hostdev><console")),
             ("capabilities", with("<privnet/>", "<privnet/><capabilities policy='allow'/>")),
-            ("a bridge interface", with("type='network'><mac", "type='bridge'><mac")),
             ("a VM", with("type='lxc'>", "type='kvm'>")),
             ("seclabel", with("<clock", "<seclabel type='none'/><clock")),
         ] {

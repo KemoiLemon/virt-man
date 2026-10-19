@@ -52,6 +52,24 @@ test("an interface serialises with its network and model", () => {
   assert.doesNotMatch(xml, /<mac/, "no mac element when unset");
 });
 
+/// The networks are the daemon's own; libvirt has none to name, so the guest is
+/// attached to the bridge the network runs.
+test("a NIC on a bridge serialises as a bridge interface", () => {
+  const xml = hw.deviceXml({
+    kind: "interface",
+    fields: {
+      network: "net-a", bridge: "vbr0123456789ab", model: "virtio",
+      mac: "52:54:00:aa:bb:cc",
+      bandwidth: "<bandwidth><inbound average='100'/></bandwidth>",
+    },
+  });
+  assert.match(xml, /<interface type="bridge">/);
+  assert.match(xml, /<source bridge="vbr0123456789ab"\/>/);
+  assert.doesNotMatch(xml, /network="net-a"/, "the bridge is what is attached to");
+  assert.match(xml, /<mac address="52:54:00:aa:bb:cc"\/>/);
+  assert.match(xml, /<inbound average='100'\/>/, "the rate limit travels with it");
+});
+
 test("an optional MAC is emitted only when provided", () => {
   const xml = hw.deviceXml({ kind: "interface", fields: { network: "n", mac: "52:54:00:aa:bb:cc" } });
   assert.match(xml, /address="52:54:00:aa:bb:cc"/);
@@ -143,6 +161,23 @@ test("devices parse back out of a real domain XML", () => {
   assert.equal(nic.fields.network, "internal");
 });
 
+test("a bridge NIC is claimed and round-trips, keeping its bridge", () => {
+  // The hardware editor strips every interface block and re-adds only what
+  // this function returns, so a bridge NIC it does not claim would be silently
+  // removed when hardware is saved.
+  const xml = `<domain><devices><interface type="bridge">
+    <mac address="52:54:00:aa:bb:cc"/><source bridge="vbr0123456789ab"/><model type="e1000e"/>
+  </interface></devices></domain>`;
+  const nic = hw.devicesFromXml(xml).find((d) => d.kind === "interface");
+  assert.equal(nic.fields.bridge, "vbr0123456789ab");
+  assert.equal(nic.fields.network, "", "a bridge is not a network name");
+  assert.equal(nic.fields.model, "e1000e");
+  assert.equal(nic.fields.mac, "52:54:00:aa:bb:cc");
+  const back = hw.deviceXml(nic, 1);
+  assert.match(back, /<interface type="bridge">/, "a bridge no network owns still saves back");
+  assert.match(back, /<source bridge="vbr0123456789ab"\/>/);
+});
+
 test("a file-backed disk round-trips through its path rather than being dropped", () => {
   // The caller strips every <disk> block out of the definition and re-adds
   // only what devicesFromXml returns, so a disk this function does not claim
@@ -221,7 +256,7 @@ test("round trip: parse then re-serialise preserves the device set", () => {
   // Strip what the editor owns, then splice its set back in.
   const stripped = SAMPLE
     .replace(/<disk\b[^>]*device=['"](disk|cdrom)['"][\s\S]*?<\/disk>\s*/g, "")
-    .replace(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>\s*/g, "")
+    .replace(/<interface\b[^>]*type=['"](?:network|bridge)['"][\s\S]*?<\/interface>\s*/g, "")
     .replace(/<memballoon\b[^>]*\/>\s*/g, "")
     .replace(/<channel\b[\s\S]*?org\.qemu\.guest_agent[\s\S]*?<\/channel>\s*/g, "");
   const rebuilt = hw.withDevices(stripped, devices);
@@ -238,6 +273,13 @@ test("round trip: parse then re-serialise preserves the device set", () => {
 test("summaries describe each device for the sidebar", () => {
   assert.match(hw.deviceSummary({ kind: "disk", fields: { pool: "p", volume: "v", bus: "virtio" } }), /p\/v/);
   assert.match(hw.deviceSummary({ kind: "interface", fields: { network: "n" } }), /n/);
+  // A NIC read straight from XML names its bridge until the editor maps it to
+  // the network; it must read as attached, not as "No network".
+  assert.equal(
+    hw.deviceSummary({ kind: "interface", fields: { bridge: "vbr0123456789ab", model: "e1000e" } }),
+    "bridge vbr0123456789ab (e1000e)",
+  );
+  assert.equal(hw.deviceSummary({ kind: "interface", fields: {} }), "No network (virtio)");
   assert.equal(hw.deviceSummary({ kind: "memballoon", fields: {} }), "virtio");
 });
 
@@ -394,6 +436,15 @@ test("a network boot entry names the interface's network and MAC", () => {
   const noMac = "<domain><devices><interface type='network'><source network='lan'/></interface></devices></domain>";
   assert.equal(hw.bootTargets(noMac).network, "lan");
   assert.equal(hw.bootTargets(noMac).networkName, "lan");
+
+  // A guest attached by bridge reports the bridge: it is the only name the XML
+  // carries, and the caller maps it to the network for its label. Dropping it
+  // would hide the only NIC a guest has, and with it the network boot option.
+  const bridged = `<domain><devices><interface type='bridge'>
+    <mac address='52:54:00:05:55:c9'/><source bridge='vbr0123456789ab'/><model type='virtio'/>
+  </interface></devices></domain>`;
+  assert.equal(hw.bootTargets(bridged).network, "vbr0123456789ab 52:54:00:05:55:c9");
+  assert.equal(hw.bootTargets(bridged).networkName, "vbr0123456789ab");
 });
 
 test("a guest with no disks names nothing", () => {

@@ -260,6 +260,25 @@ function displayName(list: { name: string; title?: string | null }[] | undefined
   return list?.find((x) => x.name === name)?.title || name;
 }
 
+/// The network a NIC's `<source>` names: `network` in a definition written
+/// before networks became the daemon's own, or the network whose bridge the
+/// guest is plugged into now. An operator's own bridge belongs to no network
+/// here, and stays its own name.
+function nicNetwork(nets: NetworkSummary[] | undefined, source: string): string {
+  const at = (k: string) => source.match(new RegExp(`${k}\\s*=\\s*['"]([^'"]*)['"]`))?.[1] ?? "";
+  const net = at("network");
+  if (net) return net;
+  const bridge = at("bridge");
+  return nets?.find((n) => n.bridge === bridge)?.name ?? bridge;
+}
+
+/// The network key behind a NIC's bridge, for a form that picks by network.
+/// Unknown (an operator's bridge) leaves the network empty and keeps the
+/// bridge, so the device round-trips unchanged.
+function bridgeNetwork(nets: { name: string; bridge: string }[], bridge: string): string {
+  return nets.find((n) => n.bridge === bridge)?.name ?? "";
+}
+
 
 /// `displayName` against the selected server's cached lists, for a caller
 /// holding only a network or pool name (a modal title, a confirm message).
@@ -4302,14 +4321,17 @@ async function renderVmBody(vm: string) {
         if (nickname) bootNames.hd = `${bootNames.hd} — ${nickname}`;
       }
       // A network boot entry is named by its network, which `bootTargets`
-      // reports as the libvirt name. Swap in the nickname the rest of the page
-      // uses, keeping the MAC: the entry reads "LAN 52:54:...". Uses the bare
-      // `networkName`, not the formatted label, so the substitution does not
-      // depend on a delimiter.
+      // reports as the libvirt name -- or as the bridge, for a guest attached
+      // by one. Swap in the nickname the rest of the page uses, keeping the
+      // MAC: the entry reads "LAN 52:54:...". Uses the bare `networkName`, not
+      // the formatted label, so the substitution does not depend on a
+      // delimiter.
       if (bootNames.networkName && bootNames.network) {
+        const bootNet = (treeNets[selectedConn!] ?? []).find((n) =>
+          n.name === bootNames.networkName || n.bridge === bootNames.networkName);
         bootNames.network = bootNames.network.replace(
           bootNames.networkName,
-          displayName(treeNets[selectedConn!], bootNames.networkName),
+          displayName(treeNets[selectedConn!], bootNet?.name ?? bootNames.networkName),
         );
       }
       const ct = ctMode;
@@ -4844,14 +4866,24 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     if (rootfs) {
       disks.push({ dev: "rootfs", kind: "disk", pool: "", volume: "", file: rootfs, label: rootfs.split("/").pop() ?? rootfs });
     }
-    const nics = [...xml.matchAll(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>/g)].map((m) => {
+    // A NIC names the network's bridge now; `nicNetwork` maps it back to the
+    // network key the rest of the page (and its titles) is keyed by.
+    const nics = [...xml.matchAll(/<interface\b[^>]*type=['"](?:network|bridge)['"][\s\S]*?<\/interface>/g)].map((m) => {
       const block = m[0];
       return {
-        net: xattr(block.match(/<source\b[^>]*>/)?.[0] ?? "", "network"),
+        net: nicNetwork(treeNets[conn], block.match(/<source\b[^>]*>/)?.[0] ?? ""),
         model: xattr(block.match(/<model\b[^>]*>/)?.[0] ?? "", "type"),
       };
     });
     const devices = devicesFromXml(xml);
+    // The summary shows a NIC by its network, but its definition names the
+    // bridge. The bridge stays on the device, so the editor still round-trips
+    // one this app does not know.
+    for (const d of devices) {
+      if (d.kind === "interface" && !d.fields.network && d.fields.bridge) {
+        d.fields.network = bridgeNetwork(treeNets[conn] ?? [], d.fields.bridge);
+      }
+    }
     const bios = /pflash|OVMF/i.test(xml) ? "UEFI (OVMF)" : "BIOS (SeaBIOS)";
     const display = /<graphics[^>]*type=['"]spice/.test(xml) ? "spice" : "vnc";
 
@@ -5728,6 +5760,14 @@ async function openHardwareEditor(opts: {
   if (modal) modal.querySelector(".modal")?.classList.add("hw-modal");
 
   const { pools, nets } = await loadFormData(conn);
+  // A guest's NIC names the bridge it is plugged into; the form picks by
+  // network. The bridge is kept as it is, so a NIC on a bridge no network here
+  // owns still saves back unchanged.
+  for (const d of devices) {
+    if (d.kind === "interface" && !d.fields.network && d.fields.bridge) {
+      d.fields.network = bridgeNetwork(nets, d.fields.bridge);
+    }
+  }
   // Hard ceilings from the caller's remaining limits, so a field cannot be set
   // past what the server would accept and then be refused after the work. An
   // edit may grow by the delta, so the guest's own use is added back.
@@ -5833,7 +5873,7 @@ async function openHardwareEditor(opts: {
   if (!editing) {
     devices = [{ kind: "cdrom", fields: { pool: newDisk.pool, volume: "" } }];
     if (nets.length) {
-      devices.push({ kind: "interface", fields: { network: nets[0].name, model: "virtio" } });
+      devices.push({ kind: "interface", fields: { network: nets[0].name, bridge: nets[0].bridge, model: "virtio" } });
     }
   }
 
@@ -6140,6 +6180,12 @@ async function openHardwareEditor(opts: {
             val = String(clamp(val, 1, cap.disk));
           }
           devices[i].fields[key] = val;
+          // A NIC attaches by the network's bridge, so the two fields are one
+          // setting: pick a network and its bridge follows, or the save would
+          // write the bridge of the network that was chosen before.
+          if (devices[i].kind === "interface" && key === "network") {
+            devices[i].fields.bridge = nets.find((n) => n.name === val)?.bridge ?? "";
+          }
           // A `*-gl` video device and 3D acceleration are one setting: libvirt
           // refuses a gl frontend without enabled 3d (and a plain device with
           // 3d is upgraded to gl). Moving one moves the other, so the save
@@ -6308,6 +6354,11 @@ async function openHardwareEditor(opts: {
           const key = (n as HTMLElement).dataset.af!;
           if (draft[key] === undefined) draft[key] = (n as HTMLInputElement).value;
         });
+        // A NIC attaches by the network's bridge; the form picks by network,
+        // and the bridge is what `deviceXml` writes.
+        if (kind === "interface") {
+          draft.bridge = nets.find((n) => n.name === draft.network)?.bridge ?? "";
+        }
         const device: HwDevice = { kind, fields: { ...draft } };
         const bad = validateDevice(device);
         if (bad) return toast(bad, "bad");
@@ -6361,7 +6412,7 @@ async function openHardwareEditor(opts: {
         // in, so libvirt-added devices we do not model survive the round trip.
         const stripped = baseXml
           .replace(/<disk\b[^>]*device=['"](disk|cdrom)['"][\s\S]*?<\/disk>\s*/g, "")
-          .replace(/<interface\b[^>]*type=['"]network['"][\s\S]*?<\/interface>\s*/g, "")
+          .replace(/<interface\b[^>]*type=['"](?:network|bridge)['"][\s\S]*?<\/interface>\s*/g, "")
           .replace(/<rng\b[\s\S]*?<\/rng>\s*/g, "")
           // Both self-closing and child-bearing shapes must be stripped:
           // libvirt writes <memballoon model='virtio'> with an <address>

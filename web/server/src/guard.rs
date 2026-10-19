@@ -333,18 +333,83 @@ pub async fn check_quota(
         .map_err(|e| ApiError::new(axum::http::StatusCode::FORBIDDEN, e))
 }
 
+/// The networks that attach to `bridge`, by their stored key. A bridge can be
+/// shared: two `Mode::Bridge` networks may borrow the same operator bridge, so
+/// every one of them is a way in, not just the first match.
+fn networks_for_bridge(nets: &Value, bridge: &str) -> Vec<String> {
+    nets.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|n| n.get("bridge").and_then(Value::as_str) == Some(bridge))
+        .filter_map(|n| n.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// Every bridge a guest attaches to must be a network the caller may use. An
+/// unknown bridge is refused rather than allowed: it could be the host's own
+/// LAN bridge, which no network here grants.
+async fn check_network_bridges(
+    state: &AppState,
+    user: &User,
+    conn: &Connection,
+    bridges: &[String],
+) -> Result<(), ApiError> {
+    if bridges.is_empty() {
+        return Ok(());
+    }
+    // One read answers for every bridge: the network list carries each
+    // network's bridge, and a guest's NIC names the bridge, not the network.
+    let nets = daemon_get(conn, "/networks").await?;
+    let store = state.read();
+    for bridge in bridges {
+        let keys = networks_for_bridge(&nets, bridge);
+        // A shared bridge is one attachment point: a grant on any network that
+        // uses it is enough, and that network's firewall is what applies.
+        if keys.is_empty() {
+            return Err(ApiError::new(
+                axum::http::StatusCode::FORBIDDEN,
+                format!("no network uses bridge '{bridge}': a guest cannot attach to it"),
+            ));
+        }
+        if !keys
+            .iter()
+            .any(|key| store.can(user, &perm::net_path(&conn.id, key), "Network.Use"))
+        {
+            return Err(ApiError::new(
+                axum::http::StatusCode::FORBIDDEN,
+                format!(
+                    "you may not attach a guest to bridge '{bridge}': no network using it is yours"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Everything a non-admin names in a guest definition must be theirs to use:
 /// each network (`Network.Use`); each writable disk a volume they own; each
 /// read-only disk or CD-ROM any volume in a pool they can read (shared media
 /// like ISOs). A path that is no volume at all is refused.
+///
+/// `before` is the definition the guest has now, when one is being re-saved:
+/// a network or bridge it already has needs no new grant, or a grant revoked
+/// since would lock an owner out of their own guest. `None` (a create) checks
+/// every one. Disks are always checked: their ownership is what a save could
+/// change.
 async fn check_domain_refs(
     state: &AppState,
     user: &User,
     conn: &Connection,
     spec: &xmlcheck::DomainSpec,
+    before: Option<&xmlcheck::DomainSpec>,
 ) -> Result<(), ApiError> {
     let denied = |m: String| ApiError::new(axum::http::StatusCode::FORBIDDEN, m);
-    for net in &spec.networks {
+    let empty: Vec<String> = Vec::new();
+    let (have_nets, have_bridges) = match before {
+        Some(b) => (&b.networks, &b.bridges),
+        None => (&empty, &empty),
+    };
+    for net in spec.networks.iter().filter(|n| !have_nets.contains(*n)) {
         if !state
             .read()
             .can(user, &perm::net_path(&conn.id, net), "Network.Use")
@@ -352,6 +417,13 @@ async fn check_domain_refs(
             return Err(denied(format!("you may not use network '{net}'")));
         }
     }
+    let bridges: Vec<String> = spec
+        .bridges
+        .iter()
+        .filter(|b| !have_bridges.contains(b))
+        .cloned()
+        .collect();
+    check_network_bridges(state, user, conn, &bridges).await?;
     if spec.disks.is_empty() {
         return Ok(());
     }
@@ -475,7 +547,7 @@ pub async fn before(
                 Err(_) => return Ok(None),
             };
             if !admin {
-                check_domain_refs(state, user, conn, &spec).await?;
+                check_domain_refs(state, user, conn, &spec, None).await?;
                 check_quota(
                     state,
                     conn,
@@ -503,7 +575,18 @@ pub async fn before(
                     "the definition names a different guest",
                 ));
             }
-            check_domain_refs(state, user, conn, &spec).await?;
+            // A save only has to justify what it adds: a network or bridge the
+            // guest already has was allowed when it was made. The current
+            // definition is read for that; if the read or parse fails, check
+            // everything -- refusing too much is the safe failure, silently
+            // allowing a new bridge is not.
+            let before = match daemon_get(conn, &format!("/domains/{}/xml", enc(vm))).await {
+                Ok(v) => {
+                    xmlcheck::check_domain(v.get("xml").and_then(Value::as_str).unwrap_or("")).ok()
+                }
+                Err(_) => None,
+            };
+            check_domain_refs(state, user, conn, &spec, before.as_ref()).await?;
             // Growth counts against the owner's quota: take the current size
             // away and add the new one.
             let owner = owner_user(owner_of(Kind::Vm, vm)).unwrap_or_else(|| user.clone());
@@ -646,6 +729,17 @@ pub async fn before(
                     return Err(forbidden(format!("you may not use network '{n}'")));
                 }
             }
+            // A bridge must belong to a network the caller may use. Only one
+            // this edit adds is checked, like the networks above: an unchanged
+            // bridge was allowed when the container was made, and a grant
+            // revoked since must not lock an owner out of their own container.
+            let added: Vec<String> = spec
+                .bridges
+                .iter()
+                .filter(|b| !cur.bridges.contains(b))
+                .cloned()
+                .collect();
+            check_network_bridges(state, user, conn, &added).await?;
             let grow = Usage {
                 vcpus: spec.vcpus.saturating_sub(cur.vcpus),
                 memory_mb: spec.memory_mb.saturating_sub(cur.memory_mb),
@@ -1033,7 +1127,7 @@ fn forget(store: &mut crate::store::Store, kind: Kind, conn: &str, pool: &str, n
 
 #[cfg(test)]
 mod tests {
-    use super::quota_applies;
+    use super::{networks_for_bridge, quota_applies};
     use crate::perm::Quota;
 
     fn some_quota() -> Quota {
@@ -1062,6 +1156,25 @@ mod tests {
             !quota_applies(true, &Quota::default()),
             "and an absent one is equally not enforced"
         );
+    }
+
+    #[test]
+    fn a_bridge_maps_to_every_network_that_uses_it() {
+        // Two operator-bridge networks may borrow one bridge, so the caller's
+        // grant on either is enough -- and a bridge no network owns maps to
+        // nothing, which is what makes an arbitrary host bridge unreachable.
+        let nets = serde_json::json!([
+            { "name": "first", "bridge": "br0" },
+            { "name": "second", "bridge": "br0" },
+            { "name": "third", "bridge": "vbr0123456789ab" },
+        ]);
+        assert_eq!(networks_for_bridge(&nets, "br0"), ["first", "second"]);
+        assert_eq!(networks_for_bridge(&nets, "vbr0123456789ab"), ["third"]);
+        assert!(
+            networks_for_bridge(&nets, "eth0").is_empty(),
+            "an unknown bridge belongs to no network"
+        );
+        assert!(networks_for_bridge(&serde_json::json!({}), "br0").is_empty());
     }
 
     #[test]
