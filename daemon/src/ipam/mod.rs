@@ -1,9 +1,8 @@
-//! The daemon's own IPAM: DHCP and DNS for guest networks, in place of the
-//! dnsmasq libvirt runs. See `store` for the state and why it is kept here.
+//! The daemon's own networks: the stored definitions (`store`), the supervisor
+//! that keeps bridges and dnsmasq in step with the guests (`server`), and the
+//! guest connection log (`flows`).
 
-pub mod dhcp;
-pub mod dns;
+pub(crate) mod dnslog;
 pub mod flows;
 pub mod server;
 pub mod store;
-pub mod xml;

@@ -1,6 +1,9 @@
 [Unit]
 Description=virt-man-daemon (libvirt HTTP control daemon)
-After=network-online.target libvirtd.service
+# The daemon creates the network bridges before libvirtd may autostart a guest
+# with a bridge NIC; startup() tolerates libvirtd being down.
+After=network-online.target
+Before=libvirtd.service
 Wants=network-online.target
 
 [Service]

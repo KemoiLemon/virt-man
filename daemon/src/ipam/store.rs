@@ -1,32 +1,56 @@
-//! IPAM state: what each managed network hands out, and to whom.
+//! Network state: what each network is, what it hands out, and to whom.
 //!
-//! One JSON file (`/etc/virt-man-daemon/ipam.json`), owned by the daemon. It replaces
-//! the `<dhcp>` section libvirt used to keep in the network definition: editing
-//! a reservation there meant `virNetworkUpdate` or a redefine, and a redefine
-//! restarts the network and unplugs every guest on it.
+//! One JSON file (`<data_dir>/networks.json`), owned by the daemon. It is the
+//! source of truth for the networks the daemon runs: their mode, subnet, DNS
+//! and DHCP reservations. Nothing is read back from libvirt, which no longer
+//! defines these networks at all.
 //!
 //! A **reservation** binds a MAC to an address for good. Ones the user set are
-//! `manual`; one made because a guest asked for an address and got one from
-//! the range is `dynamic`, and is kept until its guest is deleted, so a guest
-//! keeps the same address across reboots, lease expiry and daemon restarts.
-//! There are no expiring leases to lose.
+//! `manual`; one made because a guest is defined on the network is `dynamic`,
+//! and is kept until its guest is deleted, so a guest keeps the same address
+//! across reboots, lease expiry and daemon restarts. There are no expiring
+//! leases to lose.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-pub const IPAM_PATH: &str = "/etc/virt-man-daemon/ipam.json";
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Store {
-    /// Keyed by libvirt network name.
+    /// Keyed by the network's UUID.
     #[serde(default)]
     pub networks: BTreeMap<String, Net>,
 }
 
+/// How a network reaches the world. The daemon owns the bridge and the
+/// dnsmasq for `Nat` and `Isolated`; `Bridge` uses a bridge the operator
+/// already made, which the daemon neither sets up nor deletes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Nat,
+    /// A definition that lost its mode must not silently masquerade its
+    /// guests onto the host's network.
+    #[default]
+    Isolated,
+    Bridge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Net {
+    /// What the user calls the network. libvirt's name is its UUID.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub mode: Mode,
+    /// The operator's bridge, for `Mode::Bridge` only. A managed network's
+    /// bridge is always derived from its id (`hostnet::bridge_name`), never
+    /// stored and never libvirt's `virbrN`.
+    #[serde(default)]
+    pub bridge: String,
+    #[serde(default = "default_true")]
+    pub autostart: bool,
     /// The bridge's own address: gateway, DNS server and DHCP server id.
     pub gateway: Ipv4Addr,
     pub prefix: u8,
@@ -48,6 +72,10 @@ pub struct Net {
 
 fn default_lease() -> u32 {
     3600
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,14 +110,28 @@ pub fn load(path: &Path) -> Result<Store, String> {
 }
 
 /// Write atomically: a crash mid-write must not leave a truncated file, which
-/// would lose every reservation at the next start.
+/// would lose every reservation at the next start. The file names every guest's
+/// address and MAC, so it is created 0600 and renamed into place.
 pub fn save(path: &Path, store: &Store) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_vec_pretty(store).map_err(|e| format!("serialize ipam: {e}"))?;
-    std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    // An existing temp file keeps its old mode through `open`.
+    let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    f.write_all(&text)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    drop(f);
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
 }
 
@@ -106,6 +148,35 @@ pub fn mask(prefix: u8) -> u32 {
 impl Net {
     pub fn netmask(&self) -> Ipv4Addr {
         Ipv4Addr::from(mask(self.prefix))
+    }
+    /// A network whose bridge, addressing and dhcp are the daemon's. A bridge
+    /// network only borrows an interface the operator owns.
+    pub fn is_managed(&self) -> bool {
+        self.mode != Mode::Bridge
+    }
+    /// The network address, e.g. `192.168.1.0/24`. None when there is no
+    /// address of our own to describe: a bridge network, or a gateway of
+    /// 0.0.0.0 (a placeholder definition that has not been given a subnet).
+    pub fn subnet(&self) -> Option<String> {
+        if !self.is_managed() || self.gateway.is_unspecified() {
+            return None;
+        }
+        Some(format!(
+            "{}/{}",
+            Ipv4Addr::from(self.network()),
+            self.prefix
+        ))
+    }
+    /// The bridge address with its prefix length, e.g. `192.168.1.1/24`.
+    pub fn cidr(&self) -> Option<String> {
+        if !self.is_managed() || self.gateway.is_unspecified() {
+            return None;
+        }
+        Some(format!("{}/{}", self.gateway, self.prefix))
+    }
+    /// Whether dnsmasq has something to serve: a managed bridge with a subnet.
+    pub fn is_served(&self) -> bool {
+        self.is_managed() && self.subnet().is_some()
     }
     fn network(&self) -> u32 {
         u32::from(self.gateway) & mask(self.prefix)
@@ -151,6 +222,71 @@ impl Net {
             return Err("the range ends before it starts".into());
         }
         Ok(())
+    }
+
+    /// Fill the range with the subnet's usable addresses after the gateway:
+    /// `gateway+1` .. broadcast-1, never including the gateway itself. Used
+    /// when a network is given a subnet the user did not write a range for. A
+    /// gateway at the top of the subnet wraps the start to the first host, so
+    /// the range is never empty or the broadcast.
+    pub fn default_range(&mut self) {
+        if self.gateway.is_unspecified() {
+            return;
+        }
+        let network = self.network();
+        let broadcast = u32::from(self.broadcast());
+        let gateway = u32::from(self.gateway);
+        let mut start = gateway.saturating_add(1);
+        if start >= broadcast {
+            start = network + 1;
+        }
+        if start == gateway {
+            start += 1;
+        }
+        let mut end = broadcast.saturating_sub(1);
+        if end == gateway {
+            end = gateway.saturating_sub(1);
+        }
+        self.range_start = Ipv4Addr::from(start.min(end));
+        self.range_end = Ipv4Addr::from(end);
+    }
+
+    /// Make sure this network has a permanent reservation for `mac`, owned by
+    /// guest `vm`, named after its display name. The lowest free address in
+    /// the range is taken, so a guest that appears on a network gets an
+    /// address without asking for one. Returns whether one was inserted; an
+    /// existing reservation keeps its address and name, and only gains its
+    /// owner if it had none.
+    pub fn ensure_reservation(
+        &mut self,
+        mac: &str,
+        vm: &str,
+        display: &str,
+    ) -> Result<bool, String> {
+        let mac = normalize_mac(mac).ok_or_else(|| format!("'{mac}' is not a MAC address"))?;
+        if let Some(r) = self.reservations.iter_mut().find(|r| r.mac == mac) {
+            if r.vm.is_none() {
+                r.vm = Some(vm.to_string());
+            }
+            return Ok(false);
+        }
+        let base = clean_hostname(display).unwrap_or_else(|| "guest".into());
+        let name = self.unique_name(&base, &mac);
+        let ip = self.next_free(&|_| false).ok_or_else(|| {
+            format!(
+                "no free address left in {}..{}",
+                self.range_start, self.range_end
+            )
+        })?;
+        self.reservations.push(Reservation {
+            mac,
+            ip,
+            name: Some(name),
+            dynamic: true,
+            vm: Some(vm.to_string()),
+            seen_ms: 0,
+        });
+        Ok(true)
     }
 
     /// A hostname not already taken by another guest's reservation on this
@@ -243,8 +379,9 @@ pub fn pick_subnet(used: &[(u32, u8)], rand: &mut dyn FnMut() -> u32) -> Option<
 }
 
 /// Whether `cand/prefix` overlaps any used prefix. Overlap is symmetric: the
-/// candidate may sit inside a used prefix, or contain one.
-fn overlaps_any(cand: u32, prefix: u8, used: &[(u32, u8)]) -> bool {
+/// candidate may sit inside a used prefix, or contain one. Also used by the
+/// network API to refuse a hand-typed subnet that collides.
+pub fn overlaps_any(cand: u32, prefix: u8, used: &[(u32, u8)]) -> bool {
     used.iter().any(|&(net, p)| {
         let p = p.min(32);
         let same = |a: u32, pa: u8, b: u32, pb: u8| {
@@ -289,48 +426,101 @@ pub fn clean_hostname(raw: &str) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
-// ------------------------------------------------------------ libvirt import
+/// A DNS domain this host may serve: lowercase labels of letters, digits and
+/// hyphens separated by single dots. It is written into a dnsmasq config file,
+/// which is read line by line, so whitespace or a newline must never get in.
+/// Anything not valid is rejected rather than cleaned: this is the user's
+/// input, not a guest's.
+pub fn valid_domain(raw: &str) -> Option<String> {
+    let d = raw.trim().to_ascii_lowercase();
+    (!d.is_empty()
+        && d.split('.')
+            .all(|l| clean_hostname(l).as_deref() == Some(l)))
+    .then_some(d)
+}
 
-/// Read what libvirt's `<ip>` (with its `<dhcp>` and `<dns>`) describes, so a
-/// network taken over from dnsmasq keeps every address it had. Returns None
-/// for a network without an IPv4 subnet (bridge mode, or isolated with no
-/// `<ip>`): there is nothing for us to serve there.
-pub fn import(xml: &str) -> Option<Net> {
-    let ip_tag = open_tag(xml, "<ip ")?;
-    if attr(ip_tag, "family").is_some_and(|f| f != "ipv4") {
-        return None;
-    }
-    let gateway: Ipv4Addr = attr(ip_tag, "address")?.parse().ok()?;
-    let prefix = match (attr(ip_tag, "prefix"), attr(ip_tag, "netmask")) {
-        (Some(p), _) => p.parse().ok()?,
-        (None, Some(m)) => u32::from(m.parse::<Ipv4Addr>().ok()?).count_ones() as u8,
-        _ => 24,
+// ------------------------------------------------------------ XML import
+
+/// Read a network definition — libvirt's shape, which is also what the SPA
+/// editor speaks — into the stored state. Every supported mode imports,
+/// including one with no subnet of its own: a bridge network, or an isolated
+/// segment nothing serves. Returns an error for a mode this daemon cannot
+/// reproduce (`route`, `open`, `passthrough`) rather than silently forcing it
+/// into isolation.
+pub fn import(xml: &str) -> Result<Net, String> {
+    // Modes we can reproduce natively. libvirt's `route`, `open`, `passthrough`
+    // and anything newer have no native equivalent here yet, so such a
+    // definition is refused rather than silently forced into isolation.
+    let mode = match open_tag(xml, "<forward ").and_then(|t| attr(t, "mode")) {
+        Some("nat") => Mode::Nat,
+        Some("bridge") => Mode::Bridge,
+        Some("none") | Some("") => Mode::Isolated,
+        None => Mode::Isolated,
+        Some(other) => return Err(format!("forward mode '{other}' is not supported")),
     };
+    // Only an operator's bridge is stored: a managed network derives its own,
+    // and libvirt's `virbrN` is libvirt's.
+    let bridge = if mode == Mode::Bridge {
+        let b = open_tag(xml, "<bridge ")
+            .and_then(|t| attr(t, "name"))
+            .unwrap_or_default()
+            .to_string();
+        if b.is_empty() {
+            return Err("a bridge network must name its bridge".into());
+        }
+        b
+    } else {
+        String::new()
+    };
+    // An <ip> of another family describes nothing this daemon serves.
+    let ip_tag = open_tag(xml, "<ip ").filter(|t| !attr(t, "family").is_some_and(|f| f != "ipv4"));
     let mut net = Net {
-        gateway,
-        prefix,
-        range_start: gateway,
-        range_end: gateway,
+        title: element_text(xml, "title").unwrap_or_default(),
+        mode,
+        bridge,
+        // Autostart is a separate property in libvirt, not in the XML. A
+        // network this daemon defines starts on boot unless told otherwise.
+        autostart: true,
+        gateway: Ipv4Addr::UNSPECIFIED,
+        prefix: 0,
+        range_start: Ipv4Addr::UNSPECIFIED,
+        range_end: Ipv4Addr::UNSPECIFIED,
         dns_forwarders: Vec::new(),
         domain: open_tag(xml, "<domain ")
             .and_then(|t| attr(t, "name"))
-            .map(str::to_string),
+            .and_then(valid_domain),
         lease_secs: default_lease(),
         reservations: Vec::new(),
     };
-    // Default range: the whole subnet after the gateway.
-    let first = Ipv4Addr::from((u32::from(gateway) & mask(prefix)) + 1);
-    let last = Ipv4Addr::from(u32::from(net.broadcast()) - 1);
-    net.range_start = if first == gateway {
-        Ipv4Addr::from(u32::from(gateway) + 1)
-    } else {
-        first
+    // A bridge network borrows the operator's bridge and its addressing, and
+    // an isolated segment may deliberately have no subnet. Both are definitions
+    // with nothing of our own to serve.
+    if mode == Mode::Bridge {
+        return Ok(net);
+    }
+    let Some(ip_tag) = ip_tag else { return Ok(net) };
+    let Some(gateway) = attr(ip_tag, "address") else {
+        return Ok(net);
     };
-    net.range_end = last;
+    net.gateway = gateway
+        .parse()
+        .map_err(|_| format!("'{gateway}' is not an IPv4 address"))?;
+    net.prefix = match (attr(ip_tag, "prefix"), attr(ip_tag, "netmask")) {
+        (Some(p), _) => p
+            .parse()
+            .map_err(|_| format!("'{p}' is not a prefix length"))?,
+        (None, Some(m)) => u32::from(
+            m.parse::<Ipv4Addr>()
+                .map_err(|_| format!("'{m}' is not a netmask"))?,
+        )
+        .count_ones() as u8,
+        _ => 24,
+    };
+    // Default range: the whole subnet after the gateway.
+    net.default_range();
     if let Some(r) = open_tag(xml, "<range ")
         && let (Some(s), Some(e)) = (attr(r, "start"), attr(r, "end"))
         && let (Ok(s), Ok(e)) = (s.parse(), e.parse())
-        && net.validate_range(s, e).is_ok()
     {
         net.range_start = s;
         net.range_end = e;
@@ -356,13 +546,22 @@ pub fn import(xml: &str) -> Option<Net> {
             });
         }
     }
-    Some(net)
+    Ok(net)
 }
 
 fn open_tag<'a>(xml: &'a str, start: &str) -> Option<&'a str> {
     let i = xml.find(start)?;
     let e = xml[i..].find('>')?;
     Some(&xml[i..=i + e])
+}
+
+/// The text of the first `<name>…</name>` element, trimmed and unescaped.
+fn element_text(xml: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let i = xml.find(&open)? + open.len();
+    let end = xml[i..].find(&close)?;
+    Some(crate::libvirt::unescape(xml[i..i + end].trim()))
 }
 
 fn all_tags<'a>(xml: &'a str, start: &str) -> Vec<&'a str> {
@@ -421,6 +620,123 @@ mod tests {
     }
 
     #[test]
+    fn old_json_gains_the_new_fields_with_their_defaults() {
+        let old = r#"{"networks":{"internet":{"gateway":"10.0.0.1","prefix":24,"range_start":"10.0.0.2","range_end":"10.0.0.254"}}}"#;
+        let s: Store = serde_json::from_str(old).unwrap();
+        let n = &s.networks["internet"];
+        assert_eq!(
+            (n.title.as_str(), n.mode, n.bridge.as_str(), n.autostart),
+            ("", Mode::Isolated, "", true),
+            "a missing mode is isolated, never an implicit masquerade"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_forward_mode_is_refused() {
+        // `route`, `open` and `passthrough` have no native equivalent yet.
+        for mode in ["route", "open", "passthrough", "future"] {
+            let xml = format!(
+                "<network><forward mode='{mode}'/><ip address='10.1.0.1' prefix='24'/></network>"
+            );
+            assert!(import(&xml).is_err(), "{mode}");
+        }
+        // The modes we do implement still map.
+        assert_eq!(
+            import("<network><forward mode='none'/><ip address='10.1.0.1' prefix='24'/></network>")
+                .unwrap()
+                .mode,
+            Mode::Isolated
+        );
+        assert_eq!(
+            import("<network><forward mode=''/><ip address='10.1.0.1' prefix='24'/></network>")
+                .unwrap()
+                .mode,
+            Mode::Isolated
+        );
+    }
+
+    #[test]
+    fn libvirt_forwarding_mode_bridge_and_title_are_imported() {
+        let x = "<network><title>Lab</title><forward mode='none'/><bridge name='br-lan'/><ip address='10.1.0.1' prefix='24'/></network>";
+        let n = import(x).unwrap();
+        assert_eq!(
+            (n.mode, n.bridge.as_str(), n.title.as_str()),
+            (Mode::Isolated, "", "Lab"),
+            "a managed network never keeps libvirt's bridge"
+        );
+        // Only an operator's bridge is stored as one.
+        let b = import(
+            "<network><forward mode='bridge'/><bridge name='br-lan'/><ip address='10.1.0.1' prefix='24'/></network>",
+        )
+        .unwrap();
+        assert_eq!((b.mode, b.bridge.as_str()), (Mode::Bridge, "br-lan"));
+        let nat =
+            import("<network><forward mode='nat'/><ip address='10.1.0.1' prefix='24'/></network>")
+                .unwrap();
+        assert_eq!(nat.mode, Mode::Nat);
+        // libvirt forwards nothing without a <forward> element.
+        let none = import("<network><ip address='10.1.0.1' prefix='24'/></network>").unwrap();
+        assert_eq!(none.mode, Mode::Isolated);
+        assert!(none.autostart);
+        // libvirt keeps autostart outside the XML; there is nothing to import.
+        assert!(
+            import("<network><ip address='10.1.0.1' prefix='24'/></network>")
+                .unwrap()
+                .autostart
+        );
+    }
+
+    #[test]
+    fn modes_round_trip_through_json() {
+        for (mode, text) in [
+            (Mode::Nat, "\"nat\""),
+            (Mode::Isolated, "\"isolated\""),
+            (Mode::Bridge, "\"bridge\""),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), text);
+            assert_eq!(serde_json::from_str::<Mode>(text).unwrap(), mode);
+        }
+        let n = Net {
+            mode: Mode::Bridge,
+            bridge: "br0".into(),
+            ..net()
+        };
+        assert_eq!(
+            serde_json::from_str::<Net>(&serde_json::to_string(&n).unwrap()).unwrap(),
+            n,
+            "a bridge network keeps its mode and operator bridge"
+        );
+    }
+
+    #[test]
+    fn a_domain_must_be_labels_and_never_reaches_a_config_line() {
+        assert_eq!(
+            valid_domain("  LAB.Example ").as_deref(),
+            Some("lab.example")
+        );
+        assert_eq!(valid_domain("lab").as_deref(), Some("lab"));
+        for bad in [
+            "",
+            " ",
+            "a b",
+            "lab\nlisten-address=0.0.0.0",
+            "lab\tlisten-address=0.0.0.0",
+            "a..b",
+            ".lab",
+            "lab.",
+            "_dmarc.example",
+        ] {
+            assert_eq!(valid_domain(bad), None, "{bad:?}");
+        }
+        // import() drops an invalid domain instead of storing it.
+        let n = import(
+            "<network><domain name='lab\nlisten-address=0.0.0.0'/><ip address='10.1.0.1' prefix='24'/></network>",
+        )
+        .unwrap();
+        assert_eq!(n.domain, None);
+    }
+
+    #[test]
     fn with_no_range_the_whole_subnet_after_the_gateway_is_dynamic() {
         let n = import("<network><ip address='10.0.0.1' prefix='24'/></network>").unwrap();
         assert_eq!(
@@ -437,13 +753,107 @@ mod tests {
     }
 
     #[test]
-    fn a_network_without_ipv4_is_not_ours() {
+    fn a_definition_without_a_subnet_still_imports() {
+        // An operator's bridge is borrowed, so it names one and has no subnet.
+        let b = import("<network><forward mode='bridge'/><bridge name='br0'/></network>").unwrap();
+        assert_eq!((b.mode, b.bridge.as_str()), (Mode::Bridge, "br0"));
+        assert!(b.subnet().is_none() && b.gateway.is_unspecified());
+        assert!(b.range_start.is_unspecified() && b.range_end.is_unspecified());
+        assert!(import("<network><forward mode='bridge'/></network>").is_err());
+
+        // An isolated segment may have no subnet of its own.
+        let i = import("<network><forward mode='none'/></network>").unwrap();
+        assert_eq!(i.mode, Mode::Isolated);
+        assert!(i.subnet().is_none() && !i.is_served());
+
+        // A NAT network with no <ip>: the API fills a generated /24.
+        let n = import("<network><forward mode='nat'/></network>").unwrap();
+        assert_eq!(n.mode, Mode::Nat);
+        assert!(n.subnet().is_none() && n.gateway.is_unspecified());
+
+        // An IPv6 <ip> is not ours to serve either.
+        let v6 =
+            import("<network><ip family='ipv6' address='fd00::1' prefix='64'/></network>").unwrap();
+        assert!(v6.gateway.is_unspecified() && !v6.is_served());
+    }
+
+    #[test]
+    fn a_generated_subnet_gets_the_subnet_after_its_gateway() {
+        let mut n = import("<network><forward mode='nat'/></network>").unwrap();
+        n.gateway = "10.42.7.1".parse().unwrap();
+        n.prefix = 24;
+        n.default_range();
+        assert_eq!(
+            (n.range_start, n.range_end),
+            ("10.42.7.2".parse().unwrap(), "10.42.7.254".parse().unwrap())
+        );
+        // A gateway at the top wraps to the first host instead of the broadcast.
+        let mut n = import("<network><forward mode='nat'/></network>").unwrap();
+        n.gateway = "10.42.7.254".parse().unwrap();
+        n.prefix = 24;
+        n.default_range();
+        assert_eq!(n.range_start, "10.42.7.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            n.range_end,
+            "10.42.7.253".parse::<Ipv4Addr>().unwrap(),
+            "the gateway itself is never in the range"
+        );
+    }
+
+    #[test]
+    fn a_guest_appearing_on_a_network_gets_the_lowest_free_address() {
+        let mut n = import("<network><ip address='10.9.0.1' prefix='24'/></network>").unwrap();
         assert!(
-            import("<network><forward mode='bridge'/><bridge name='br0'/></network>").is_none()
+            n.ensure_reservation("52-54-00-AA-00-01", "u1", "My Web")
+                .unwrap()
+        );
+        assert_eq!(n.reservations.len(), 1);
+        let r = &n.reservations[0];
+        assert_eq!(r.mac, "52:54:00:aa:00:01");
+        assert_eq!(r.ip, "10.9.0.2".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(r.name.as_deref(), Some("my-web"));
+        assert!(r.dynamic && r.vm.as_deref() == Some("u1") && r.seen_ms == 0);
+
+        // A second guest takes the next one; a duplicate display name is numbered.
+        assert!(
+            n.ensure_reservation("52:54:00:aa:00:02", "u2", "My Web")
+                .unwrap()
+        );
+        assert_eq!(
+            n.reservations[1].ip,
+            "10.9.0.3".parse::<Ipv4Addr>().unwrap()
+        );
+        assert_eq!(n.reservations[1].name.as_deref(), Some("my-web-2"));
+
+        // The same MAC is not inserted twice, and a missing owner is filled in.
+        let mut manual = n.reservations[0].clone();
+        manual.vm = None;
+        n.reservations[0] = manual;
+        assert!(
+            !n.ensure_reservation("52:54:00:aa:00:01", "u1", "Other")
+                .unwrap()
+        );
+        assert_eq!(n.reservations.len(), 2);
+        assert_eq!(
+            n.reservations[0].ip,
+            "10.9.0.2".parse::<Ipv4Addr>().unwrap()
+        );
+        assert_eq!(n.reservations[0].name.as_deref(), Some("my-web"));
+        assert_eq!(n.reservations[0].vm.as_deref(), Some("u1"));
+
+        // A full range is an error, not a wrong address.
+        let mut full = import("<network><ip address='10.9.0.1' prefix='30'/></network>").unwrap();
+        assert!(
+            full.ensure_reservation("52:54:00:aa:00:01", "u1", "a")
+                .unwrap()
+        );
+        assert_eq!(
+            full.reservations[0].ip,
+            "10.9.0.2".parse::<Ipv4Addr>().unwrap()
         );
         assert!(
-            import("<network><ip family='ipv6' address='fd00::1' prefix='64'/></network>")
-                .is_none()
+            full.ensure_reservation("52:54:00:aa:00:02", "u2", "b")
+                .is_err()
         );
     }
 
@@ -574,8 +984,9 @@ mod tests {
 
     #[test]
     fn the_store_round_trips_through_its_file() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("ipam-test-{}", std::process::id()));
-        let path = dir.join("ipam.json");
+        let path = dir.join("networks.json");
         let mut s = Store::default();
         s.networks.insert("internet".into(), net());
         save(&path, &s).unwrap();
@@ -583,6 +994,11 @@ mod tests {
         assert!(
             !path.with_extension("json.tmp").exists(),
             "no temp file left behind"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the store names every guest's address and MAC"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

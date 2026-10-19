@@ -179,11 +179,13 @@ async fn reapply_firewall(fw: &FirewallState) -> Option<String> {
         Ok(s) => s,
         Err(e) => return Some(e),
     };
-    super::firewall::apply_store(store).await.err()
+    super::firewall::apply_store(&fw.ipam, &store).await.err()
 }
 
 #[derive(Deserialize)]
 struct AddReq {
+    /// A network key (its UUID or title). The NIC is attached to that
+    /// network's bridge.
     network: String,
     #[serde(default)]
     model: Option<String>,
@@ -210,6 +212,12 @@ async fn add(
         Some(m) => Some(normalize_mac(m).map_err(ApiError::bad_request)?),
         None => None,
     };
+    // These networks are not defined in libvirt: a guest is put on the
+    // network's bridge. The store is the only place that mapping lives.
+    let bridge = fw
+        .ipam
+        .bridge_for(&network)
+        .ok_or_else(|| ApiError::bad_request(format!("unknown network '{network}'")))?;
     let v = with_conn(move |c| {
         let d = crate::libvirt::domain(c, &name)?;
         let live = d.is_active().unwrap_or(false);
@@ -217,8 +225,11 @@ async fn add(
             .as_deref()
             .map(|m| format!("<mac address='{m}'/>"))
             .unwrap_or_default();
+        // `bridge` comes from the daemon's validated store (a derived `vbr…`
+        // name or the operator's checked bridge), never from the request, so
+        // it is safe to interpolate here.
         let xml = format!(
-            "<interface type='network'>{mac_xml}<source network='{network}'/><model type='{model}'/></interface>"
+            "<interface type='bridge'>{mac_xml}<source bridge='{bridge}'/><model type='{model}'/></interface>"
         );
         d.attach_device_flags(&xml, affect(&d))
             .map_err(|e| hotplug_hint(&e.to_string(), live))?;

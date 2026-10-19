@@ -32,7 +32,7 @@ const RING: usize = 50_000;
 /// Answers carry TTLs, but many are seconds long and the connection follows
 /// the lookup by far longer than that on a slow guest; a fixed hour is the
 /// useful reading of "which name was this IP".
-const NAME_TTL_MS: u64 = 3_600_000;
+pub(crate) const NAME_TTL_MS: u64 = 3_600_000;
 
 // netlink / nfnetlink constants
 const NETLINK_NETFILTER: i32 = 12;
@@ -247,6 +247,9 @@ pub struct Flow {
 
 /// A DNS query a guest made, recorded as its own row so a lookup with no
 /// connection after it (blocked, cached, failed) is still visible.
+///
+/// dnsmasq answers DNS now, so nothing in-process fills this: the supervisor
+/// reads its query log (`ipam::dnslog`) and feeds the answers here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lookup {
     pub client: Ipv4Addr,
@@ -295,6 +298,15 @@ impl Flows {
         if let Some(o) = owner {
             push(&mut s, dns_flow(l, o, now));
         }
+    }
+
+    /// Name one more address a reply carried, without a row: a lookup with
+    /// several A records is still one lookup, but a connection may use any of
+    /// them.
+    pub fn record_name(&self, client: Ipv4Addr, answer: Ipv4Addr, name: &str, now: u64) {
+        self.lock()
+            .names
+            .insert((client, answer), (name.to_string(), now));
     }
 
     /// Fold one conntrack event in. Events with no guest at either end are
@@ -674,6 +686,32 @@ mod tests {
             1,
             "a cursor skips what was already pulled"
         );
+    }
+
+    #[test]
+    fn a_second_address_of_one_lookup_names_a_connection_without_a_second_row() {
+        let f = Flows::default();
+        f.record_lookup(
+            &Lookup {
+                client: "10.9.0.7".parse().unwrap(),
+                name: "example.com".into(),
+                answers: vec!["1.2.3.4".parse().unwrap()],
+            },
+            owner("10.9.0.7".parse().unwrap()),
+            1_000,
+        );
+        f.record_name(
+            "10.9.0.7".parse().unwrap(),
+            "5.6.7.8".parse().unwrap(),
+            "example.com",
+            1_000,
+        );
+        let rows = f.since(0, 100).0;
+        assert_eq!(rows.len(), 1, "one lookup is one DNS row");
+        f.record_event(&ev(false, 8, "10.9.0.7", "5.6.7.8", 443), owner, 2_000);
+        let rows = f.since(0, 100).0;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].domain.as_deref(), Some("example.com"));
     }
 
     #[test]

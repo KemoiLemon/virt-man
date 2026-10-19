@@ -51,15 +51,17 @@ say "package manager: $PM"
 # ------------------------------------------------------------------ packages
 # Build: a C toolchain and pkg-config for the Rust crates, libvirt headers for
 # the daemon. Runtime, daemon: libvirt with the QEMU and LXC drivers,
-# nftables (firewall), iproute2 (tap reattach), and what builds a container
-# rootfs: e2fsprogs (mkfs.ext4), util-linux (unshare, mount), tar with xz and
-# zstd, openssl (password hashes and the TLS cert).
+# nftables (firewall), iproute2 (bridge addressing), dnsmasq-base (the DHCP and
+# DNS server; the -base package has the binary without the distro's service,
+# which would bind :53 on every interface), and what builds a container rootfs:
+# e2fsprogs (mkfs.ext4), util-linux (unshare, mount), tar with xz and zstd,
+# openssl (password hashes and the TLS cert).
 apt_daemon=(libvirt-daemon-system libvirt-daemon-driver-qemu libvirt-daemon-driver-lxc libvirt-dev
-  qemu-system-x86 ovmf nftables iproute2 e2fsprogs util-linux tar xz-utils zstd openssl)
+  qemu-system-x86 ovmf nftables iproute2 dnsmasq-base e2fsprogs util-linux tar xz-utils zstd openssl)
 apt_web=(nodejs npm)
 apt_build=(build-essential pkg-config curl ca-certificates)
 apk_daemon=(libvirt-daemon libvirt-qemu libvirt-lxc libvirt-dev qemu-system-x86_64 ovmf
-  nftables iproute2 e2fsprogs util-linux-misc tar xz zstd openssl dbus)
+  nftables iproute2 dnsmasq e2fsprogs util-linux-misc tar xz zstd openssl dbus)
 apk_web=(nodejs npm)
 apk_build=(build-base pkgconf curl ca-certificates bash sudo)
 

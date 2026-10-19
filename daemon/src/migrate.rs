@@ -1,5 +1,5 @@
-//! Rename existing guests, networks and pools so their libvirt name is their
-//! UUID, keeping the old name as their display name.
+//! Rename existing guests and pools so their libvirt name is their UUID,
+//! keeping the old name as their display name.
 //!
 //! Runs by itself: at startup and then on a timer, so updating the daemon on
 //! any server migrates that server with no manual step. Each pass is a no-op
@@ -11,15 +11,13 @@
 //! - A **guest** is renamed only while shut off (libvirt's rule, and the only
 //!   safe moment); a running one is retried on a later pass. Its UEFI variable
 //!   store is renamed with it, or it would boot with fresh variables.
-//! - A **network** is renamed only when nothing running uses it: renaming means
-//!   undefining it, which destroys its bridge. Guests that reference it by
-//!   name are rewritten to the new name first (shut-off ones only, for the
-//!   same reason), and it waits until they all can be.
 //! - A **pool** is renamed only when no guest references it by pool name
 //!   (`<source pool=...>`); guests given disks by path, as the app does, are
 //!   unaffected by a pool's name.
-//! - The daemon's own records keyed by name follow: IPAM networks and firewall
-//!   rules for networks and guests.
+//! - Firewall rules for guests follow their new name.
+//!
+//! Networks are not migrated: the daemon owns them now and stores them by
+//! their UUID already, so there is no libvirt network to rename.
 //!
 //! Every step is re-checked against libvirt, not a cached view, and any
 //! failure leaves the resource under its old name for the next pass.
@@ -45,28 +43,6 @@ pub fn plan_domain(name: &str, uuid: &str, shut_off: bool) -> Plan {
         Plan::Wait("running; renamed once it is shut off".into())
     } else {
         Plan::Rename
-    }
-}
-
-/// A network: rename only when every guest that uses it is shut off, since
-/// renaming destroys its bridge and each user must be rewritten to the new
-/// name. `users` is (guest name, shut off) for guests referencing it.
-pub fn plan_network(name: &str, uuid: &str, users: &[(String, bool)]) -> Plan {
-    if name == uuid {
-        return Plan::Done;
-    }
-    let running: Vec<&str> = users
-        .iter()
-        .filter(|(_, off)| !off)
-        .map(|(n, _)| n.as_str())
-        .collect();
-    if running.is_empty() {
-        Plan::Rename
-    } else {
-        Plan::Wait(format!(
-            "in use by running guest(s) {}; renamed once they are shut off",
-            running.join(", ")
-        ))
     }
 }
 
@@ -105,27 +81,7 @@ pub fn renamed_xml(xml: &str, old: &str, new: &str) -> Option<String> {
     Some(out)
 }
 
-/// Point a guest's `<source network='old'/>` at `new`. Returns the rewritten
-/// XML only if something changed.
-pub fn repoint_network(xml: &str, old: &str, new: &str) -> Option<String> {
-    let mut changed = false;
-    let mut out = xml.to_string();
-    for q in ['\'', '"'] {
-        let from = format!("network={q}{}{q}", escape_attr(old));
-        if out.contains(&from) {
-            out = out.replace(&from, &format!("network={q}{}{q}", escape_attr(new)));
-            changed = true;
-        }
-    }
-    changed.then_some(out)
-}
-
-/// Whether a guest's XML references a network or a pool by name.
-pub fn uses_network(xml: &str, net: &str) -> bool {
-    ['\'', '"']
-        .iter()
-        .any(|q| xml.contains(&format!("network={q}{}{q}", escape_attr(net))))
-}
+/// Whether a guest's XML references a pool by name.
 pub fn uses_pool(xml: &str, pool: &str) -> bool {
     ['\'', '"']
         .iter()
@@ -202,18 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn a_network_waits_for_every_running_user() {
-        let users = [("a".to_string(), true), ("b".to_string(), false)];
-        match plan_network("lan", U, &users) {
-            Plan::Wait(why) => assert!(why.contains('b') && !why.contains("a,"), "{why}"),
-            p => panic!("{p:?}"),
-        }
-        assert_eq!(plan_network("lan", U, &[("a".into(), true)]), Plan::Rename);
-        assert_eq!(plan_network("lan", U, &[]), Plan::Rename);
-        assert_eq!(plan_network(U, U, &users), Plan::Done);
-    }
-
-    #[test]
     fn a_pool_named_by_a_guest_is_left_alone() {
         assert_eq!(plan_pool("default", U, &[]), Plan::Rename);
         assert!(matches!(
@@ -240,24 +184,6 @@ mod tests {
         let got = renamed_xml("<domain><name>a&amp;b</name></domain>", "a&b", U).unwrap();
         assert!(got.contains("<title>a&amp;b</title>"), "{got}");
         assert!(renamed_xml("<domain/>", "x", U).is_none());
-    }
-
-    #[test]
-    fn guests_are_repointed_at_the_renamed_network_and_nothing_else() {
-        let x = "<interface type='network'><source network='internet'/></interface>\
-                 <interface type=\"network\"><source network=\"internet\"/></interface>\
-                 <interface type='network'><source network='internet2'/></interface>";
-        let got = repoint_network(x, "internet", U).unwrap();
-        assert_eq!(got.matches(U).count(), 2, "both quote styles: {got}");
-        assert!(
-            got.contains("network='internet2'"),
-            "a longer name is not touched: {got}"
-        );
-        assert!(
-            repoint_network(x, "lan", U).is_none(),
-            "no change, no rewrite"
-        );
-        assert!(uses_network(x, "internet") && !uses_network(x, "inter"));
     }
 
     #[test]
@@ -304,7 +230,6 @@ mod tests {
 use crate::libvirt::with_conn;
 use virt::connect::Connect;
 use virt::domain::Domain;
-use virt::network::Network;
 use virt::storage_pool::StoragePool;
 
 /// Seconds between passes. A guest that was running is renamed within this
@@ -324,7 +249,6 @@ fn everything(_: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Renamed {
     Domain { old: String, new: String },
-    Network { old: String, new: String },
     Pool { old: String, new: String },
 }
 
@@ -362,12 +286,12 @@ pub async fn run(ipam: crate::ipam::server::Ipam) {
 
 /// One pass: rename what can be renamed now, move the records that follow
 /// the name, and report what was renamed.
-pub async fn pass(ipam: &crate::ipam::server::Ipam, only: Filter) -> Result<Vec<Renamed>, String> {
+pub async fn pass(_ipam: &crate::ipam::server::Ipam, only: Filter) -> Result<Vec<Renamed>, String> {
     let done = with_conn(move |c| Ok(rename_all(c, only))).await?;
     // Records keyed by name follow their resource. Done after libvirt, and
     // only for what was actually renamed, so a failed rename moves nothing.
     if !done.is_empty() {
-        follow_records(ipam, &done)?;
+        follow_records(&done)?;
     }
     Ok(done)
 }
@@ -375,7 +299,7 @@ pub async fn pass(ipam: &crate::ipam::server::Ipam, only: Filter) -> Result<Vec<
 fn rename_all(c: &Connect, only: Filter) -> Vec<Renamed> {
     let mut done = vec![];
     let domains = c.list_all_domains(0).unwrap_or_default();
-    // Guest definitions, read once: network and pool plans look at them.
+    // Guest definitions, read once: the pool plan looks at them.
     let guest_xml = |c: &Connect| -> Vec<(String, bool, String)> {
         c.list_all_domains(0)
             .unwrap_or_default()
@@ -389,7 +313,7 @@ fn rename_all(c: &Connect, only: Filter) -> Vec<Renamed> {
             .collect()
     };
 
-    // Guests first: a guest renamed while shut off does not hold a network up.
+    // Guests first: a guest renamed while shut off does not hold a pool's users.
     for d in &domains {
         let (Ok(name), Ok(uuid)) = (d.get_name(), d.get_uuid_string()) else {
             continue;
@@ -407,32 +331,6 @@ fn rename_all(c: &Connect, only: Filter) -> Vec<Renamed> {
                     new: uuid,
                 }),
                 Err(e) => tracing::warn!("migrate: guest {name}: {e}"),
-            },
-        }
-    }
-
-    for n in c.list_all_networks(0).unwrap_or_default() {
-        let (Ok(name), Ok(uuid)) = (n.get_name(), n.get_uuid_string()) else {
-            continue;
-        };
-        if !only(&name) {
-            continue;
-        }
-        let guests = guest_xml(c);
-        let users: Vec<(String, bool)> = guests
-            .iter()
-            .filter(|(_, _, x)| uses_network(x, &name))
-            .map(|(g, off, _)| (g.clone(), *off))
-            .collect();
-        match plan_network(&name, &uuid, &users) {
-            Plan::Done => {}
-            Plan::Wait(why) => tracing::info!("migrate: network {name}: {why}"),
-            Plan::Rename => match rename_network(c, &n, &name, &uuid, &guests) {
-                Ok(()) => done.push(Renamed::Network {
-                    old: name,
-                    new: uuid,
-                }),
-                Err(e) => tracing::warn!("migrate: network {name}: {e}"),
             },
         }
     }
@@ -506,77 +404,6 @@ fn rename_domain(c: &Connect, d: &Domain, old: &str, uuid: &str) -> Result<(), S
     Ok(())
 }
 
-/// A network no running guest uses: redefine it under its UUID (same UUID,
-/// old name as title), point its shut-off users at the new name, and start
-/// it again if it was running. A failure puts the old definition back.
-fn rename_network(
-    c: &Connect,
-    n: &Network,
-    old: &str,
-    uuid: &str,
-    guests: &[(String, bool, String)],
-) -> Result<(), String> {
-    let xml = n
-        .get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE)
-        .map_err(|e| e.to_string())?;
-    let next = renamed_xml(&xml, old, uuid).ok_or("no <name> in the definition")?;
-    let users: Vec<&(String, bool, String)> = guests
-        .iter()
-        .filter(|(_, _, x)| uses_network(x, old))
-        .collect();
-    // Re-checked against libvirt, not the snapshot.
-    for (g, _, _) in &users {
-        if crate::libvirt::domain(c, g).is_ok_and(|d| d.is_active().unwrap_or(true)) {
-            return Err(format!("guest {g} started; next pass"));
-        }
-    }
-    let was_active = n.is_active().unwrap_or(false);
-    let autostart = n.get_autostart().unwrap_or(false);
-    if was_active {
-        n.destroy().map_err(|e| format!("stop: {e}"))?;
-    }
-    n.undefine().map_err(|e| {
-        if was_active {
-            let _ = n.create();
-        }
-        format!("undefine: {e}")
-    })?;
-    let restore = |why: String| -> String {
-        if let Ok(back) = Network::define_xml(c, &xml) {
-            let _ = back.set_autostart(autostart);
-            if was_active {
-                let _ = back.create();
-            }
-        }
-        why
-    };
-    let new = Network::define_xml(c, &next).map_err(|e| restore(format!("define: {e}")))?;
-    // Guests follow. A guest that cannot be rewritten puts everything back:
-    // leaving it pointing at a name that no longer exists would stop it
-    // booting.
-    let mut rewritten: Vec<(String, String)> = vec![];
-    for (g, _, gx) in users {
-        let Some(nx) = repoint_network(gx, old, uuid) else {
-            continue;
-        };
-        if let Err(e) = Domain::define_xml(c, &nx) {
-            for (_, orig) in &rewritten {
-                let _ = Domain::define_xml(c, orig);
-            }
-            let _ = new.undefine();
-            return Err(restore(format!("guest {g}: {e}")));
-        }
-        rewritten.push((g.clone(), gx.clone()));
-    }
-    let _ = new.set_autostart(autostart);
-    if was_active {
-        new.create()
-            .map_err(|e| format!("renamed, but starting it failed: {e}"))?;
-        crate::api::networks::reattach_taps(c, &new);
-    }
-    Ok(())
-}
-
 /// A pool no guest names: redefine it under its UUID, keeping it running.
 /// Its display name goes to `titles`, since a pool has no `<title>`.
 fn rename_pool(c: &Connect, p: &StoragePool, old: &str, uuid: &str) -> Result<(), String> {
@@ -623,32 +450,15 @@ fn rename_pool(c: &Connect, p: &StoragePool, old: &str, uuid: &str) -> Result<()
     Ok(())
 }
 
-/// Move the daemon's name-keyed records to the new names: IPAM networks, and
-/// firewall rules for networks and guests.
-fn follow_records(ipam: &crate::ipam::server::Ipam, done: &[Renamed]) -> Result<(), String> {
-    {
-        let mut s = ipam.lock();
-        let mut changed = false;
-        for r in done {
-            if let Renamed::Network { old, new } = r {
-                let mut m: HashMap<String, _> =
-                    std::mem::take(&mut s.networks).into_iter().collect();
-                changed |= rekey(&mut m, old, new);
-                s.networks = m.into_iter().collect();
-            }
-        }
-        if changed {
-            ipam.save(&s)?;
-        }
-    }
+/// Move the daemon's name-keyed records to the new names: firewall rules for
+/// guests. Network definitions are the daemon's own and already keyed by UUID.
+fn follow_records(done: &[Renamed]) -> Result<(), String> {
     let path = std::path::Path::new(crate::firewall::FIREWALL_PATH);
     let mut fw = crate::firewall::load(path)?;
     let mut changed = false;
     for r in done {
-        match r {
-            Renamed::Network { old, new } => changed |= rekey(&mut fw.networks, old, new),
-            Renamed::Domain { old, new } => changed |= rekey(&mut fw.vms, old, new),
-            Renamed::Pool { .. } => {}
+        if let Renamed::Domain { old, new } = r {
+            changed |= rekey(&mut fw.vms, old, new);
         }
     }
     if changed {
@@ -671,12 +481,11 @@ mod live {
 
     #[tokio::test]
     #[ignore = "needs root and a reachable qemu:///system"]
-    async fn migrates_a_guest_its_network_and_a_pool() {
+    async fn migrates_a_guest_and_a_pool() {
         const NV: &str = "/var/lib/libvirt/qemu/nvram/migprobe-vm_VARS.fd";
         let dir = "/tmp/migprobe-pool";
         std::fs::create_dir_all(dir).unwrap();
-        let (vm_u, net_u, pool_u) = with_conn(move |c| {
-            let net = Network::define_xml(c, "<network><name>migprobe-net</name></network>")?;
+        let (vm_u, pool_u) = with_conn(move |c| {
             let pool = StoragePool::define_xml(
                 c,
                 &format!("<pool type='dir'><name>migprobe-pool</name><target><path>{dir}</path></target></pool>"),
@@ -689,35 +498,30 @@ mod live {
                      <os><type arch='x86_64' machine='q35'>hvm</type>\\
                      <loader readonly='yes' type='pflash' format='raw'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>\\
                      <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd' format='raw'>{NV}</nvram></os>\\
-                     <features><acpi/></features><devices>\\
-                     <interface type='network'><source network='migprobe-net'/><model type='virtio'/></interface>\\
-                     </devices></domain>"
+                     <features><acpi/></features><devices></devices></domain>"
                 ),
             )?;
-            Ok((vm.get_uuid_string()?, net.get_uuid_string()?, pool.get_uuid_string()?))
+            Ok((vm.get_uuid_string()?, pool.get_uuid_string()?))
         })
         .await
         .expect("define probes");
         std::fs::write(NV, b"probe-vars").unwrap();
 
-        // The daemon's own records, keyed by the old names, in a scratch IPAM.
-        let scratch = std::env::temp_dir().join("migprobe-ipam.json");
+        // A scratch IPAM, so the pass never touches the host's own networks.
+        let scratch = std::env::temp_dir().join("migprobe-networks.json");
         let _ = std::fs::remove_file(&scratch);
-        let ipam = crate::ipam::server::Ipam::load(scratch.clone()).unwrap();
+        let ipam = crate::ipam::server::Ipam::load(scratch.clone(), std::env::temp_dir()).unwrap();
 
         let first = pass(&ipam, only_probes).await;
         let second = pass(&ipam, only_probes).await;
 
-        let (v2, n2, p2) = (vm_u.clone(), net_u.clone(), pool_u.clone());
+        let (v2, p2) = (vm_u.clone(), pool_u.clone());
         let after = with_conn(move |c| {
             let vm = crate::libvirt::domain(c, &v2)?;
-            let net = crate::libvirt::network(c, &n2)?;
             let pool = crate::libvirt::pool(c, &p2)?;
             Ok((
                 vm.get_name()?,
                 vm.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?,
-                net.get_name()?,
-                net.get_xml_desc(0)?,
                 pool.get_name()?,
             ))
         })
@@ -728,13 +532,10 @@ mod live {
         let pool_title = crate::titles::get(&pool_u);
 
         // Clean up whatever state it ended in, before asserting.
-        let (v3, n3, p3) = (vm_u.clone(), net_u.clone(), pool_u.clone());
+        let (v3, p3) = (vm_u.clone(), pool_u.clone());
         let _ = with_conn(move |c| {
             if let Ok(d) = crate::libvirt::domain(c, &v3) {
                 let _ = d.undefine_flags(virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM);
-            }
-            if let Ok(n) = crate::libvirt::network(c, &n3) {
-                let _ = n.undefine();
             }
             if let Ok(p) = crate::libvirt::pool(c, &p3) {
                 let _ = p.undefine();
@@ -749,20 +550,16 @@ mod live {
         let _ = std::fs::remove_file(&scratch);
 
         let first = first.expect("first pass");
-        assert_eq!(first.len(), 3, "all three renamed: {first:?}");
+        assert_eq!(first.len(), 2, "guest and pool renamed: {first:?}");
         assert!(
             second.expect("second pass").is_empty(),
             "a second pass is a no-op"
         );
-        let (vm_name, vm_xml, net_name, net_xml, pool_name) = after.expect("found by UUID");
+        let (vm_name, vm_xml, pool_name) = after.expect("found by UUID");
         assert_eq!(vm_name, vm_u, "guest named by its UUID");
         assert!(
             vm_xml.contains("<title>migprobe-vm</title>"),
             "old name kept as title:\n{vm_xml}"
-        );
-        assert!(
-            vm_xml.contains(&format!("network='{net_u}'")),
-            "guest points at the renamed network:\n{vm_xml}"
         );
         assert!(
             vm_xml.contains(&new_nv),
@@ -774,8 +571,6 @@ mod live {
             "and its contents kept"
         );
         assert!(!old_nv_left, "the old store file is gone");
-        assert_eq!(net_name, net_u);
-        assert!(net_xml.contains("<title>migprobe-net</title>"), "{net_xml}");
         assert_eq!(pool_name, pool_u);
         assert_eq!(
             pool_title.as_deref(),

@@ -11,6 +11,8 @@ use tokio::sync::Mutex;
 
 use super::ApiError;
 use crate::firewall::{self, FirewallStore, NetworkFirewall, PolicySet, VmFirewall};
+use crate::ipam::server::Ipam;
+use crate::ipam::store::Mode;
 
 #[derive(Clone)]
 pub struct FirewallState {
@@ -18,19 +20,17 @@ pub struct FirewallState {
     /// Serialises save + re-apply so concurrent PUTs cannot interleave the
     /// persisted file and the live ruleset.
     pub lock: Arc<Mutex<()>>,
-}
-
-impl Default for FirewallState {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// The stored network definitions: what a network is, which bridge it
+    /// owns, and whether it is up all come from here, not from libvirt.
+    pub ipam: Ipam,
 }
 
 impl FirewallState {
-    pub fn new() -> Self {
+    pub fn new(ipam: Ipam) -> Self {
         Self {
             path: firewall::FIREWALL_PATH.into(),
             lock: Arc::new(Mutex::new(())),
+            ipam,
         }
     }
 }
@@ -53,10 +53,22 @@ fn save_store(state: &FirewallState, store: &FirewallStore) -> Result<(), ApiErr
     firewall::save(&state.path, store).map_err(ApiError::internal)
 }
 
+/// The stored key a path segment names (a UUID, else its title), or 404. A
+/// title link then reaches the same rules as the UUID key.
+fn network_key(state: &FirewallState, seg: &str) -> Result<String, ApiError> {
+    state
+        .ipam
+        .resolve_key(seg)
+        .ok_or_else(|| ApiError::not_found(format!("network '{seg}' is not managed here")))
+}
+
 async fn get_network(
     State(state): State<FirewallState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    // An unknown network is a 404, like every other network route; a network
+    // that exists but has no rules still answers the empty default.
+    let name = network_key(&state, &name)?;
     let store = load_store(&state)?;
     Ok(Json(json!(
         store.networks.get(&name).cloned().unwrap_or_default()
@@ -103,13 +115,21 @@ async fn put_network(
 
     // Rules are scoped to this network's subnet, so a typo'd name would
     // silently persist but never apply. Fail fast instead.
-    let n = name.clone();
-    crate::libvirt::with_conn(move |c| {
-        crate::libvirt::network(c, &n).map(|_| ())?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| ApiError::not_found(format!("network '{name}': {e}")))?;
+    let name = network_key(&state, &name)?;
+    let net = state.ipam.lock().networks.get(&name).cloned();
+    let Some(net) = net else {
+        return Err(ApiError::not_found(format!(
+            "network '{name}' is not managed here"
+        )));
+    };
+    // A network this host does not serve (an operator's bridge, or one with no
+    // subnet) renders no rules at all: `apply_store` skips it. Saving here
+    // would answer "applied" for rules that never reach nftables.
+    if !net.is_served() {
+        return Err(ApiError::bad_request(format!(
+            "network '{name}' has no IPv4 subnet served by this host, so it has no firewall rules: a bridge network's policy belongs to its own bridge"
+        )));
+    }
 
     let mut fw = NetworkFirewall::default();
     for r in &req.rules {
@@ -128,7 +148,7 @@ async fn put_network(
         store.networks.insert(name.clone(), fw);
     }
     save_store(&state, &store)?;
-    apply_store(store)
+    apply_store(&state.ipam, &store)
         .await
         .map_err(|e| ApiError::internal(format!("rules saved, apply failed: {e}")))?;
     Ok(Json(json!({"name": name, "saved": true, "applied": true})))
@@ -165,18 +185,27 @@ async fn put_vm(
         store.vms.insert(name.clone(), fw);
     }
     save_store(&state, &store)?;
-    apply_store(store)
+    apply_store(&state.ipam, &store)
         .await
         .map_err(|e| ApiError::internal(format!("rules saved, apply failed: {e}")))?;
     Ok(Json(json!({"name": name, "saved": true, "applied": true})))
 }
 
-/// Rebuild the whole `virt-man` nftables table from the persisted store, plus
-/// the live libvirt subnets and domain MACs (rules are scoped to them, so they
-/// have to be read at apply time).
-pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
+/// Rebuild the whole `virt-man` nftables table from the persisted store.
+///
+/// The networks come from the daemon's own definitions: each one's subnet,
+/// mode, bridge and whether its bridge is up. Guests still come from libvirt,
+/// since a VM's rules are scoped to the MACs it is defined with. All of it has
+/// to be read at apply time — the rules match live identities.
+///
+/// The network API calls this on every lifecycle change (start, stop, create,
+/// delete, edit); nothing else re-installs a network's rules.
+pub async fn apply_store(ipam: &Ipam, store: &FirewallStore) -> Result<(), String> {
     struct Net {
         subnet: String,
+        mode: Mode,
+        bridge: String,
+        active: bool,
         fw: NetworkFirewall,
     }
     struct Vm {
@@ -184,23 +213,36 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
         fw: VmFirewall,
     }
 
-    let (nets, vms) = crate::libvirt::with_conn(move |c| {
-        let mut nets: Vec<Net> = Vec::new();
-        for n in c.list_all_networks(0)? {
-            let name = n.get_name().unwrap_or_default();
-            let xml = n.get_xml_desc(0).unwrap_or_default();
-            if let Some(cidr) = crate::api::networks::network_subnet(&xml)
-                && let Some(subnet) = firewall::network_prefix(&cidr)
-            {
-                let fw = store.networks.get(&name).cloned().unwrap_or_default();
-                nets.push(Net { subnet, fw });
-            }
-        }
+    // Snapshot the definitions and drop the lock: nothing below may hold it
+    // across an await.
+    let nets: Vec<Net> = {
+        let s = ipam.lock();
+        s.networks
+            .iter()
+            .filter_map(|(id, net)| {
+                Some(Net {
+                    subnet: net.subnet()?,
+                    mode: net.mode,
+                    bridge: crate::hostnet::bridge_for(net, id),
+                    // The bridge, not dnsmasq: rules belong to the interface,
+                    // and a dnsmasq restart must not drop every rule.
+                    active: crate::hostnet::bridge_up(net, id),
+                    fw: store.networks.get(id).cloned().unwrap_or_default(),
+                })
+            })
+            .collect()
+    };
 
+    let vm_store = store.vms.clone();
+    // Per-VM rules need the guest list. With libvirtd down that read fails, and
+    // dropping the whole ruleset (or the network half with it) would take every
+    // network's NAT and isolation away over an unrelated outage: apply the
+    // network rules and log the gap, and the next apply restores the VM rules.
+    let vms: Vec<Vm> = match crate::libvirt::with_conn(move |c| {
         let mut vms: Vec<Vm> = Vec::new();
         for d in crate::libvirt::all_domains(c, 0) {
             let name = d.get_name().unwrap_or_default();
-            if let Some(fw) = store.vms.get(&name).cloned() {
+            if let Some(fw) = vm_store.get(&name).cloned() {
                 let xml = d
                     .get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)
                     .unwrap_or_default();
@@ -210,14 +252,26 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
                 });
             }
         }
-        Ok((nets, vms))
+        Ok(vms)
     })
-    .await?;
+    .await
+    {
+        Ok(vms) => vms,
+        Err(e) => {
+            tracing::warn!(
+                "firewall: cannot read guests, applying network rules only (per-guest rules are off until the next apply): {e}"
+            );
+            Vec::new()
+        }
+    };
 
     let rendered_nets: Vec<firewall::RenderedNet> = nets
         .iter()
         .map(|n| firewall::RenderedNet {
             subnet: n.subnet.clone(),
+            mode: n.mode,
+            bridge: n.bridge.clone(),
+            active: n.active,
             rules: &n.fw.rules,
             forwards: &n.fw.forwards,
             policy: n.fw.policy,
@@ -233,16 +287,12 @@ pub async fn apply_store(store: FirewallStore) -> Result<(), String> {
         .collect();
     let script = firewall::render_ruleset(&rendered_nets, &rendered_vms);
     firewall::apply_script(&script).await?;
-    // The script's own accepts cannot save a forwarded packet from libvirt's
-    // per-network reject — a verdict in one chain does not stop a later chain
-    // of the same hook from rejecting — so DNAT'd traffic is admitted inside
-    // libvirt's chain too. Done here so a rule change takes effect at once
-    // rather than on the supervisor's next pass; the supervisor re-asserts it
-    // because libvirt rewrites that chain on a network restart.
-    for n in &nets {
-        if let Err(e) = firewall::allow_forwarded(&n.subnet).await {
-            tracing::warn!("firewall: {e}");
-        }
+    // Forwarding is only turned on once the NAT rules exist: with a bare
+    // bridge and no masquerade, a forwarded packet would leave with a private
+    // source address. It is never turned off — the sysctl is host-wide and
+    // shared with libvirt's LXC driver, Docker and anything else on the host.
+    if nets.iter().any(|n| n.active && n.mode == Mode::Nat) {
+        crate::hostnet::enable_ip_forward()?;
     }
     Ok(())
 }
@@ -287,7 +337,8 @@ fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::domain_macs;
+    use super::*;
+    use axum::response::IntoResponse;
 
     #[test]
     fn macs_are_parsed_from_domain_xml() {
@@ -304,5 +355,89 @@ mod tests {
     #[test]
     fn a_domain_without_interfaces_yields_no_macs() {
         assert!(domain_macs("<domain><devices/></domain>").is_empty());
+    }
+
+    fn state_with(dir: &std::path::Path, id: &str, xml: &str) -> FirewallState {
+        let ipam = Ipam::load(dir.join("networks.json"), dir.to_path_buf()).unwrap();
+        ipam.lock()
+            .networks
+            .insert(id.into(), crate::ipam::store::import(xml).unwrap());
+        FirewallState {
+            path: dir.join("firewall.json"),
+            lock: Arc::new(Mutex::new(())),
+            ipam,
+        }
+    }
+
+    /// A bridge network (or one without a subnet) is skipped by `apply_store`,
+    /// so a save that claimed "applied" would be a lie. The title in the path
+    /// also pins the key/title resolution: an unresolved name would be a 404.
+    #[tokio::test]
+    async fn a_network_without_a_subnet_refuses_firewall_rules() {
+        let dir = std::env::temp_dir().join(format!("fw-nosubnet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = state_with(
+            &dir,
+            "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00",
+            "<network><title>Lab</title><forward mode='bridge'/><bridge name='br0'/></network>",
+        );
+        let err = put_network(
+            State(state.clone()),
+            Path("Lab".into()),
+            Json(NetworkReq {
+                rules: Vec::new(),
+                forwards: Vec::new(),
+                policy: PolicySet::default(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.into_response().status(), 400);
+        assert!(!state.path.exists(), "a refused write saves nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_title_link_reaches_the_same_rules_and_an_unknown_network_is_a_404() {
+        let dir = std::env::temp_dir().join(format!("fw-title-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00";
+        let state = state_with(
+            &dir,
+            id,
+            "<network><title>Lab</title><ip address='10.9.0.1' netmask='255.255.255.0'/></network>",
+        );
+        let mut store = crate::firewall::FirewallStore::default();
+        store.networks.insert(
+            id.into(),
+            crate::firewall::NetworkFirewall {
+                rules: vec![crate::firewall::Rule {
+                    direction: "in".into(),
+                    action: "accept".into(),
+                    proto: "tcp".into(),
+                    dst_port: "22".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        crate::firewall::save(&state.path, &store).unwrap();
+
+        let Json(by_title) = get_network(State(state.clone()), Path("Lab".into()))
+            .await
+            .ok()
+            .expect("the title resolves");
+        assert_eq!(by_title["rules"][0]["dst_port"], "22");
+        let Json(by_key) = get_network(State(state.clone()), Path(id.into()))
+            .await
+            .ok()
+            .expect("the key resolves");
+        assert_eq!(by_key, by_title);
+
+        let err = get_network(State(state), Path("nope".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.into_response().status(), 404);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

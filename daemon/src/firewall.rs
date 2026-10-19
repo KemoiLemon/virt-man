@@ -3,9 +3,8 @@
 //! libvirt has no network-level firewall primitive (nwfilters apply to domain
 //! interfaces and have no "forward" direction or port forwarding), so these
 //! rules are enforced directly on the host with nftables. The daemon renders
-//! the whole set as one atomic `nft -f` script in its own `virt-man` table,
-//! which is separate from libvirt's `libvirt_network` table so the two never
-//! fight. Rules persist in `/etc/virt-man-daemon/firewall.json` and are re-applied at
+//! the whole set as one atomic `nft -f` script in its own `virt-man` table.
+//! Rules persist in `/etc/virt-man-daemon/firewall.json` and are re-applied at
 //! startup (nftables itself is not persistent across reboot).
 //!
 //! Direction semantics, mirroring a firewall appliance:
@@ -15,9 +14,19 @@
 //!
 //! Port forwards are DNAT rules on the prerouting hook: a WAN destination
 //! address (0.0.0.0 = any, excluding the guest subnet) and port are rewritten
-//! to an internal address and port. libvirt's existing postrouting masquerade
-//! handles the reply path.
+//! to an internal address and port. The `vm-postrouting` chain masquerades a
+//! NAT network's outbound traffic, so replies find their way back.
+//!
+//! The table also owns what libvirt's network driver used to: a per-network
+//! accept/drop pair on the network's bridge (NAT forwards its guests, an
+//! isolated network drops their outbound traffic), with the masquerade for the
+//! NAT case. Those base rules are emitted after the explicit ones, so an
+//! operator's own rule for the same traffic wins.
+//!
+//! The table is IPv4-only, like the daemon's IPAM. IPv6 is neither filtered nor
+//! isolated here, and no such claim is made.
 
+use crate::ipam::store::Mode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -234,19 +243,6 @@ fn valid_port(p: u16) -> Result<u16, String> {
     Ok(p)
 }
 
-/// The network address of a CIDR (192.168.167.1/24 -> 192.168.167.0/24).
-pub fn network_prefix(cidr: &str) -> Option<String> {
-    let (addr, bits) = cidr.split_once('/')?;
-    let ip: Ipv4Addr = addr.parse().ok()?;
-    let prefix: u8 = bits.parse().ok()?;
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    };
-    Some(format!("{}/{prefix}", Ipv4Addr::from(u32::from(ip) & mask)))
-}
-
 /// Default action for traffic not matched by any explicit rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -290,6 +286,13 @@ impl PolicySet {
 /// direction matches against. `subnet` is a network CIDR like 192.168.167.0/24.
 pub struct RenderedNet<'a> {
     pub subnet: String,
+    /// How the network reaches the world; decides its automatic base rules.
+    pub mode: Mode,
+    /// The bridge the guests are attached to.
+    pub bridge: String,
+    /// Whether the network is actually up: base rules exist only then, so a
+    /// stopped network leaves nothing behind that could match another bridge.
+    pub active: bool,
     pub rules: &'a [Rule],
     pub forwards: &'a [Forward],
     pub policy: PolicySet,
@@ -310,11 +313,27 @@ pub struct RenderedVm<'a> {
 /// ACCEPT) follow, scoped exactly like the rules they are the default for.
 /// The chain base policy stays ACCEPT, so traffic outside every configured
 /// scope falls through unharmed.
+///
+/// Every rule of a network that is not up is omitted, so a stopped network can
+/// neither claim a WAN port nor match traffic that now belongs elsewhere.
 pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
     let mut rules = Vec::new();
     let mut defaults = Vec::new();
     let mut forwards = Vec::new();
-    for n in nets {
+    let mut base = Vec::new();
+    let mut masquerade = Vec::new();
+
+    // Every bridge whose guests must never reach another network's guests.
+    // A flat rule list means an accept for one network would otherwise end
+    // evaluation before another network's drop is reached, so each accept for
+    // our own traffic carries a guard against all of these.
+    let guest_bridges: Vec<&str> = nets
+        .iter()
+        .filter(|n| n.active && n.mode != Mode::Bridge)
+        .map(|n| n.bridge.as_str())
+        .collect();
+
+    for n in nets.iter().filter(|n| n.active) {
         for r in n.rules {
             if let Some(line) = render_rule(r, &n.subnet) {
                 rules.push(line);
@@ -325,6 +344,12 @@ pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
             if let Some(line) = render_forward(f, &n.subnet) {
                 forwards.push(line);
             }
+        }
+        // After the explicit rules and their defaults: those are the
+        // operator's verdict for this traffic and must come first.
+        base.extend(net_base_rules(n, &guest_bridges));
+        if let Some(line) = net_masquerade(n) {
+            masquerade.push(line);
         }
     }
     // A VM with no NIC cannot be matched by MAC, so skip it rather than emit
@@ -339,7 +364,7 @@ pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
     let mut out = String::from("table ip virt-man {\n");
     out.push_str("  chain vm-forward {\n");
     out.push_str("    type filter hook forward priority filter - 1; policy accept;\n");
-    for r in rules.iter().chain(defaults.iter()) {
+    for r in rules.iter().chain(defaults.iter()).chain(base.iter()) {
         out.push_str("    ");
         out.push_str(r);
         out.push('\n');
@@ -353,8 +378,86 @@ pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
         out.push('\n');
     }
     out.push_str("  }\n");
+    out.push_str("  chain vm-postrouting {\n");
+    out.push_str("    type nat hook postrouting priority srcnat; policy accept;\n");
+    for m in masquerade {
+        out.push_str("    ");
+        out.push_str(&m);
+        out.push('\n');
+    }
+    out.push_str("  }\n");
     out.push_str("}\n");
     out
+}
+
+/// An nft match that excludes every managed guest bridge: `oifname != "vbr1"`
+/// for one, or a set for several. None when there is nothing to exclude.
+fn not_guest_bridge(field: &str, bridges: &[&str]) -> Option<String> {
+    match bridges {
+        [] => None,
+        [one] => Some(format!("{field} != \"{one}\"")),
+        many => {
+            let set: Vec<String> = many.iter().map(|b| format!("\"{b}\"")).collect();
+            Some(format!("{field} != {{ {} }}", set.join(", ")))
+        }
+    }
+}
+
+/// The automatic per-network forwarding rules for a network that is up.
+///
+/// This is the half libvirt's network driver used to install: a NAT network
+/// lets its guests out and accepts only replies and DNAT'd connections back
+/// in; an isolated network drops guest traffic in both directions; a bridge
+/// network is the operator's, and the operator's firewall owns its policy.
+///
+/// The accepts are guarded against every other managed bridge, because one
+/// flat chain cannot "return to the network's own rules": an unguarded
+/// `iifname <nat> accept` would admit a packet on its way to an isolated
+/// network's guest, which the isolated network's `oifname <iso> drop` would
+/// then never see.
+fn net_base_rules(n: &RenderedNet, guest_bridges: &[&str]) -> Vec<String> {
+    if !n.active {
+        return Vec::new();
+    }
+    let b = &n.bridge;
+    let out_guard = not_guest_bridge("oifname", guest_bridges);
+    let in_guard = not_guest_bridge("iifname", guest_bridges);
+    let guard = |g: &Option<String>| g.as_deref().map(|g| format!("{g} ")).unwrap_or_default();
+    match n.mode {
+        Mode::Nat => vec![
+            format!("iifname \"{b}\" {}accept", guard(&out_guard)),
+            format!(
+                "oifname \"{b}\" {}ct state established,related accept",
+                guard(&in_guard)
+            ),
+            format!("oifname \"{b}\" {}ct status dnat accept", guard(&in_guard)),
+            format!("oifname \"{b}\" drop"),
+        ],
+        // `drop`, not `reject`: a guest sees a timeout as it would on a dead
+        // link, and the host sends no ICMP it would have to route back. The
+        // DNAT accept sits between the drops so an explicit port forward
+        // still reaches its guest.
+        Mode::Isolated => vec![
+            format!("iifname \"{b}\" drop"),
+            format!("oifname \"{b}\" {}ct status dnat accept", guard(&in_guard)),
+            format!("oifname \"{b}\" drop"),
+        ],
+        Mode::Bridge => Vec::new(),
+    }
+}
+
+/// The masquerade line for a NAT network that is up: guest traffic leaving by
+/// any other interface is source-translated to the host's address. Traffic
+/// that is already going to a guest (`ip daddr`) is excluded, so two guest
+/// networks on one host do not get hairpinned through the host's address, and
+/// multicast in 224.0.0.0/24 is left alone.
+fn net_masquerade(n: &RenderedNet) -> Option<String> {
+    (n.mode == Mode::Nat && n.active).then(|| {
+        format!(
+            "ip saddr {} ip daddr != {} ip daddr != 224.0.0.0/24 oifname != \"{}\" masquerade",
+            n.subnet, n.subnet, n.bridge
+        )
+    })
 }
 
 /// Default-policy lines for a network. Only non-ACCEPT policies need a rule:
@@ -483,18 +586,13 @@ fn render_forward(f: &Forward, subnet: &str) -> Option<String> {
 }
 
 /// Apply a ruleset with `nft -f` (atomic: a syntax error aborts the whole
-/// script). A prior `virt-man` table is flushed first so removing a rule or a
-/// whole network does not leave stale entries behind.
-pub async fn apply_script(script: &str) -> Result<(), String> {
+/// script and leaves the previous table in force). One transaction claims and
+/// flushes the table, then fills it, so there is never a moment with no rules.
+pub async fn apply_script(rendered: &str) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
-    // Ignore failure: the table may not exist yet.
-    let _ = Command::new("nft")
-        .args(["delete", "table", "ip", "virt-man"])
-        .output()
-        .await;
-
+    let script = apply_script_input(rendered);
     let mut child = Command::new("nft")
         .args(["-f", "-"])
         .stdin(std::process::Stdio::piped())
@@ -520,312 +618,12 @@ pub async fn apply_script(script: &str) -> Result<(), String> {
     }
 }
 
-/// libvirt's chain for traffic entering a network, on its **iptables**
-/// backend. It accepts replies to guest-initiated flows and then rejects
-/// everything else, per network.
-const LIBVIRT_NET_IN: &str = "LIBVIRT_FWI";
-
-/// Where libvirt's **nftables** backend keeps the same filter: a table of its
-/// own, with the entering-traffic rules in `guest_input`.
-const LIBVIRT_NFT_TABLE: &str = "libvirt_network";
-const LIBVIRT_NFT_CHAIN: &str = "guest_input";
-
-/// Marks the rules we insert, so re-asserting cannot stack copies and a later
-/// reader can tell ours from libvirt's own.
-///
-/// The surrounding quotes are part of the value, not decoration: nft takes a
-/// comment as a single quoted token, so passing it bare splits it into extra
-/// arguments and nft fails with "syntax error, unexpected dnat" — after which
-/// forwarding is still broken and nothing looks wrong from our side. Both
-/// consumers want the quotes included (nft's grammar, and the listed output
-/// where the marker is recognised), so they live here rather than at the call
-/// site.
-const OUR_MARK: &str = "\"virt-man dnat\"";
-
-/// [`OUR_MARK`] without its surrounding quotes, for matching what `nft list`
-/// prints back.
-fn our_mark_quoted() -> String {
-    OUR_MARK.trim_matches('"').to_string()
-}
-
-/// What one libvirt firewall backend had to say:
-/// - `Ok(true)`  — this backend is in use and forwards are now admitted;
-/// - `Ok(false)` — this backend is not in use here, so nothing to do;
-/// - `Err`       — the backend is in use and could not be satisfied.
-type Backend = Result<bool, String>;
-
-/// The iptables arguments that admit a network's DNAT'd traffic through
-/// libvirt's filter. Pure, so the rule's shape is unit-testable.
-///
-/// `--ctstate DNAT` is the whole point: it matches only connections that were
-/// destination-translated, i.e. exactly the port forwards, and leaves
-/// libvirt's filtering of everything else untouched.
-pub fn forward_accept_rule(subnet: &str) -> Vec<String> {
-    [
-        "-d",
-        subnet,
-        "-m",
-        "conntrack",
-        "--ctstate",
-        "DNAT",
-        "-j",
-        "ACCEPT",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-/// The nftables arguments for the same job. Pure, so it is unit-testable.
-///
-/// The matcher is spelled `ct status dnat` here, not `ct state dnat`:
-/// nftables keeps the translation flags in the conntrack *status* field, and
-/// rejects `ct state dnat` outright ("Could not parse conntrack state"), where
-/// iptables accepts it as a pseudo-state. Same meaning, different spelling, so
-/// it is worth pinning: this one fails loudly when wrong, but a reader
-/// "unifying" the two spellings would break it.
-pub fn forward_accept_nft(subnet: &str) -> Vec<String> {
-    [
-        "insert",
-        "rule",
-        "ip",
-        LIBVIRT_NFT_TABLE,
-        LIBVIRT_NFT_CHAIN,
-        "ip",
-        "daddr",
-        subnet,
-        "ct",
-        "status",
-        "dnat",
-        "counter",
-        "accept",
-        "comment",
-        OUR_MARK,
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-/// Whether a rule of ours that the backend already has can admit anything at
-/// all: it must sit **ahead of** libvirt's reject in the rule order.
-///
-/// Both backends list a chain in rule order, and that order is the whole
-/// question — libvirt *inserts* its accept+reject at the head of its chain
-/// whenever it (re)applies a network, i.e. on a network start and on a
-/// libvirtd restart. That pushes our rule below the reject, and `iptables -C`
-/// or a `contains` on the nft listing only asks whether the rule exists, so
-/// they keep answering "already there" while every forwarded connection is
-/// rejected: a forward's first packet is NEW, so the reject throws it away
-/// before our accept is ever consulted.
-///
-/// So a rule that is present but behind the reject has to be *moved*, not left
-/// alone — that is the difference between "the fix is applied" and "the fix is
-/// in force".
-fn ahead_of_reject(listing: &str, ours: impl Fn(&str) -> bool) -> bool {
-    for line in listing.lines() {
-        if ours(line) {
-            return true;
-        }
-        // libvirt's own rejection, spelled `-j REJECT` or `reject with icmp`.
-        if line.contains("reject") || line.contains("-j DROP") {
-            return false;
-        }
-    }
-    false
-}
-
-/// The nft rule handles on the lines matching `mark`, so a stray or mis-placed
-/// copy can be removed before ours is inserted again.
-fn nft_handles(listing: &str, mark: &str) -> Vec<u64> {
-    listing
-        .lines()
-        .filter(|l| l.contains(mark))
-        .filter_map(|l| l.rsplit("# handle ").next()?.trim().parse().ok())
-        .collect()
-}
-
-/// Admit a network's DNAT'd traffic into libvirt's **iptables** filter.
-async fn allow_via_iptables(subnet: &str) -> Backend {
-    use tokio::process::Command;
-    let rule = forward_accept_rule(subnet);
-
-    // -S lists the chain in order, in one call, which answers both questions:
-    // whether our rule exists and whether it is ahead of the reject. Asking
-    // with -C instead only answered the first, which is how a rule that
-    // libvirt had pushed behind its reject kept looking applied.
-    let Ok(listing) = Command::new("iptables")
-        .args(["-S", LIBVIRT_NET_IN])
-        .output()
-        .await
-    else {
-        // No iptables at all, so libvirt's chains cannot exist either.
-        return Ok(false);
-    };
-    if !listing.status.success() {
-        // No such chain: this host's libvirt does not filter through
-        // iptables — most likely it uses the nftables backend, which the
-        // other path handles.
-        return Ok(false);
-    }
-    let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
-    let prefix = format!("-A {LIBVIRT_NET_IN} ");
-    let ours =
-        |l: &str| l.starts_with(&prefix) && l.contains("--ctstate DNAT") && l.contains(subnet);
-    let copies = listing.lines().filter(|l| ours(l)).count();
-    if copies == 1 && ahead_of_reject(&listing, ours) {
-        // In force, which is the common case on every pass after the first.
-        return Ok(true);
-    }
-
-    // Missing, behind the reject, or more than one copy: drop every copy, then
-    // put a single one at the head. Exactly one is what counts: a copy behind
-    // the reject admits nothing, and an extra copy is one nothing will ever
-    // remove, because finding ours ahead of the reject is what stops this pass
-    // from looking again.
-    for _ in 0..copies {
-        let _ = Command::new("iptables")
-            .arg("-D")
-            .arg(LIBVIRT_NET_IN)
-            .args(&rule)
-            .output()
-            .await;
-    }
-
-    let out = Command::new("iptables")
-        .arg("-I")
-        .arg(LIBVIRT_NET_IN)
-        .arg("1")
-        .args(&rule)
-        .output()
-        .await
-        .map_err(|e| format!("iptables: {e}"))?;
-    if out.status.success() {
-        tracing::info!(
-            "firewall: admitting DNAT'd traffic to {subnet} ahead of libvirt's reject (iptables)"
-        );
-        return Ok(true);
-    }
-    let err = String::from_utf8_lossy(&out.stderr);
-    if err.contains("No chain") {
-        return Ok(false);
-    }
-    Err(format!("iptables -I {LIBVIRT_NET_IN}: {}", err.trim()))
-}
-
-/// Admit a network's DNAT'd traffic into libvirt's **nftables** filter.
-async fn allow_via_nftables(subnet: &str) -> Backend {
-    use tokio::process::Command;
-
-    // Reading the chain serves twice over: it says whether this host uses the
-    // nftables backend at all, and where our rule is. `-a` is what makes the
-    // listing carry each rule's handle, which is the only way to delete one:
-    // nft has no "delete the rule matching this spec" the way iptables does,
-    // so without it a mis-placed copy cannot be removed. The option has to
-    // precede the command, or nft rejects the whole line.
-    let Ok(current) = Command::new("nft")
-        .args([
-            "-a",
-            "list",
-            "chain",
-            "ip",
-            LIBVIRT_NFT_TABLE,
-            LIBVIRT_NFT_CHAIN,
-        ])
-        .output()
-        .await
-    else {
-        return Ok(false);
-    };
-    if !current.status.success() {
-        return Ok(false);
-    }
-    let listing = String::from_utf8_lossy(&current.stdout).into_owned();
-    let mark = our_mark_quoted();
-    let copies = nft_handles(&listing, &mark);
-    if copies.len() == 1 && ahead_of_reject(&listing, |l| l.contains(&mark)) {
-        return Ok(true);
-    }
-
-    // Behind the reject, missing, or duplicated: drop our copies by handle
-    // first, so re-inserting cannot stack them.
-    for handle in copies {
-        let _ = Command::new("nft")
-            .args([
-                "delete",
-                "rule",
-                "ip",
-                LIBVIRT_NFT_TABLE,
-                LIBVIRT_NFT_CHAIN,
-                "handle",
-                &handle.to_string(),
-            ])
-            .output()
-            .await;
-    }
-
-    // Plain `insert` prepends, putting ours ahead of libvirt's reject.
-    let out = Command::new("nft")
-        .args(forward_accept_nft(subnet))
-        .output()
-        .await
-        .map_err(|e| format!("nft: {e}"))?;
-    if out.status.success() {
-        tracing::info!(
-            "firewall: admitting DNAT'd traffic to {subnet} ahead of libvirt's reject (nftables)"
-        );
-        return Ok(true);
-    }
-    Err(format!(
-        "nft insert into {LIBVIRT_NFT_TABLE}/{LIBVIRT_NFT_CHAIN}: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    ))
-}
-
-/// Let a network's port forwards past libvirt's own firewall.
-///
-/// libvirt renders, per network, an accept for `related,established` traffic
-/// into the bridge followed by a reject of everything else. On its iptables
-/// backend that is `LIBVIRT_FWI`:
-///
-/// ```text
-/// -A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-/// -A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
-/// ```
-///
-/// and on its nftables backend the same two rules live in
-/// `ip libvirt_network guest_input`. A forwarded connection's first packet is
-/// NEW, not established, so libvirt throws it away — *after* our own DNAT has
-/// rewritten it and our own rules have accepted it. The guest never sees the
-/// connection and the client is told "connection refused", because the reject
-/// answers with ICMP port-unreachable. Measured on real hosts, on both
-/// backends: libvirt's reject counter rises by exactly one per connection
-/// attempt, while the DNAT itself is correct.
-///
-/// Nothing in our own table can prevent that. A verdict in one chain does not
-/// stop a later chain of the same hook from rejecting, so accepting at
-/// `priority filter - 1` — which is what this table already does for its own
-/// rules — does not save the packet. The accept has to sit inside libvirt's
-/// chain, ahead of its reject. libvirt has no way to declare a port forward
-/// itself (`network.rng` has no such element), so there is nowhere else for it
-/// to go.
-///
-/// Both backends are attempted and whichever is in use is satisfied — a host
-/// uses one or the other, so the other reports that it is not present.
-/// Idempotent, and safe to call on a timer: libvirt rewrites those chains when
-/// a network is (re)started or libvirtd restarts, which silently undoes this,
-/// so the caller re-asserts it rather than applying it once.
-pub async fn allow_forwarded(subnet: &str) -> Result<(), String> {
-    let iptables = allow_via_iptables(subnet).await;
-    let nftables = allow_via_nftables(subnet).await;
-    match (iptables, nftables) {
-        // Neither backend in use: nothing to get past.
-        (Ok(false), Ok(false)) => Ok(()),
-        // One of them is in use and now admits the traffic.
-        (Ok(true), _) | (_, Ok(true)) => Ok(()),
-        // In use and unsatisfied: say so rather than pretend it worked.
-        (Err(e), _) | (_, Err(e)) => Err(e),
-    }
+/// The whole `nft -f` input: claim the table, empty it, then the rendered
+/// block. `add table` succeeds whether or not the table exists, and the flush
+/// removes every chain and rule before the block re-adds them — in one
+/// transaction, so a bad script cannot leave the host with no firewall at all.
+pub fn apply_script_input(rendered: &str) -> String {
+    format!("add table ip virt-man\nflush table ip virt-man\n{rendered}")
 }
 
 #[cfg(test)]
@@ -844,6 +642,19 @@ mod tests {
         }
     }
 
+    /// A network with no explicit rules, for the automatic base rules.
+    fn rendered<'a>(subnet: &str, mode: Mode, bridge: &str, active: bool) -> RenderedNet<'a> {
+        RenderedNet {
+            subnet: subnet.into(),
+            mode,
+            bridge: bridge.into(),
+            active,
+            rules: &[],
+            forwards: &[],
+            policy: PolicySet::default(),
+        }
+    }
+
     #[test]
     fn a_bare_ip_becomes_a_host_cidr() {
         assert_eq!(norm_cidr("192.168.1.5").unwrap(), "192.168.1.5/32");
@@ -854,140 +665,6 @@ mod tests {
     fn a_cidr_is_normalised_to_its_network_address() {
         assert_eq!(norm_cidr("192.168.167.1/24").unwrap(), "192.168.167.0/24");
         assert_eq!(norm_cidr("10.9.9.9/16").unwrap(), "10.9.0.0/16");
-    }
-
-    #[test]
-    fn the_forward_accept_admits_only_translated_traffic() {
-        // These rules go inside libvirt's own chains, ahead of the reject that
-        // would otherwise drop a port forward's first packet. They must not
-        // widen libvirt's filtering beyond the connections we translated:
-        // scoped to the network, and to DNAT'd flows only.
-        let r = forward_accept_rule("10.74.0.0/24");
-        assert_eq!(
-            r,
-            vec![
-                "-d",
-                "10.74.0.0/24",
-                "-m",
-                "conntrack",
-                "--ctstate",
-                "DNAT",
-                "-j",
-                "ACCEPT"
-            ]
-        );
-        assert_eq!(LIBVIRT_NET_IN, "LIBVIRT_FWI", "libvirt's inbound chain");
-        assert!(
-            !r.iter().any(|a| a.contains("RELATED")),
-            "must not restate libvirt's established-traffic accept"
-        );
-        assert!(!r.iter().any(|a| a == "DROP" || a == "REJECT"));
-    }
-
-    #[test]
-    fn a_rule_behind_libvirts_reject_is_not_admitting_anything() {
-        // The real shape, measured on an iptables-backed host whose forward
-        // worked before a network restart and not after: libvirt inserted its
-        // own two rules at the head, ours drifted to the end, and the reject
-        // then counted one packet per connection attempt.
-        let ours = |l: &str| l.contains("--ctstate DNAT");
-        let in_force = "\
--P LIBVIRT_FWI ACCEPT
--A LIBVIRT_FWI -d 10.74.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT
--A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable";
-        assert!(ahead_of_reject(in_force, ours), "ahead of the reject");
-
-        let drifted = "\
--A LIBVIRT_FWI -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
--A LIBVIRT_FWI -d 10.74.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT";
-        assert!(
-            !ahead_of_reject(drifted, ours),
-            "present, but behind the reject, so it admits nothing"
-        );
-        assert!(!ahead_of_reject("-P LIBVIRT_FWI ACCEPT", ours), "absent");
-    }
-
-    #[test]
-    fn the_nft_chain_is_judged_the_same_way_and_our_copies_are_findable() {
-        let mark = our_mark_quoted();
-        let ours = |l: &str| l.contains(&mark);
-        let listing = "\
-chain guest_input {
-		type filter hook forward priority filter; policy accept;
-		oif \"virbr0\" ip daddr 10.74.0.0/24 ct state established,related accept
-		oif \"virbr0\" reject with icmp type port-unreachable
-		ip daddr 10.74.0.0/24 ct status dnat counter accept comment \"virt-man dnat\" # handle 9
-}";
-        assert!(!ahead_of_reject(listing, ours), "behind libvirt's reject");
-        assert_eq!(nft_handles(listing, &mark), vec![9], "deletable by handle");
-        // A duplicate is found too, so a pass can collapse it back to one.
-        let twice = format!(
-            "{listing}\n\t\tip daddr 10.74.0.0/24 ct status dnat counter accept comment \"virt-man dnat\" # handle 11"
-        );
-        assert_eq!(nft_handles(&twice, &mark).len(), 2, "both copies");
-        let moved = listing.replace(
-            "ip daddr 10.74.0.0/24 ct status dnat counter accept comment \"virt-man dnat\" # handle 9",
-            "",
-        );
-        assert!(
-            !ahead_of_reject(&moved, ours),
-            "removing ours leaves none, so it is re-inserted"
-        );
-    }
-
-    #[test]
-    fn the_forward_accept_is_spelled_for_each_backend() {
-        // The two backends name the same concept differently. nftables keeps
-        // translation in the conntrack *status* field and refuses
-        // `ct state dnat`; iptables takes DNAT as a pseudo-state. Pinning both
-        // spellings stops a later "unification" that would parse-error on a
-        // host using the other backend.
-        let nft = forward_accept_nft("10.74.0.0/24");
-        let joined = nft.join(" ");
-        assert!(
-            joined.contains("ct status dnat"),
-            "nftables' spelling: {joined}"
-        );
-        assert!(
-            !joined.contains("ct state dnat"),
-            "which nft refuses to parse"
-        );
-        assert!(
-            joined.starts_with("insert rule"),
-            "prepended, so it beats the reject"
-        );
-        assert!(
-            joined.contains("ip daddr 10.74.0.0/24"),
-            "scoped to the network"
-        );
-        assert!(
-            joined.contains(OUR_MARK),
-            "marked, so re-asserting is idempotent"
-        );
-        assert_eq!(LIBVIRT_NFT_TABLE, "libvirt_network");
-        assert_eq!(LIBVIRT_NFT_CHAIN, "guest_input");
-        // The comment must already carry its quotes. Bare, nft splits it into
-        // extra arguments and refuses the whole rule with "syntax error,
-        // unexpected dnat" — measured on a real host, where that left
-        // forwarding broken while the rest of the rule read correctly.
-        assert_eq!(
-            nft.last().map(String::as_str),
-            Some("\"virt-man dnat\""),
-            "the comment reaches nft as one quoted token"
-        );
-        assert_eq!(
-            our_mark_quoted(),
-            "virt-man dnat",
-            "matching is on the bare text nft lists back"
-        );
-
-        let iptables = forward_accept_rule("10.74.0.0/24").join(" ");
-        assert!(
-            iptables.contains("--ctstate DNAT"),
-            "iptables' spelling: {iptables}"
-        );
     }
 
     #[test]
@@ -1053,13 +730,16 @@ chain guest_input {
     }
 
     #[test]
-    fn the_ruleset_has_both_chains_with_the_right_hooks() {
+    fn the_ruleset_has_the_filter_dnat_and_postrouting_hooks() {
         let in_rule = Rule {
             direction: "in".into(),
             ..base()
         };
         let nets = [RenderedNet {
             subnet: "192.168.167.0/24".into(),
+            mode: Mode::Nat,
+            bridge: "virbr1".into(),
+            active: true,
             rules: &[in_rule],
             forwards: &[],
             policy: PolicySet::default(),
@@ -1067,7 +747,213 @@ chain guest_input {
         let out = render_ruleset(&nets, &[]);
         assert!(out.contains("hook forward priority filter - 1"));
         assert!(out.contains("hook prerouting priority dstnat - 1"));
+        assert!(out.contains("hook postrouting priority srcnat"));
         assert!(out.contains("ip daddr 192.168.167.0/24 accept"));
+    }
+
+    #[test]
+    fn an_active_nat_network_forwards_and_masquerades() {
+        let nets = [rendered("10.9.0.0/24", Mode::Nat, "vbr5b92a1a5", true)];
+        assert_eq!(
+            render_ruleset(&nets, &[]),
+            concat!(
+                "table ip virt-man {\n",
+                "  chain vm-forward {\n",
+                "    type filter hook forward priority filter - 1; policy accept;\n",
+                "    iifname \"vbr5b92a1a5\" oifname != \"vbr5b92a1a5\" accept\n",
+                "    oifname \"vbr5b92a1a5\" iifname != \"vbr5b92a1a5\" ct state established,related accept\n",
+                "    oifname \"vbr5b92a1a5\" iifname != \"vbr5b92a1a5\" ct status dnat accept\n",
+                "    oifname \"vbr5b92a1a5\" drop\n",
+                "  }\n",
+                "  chain vm-dnat {\n",
+                "    type nat hook prerouting priority dstnat - 1; policy accept;\n",
+                "  }\n",
+                "  chain vm-postrouting {\n",
+                "    type nat hook postrouting priority srcnat; policy accept;\n",
+                "    ip saddr 10.9.0.0/24 ip daddr != 10.9.0.0/24 ip daddr != 224.0.0.0/24 oifname != \"vbr5b92a1a5\" masquerade\n",
+                "  }\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn an_active_isolated_network_drops_guest_traffic_and_masquerades_nothing() {
+        // Port forwards still reach the guest: the DNAT accept sits ahead of
+        // the outbound drop. Nothing is source-translated — an isolated
+        // network has nowhere to forward to.
+        let nets = [rendered("10.9.0.0/24", Mode::Isolated, "vbr5b92a1a5", true)];
+        let out = render_ruleset(&nets, &[]);
+        assert_eq!(
+            out,
+            concat!(
+                "table ip virt-man {\n",
+                "  chain vm-forward {\n",
+                "    type filter hook forward priority filter - 1; policy accept;\n",
+                "    iifname \"vbr5b92a1a5\" drop\n",
+                "    oifname \"vbr5b92a1a5\" iifname != \"vbr5b92a1a5\" ct status dnat accept\n",
+                "    oifname \"vbr5b92a1a5\" drop\n",
+                "  }\n",
+                "  chain vm-dnat {\n",
+                "    type nat hook prerouting priority dstnat - 1; policy accept;\n",
+                "  }\n",
+                "  chain vm-postrouting {\n",
+                "    type nat hook postrouting priority srcnat; policy accept;\n",
+                "  }\n",
+                "}\n",
+            )
+        );
+        assert!(!out.contains("masquerade"), "{out}");
+    }
+
+    #[test]
+    fn two_networks_guard_their_accepts_against_each_other() {
+        // The NAT network is rendered first, which is the ordering that let a
+        // flat `iifname accept` carry a packet into the isolated network
+        // before its `oifname drop` was ever reached.
+        let nets = [
+            rendered("10.9.0.0/24", Mode::Nat, "vbr1", true),
+            rendered("10.10.0.0/24", Mode::Isolated, "vbr2", true),
+        ];
+        let out = render_ruleset(&nets, &[]);
+        for line in [
+            "    iifname \"vbr1\" oifname != { \"vbr1\", \"vbr2\" } accept\n",
+            "    oifname \"vbr1\" iifname != { \"vbr1\", \"vbr2\" } ct state established,related accept\n",
+            "    oifname \"vbr1\" iifname != { \"vbr1\", \"vbr2\" } ct status dnat accept\n",
+            "    oifname \"vbr1\" drop\n",
+            "    iifname \"vbr2\" drop\n",
+            "    oifname \"vbr2\" iifname != { \"vbr1\", \"vbr2\" } ct status dnat accept\n",
+            "    oifname \"vbr2\" drop\n",
+        ] {
+            assert!(out.contains(line), "missing {line:?} in:\n{out}");
+        }
+        // The isolated network's drops are present and last, so whatever the
+        // NAT accepts let through is still stopped there.
+        let nat_out = out
+            .find("iifname \"vbr1\" oifname != { \"vbr1\", \"vbr2\" } accept")
+            .unwrap();
+        let isolated_in = out.find("iifname \"vbr2\" drop").unwrap();
+        let isolated_out = out.find("oifname \"vbr2\" drop").unwrap();
+        assert!(nat_out < isolated_in && isolated_in < isolated_out);
+    }
+
+    #[test]
+    fn an_inactive_network_emits_nothing_at_all() {
+        // A stopped network must not keep its DNAT ports or any rule that
+        // could match traffic another network now carries.
+        let rule = Rule {
+            direction: "forward".into(),
+            proto: "tcp".into(),
+            dst_port: "8443".into(),
+            ..base()
+        };
+        let forward = Forward {
+            wan_ip: "0.0.0.0".into(),
+            wan_port: 8080,
+            lan_ip: "10.9.0.10".into(),
+            lan_port: 80,
+            proto: "tcp".into(),
+        };
+        let policy = PolicySet {
+            in_: Policy::Drop,
+            out: Policy::Accept,
+            forward: Policy::Accept,
+        };
+        let nets = [RenderedNet {
+            subnet: "10.9.0.0/24".into(),
+            mode: Mode::Nat,
+            bridge: "vbr5b92a1a5".into(),
+            active: false,
+            rules: &[rule],
+            forwards: &[forward],
+            policy,
+        }];
+        let out = render_ruleset(&nets, &[]);
+        assert_eq!(
+            out,
+            concat!(
+                "table ip virt-man {\n",
+                "  chain vm-forward {\n",
+                "    type filter hook forward priority filter - 1; policy accept;\n",
+                "  }\n",
+                "  chain vm-dnat {\n",
+                "    type nat hook prerouting priority dstnat - 1; policy accept;\n",
+                "  }\n",
+                "  chain vm-postrouting {\n",
+                "    type nat hook postrouting priority srcnat; policy accept;\n",
+                "  }\n",
+                "}\n",
+            )
+        );
+        for stale in ["8443", "8080", "iifname", "oifname", "drop", "masquerade"] {
+            assert!(
+                !out.contains(stale),
+                "{stale} from a stopped network: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_nft_input_claims_and_flushes_before_the_table() {
+        // One transaction: `add` is idempotent, `flush` clears the old rules,
+        // and the rendered table refills it. The table is declared exactly
+        // once, so a failed script leaves the previous rules in force instead
+        // of an empty table (the old delete-then-load did not).
+        let rendered = render_ruleset(&[], &[]);
+        let input = apply_script_input(&rendered);
+        assert_eq!(input.matches("add table ip virt-man").count(), 1);
+        assert_eq!(input.matches("flush table ip virt-man").count(), 1);
+        assert_eq!(input.matches("table ip virt-man {").count(), 1);
+        assert!(
+            input.starts_with(
+                "add table ip virt-man\nflush table ip virt-man\ntable ip virt-man {\n"
+            ),
+            "{input}"
+        );
+    }
+
+    #[test]
+    fn a_bridge_network_leaves_forwarding_to_the_operator() {
+        // Bridge mode borrows a bridge the operator owns, so the operator's
+        // firewall is the one that decides what crosses it.
+        let nets = [rendered("10.9.0.0/24", Mode::Bridge, "br0", true)];
+        let out = render_ruleset(&nets, &[]);
+        assert!(!out.contains("br0"), "{out}");
+        assert!(!out.contains("masquerade"), "{out}");
+    }
+
+    #[test]
+    fn explicit_rules_precede_the_network_base_rules() {
+        let explicit = Rule {
+            direction: "forward".into(),
+            proto: "tcp".into(),
+            dst_port: "443".into(),
+            ..base()
+        };
+        let nets = [RenderedNet {
+            subnet: "10.9.0.0/24".into(),
+            mode: Mode::Nat,
+            bridge: "vbr5b92a1a5".into(),
+            active: true,
+            rules: &[explicit],
+            forwards: &[],
+            policy: PolicySet {
+                in_: Policy::Drop,
+                ..PolicySet::default()
+            },
+        }];
+        let out = render_ruleset(&nets, &[]);
+        let explicit_pos = out.find("tcp dport 443 accept").unwrap();
+        let default_pos = out.find("ip daddr 10.9.0.0/24 drop").unwrap();
+        let base_pos = out.find("iifname \"vbr5b92a1a5\" oifname").unwrap();
+        assert!(
+            explicit_pos < default_pos,
+            "explicit rules precede defaults"
+        );
+        assert!(
+            default_pos < base_pos,
+            "the automatic base rules come last: {out}"
+        );
     }
 
     #[test]
@@ -1111,6 +997,11 @@ chain guest_input {
         };
         let nets = [RenderedNet {
             subnet: "192.168.167.0/24".into(),
+            // Bridge mode adds no base rules, so this test sees only the
+            // policy defaults it is about.
+            mode: Mode::Bridge,
+            bridge: "virbr1".into(),
+            active: true,
             rules: &[explicit],
             forwards: &[],
             policy,

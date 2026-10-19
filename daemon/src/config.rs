@@ -127,7 +127,6 @@ fn migrate_paths(old_root: PathBuf, new_root: PathBuf) -> Result<(), String> {
         "tls/cert.pem",
         "tls/key.pem",
         "firewall.json",
-        "ipam.json",
         "idmap.json",
         "titles.json",
         "volume-titles.json",

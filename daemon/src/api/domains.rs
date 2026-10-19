@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, Query};
+use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -9,6 +9,7 @@ use virt::storage_vol::StorageVol;
 
 use super::ApiError;
 use crate::disks;
+use crate::ipam::server::Ipam;
 use crate::libvirt::{domain_state_name, parse_graphics, with_conn};
 
 pub fn routes() -> Router {
@@ -299,17 +300,28 @@ pub(super) fn interface_info(frag: &str) -> (Option<String>, Option<String>, Opt
 /// Point-in-time per-interface byte counters, so the client can graph
 /// tx/rx rates. `interface_stats` needs the guest's `target dev` name (not
 /// the MAC), which is read from the domain XML first.
-/// `<source network='...'/>` of an interface block, if it is on a network.
-fn source_network(frag: &str) -> Option<String> {
+/// The `<source ...>` tag of an interface block, if it has one.
+fn source_tag(frag: &str) -> Option<&str> {
     let s = &frag[frag.find("<source")?..];
-    let s = &s[..s.find('>')?];
-    let a = &s[s.find("network=")? + "network=".len()..];
-    let q = a.chars().next()?;
-    let a = &a[1..];
-    Some(a[..a.find(q)?].to_string())
+    Some(&s[..s.find('>')?])
 }
 
-async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+/// `<source network='...'/>` of an interface block, if it is on a libvirt
+/// network. Only a definition written before networks became our own has one.
+fn source_network(frag: &str) -> Option<String> {
+    disks::attr(source_tag(frag)?, "network").map(str::to_string)
+}
+
+/// `<source bridge='...'/>` of an interface block: the bridge the guest is
+/// plugged into, which is how a network is attached now.
+fn source_bridge(frag: &str) -> Option<String> {
+    disks::attr(source_tag(frag)?, "bridge").map(str::to_string)
+}
+
+async fn get_interfaces(
+    Extension(ipam): Extension<Ipam>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     let v = with_conn(move |c| {
         let d = crate::libvirt::domain(c, &name)?;
         // Live XML: a running guest carries its `target dev` (e.g. vnet0),
@@ -323,9 +335,18 @@ async fn get_interfaces(Path(name): Path<String>) -> Result<Json<Value>, ApiErro
             let Some(end) = block.find("</interface>") else {
                 break;
             };
-            let (dev, mac, model) = interface_info(&block[..end]);
-            let network = source_network(&block[..end]);
-            let (inbound, outbound) = super::nics::bandwidth_of(&block[..end]);
+            let b = &block[..end];
+            let (dev, mac, model) = interface_info(b);
+            // The network key, not the bridge: the VM's Network tab and the
+            // IPAM table are keyed by it. A bridge nothing here defines is an
+            // operator's own, and has no network key to report.
+            let open = &b[..b.find('>').map_or(b.len(), |e| e + 1)];
+            let network = if disks::attr(open, "type") == Some("bridge") {
+                source_bridge(b).and_then(|br| ipam.network_for_bridge(&br))
+            } else {
+                source_network(b)
+            };
+            let (inbound, outbound) = super::nics::bandwidth_of(b);
             let (rx_bytes, tx_bytes) = match dev.as_deref() {
                 Some(target) => d
                     .interface_stats(target)
@@ -549,6 +570,27 @@ mod tests {
         // A shut-off guest's inactive XML has no <target dev>.
         let no_target = "<interface type='network'>\n      <mac address='52:54:00:12:34:56'/>\n      <model type='virtio'/>\n    </interface>";
         assert_eq!(interface_info(no_target).0, None);
+    }
+
+    #[test]
+    fn an_interfaces_source_is_read_for_both_attachment_shapes() {
+        // What this daemon writes: the network's bridge.
+        let bridged =
+            "<interface type='bridge'>\n      <source bridge='vbr0123456789ab'/>\n    </interface>";
+        assert_eq!(source_bridge(bridged).as_deref(), Some("vbr0123456789ab"));
+        assert_eq!(source_network(bridged), None, "a bridge is not a network");
+        // An older definition still names a libvirt network.
+        let networked =
+            "<interface type='network'>\n      <source network='lab'/>\n    </interface>";
+        assert_eq!(source_network(networked).as_deref(), Some("lab"));
+        assert_eq!(source_bridge(networked), None);
+        // libvirt adds the resolved bridge to a running network NIC's live XML;
+        // it is informational, and the network is still what is read.
+        let live = "<interface type='network'><source network='lab' bridge='virbr0'/></interface>";
+        assert_eq!(source_network(live).as_deref(), Some("lab"));
+        // A NIC with no source, or no interface at all, reports neither.
+        assert_eq!(source_network("<interface type='bridge'/>"), None);
+        assert_eq!(source_bridge("<interface type='bridge'/>"), None);
     }
 
     /// Deleting a *running* guest stops it first.

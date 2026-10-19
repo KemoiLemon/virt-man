@@ -138,7 +138,10 @@ pub struct Spec<'a> {
     pub swap_mb: u64,
     pub vcpus: u32,
     pub rootfs: &'a str,
-    pub networks: &'a [String],
+    /// The Linux bridges to attach to, one NIC each. A guest names its network
+    /// by key; the daemon resolves that to the network's bridge, because these
+    /// networks are not defined in libvirt.
+    pub bridges: &'a [String],
     /// `None` = privileged.
     pub id_base: Option<u32>,
 }
@@ -165,12 +168,12 @@ pub fn domain_xml(s: &Spec) -> String {
     // libvirt 12.7). It is also what a container should have anyway: no NIC
     // means no network, not the host's.
     let nics: String = s
-        .networks
+        .bridges
         .iter()
-        .map(|n| {
+        .map(|b| {
             format!(
-                "<interface type='network'><source network='{}'/></interface>",
-                esc(n)
+                "<interface type='bridge'><source bridge='{}'/></interface>",
+                esc(b)
             )
         })
         .collect();
@@ -595,7 +598,7 @@ mod tests {
             swap_mb: 0,
             vcpus: 1,
             rootfs: "/p/u.raw",
-            networks: &nets,
+            bridges: &nets,
             id_base: Some(ID_BASE),
         };
         let x = domain_xml(&s);
@@ -604,6 +607,10 @@ mod tests {
         assert_eq!(rootfs_of(&x).as_deref(), Some("/p/u.raw"));
         assert!(x.contains("<title>web &lt;1&gt;</title>"), "{x}");
         assert!(x.contains("<source dir='/run/virt-man-daemon/ct/u'/>"));
+        assert!(
+            x.contains("<interface type='bridge'><source bridge='internet'/></interface>"),
+            "a container attaches to the network's bridge: {x}"
+        );
         assert!(
             x.contains("<privnet/>"),
             "never the host's network namespace"
@@ -623,7 +630,7 @@ mod tests {
             swap_mb: 0,
             vcpus: 1,
             rootfs,
-            networks: &nets,
+            bridges: &nets,
             id_base: Some(ID_BASE),
         };
         let cur = domain_xml(&spec("/p/u.raw"));

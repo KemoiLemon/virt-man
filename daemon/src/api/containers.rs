@@ -12,7 +12,7 @@
 //! first), live NIC rate limits (the LXC driver cannot change them live), and
 //! the list, which reports `privileged`.
 
-use axum::extract::{Path, Request};
+use axum::extract::{Extension, Path, Request};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,7 @@ use virt::storage_vol::StorageVol;
 
 use super::ApiError;
 use crate::ct;
+use crate::ipam::server::Ipam;
 use crate::libvirt::{DRIVER, Driver, domain_state_name, with_conn};
 
 /// Run `f` against the LXC driver.
@@ -252,6 +253,8 @@ pub struct CreateReq {
     pub swap_mb: u64,
     pub vcpus: u32,
     #[serde(default)]
+    /// Network keys (a network's UUID or its title); the daemon attaches the
+    /// container to each network's bridge.
     pub networks: Vec<String>,
     #[serde(default)]
     pub password: Option<String>,
@@ -324,7 +327,10 @@ fn new_uuid() -> String {
     )
 }
 
-async fn create(Json(req): Json<CreateReq>) -> Result<Json<Value>, ApiError> {
+async fn create(
+    Extension(ipam): Extension<Ipam>,
+    Json(req): Json<CreateReq>,
+) -> Result<Json<Value>, ApiError> {
     let title = req.title.trim().to_string();
     if title.is_empty() {
         return Err(ApiError::bad_request("give the container a name"));
@@ -350,6 +356,15 @@ async fn create(Json(req): Json<CreateReq>) -> Result<Json<Value>, ApiError> {
             "'{}' is not a container template",
             req.template.volume
         )));
+    }
+    // The request names networks; a container is attached to their bridges,
+    // since these networks are not defined in libvirt.
+    let mut bridges = Vec::with_capacity(req.networks.len());
+    for n in &req.networks {
+        let b = ipam
+            .bridge_for(n)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown network '{n}'")))?;
+        bridges.push(b);
     }
     let missing = ct::missing_tools();
     if !missing.is_empty() {
@@ -396,7 +411,6 @@ async fn create(Json(req): Json<CreateReq>) -> Result<Json<Value>, ApiError> {
         ApiError::bad_request(e)
     })?;
 
-    let networks = req.networks.clone();
     let (u, img, keys) = (
         uuid.clone(),
         image.clone(),
@@ -437,7 +451,7 @@ async fn create(Json(req): Json<CreateReq>) -> Result<Json<Value>, ApiError> {
                 swap_mb,
                 vcpus,
                 rootfs: &img,
-                networks: &networks,
+                bridges: &bridges,
                 id_base,
             });
             let d = Domain::define_xml(c, &xml)?;
@@ -829,7 +843,7 @@ mod tests {
             swap_mb: 256,
             vcpus: 1,
             rootfs: "/p/u.raw",
-            networks: &nets,
+            bridges: &nets,
             id_base: Some(ct::ID_BASE),
         });
         let hw = Hardware {

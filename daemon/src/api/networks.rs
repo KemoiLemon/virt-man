@@ -1,25 +1,48 @@
+//! The network API: the store is the source of truth, `hostnet` runs the
+//! bridge and dnsmasq, and the firewall table follows every lifecycle change.
+//!
+//! The SPA still edits a network as libvirt-shaped XML (`netxml`), but nothing
+//! here calls libvirt's network driver: these networks do not exist in it.
+
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use virt::network::Network;
 
 use super::ApiError;
+use super::firewall::FirewallState;
+use crate::firewall;
+use crate::hostnet;
 use crate::ipam::server::Ipam;
-use crate::ipam::xml as ipamxml;
-use crate::libvirt::with_conn;
+use crate::ipam::store::{self, Mode, Net, Reservation};
+use crate::netxml;
 
-pub fn routes() -> Router {
+#[derive(Clone)]
+struct NetState {
+    ipam: Ipam,
+    fw: FirewallState,
+}
+
+pub fn routes(ipam: Ipam, fw: FirewallState) -> Router {
     Router::new()
-        .route("/networks", get(list))
+        .route("/networks", get(list).post(create))
         .route("/networks/bridges", get(bridges))
         .route("/networks/suggest-subnet", get(suggest_subnet))
         .route("/networks/{name}", get(get_one).delete(delete))
+        .route("/networks/{name}/xml", get(get_xml).put(put_xml))
         .route("/networks/{name}/start", post(start))
         .route("/networks/{name}/stop", post(stop))
         .route("/networks/{name}/autostart", post(set_autostart))
+        .route("/networks/{name}/hosts", get(list_hosts).put(put_host))
+        .route(
+            "/networks/{name}/hosts/{mac}",
+            axum::routing::delete(delete_host),
+        )
+        .route("/networks/{name}/ipam", get(get_ipam).put(put_ipam))
+        .route("/flows", get(get_flows))
+        .with_state(NetState { ipam, fw })
 }
 
 /// The host's own interfaces and routes, as `(network address, prefix)`.
@@ -48,32 +71,29 @@ fn used_prefixes_host() -> Vec<(u32, u8)> {
 }
 
 /// Every IPv4 prefix this host can already reach: its interfaces and routes,
-/// plus every network libvirt knows.
+/// plus every stored network except `except` (the one being edited, which owns
+/// its own prefix).
 ///
-/// A generated /24 must collide with none of them, and the libvirt half is
-/// why this cannot live in the store: a network defined outside this app is
-/// not in `ipam.json`, and the host's routes cover a VPN that has no interface
-/// of its own (the usual `10.0.0.0/8` WireGuard case).
-async fn used_prefixes() -> Vec<(u32, u8)> {
+/// A generated /24 must collide with none of them. The stored half matters
+/// even for a network that is down now: it still owns its address, and reusing
+/// it would break it when it starts.
+async fn used_prefixes(ipam: &Ipam, except: Option<&str>) -> Vec<(u32, u8)> {
     let mut out = tokio::task::spawn_blocking(used_prefixes_host)
         .await
         .unwrap_or_default();
-    // Live or not: a network that is down now still owns its address, and
-    // reusing it would break it when it starts.
-    if let Ok(found) = with_conn(|c| {
-        let mut v = Vec::new();
-        for n in c.list_all_networks(0).unwrap_or_default() {
-            if let Ok(xml) = n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE)
-                && let Some((net, p)) = read_cidr(&ip_cidr(&xml))
-            {
-                v.push((net, p));
-            }
+    let nets: Vec<(String, Net)> = ipam
+        .lock()
+        .networks
+        .iter()
+        .map(|(id, n)| (id.clone(), n.clone()))
+        .collect();
+    for (id, n) in nets {
+        if Some(id.as_str()) == except {
+            continue;
         }
-        Ok(v)
-    })
-    .await
-    {
-        out.extend(found);
+        if let Some(found) = n.subnet().as_deref().and_then(read_cidr) {
+            out.push(found);
+        }
     }
     out
 }
@@ -86,431 +106,28 @@ fn read_cidr(tok: &str) -> Option<(u32, u8)> {
         None => (tok, 32),
     };
     let ip: std::net::Ipv4Addr = addr.parse().ok()?;
-    Some((u32::from(ip) & crate::ipam::store::mask(prefix), prefix))
+    Some((u32::from(ip) & store::mask(prefix), prefix))
 }
 
 /// A free `/24` for a new network, so a user never picks an address that
 /// collides. Read-only: the SPA asks for this to prefill the form, and the
 /// create path checks conflicts itself again, since a caller may skip this.
-async fn suggest_subnet() -> Result<Json<Value>, ApiError> {
-    let used = used_prefixes().await;
-    let mut r = 0u64;
-    let mut rand = || {
-        // /dev/urandom, as elsewhere in this daemon; a clock fallback still
-        // spreads callers, which is all this needs.
-        if r == 0 {
-            let mut b = [0u8; 8];
-            r = if std::fs::File::open("/dev/urandom")
-                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b))
-                .is_ok()
-            {
-                u64::from_le_bytes(b)
-            } else {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(1)
-                    ^ (std::process::id() as u64) << 32
-            };
-        }
-        let v = r;
-        r = r.rotate_left(17);
-        v as u32
-    };
-    let net = crate::ipam::store::pick_subnet(&used, &mut rand)
-        .ok_or_else(|| ApiError::internal("no free /24 left in 10/8 or 192.168/16"))?;
+async fn suggest_subnet(State(st): State<NetState>) -> Result<Json<Value>, ApiError> {
+    let used = used_prefixes(&st.ipam, None).await;
+    let subnet = free_subnet(&used)?;
     // The **gateway**, not the network address: x.x.x.0 is the subnet's own
-    // address and libvirt refuses it as a host address (`Invalid address ... in
-    // network`), so the value a form puts in its <ip address> must be x.x.x.1.
-    // `pick_subnet` works in network addresses because that is what an overlap
-    // check needs, so the +1 happens here, at the boundary.
-    let gateway = std::net::Ipv4Addr::from(u32::from(net) + 1);
+    // address and cannot be a host, so the value a form puts in its <ip
+    // address> must be x.x.x.1. `pick_subnet` works in network addresses
+    // because that is what an overlap check needs, so the +1 happens here.
+    let gateway = std::net::Ipv4Addr::from(u32::from(subnet) + 1);
     Ok(Json(json!({
         "subnet": format!("{gateway}/24"),
-        "network": format!("{net}/24"),
+        "network": format!("{subnet}/24"),
         "used": used.len(),
     })))
 }
 
-/// Routes that read or change IPAM state.
-pub fn ipam_routes(ipam: Ipam) -> Router {
-    Router::new()
-        .route("/networks", axum::routing::post(create))
-        .route("/networks/{name}/xml", get(get_xml).put(put_xml))
-        .route("/networks/{name}/hosts", get(list_hosts).put(put_host))
-        .route(
-            "/networks/{name}/hosts/{mac}",
-            axum::routing::delete(delete_host),
-        )
-        .route("/networks/{name}/ipam", get(get_ipam).put(put_ipam))
-        .route("/flows", get(get_flows))
-        .with_state(ipam)
-}
-
-async fn list() -> Result<Json<Value>, ApiError> {
-    let v = with_conn(|c| {
-        let nets = c.list_all_networks(0)?;
-        let mut arr = Vec::with_capacity(nets.len());
-        for n in &nets {
-            arr.push(net_json(n));
-        }
-        Ok(json!(arr))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
-}
-
-fn net_json(n: &Network) -> Value {
-    // Forward mode and subnet live in the definition XML; the summary fields
-    // otherwise cannot distinguish NAT from isolated, or show the subnet.
-    let xml = n.get_xml_desc(0).unwrap_or_default();
-    let forward = forward_mode(&xml).to_string();
-    let ip = ip_cidr(&xml);
-    json!({
-        "name": n.get_name().unwrap_or_default(),
-        "uuid": n.get_uuid_string().unwrap_or_default(),
-        "title": crate::libvirt::title_of(&xml),
-        "bridge": n.get_bridge_name().unwrap_or_default(),
-        "active": n.is_active().unwrap_or(false),
-        "persistent": n.is_persistent().unwrap_or(false),
-        "autostart": n.get_autostart().unwrap_or(false),
-        "forward": forward,
-        "ip": ip,
-    })
-}
-
-/// The network's forward mode: "nat", "bridge", or "none" (isolated).
-fn forward_mode(xml: &str) -> &str {
-    let Some(i) = xml.find("<forward") else {
-        return "none";
-    };
-    let end = xml[i..].find('>').map_or(xml.len(), |j| i + j);
-    let mode = attr_value(&xml[i..=end], "mode").unwrap_or("none");
-    match mode {
-        "bridge" => "bridge",
-        "nat" | "route" => "nat",
-        _ => "none",
-    }
-}
-
-/// The first `<ip>` element's subnet, as `address/prefix` (or empty).
-/// The first `<ip>` element's subnet, as `address/prefix` (or empty).
-pub(crate) fn network_subnet(xml: &str) -> Option<String> {
-    let c = ip_cidr(xml);
-    if c.is_empty() { None } else { Some(c) }
-}
-
-fn ip_cidr(xml: &str) -> String {
-    let Some(ip) = xml.find("<ip") else {
-        return String::new();
-    };
-    let rest = &xml[ip..];
-    let end = rest.find('>').unwrap_or(rest.len());
-    let attrs = &rest[..=end];
-    let address = attr_value(attrs, "address").unwrap_or_default();
-    if address.is_empty() {
-        return String::new();
-    }
-    let prefix = attr_value(attrs, "prefix")
-        .map(|p| p.to_string())
-        .or_else(|| attr_value(attrs, "netmask").map(|m| netmask_bits(m).to_string()))
-        .unwrap_or_default();
-    if prefix.is_empty() {
-        address.to_string()
-    } else {
-        format!("{address}/{prefix}")
-    }
-}
-
-/// Read one XML attribute's value out of a tag fragment, single- or
-/// double-quoted. Matches only a real attribute position (name followed by
-/// '='), never a substring inside another attribute's value.
-fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let mut from = 0;
-    while let Some(rel) = tag[from..].find(name) {
-        let i = from + rel;
-        from = i + name.len();
-        let rest = tag[from..].trim_start();
-        let Some(rest) = rest.strip_prefix('=') else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        let quote = rest.chars().next()?;
-        if quote != '\'' && quote != '"' {
-            continue;
-        }
-        let inner = &rest[quote.len_utf8()..];
-        let j = inner.find(quote)?;
-        return Some(&inner[..j]);
-    }
-    None
-}
-
-/// Dotted-quad netmask to prefix length (255.255.255.0 -> 24).
-fn netmask_bits(mask: &str) -> u32 {
-    mask.split('.')
-        .filter_map(|o| o.parse::<u32>().ok())
-        .map(|o| o.count_ones())
-        .sum()
-}
-
-async fn get_one(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let n = crate::libvirt::network(c, &name)?;
-        Ok(net_json(&n))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
-}
-
-/// Linux bridge devices, for the create/edit network form's bridge dropdown.
-///
-/// Read from /sys/class/net rather than libvirt interfaces: a bridge does not
-/// have to be a libvirt interface, and scanning sysfs is what `ip link show
-/// type bridge` does under the hood. A device is a bridge iff it has a
-/// `bridge` subdirectory.
-async fn bridges() -> Result<Json<Value>, ApiError> {
-    let v = std::fs::read_dir("/sys/class/net")
-        .map_err(|e| ApiError::internal(format!("read /sys/class/net: {e}")))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("bridge").is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    Ok(Json(json!(v)))
-}
-
-/// The definition as the editor should see it: libvirt's, with this daemon's
-/// IPAM (range, reservations, forwarders, domain) put back in, so the editor
-/// works on one document whoever serves the network.
-async fn get_xml(
-    State(ipam): State<Ipam>,
-    Path(name): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let n2 = name.clone();
-    let xml = with_conn(move |c| Ok(crate::libvirt::network(c, &n2)?.get_xml_desc(0)?))
-        .await
-        .map_err(ApiError::internal)?;
-    let stored = ipam.lock().networks.get(&name).cloned();
-    let xml = match stored {
-        Some(net) if ipamxml::is_managed(&xml) => ipamxml::inject(&xml, &net),
-        _ => xml,
-    };
-    Ok(Json(json!({"name": name, "xml": xml})))
-}
-
-/// Define/replace a network.
-///
-/// The IPAM part of the edited XML (DHCP range, reservations, DNS forwarders,
-/// domain) goes to this daemon's store, and libvirt gets the definition
-/// without it. If that is all that changed, the running network is left
-/// alone: changing a range or a reservation never restarts anything. Only a
-/// change to what libvirt itself runs (subnet, bridge, forward mode, a rename)
-/// restarts the network, and its guests are plugged back in afterwards.
-async fn put_xml(
-    State(ipam): State<Ipam>,
-    Path(name): Path<String>,
-    body: String,
-) -> Result<Json<Value>, ApiError> {
-    let managed = ipamxml::needs_takeover(&body) || ipamxml::is_managed(&body);
-    let libvirt_xml = if managed {
-        ipamxml::strip(&body)
-    } else {
-        body.clone()
-    };
-    if managed {
-        let merged = ipamxml::merge(ipam.lock().networks.get(&name), &body)
-            .ok_or_else(|| ApiError::bad_request("the network has no IPv4 subnet"))?;
-        let mut s = ipam.lock();
-        s.networks.insert(name.clone(), merged);
-        ipam.save(&s).map_err(ApiError::internal)?;
-    }
-    let old_name = name.clone();
-    let v = with_conn(move |c| {
-        let existing = crate::libvirt::network(c, &old_name).ok();
-        let was_active = existing.as_ref().is_some_and(|n| n.is_active().unwrap_or(false));
-        let before = existing
-            .as_ref()
-            .and_then(|n| n.get_xml_desc(virt::sys::VIR_NETWORK_XML_INACTIVE).ok())
-            .unwrap_or_default();
-        if same_definition(&before, &libvirt_xml) {
-            return Ok(json!({"name": old_name, "defined": true, "restarted": false}));
-        }
-        if was_active && let Some(n) = &existing {
-            n.destroy()?;
-        }
-        let n = Network::define_xml(c, &libvirt_xml)?;
-        let new_name = n.get_name().unwrap_or_default();
-        let (started, reattached) = if was_active {
-            match n.create() {
-                Ok(_) => (true, reattach_taps(c, &n)),
-                Err(_) => (false, 0),
-            }
-        } else {
-            (false, 0)
-        };
-        Ok(json!({"name": new_name, "defined": true, "restarted": started, "reattached": reattached}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    // A rename moves the stored IPAM with it.
-    if let Some(new) = v["name"].as_str().filter(|n| *n != name) {
-        let mut s = ipam.lock();
-        if let Some(net) = s.networks.remove(&name) {
-            s.networks.insert(new.to_string(), net);
-            ipam.save(&s).map_err(ApiError::internal)?;
-        }
-    }
-    Ok(Json(v))
-}
-
-/// Whether two definitions describe the same network to libvirt, ignoring
-/// what libvirt fills in by itself (uuid, generated MAC, stp/delay defaults)
-/// and whitespace. Conservative: anything it cannot see as equal is a change.
-fn same_definition(a: &str, b: &str) -> bool {
-    let norm = |x: &str| {
-        let mut s = ipamxml::strip_generated(x);
-        s.retain(|c| !c.is_whitespace());
-        s.replace('"', "'")
-    };
-    !a.is_empty() && norm(a) == norm(b)
-}
-
-/// Plug every running guest's interface on `n` back into its bridge.
-///
-/// Destroying a network deletes its bridge, and every guest tap on it is left
-/// with no master; starting the network makes a new, empty bridge. libvirt does
-/// not reconnect them (measured: the taps stayed detached, and update-device or
-/// a link down/up did not help), so each guest silently lost its network until
-/// it was restarted. That is what editing a network, or deleting an IPAM
-/// reservation back when that redefined it, did to every guest on it.
-///
-/// Returns how many taps were reattached.
-pub(crate) fn reattach_taps(c: &virt::connect::Connect, n: &Network) -> usize {
-    let Ok(xml) = n.get_xml_desc(0) else { return 0 };
-    let Some(bridge) = xml
-        .find("<bridge")
-        .and_then(|i| {
-            attr_value(
-                &xml[i..xml[i..].find('>').map_or(xml.len(), |e| i + e)],
-                "name",
-            )
-        })
-        .map(str::to_string)
-    else {
-        return 0;
-    };
-    let net = n.get_name().unwrap_or_default();
-    let mut done = 0;
-    for d in crate::libvirt::all_domains(c, virt::sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE) {
-        let Ok(dx) = d.get_xml_desc(0) else { continue };
-        for tap in taps_on_network(&dx, &net) {
-            let ok = std::process::Command::new("ip")
-                .args(["link", "set", "dev", &tap, "master", &bridge])
-                .status()
-                .is_ok_and(|s| s.success());
-            if ok {
-                done += 1;
-            } else {
-                tracing::warn!("could not reattach {tap} to {bridge}");
-            }
-        }
-    }
-    done
-}
-
-/// Target devs of a live domain's interfaces on network `net`.
-fn taps_on_network(domain_xml: &str, net: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = domain_xml;
-    while let Some(i) = rest.find("<interface") {
-        let block = &rest[i..];
-        let Some(end) = block.find("</interface>") else {
-            break;
-        };
-        let b = &block[..end];
-        let on_net = b.find("<source").is_some_and(|s| {
-            let tag = &b[s..b[s..].find('>').map_or(b.len(), |e| s + e)];
-            attr_value(tag, "network") == Some(net)
-        });
-        if on_net
-            && let Some(t) = b.find("<target")
-            && let Some(dev) = attr_value(&b[t..b[t..].find('>').map_or(b.len(), |e| t + e)], "dev")
-        {
-            out.push(dev.to_string());
-        }
-        rest = &block[end + 12..];
-    }
-    out
-}
-
-async fn create(State(ipam): State<Ipam>, body: String) -> Result<Json<Value>, ApiError> {
-    // A NAT or isolated network with no subnet of its own is given one, so a
-    // user never picks an address that collides with the host's LAN, a VPN or
-    // another network. Bridge mode takes its addressing from the bridge, so it
-    // is left alone.
-    let body = if wants_generated_subnet(&body) {
-        let used = used_prefixes().await;
-        let subnet = free_subnet(&used)?;
-        inject_subnet(&body, subnet)
-    } else {
-        body
-    };
-    // A new network with an IPv4 subnet is served by this daemon from the
-    // start, so libvirt never runs dnsmasq for it.
-    let libvirt_xml = if ipamxml::needs_takeover(&body) {
-        let net = crate::ipam::store::import(&body)
-            .ok_or_else(|| ApiError::bad_request("the network has no IPv4 subnet"))?;
-        let name =
-            open_name(&body).ok_or_else(|| ApiError::bad_request("the network has no name"))?;
-        let mut s = ipam.lock();
-        s.networks.insert(name, net);
-        ipam.save(&s).map_err(ApiError::internal)?;
-        ipamxml::strip(&body)
-    } else {
-        body
-    };
-    let v = with_conn(move |c| {
-        let n = Network::define_xml(c, &libvirt_xml)?;
-        let name = n.get_name().unwrap_or_default();
-        n.create()?;
-        n.set_autostart(true)?;
-        Ok(json!({"name": name, "started": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
-}
-
-/// Whether this definition should be given a generated subnet.
-///
-/// Only a network that would carry an IPv4 subnet and has none: NAT and
-/// isolated both qualify, bridge mode does not (the bridge owns addressing and
-/// libvirt refuses an `<ip>` there). An existing `<ip>` is the caller's choice
-/// -- an administrator may set one deliberately -- and is never replaced.
-/// Whether this definition should be given a generated subnet.
-///
-/// Only **NAT**: it must route and hand out addresses, so a subnet is not
-/// optional there. A NAT network that already carries an `<ip>` is the
-/// caller's deliberate choice and is never replaced.
-///
-/// An **isolated** network is left alone when it has no subnet. It is usually a
-/// private segment the operator routes themselves -- a dummy interface, a
-/// private routed network, an internal-only link -- and libvirt runs no DHCP
-/// for it either way. Forcing a subnet on one would claim addresses on a
-/// segment nothing serves, and would make "no subnet" impossible to express.
-///
-/// **Bridge** mode takes its addressing from the bridge, and libvirt refuses
-/// an `<ip>` there.
-fn wants_generated_subnet(xml: &str) -> bool {
-    ip_cidr(xml).is_empty()
-        && forward_mode(xml) == "nat"
-        && crate::ipam::store::import(xml).is_none()
-}
-
-/// A free `/24`, or an error naming what to do about it. `used` is passed in
-/// so a caller that already gathered it does not re-query libvirt.
+/// A free `/24`, or an error naming what to do about it.
 fn free_subnet(used: &[(u32, u8)]) -> Result<std::net::Ipv4Addr, ApiError> {
     let mut r = 0u64;
     let mut rand = || {
@@ -533,67 +150,395 @@ fn free_subnet(used: &[(u32, u8)]) -> Result<std::net::Ipv4Addr, ApiError> {
         r = r.rotate_left(17);
         v as u32
     };
-    crate::ipam::store::pick_subnet(used, &mut rand).ok_or_else(|| {
+    store::pick_subnet(used, &mut rand).ok_or_else(|| {
         ApiError::internal(
             "no free /24 left in 10/8 or 192.168/16: free an address range by deleting a network",
         )
     })
 }
 
-/// Put an `<ip address='…' netmask='255.255.255.0'/>` into a definition that
-/// has none, right after any `<dns>` (libvirt wants `<dns>` before `<ip>`) and
-/// before `</network>`. Written as text because the caller's XML is already a
-/// document we pass to libvirt unparsed, the same way the SPA builds it.
-///
-/// `subnet` is the /24's **network address** (as `pick_subnet` returns it); the
-/// gateway written into the definition is its first host address, x.x.x.1,
-/// because libvirt refuses x.x.x.0 as a host address.
-fn inject_subnet(xml: &str, subnet: std::net::Ipv4Addr) -> String {
-    // The gateway is the first host address: what libvirt, dnsmasq and our own
-    // DHCP/DNS use as the bridge address.
-    let gw = std::net::Ipv4Addr::from(u32::from(subnet) + 1);
-    let tag = format!("<ip address='{gw}' netmask='255.255.255.0'/>");
-    let insert_at = xml
-        .find("</network>")
-        .or_else(|| xml.rfind('>').map(|i| i + 1))
-        .unwrap_or(xml.len());
-    format!("{}\n  {}\n{}", &xml[..insert_at], tag, &xml[insert_at..])
+/// Give a NAT network the free /24 it must route and hand out addresses from.
+/// A bridge network's addressing is the operator's, and an isolated segment may
+/// deliberately have none, so neither is given one.
+async fn with_nat_subnet(ipam: &Ipam, mut net: Net) -> Result<Net, ApiError> {
+    if net.mode == Mode::Nat && net.subnet().is_none() {
+        let used = used_prefixes(ipam, None).await;
+        let subnet = free_subnet(&used)?;
+        net.gateway = std::net::Ipv4Addr::from(u32::from(subnet) + 1);
+        net.prefix = 24;
+        net.default_range();
+    }
+    Ok(net)
 }
 
-async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let n = crate::libvirt::network(c, &name)?;
-        if n.is_active().unwrap_or(false) {
-            n.destroy()?;
+/// The host's own prefixes, gathered once per write before the store lock.
+/// `omit` drops the edited network's own bridge address: it is on the host, but
+/// it is about to be replaced, so it must not read as a collision with itself.
+async fn host_prefixes(omit: Option<(u32, u8)>) -> Vec<(u32, u8)> {
+    let mut out = tokio::task::spawn_blocking(used_prefixes_host)
+        .await
+        .unwrap_or_default();
+    if let Some(omit) = omit {
+        out.retain(|p| *p != omit);
+    }
+    out
+}
+
+/// Refuse a subnet (supplied in the editor, not generated) that overlaps the
+/// host's own addressing or another stored network's. Called under the store
+/// lock, so two creates cannot both pass and then claim one range.
+fn subnet_clash(
+    s: &store::Store,
+    host: &[(u32, u8)],
+    net: &Net,
+    except: Option<&str>,
+) -> Result<(), ApiError> {
+    if net.mode == Mode::Bridge {
+        return Ok(());
+    }
+    let Some(subnet) = net.subnet() else {
+        return Ok(());
+    };
+    let Some((network, prefix)) = read_cidr(&subnet) else {
+        return Ok(());
+    };
+    let mut used = host.to_vec();
+    for (id, n) in &s.networks {
+        if Some(id.as_str()) == except {
+            continue;
         }
-        n.undefine()?;
-        Ok(json!({"name": name, "undefined": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+        if let Some(found) = n.subnet().as_deref().and_then(read_cidr) {
+            used.push(found);
+        }
+    }
+    if store::overlaps_any(network, prefix, &used) {
+        return Err(ApiError::bad_request(format!(
+            "the subnet {subnet} overlaps an address range already in use (the host's interfaces and routes, or another network); pick an unused one"
+        )));
+    }
+    Ok(())
 }
 
-async fn start(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let n = crate::libvirt::network(c, &name)?;
-        n.create()?;
-        Ok(json!({"name": name, "started": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+/// A network's display name must resolve to exactly one network: a title equal
+/// to another network's key or title would make `key()` ambiguous.
+fn check_title(s: &store::Store, id: &str, title: &str) -> Result<(), ApiError> {
+    if title.is_empty() {
+        return Ok(());
+    }
+    let clash = s
+        .networks
+        .iter()
+        .any(|(other, n)| other != id && (other == title || n.title == title));
+    if clash {
+        return Err(ApiError::bad_request(format!(
+            "another network is already called '{title}'"
+        )));
+    }
+    Ok(())
 }
 
-async fn stop(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let n = crate::libvirt::network(c, &name)?;
-        n.destroy()?;
-        Ok(json!({"name": name, "stopped": true}))
+/// Two networks must never derive one bridge name: each Start would flush the
+/// other's address, and one delete would take the other's bridge with it. Two
+/// *operator* bridges may deliberately share a LAN, so that pair is allowed —
+/// but naming a managed network's derived bridge is never.
+fn check_bridge(s: &store::Store, id: &str, net: &Net) -> Result<(), ApiError> {
+    let bridge = hostnet::bridge_for(net, id);
+    if bridge.is_empty() {
+        return Ok(());
+    }
+    let clash = s.networks.iter().find(|(other, n)| {
+        other.as_str() != id
+            && hostnet::bridge_for(n, other) == bridge
+            && !(net.mode == Mode::Bridge && n.mode == Mode::Bridge)
+    });
+    if let Some((other, _)) = clash {
+        return Err(ApiError::conflict(format!(
+            "network '{other}' already uses the bridge '{bridge}'"
+        )));
+    }
+    Ok(())
+}
+
+fn net_json(id: &str, net: &Net) -> Value {
+    json!({
+        "name": id,
+        "uuid": id,
+        "title": net.title,
+        "bridge": hostnet::bridge_for(net, id),
+        "active": hostnet::is_active(net, id),
+        // A stored network is persistent by definition: nothing removes one
+        // but the API's delete.
+        "persistent": true,
+        "autostart": net.autostart,
+        "forward": match net.mode {
+            Mode::Nat => "nat",
+            Mode::Bridge => "bridge",
+            Mode::Isolated => "none",
+        },
+        "ip": net.cidr().unwrap_or_default(),
     })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+}
+
+fn net_of(ipam: &Ipam, name: &str) -> Result<Net, ApiError> {
+    ipam.lock()
+        .networks
+        .get(name)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found(format!("network '{name}' is not managed here")))
+}
+
+/// The stored key a path segment names: the key itself (a UUID), or the title
+/// it displays, for an old link by name. Titles are not unique, so the first
+/// in key order wins. An unknown segment is returned unchanged, so the handler
+/// answers "not found" exactly as it would for a wrong id.
+///
+/// This lives here rather than in `resolve_uuids` because a router captures
+/// `Path` params before any per-route middleware runs, so rewriting the URI
+/// there could not change what a handler reads.
+fn key(ipam: &Ipam, seg: &str) -> String {
+    ipam.resolve_key(seg).unwrap_or_else(|| seg.to_string())
+}
+
+async fn list(State(st): State<NetState>) -> Result<Json<Value>, ApiError> {
+    let nets: Vec<(String, Net)> = st
+        .ipam
+        .lock()
+        .networks
+        .iter()
+        .map(|(id, n)| (id.clone(), n.clone()))
+        .collect();
+    let arr: Vec<Value> = nets.iter().map(|(id, n)| net_json(id, n)).collect();
+    Ok(Json(json!(arr)))
+}
+
+async fn get_one(
+    State(st): State<NetState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let name = key(&st.ipam, &name);
+    let net = net_of(&st.ipam, &name)?;
+    Ok(Json(net_json(&name, &net)))
+}
+
+/// Linux bridge devices, for the create/edit network form's bridge dropdown.
+///
+/// Read from /sys/class/net rather than libvirt interfaces: a bridge does not
+/// have to be a libvirt interface, and scanning sysfs is what `ip link show
+/// type bridge` does under the hood. A device is a bridge iff it has a
+/// `bridge` subdirectory.
+async fn bridges() -> Result<Json<Value>, ApiError> {
+    let v = std::fs::read_dir("/sys/class/net")
+        .map_err(|e| ApiError::internal(format!("read /sys/class/net: {e}")))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("bridge").is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    Ok(Json(json!(v)))
+}
+
+async fn get_xml(
+    State(st): State<NetState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let name = key(&st.ipam, &name);
+    let net = net_of(&st.ipam, &name)?;
+    Ok(Json(
+        json!({"name": name, "xml": netxml::render(&name, &net)}),
+    ))
+}
+
+/// Create a network. The SPA names it with a fresh UUID and puts the name the
+/// user typed in `<title>`, so the id and the display name cannot drift.
+async fn create(State(st): State<NetState>, body: String) -> Result<Json<Value>, ApiError> {
+    let name = open_name(&body).ok_or_else(|| ApiError::bad_request("the network has no name"))?;
+    if !crate::libvirt::is_uuid(&name) {
+        return Err(ApiError::bad_request(format!(
+            "network '{name}' must be named by a UUID"
+        )));
+    }
+    let net = with_nat_subnet(
+        &st.ipam,
+        netxml::parse(&body).map_err(ApiError::bad_request)?,
+    )
+    .await?;
+    let host = host_prefixes(None).await;
+    {
+        let mut s = st.ipam.lock();
+        if s.networks.contains_key(&name) {
+            return Err(ApiError::conflict(format!(
+                "network '{name}' already exists"
+            )));
+        }
+        check_title(&s, &name, &net.title)?;
+        check_bridge(&s, &name, &net)?;
+        subnet_clash(&s, &host, &net, None)?;
+        s.networks.insert(name.clone(), net.clone());
+        st.ipam.save(&s).map_err(ApiError::internal)?;
+    }
+    let macs = st.ipam.dhcp_macs(&net, &name);
+    if let Err(e) = st
+        .ipam
+        .host
+        .start(&net, &name, &net.reservations, &macs)
+        .await
+    {
+        // Roll back what the failed start may already have made: dnsmasq, its
+        // files, the bridge. Then forget the definition, rather than leave a
+        // broken network every later startup retries.
+        let _ = st.ipam.host.stop(&net, &name).await;
+        st.ipam.host.remove(&name);
+        {
+            let mut s = st.ipam.lock();
+            s.networks.remove(&name);
+            let _ = st.ipam.save(&s);
+        }
+        return Err(ApiError::internal(e));
+    }
+    apply_firewall(&st).await?;
+    Ok(Json(json!({"name": name, "started": true})))
+}
+
+/// Define/replace a network from the editor's XML.
+///
+/// Only a change to what runs (bridge, subnet, mode) reprograms the bridge; an
+/// edit to the range, forwarders, domain or reservations just restarts dnsmasq,
+/// so a guest is never unplugged for a settings change. A bridge *rename* stops
+/// the old one first; a same-bridge subnet change is applied in place.
+/// `hostnet::bridge_up`, not `is_active`, decides "was up": a crashed dnsmasq
+/// must not stop the address from being reprogrammed.
+async fn put_xml(
+    State(st): State<NetState>,
+    Path(name): Path<String>,
+    body: String,
+) -> Result<Json<Value>, ApiError> {
+    let name = key(&st.ipam, &name);
+    if open_name(&body).as_deref() != Some(name.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "the definition's <name> must be this network's id '{name}'"
+        )));
+    }
+    let old = net_of(&st.ipam, &name)?;
+    let new = netxml::parse(&body).map_err(ApiError::bad_request)?;
+    let new = with_nat_subnet(&st.ipam, new).await?;
+    let net = netxml::merge(&old, new).map_err(ApiError::bad_request)?;
+    let old_bridge = hostnet::bridge_for(&old, &name);
+    let new_bridge = hostnet::bridge_for(&net, &name);
+    // `host.stop` deletes a managed bridge, and with it the address and every
+    // guest tap. Only a *different* bridge needs that: when the name stays,
+    // `host.start` reprograms the address and restarts dnsmasq in place, so a
+    // subnet change does not pull the network out from under its guests.
+    let same_bridge = old_bridge == new_bridge;
+    let reprogram = !same_bridge || old.cidr() != net.cidr() || old.mode != net.mode;
+    let dns_changed = old.range_start != net.range_start
+        || old.range_end != net.range_end
+        || old.dns_forwarders != net.dns_forwarders
+        || old.domain != net.domain
+        || old.lease_secs != net.lease_secs
+        || old.reservations != net.reservations;
+    // `bridge_up`, not `is_active`: a crashed dnsmasq must not decide whether
+    // the address is reprogrammed.
+    let was_up = hostnet::bridge_up(&old, &name);
+    // The old bridge's address is on the host, but it is this network's own.
+    let own = old.subnet().as_deref().and_then(read_cidr);
+    let host = host_prefixes(own).await;
+    // Refuse before stopping anything: a rejected definition must leave the
+    // running network exactly as it is.
+    {
+        let s = st.ipam.lock();
+        check_title(&s, &name, &net.title)?;
+        check_bridge(&s, &name, &net)?;
+        subnet_clash(&s, &host, &net, Some(&name))?;
+    }
+    if reprogram && was_up && !same_bridge {
+        st.ipam
+            .host
+            .stop(&old, &name)
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    {
+        let mut s = st.ipam.lock();
+        s.networks.insert(name.clone(), net.clone());
+        st.ipam.save(&s).map_err(ApiError::internal)?;
+    }
+    if reprogram {
+        if was_up {
+            let macs = st.ipam.dhcp_macs(&net, &name);
+            if let Err(e) = st
+                .ipam
+                .host
+                .start(&net, &name, &net.reservations, &macs)
+                .await
+            {
+                // The new definition never came up. Put the old one back so a
+                // reload shows what is actually stored, restore what runs, and
+                // rebuild the rules for it.
+                tracing::warn!(
+                    "ipam: network {name} did not start: {e}; restoring the old definition"
+                );
+                let _ = st.ipam.host.stop(&net, &name).await;
+                let macs = st.ipam.dhcp_macs(&old, &name);
+                let _ = st
+                    .ipam
+                    .host
+                    .start(&old, &name, &old.reservations, &macs)
+                    .await;
+                {
+                    let mut s = st.ipam.lock();
+                    s.networks.insert(name.clone(), old.clone());
+                    let _ = st.ipam.save(&s);
+                }
+                apply_firewall(&st).await?;
+                return Err(ApiError::internal(e));
+            }
+        }
+        // A network that becomes the operator's must not keep a dnsmasq of
+        // ours on that bridge.
+        if net.mode == Mode::Bridge && old.mode != Mode::Bridge {
+            st.ipam
+                .host
+                .stop_dnsmasq(&name)
+                .await
+                .map_err(ApiError::internal)?;
+        }
+        apply_firewall(&st).await?;
+    } else if dns_changed {
+        restart_dns(&st, &name).await?;
+    }
+    Ok(Json(
+        json!({"name": name, "defined": true, "restarted": reprogram && was_up}),
+    ))
+}
+
+async fn start(
+    State(st): State<NetState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let name = key(&st.ipam, &name);
+    let net = net_of(&st.ipam, &name)?;
+    let macs = st.ipam.dhcp_macs(&net, &name);
+    st.ipam
+        .host
+        .start(&net, &name, &net.reservations, &macs)
+        .await
+        .map_err(ApiError::internal)?;
+    apply_firewall(&st).await?;
+    Ok(Json(json!({"name": name, "started": true})))
+}
+
+async fn stop(
+    State(st): State<NetState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let name = key(&st.ipam, &name);
+    let net = net_of(&st.ipam, &name)?;
+    st.ipam
+        .host
+        .stop(&net, &name)
+        .await
+        .map_err(ApiError::internal)?;
+    apply_firewall(&st).await?;
+    Ok(Json(json!({"name": name, "stopped": true})))
 }
 
 #[derive(Deserialize)]
@@ -601,56 +546,149 @@ struct AutostartReq {
     autostart: bool,
 }
 
+/// Autostart lives in the store only: it changes what the next startup does,
+/// not what runs now.
 async fn set_autostart(
+    State(st): State<NetState>,
     Path(name): Path<String>,
     Json(req): Json<AutostartReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let n = crate::libvirt::network(c, &name)?;
-        n.set_autostart(req.autostart)?;
-        Ok(json!({"name": name, "autostart": req.autostart}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+    let name = key(&st.ipam, &name);
+    net_of(&st.ipam, &name)?;
+    st.ipam
+        .update(&name, |n| {
+            n.autostart = req.autostart;
+            Ok(())
+        })
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({"name": name, "autostart": req.autostart})))
 }
 
-fn open_name(xml: &str) -> Option<String> {
-    let i = xml.find("<name>")? + 6;
-    let j = xml[i..].find("</name>")?;
-    Some(xml[i..i + j].trim().to_string())
+async fn delete(
+    State(st): State<NetState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let name = key(&st.ipam, &name);
+    let net = net_of(&st.ipam, &name)?;
+    // Deleting takes the bridge away under its guests (and their DHCP/DNS).
+    // Refuse while any *defined* guest names it: a shut-off guest's NIC still
+    // points at the bridge, and it could not start after the bridge is gone.
+    let bridge = hostnet::bridge_for(&net, &name);
+    let mut users: Vec<String> = st
+        .ipam
+        .nics()
+        .into_iter()
+        .filter(|n| n.bridge == bridge)
+        .map(|n| n.name)
+        .collect();
+    if !users.is_empty() {
+        users.sort();
+        users.dedup();
+        return Err(ApiError::conflict(format!(
+            "network '{name}' is in use by defined guest(s) {}; delete or move them first",
+            users.join(", ")
+        )));
+    }
+    st.ipam
+        .host
+        .stop(&net, &name)
+        .await
+        .map_err(ApiError::internal)?;
+    st.ipam.host.remove(&name);
+    {
+        let mut s = st.ipam.lock();
+        s.networks.remove(&name);
+        st.ipam.save(&s).map_err(ApiError::internal)?;
+    }
+    // The firewall entry, its file and the live ruleset in one critical
+    // section: rules for a network that no longer exists must not survive, and
+    // a new network reusing the id must not inherit them.
+    let _guard = st.fw.lock.lock().await;
+    let mut store = firewall::load(&st.fw.path).map_err(ApiError::internal)?;
+    if store.networks.remove(&name).is_some() {
+        firewall::save(&st.fw.path, &store).map_err(ApiError::internal)?;
+    }
+    crate::api::firewall::apply_store(&st.ipam, &store)
+        .await
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "network removed, applying the firewall failed: {e}"
+            ))
+        })?;
+    Ok(Json(json!({"name": name, "undefined": true})))
 }
 
-fn managed(ipam: &Ipam, name: &str) -> Result<crate::ipam::store::Net, ApiError> {
-    ipam.lock().networks.get(name).cloned().ok_or_else(|| {
+/// Rebuild the `virt-man` nftables table from the persisted store. Serialised
+/// with the firewall API's own saves so a concurrent PUT cannot interleave the
+/// file and the live ruleset.
+async fn apply_firewall(st: &NetState) -> Result<(), ApiError> {
+    let _guard = st.fw.lock.lock().await;
+    let store = firewall::load(&st.fw.path).map_err(ApiError::internal)?;
+    crate::api::firewall::apply_store(&st.ipam, &store)
+        .await
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "network change applied, applying the firewall failed: {e}"
+            ))
+        })
+}
+
+/// Rewrite a network's dnsmasq config and restart it, if it is running. That is
+/// what makes a changed reservation or range take effect without touching the
+/// bridge (and so without unplugging a guest).
+async fn restart_dns(st: &NetState, id: &str) -> Result<(), ApiError> {
+    let Some(net) = st.ipam.lock().networks.get(id).cloned() else {
+        return Ok(());
+    };
+    if !net.is_served() || !hostnet::is_active(&net, id) {
+        return Ok(());
+    }
+    let macs = st.ipam.dhcp_macs(&net, id);
+    st.ipam
+        .host
+        .restart_dnsmasq(&net, id, &net.reservations, &macs)
+        .await
+        .map_err(ApiError::internal)
+}
+
+/// A network whose addressing this host serves. A bridge network, or one with
+/// no subnet, has no range or reservations to edit.
+fn managed(ipam: &Ipam, name: &str) -> Result<Net, ApiError> {
+    let err = || {
         ApiError::bad_request(format!(
             "network '{name}' has no IPv4 subnet served by this host, so it has no address reservations"
         ))
-    })
+    };
+    let net = ipam.lock().networks.get(name).cloned().ok_or_else(err)?;
+    if !net.is_served() {
+        return Err(err());
+    }
+    Ok(net)
 }
 
-fn reservation_json(r: &crate::ipam::store::Reservation, guests: &Ipam) -> Value {
+fn reservation_json(r: &Reservation, ipam: &Ipam) -> Value {
     json!({
         "mac": r.mac,
         "ip": r.ip.to_string(),
         "name": r.name,
         "dynamic": r.dynamic,
         "vm": r.vm,
-        "vm_name": guests.guest_of(&r.mac).map(|g| g.1),
+        "vm_name": ipam.guest_of(&r.mac).map(|g| g.name),
         "seen_ms": r.seen_ms,
     })
 }
 
 /// Every reservation on a network, with the guest each belongs to.
 async fn list_hosts(
-    State(ipam): State<Ipam>,
+    State(st): State<NetState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let net = managed(&ipam, &name)?;
+    let name = key(&st.ipam, &name);
+    let net = managed(&st.ipam, &name)?;
     let hosts: Vec<Value> = net
         .reservations
         .iter()
-        .map(|r| reservation_json(r, &ipam))
+        .map(|r| reservation_json(r, &st.ipam))
         .collect();
     Ok(Json(json!({"network": name, "hosts": hosts})))
 }
@@ -664,14 +702,14 @@ struct HostReq {
     name: Option<String>,
 }
 
-/// Add or change the reservation for one MAC. Takes effect at the guest's
-/// next DHCP exchange; nothing is restarted.
+/// Add or change the reservation for one MAC.
 async fn put_host(
-    State(ipam): State<Ipam>,
+    State(st): State<NetState>,
     Path(name): Path<String>,
     Json(req): Json<HostReq>,
 ) -> Result<Json<Value>, ApiError> {
-    use crate::ipam::store::{Reservation, clean_hostname, normalize_mac};
+    use crate::ipam::store::{clean_hostname, normalize_mac};
+    let name = key(&st.ipam, &name);
     let mac = normalize_mac(&req.mac)
         .ok_or_else(|| ApiError::bad_request(format!("'{}' is not a MAC address", req.mac)))?;
     let ip: std::net::Ipv4Addr = req
@@ -689,9 +727,10 @@ async fn put_host(
         ),
         None => None,
     };
-    managed(&ipam, &name)?;
-    let vm = ipam.guest_of(&mac).map(|g| g.0);
-    let r = ipam
+    managed(&st.ipam, &name)?;
+    let vm = st.ipam.guest_of(&mac).map(|g| g.uuid);
+    let r = st
+        .ipam
         .update(&name, |n| {
             if !n.contains_host(ip) || ip == n.gateway {
                 return Err(format!("{ip} is not a usable address on this network"));
@@ -701,10 +740,14 @@ async fn put_host(
             }
             let seen = n.reservation_for_mac(&mac).map_or(0, |r| r.seen_ms);
             n.reservations.retain(|r| r.mac != mac);
+            // Two reservations in one network must not answer the same DNS
+            // name, or one guest would resolve to the other's address. A
+            // clash is numbered, as the allocator does.
+            let host_name = host.map(|h| n.unique_name(&h, &mac));
             let r = Reservation {
                 mac: mac.clone(),
                 ip,
-                name: host,
+                name: host_name,
                 dynamic: false,
                 vm,
                 seen_ms: seen,
@@ -713,31 +756,32 @@ async fn put_host(
             Ok(r)
         })
         .map_err(ApiError::bad_request)?;
+    restart_dns(&st, &name).await?;
     Ok(Json(
-        json!({"network": name, "host": reservation_json(&r, &ipam)}),
+        json!({"network": name, "host": reservation_json(&r, &st.ipam)}),
     ))
 }
 
-/// Drop the reservation for one MAC.
-///
-/// The address is free again, but the guest is not left without one: its next
-/// DHCP exchange gets a fresh address from the range, which becomes its
-/// permanent reservation in turn. (Deleting used to redefine the network and
-/// unplug every guest on it; now nothing is restarted.)
+/// Drop the reservation for one MAC. The guest is not left without an address:
+/// the supervisor gives it a fresh one from the range at its next pass, which
+/// becomes its permanent reservation in turn.
 async fn delete_host(
-    State(ipam): State<Ipam>,
+    State(st): State<NetState>,
     Path((name, mac)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let mac = crate::ipam::store::normalize_mac(&mac)
-        .ok_or_else(|| ApiError::bad_request("not a MAC address"))?;
-    managed(&ipam, &name)?;
-    let removed = ipam
+    let name = key(&st.ipam, &name);
+    let mac =
+        store::normalize_mac(&mac).ok_or_else(|| ApiError::bad_request("not a MAC address"))?;
+    managed(&st.ipam, &name)?;
+    let removed = st
+        .ipam
         .update(&name, |n| {
             let before = n.reservations.len();
             n.reservations.retain(|r| r.mac != mac);
             Ok(n.reservations.len() != before)
         })
         .map_err(ApiError::bad_request)?;
+    restart_dns(&st, &name).await?;
     Ok(Json(
         json!({"network": name, "mac": mac, "removed": removed}),
     ))
@@ -756,10 +800,11 @@ struct FlowsQuery {
 /// newest sequence here; `dropped` counts records that aged out of the ring
 /// before anyone pulled them.
 async fn get_flows(
-    State(ipam): State<Ipam>,
+    State(st): State<NetState>,
     axum::extract::Query(q): axum::extract::Query<FlowsQuery>,
 ) -> Json<Value> {
-    let (flows, last, dropped) = ipam
+    let (flows, last, dropped) = st
+        .ipam
         .flows
         .since(q.after, q.limit.unwrap_or(5000).min(20_000));
     Json(json!({"flows": flows, "last": last, "dropped": dropped}))
@@ -767,10 +812,11 @@ async fn get_flows(
 
 /// The network's IPAM settings, and whether this host is serving it now.
 async fn get_ipam(
-    State(ipam): State<Ipam>,
+    State(st): State<NetState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let n = managed(&ipam, &name)?;
+    let name = key(&st.ipam, &name);
+    let n = managed(&st.ipam, &name)?;
     let (a, b) = (u32::from(n.range_start), u32::from(n.range_end));
     let used = n
         .reservations
@@ -779,7 +825,7 @@ async fn get_ipam(
         .count() as u32;
     Ok(Json(json!({
         "network": name,
-        "serving": ipam.serving(&name),
+        "serving": st.ipam.serving(&name),
         "gateway": n.gateway.to_string(),
         "prefix": n.prefix,
         "range_start": n.range_start.to_string(),
@@ -805,10 +851,11 @@ struct IpamReq {
 /// Change the dynamic range, forwarders or domain. Existing reservations are
 /// kept even when the range no longer covers them: they are permanent.
 async fn put_ipam(
-    State(ipam): State<Ipam>,
+    State(st): State<NetState>,
     Path(name): Path<String>,
     Json(req): Json<IpamReq>,
 ) -> Result<Json<Value>, ApiError> {
+    let name = key(&st.ipam, &name);
     let parse = |s: &str| -> Result<std::net::Ipv4Addr, ApiError> {
         s.trim()
             .parse()
@@ -827,181 +874,230 @@ async fn put_ipam(
         .map(str::trim)
         .filter(|d| !d.is_empty())
     {
-        Some(d)
-            if d.split('.').all(|l| {
-                crate::ipam::store::clean_hostname(l).as_deref() == Some(&l.to_ascii_lowercase())
-            }) =>
-        {
-            Some(d.to_ascii_lowercase())
-        }
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "the domain may only contain letters, digits, '-' and '.'",
-            ));
-        }
+        Some(d) => Some(store::valid_domain(d).ok_or_else(|| {
+            ApiError::bad_request("the domain may only contain letters, digits, '-' and '.'")
+        })?),
         None => None,
     };
-    managed(&ipam, &name)?;
-    ipam.update(&name, |n| {
-        n.validate_range(start, end)?;
-        n.range_start = start;
-        n.range_end = end;
-        n.dns_forwarders = fwd;
-        n.domain = domain;
-        Ok(())
-    })
-    .map_err(ApiError::bad_request)?;
-    get_ipam(State(ipam), Path(name)).await
+    managed(&st.ipam, &name)?;
+    st.ipam
+        .update(&name, |n| {
+            n.validate_range(start, end)?;
+            n.range_start = start;
+            n.range_end = end;
+            n.dns_forwarders = fwd;
+            n.domain = domain;
+            Ok(())
+        })
+        .map_err(ApiError::bad_request)?;
+    restart_dns(&st, &name).await?;
+    get_ipam(State(st), Path(name)).await
+}
+
+fn open_name(xml: &str) -> Option<String> {
+    let i = xml.find("<name>")? + 6;
+    let j = xml[i..].find("</name>")?;
+    Some(xml[i..i + j].trim().to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn taps_are_found_only_for_the_restarted_network() {
-        let xml = "<domain><devices>
-          <interface type='network'><source network='internet' bridge='virbr1'/><target dev='vnet1'/></interface>
-          <interface type='network'><source network='internal'/><target dev='vnet2'/></interface>
-          <interface type=\"network\"><mac address='x'/><source network=\"internet\"/><target dev=\"vnet9\"/></interface>
-          <interface type='network'><source network='internet'/></interface>
-        </devices></domain>";
-        assert_eq!(
-            super::taps_on_network(xml, "internet"),
-            vec!["vnet1", "vnet9"]
-        );
-        assert_eq!(super::taps_on_network(xml, "internal"), vec!["vnet2"]);
-        assert!(super::taps_on_network(xml, "other").is_empty());
-    }
-
     use super::*;
 
-    #[test]
-    fn forward_mode_reads_nat_bridge_and_none() {
-        // libvirt emits single-quoted attributes.
-        assert_eq!(
-            forward_mode(r#"<network><forward mode='nat'/></network>"#),
-            "nat"
-        );
-        assert_eq!(
-            forward_mode(r#"<network><forward mode='bridge'/></network>"#),
-            "bridge"
-        );
-        // No forward element = isolated.
-        assert_eq!(forward_mode(r#"<network><name>x</name></network>"#), "none");
-        // route behaves like nat for display purposes.
-        assert_eq!(
-            forward_mode(r#"<network><forward mode='route'/></network>"#),
-            "nat"
-        );
-    }
-
-    #[test]
-    fn ip_cidr_reads_address_and_netmask_as_prefix() {
-        assert_eq!(
-            ip_cidr(r#"<network><ip address='192.168.100.1' netmask='255.255.255.0'/></network>"#),
-            "192.168.100.1/24"
-        );
-        // Double quotes work too.
-        assert_eq!(
-            ip_cidr(r#"<network><ip address="10.9.0.1" netmask="255.255.0.0"/></network>"#),
-            "10.9.0.1/16"
-        );
-        assert_eq!(ip_cidr(r#"<network><name>x</name></network>"#), "");
-    }
-
-    #[test]
-    fn ip_cidr_prefers_an_explicit_prefix() {
-        assert_eq!(
-            ip_cidr(r#"<network><ip address='10.0.0.1' prefix='16'/></network>"#),
-            "10.0.0.1/16"
-        );
-    }
-
-    #[test]
-    fn netmask_bits_sums_leading_ones() {
-        assert_eq!(netmask_bits("255.255.255.0"), 24);
-        assert_eq!(netmask_bits("255.255.0.0"), 16);
-        assert_eq!(netmask_bits("255.255.255.128"), 25);
-    }
-
-    /// Only a NAT network without a subnet gets one. An isolated network may
-    /// legitimately have none -- that is how a private routed (or dummy)
-    /// segment is expressed -- a bridge network takes its addressing from the
-    /// bridge, and an existing `<ip>` is the caller's deliberate choice.
-    #[test]
-    fn only_a_subnet_less_nat_network_is_given_one() {
-        assert!(wants_generated_subnet(
-            "<network><name>x</name><forward mode='nat'/></network>"
-        ));
-        // Isolated: no subnet is a valid, deliberate choice.
-        assert!(!wants_generated_subnet("<network><name>x</name></network>"));
-        assert!(!wants_generated_subnet(
-            "<network><name>x</name><forward mode='bridge'/></network>"
-        ));
-        // A subnet the caller did give -- NAT or isolated -- is never replaced.
-        assert!(!wants_generated_subnet(
-            "<network><name>x</name><ip address='10.9.0.1' netmask='255.255.255.0'/></network>"
-        ));
-    }
-
-    /// The injected definition must be one the takeover then recognises, and
-    /// must not disturb an existing `<dns>`, which libvirt requires before
-    /// `<ip>`.
-    #[test]
-    fn an_injected_subnet_is_taken_over_and_keeps_dns_ahead_of_ip() {
-        let src = "<network>\n  <name>x</name>\n  <dns>\n    <forwarder addr='1.1.1.1'/>\n  </dns>\n</network>";
-        let out = inject_subnet(src, std::net::Ipv4Addr::new(10, 42, 7, 0));
-        // The gateway is the first host address, and the prefix is /24.
-        assert_eq!(ip_cidr(&out), "10.42.7.1/24", "{out}");
-        assert!(
-            out.find("<dns").unwrap() < out.find("<ip").unwrap(),
-            "{out}"
-        );
-        assert!(
-            out.contains("</network>"),
-            "the document stays closed: {out}"
-        );
-        // And the whole point: it now imports as ours, so DHCP/DNS serve it.
-        let net = crate::ipam::store::import(&out).expect("takeover recognises it");
-        assert_eq!(net.gateway, std::net::Ipv4Addr::new(10, 42, 7, 1));
-        assert_eq!(net.prefix, 24);
-    }
-
-    /// A bare `<network/>` still gets a closed document back.
-    #[test]
-    fn injecting_into_a_minimal_document_stays_well_formed() {
-        let out = inject_subnet("<network></network>", std::net::Ipv4Addr::new(10, 5, 0, 0));
-        assert_eq!(ip_cidr(&out), "10.5.0.1/24", "{out}");
-        assert_eq!(out.matches("</network>").count(), 1, "{out}");
-    }
-
-    /// The value the form puts in its CIDR field must be a **host** address.
-    /// x.x.x.0 is the subnet's own address, and libvirt refuses it outright --
-    /// `Invalid address '10.x.x.0/24' in network ...` -- so suggesting the
-    /// network address made every create through the form fail. `pick_subnet`
-    /// works in network addresses, so the gateway is derived at this boundary.
-    #[test]
-    fn a_suggested_subnet_is_a_gateway_not_the_network_address() {
-        for i in 0..64u32 {
-            let net = crate::ipam::store::pick_subnet(&[], &mut || i).expect("a subnet");
-            assert_eq!(
-                net.octets()[3],
-                0,
-                "pick_subnet works in network addresses: {net}"
-            );
-            // What the endpoint hands out is the first host address of it.
-            let gateway = std::net::Ipv4Addr::from(u32::from(net) + 1);
-            assert_eq!(
-                gateway.octets()[3],
-                1,
-                "the suggestion is x.x.x.1: {gateway}"
-            );
-            // And that address is the one libvirt accepts: injecting it into a
-            // definition yields an <ip> whose address is a host address.
-            let xml = inject_subnet("<network></network>", net);
-            assert_eq!(ip_cidr(&xml), format!("{gateway}/24"), "{xml}");
-            // The network address itself must never be what a form is given:
-            // libvirt rejects it, which is the bug this guards.
-            assert_ne!(ip_cidr(&xml), format!("{net}/24"), "{xml}");
+    fn net() -> Net {
+        Net {
+            title: "Lab".into(),
+            mode: Mode::Nat,
+            bridge: String::new(),
+            autostart: true,
+            gateway: "10.9.0.1".parse().unwrap(),
+            prefix: 24,
+            range_start: "10.9.0.2".parse().unwrap(),
+            range_end: "10.9.0.254".parse().unwrap(),
+            dns_forwarders: Vec::new(),
+            domain: None,
+            lease_secs: 3600,
+            reservations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_summary_reports_the_store_and_the_host_state() {
+        let id = "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00";
+        let v = net_json(id, &net());
+        assert_eq!(v["name"], id);
+        assert_eq!(v["uuid"], id);
+        assert_eq!(v["title"], "Lab");
+        assert_eq!(v["bridge"], hostnet::bridge_name(id));
+        assert_eq!(v["forward"], "nat");
+        assert_eq!(v["ip"], "10.9.0.1/24");
+        assert_eq!(v["persistent"], true);
+        assert_eq!(v["autostart"], true);
+
+        let mut bridge = net();
+        bridge.mode = Mode::Bridge;
+        bridge.bridge = "vmtest-nobr".into();
+        bridge.gateway = "0.0.0.0".parse().unwrap();
+        assert_eq!(net_json(id, &bridge)["forward"], "bridge");
+        assert_eq!(net_json(id, &bridge)["bridge"], "vmtest-nobr");
+        assert_eq!(net_json(id, &bridge)["ip"], "");
+        assert_eq!(net_json(id, &bridge)["active"], false);
+    }
+
+    #[test]
+    fn a_cidr_token_reads_as_a_network_and_prefix() {
+        assert_eq!(
+            read_cidr("10.0.0.5/24"),
+            Some((u32::from(std::net::Ipv4Addr::new(10, 0, 0, 0)), 24))
+        );
+        assert_eq!(
+            read_cidr("192.168.1.7"),
+            Some((u32::from(std::net::Ipv4Addr::new(192, 168, 1, 7)), 32))
+        );
+        assert_eq!(read_cidr("default"), None);
+        assert_eq!(read_cidr("linkdown"), None);
+    }
+
+    #[test]
+    fn a_definition_name_is_read_from_the_editor_xml() {
+        assert_eq!(
+            open_name("<network><name>abc</name></network>").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(open_name("<network/>"), None);
+    }
+
+    fn stored(id: &str, net: Net) -> store::Store {
+        let mut s = store::Store::default();
+        s.networks.insert(id.to_string(), net);
+        s
+    }
+
+    #[test]
+    fn a_second_network_cannot_derive_the_same_bridge() {
+        // Two caller-chosen ids sharing their first 12 hex: `bridge_name` can
+        // still collide, so the API must refuse the second one.
+        let a = "00000000-0000-4000-8000-000000000001";
+        let b = "00000000-0000-4000-8000-000000000002";
+        assert_eq!(
+            hostnet::bridge_name(a),
+            hostnet::bridge_name(b),
+            "this is the case the check exists for"
+        );
+        let s = stored(a, net());
+        assert!(check_bridge(&s, b, &net()).is_err());
+        // The network itself may keep its own bridge.
+        assert!(check_bridge(&s, a, &net()).is_ok());
+        // Two operator bridges may share a physical LAN.
+        let mut op_a = net();
+        op_a.mode = Mode::Bridge;
+        op_a.bridge = "br-lan".into();
+        let s = stored(a, op_a.clone());
+        assert!(check_bridge(&s, b, &op_a).is_ok());
+        // An operator bridge may not take a managed network's derived name.
+        let s = stored(a, net());
+        let mut thief = net();
+        thief.mode = Mode::Bridge;
+        thief.bridge = hostnet::bridge_name(a);
+        assert!(check_bridge(&s, b, &thief).is_err());
+    }
+
+    #[test]
+    fn a_title_must_name_exactly_one_network() {
+        let id = "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00";
+        let other = "6c03b2b6-5000-4b2d-a03f-2e4d6c8ba00f";
+        let s = stored(id, net()); // title "Lab"
+        assert!(check_title(&s, other, "Lab").is_err(), "duplicate title");
+        assert!(
+            check_title(&s, other, id).is_err(),
+            "a title equal to another network's id"
+        );
+        assert!(check_title(&s, id, "Lab").is_ok(), "its own title");
+        assert!(check_title(&s, other, "Other").is_ok());
+        assert!(check_title(&s, other, "").is_ok(), "no title is fine");
+    }
+
+    #[test]
+    fn a_subnet_that_overlaps_the_host_or_another_network_is_refused() {
+        use std::net::Ipv4Addr;
+        let id = "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00";
+        // `net()` is 10.9.0.0/24; the host is on 10/8 for the first case.
+        let host = [(u32::from(Ipv4Addr::new(10, 0, 0, 0)), 8)];
+        let s = stored(id, net());
+        assert!(
+            subnet_clash(&s, &host, &net(), None).is_err(),
+            "inside the host's own /8"
+        );
+
+        // Another stored network's subnet, and the edited one's own.
+        let elsewhere = [(u32::from(Ipv4Addr::new(192, 168, 50, 0)), 24)];
+        assert!(subnet_clash(&s, &elsewhere, &net(), None).is_err());
+        assert!(subnet_clash(&s, &elsewhere, &net(), Some(id)).is_ok());
+
+        // A fresh /24 is accepted.
+        let mut fresh = net();
+        fresh.gateway = "10.44.0.1".parse().unwrap();
+        assert!(subnet_clash(&s, &elsewhere, &fresh, None).is_ok());
+    }
+
+    /// A shut-off guest still has a NIC naming the bridge, and it could not
+    /// start after the bridge was gone, so *any* defined guest blocks the
+    /// delete before anything on the host is touched (needs no root).
+    #[tokio::test]
+    async fn deleting_a_network_a_defined_guest_uses_is_refused() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let dir = std::env::temp_dir().join(format!("netdel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ipam = Ipam::load(dir.join("networks.json"), dir.clone()).unwrap();
+        let id = "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00";
+        let net = net();
+        {
+            let mut s = ipam.lock();
+            s.networks.insert(id.into(), net.clone());
+            ipam.save(&s).unwrap();
+        }
+        let app = routes(ipam.clone(), FirewallState::new(ipam.clone()));
+        // Neither a running nor a shut-off guest may lose its bridge.
+        for (mac, name, running) in [
+            ("52:54:00:aa:bb:cc", "web", false),
+            ("52:54:00:aa:bb:cd", "db", true),
+        ] {
+            ipam.guests.lock().unwrap().clear();
+            ipam.guests.lock().unwrap().insert(
+                mac.into(),
+                crate::ipam::server::GuestNic {
+                    uuid: format!("u-{name}"),
+                    name: name.into(),
+                    bridge: hostnet::bridge_for(&net, id),
+                    running,
+                },
+            );
+            let r = app
+                .clone()
+                .oneshot(
+                    Request::delete(format!("/networks/{id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 409, "running: {running}");
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains("defined guest(s)"),
+                "the refusal must name what blocks it: {}",
+                String::from_utf8_lossy(&body)
+            );
+            assert!(
+                ipam.lock().networks.contains_key(id),
+                "the definition is still there"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -8,6 +8,9 @@ output_log="/var/log/${RC_SVCNAME}.log"
 error_log="/var/log/${RC_SVCNAME}.log"
 
 depend() {
-	need net libvirtd
+	# The daemon creates the network bridges; startup() tolerates libvirtd
+	# being down, and a guest must not autostart before its bridge exists.
+	need net
+	before libvirtd
 	after firewall
 }

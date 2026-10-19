@@ -93,7 +93,6 @@ macro_rules! by_id {
     };
 }
 by_id!(domain, virt::domain::Domain);
-by_id!(network, virt::network::Network);
 by_id!(pool, virt::storage_pool::StoragePool);
 
 /// The `<title>` of a definition, if it has one (and it is not empty).
@@ -469,47 +468,6 @@ mod graphics_tests {
 #[cfg(test)]
 mod tests {
     use super::is_uuid;
-
-    /// Against the real qemu:///system, with a throwaway network: the same
-    /// object is found by UUID and by name, an unknown UUID is not found, and a
-    /// network *named* like a UUID is still found by that name.
-    /// `sudo -E cargo test --bins -- --ignored finds_by_uuid`
-    #[test]
-    #[ignore = "needs root and a reachable qemu:///system"]
-    fn finds_by_uuid_and_by_name_on_real_libvirt() {
-        use virt::network::Network;
-        let mut c = virt::connect::Connect::open(Some(super::URI)).expect("connect");
-        let weird = "00000000-0000-4000-8000-00000000abcd";
-        let make = |name: &str, uuid: &str| {
-            Network::define_xml(
-                &c,
-                &format!("<network><name>{name}</name><uuid>{uuid}</uuid></network>"),
-            )
-            .expect("define")
-        };
-        let real = "5e3c1f2a-9b8d-4c7e-a1f0-2d3b4c5d6e7f";
-        let a = make("uuidprobe-a", real);
-        // A network whose NAME is UUID-shaped but is not its UUID.
-        let b = make(weird, "6f4d2a3b-0c9e-4d8f-b2a1-3e4c5d6e7f80");
-        let got = |id: &str| super::network(&c, id).ok().and_then(|n| n.get_name().ok());
-        let outcome = (
-            got(real),
-            got("uuidprobe-a"),
-            got("7a5e3b4c-1d0f-4e9a-83b2-4f5d6e7f8091"),
-            got(weird),
-        );
-        let _ = a.undefine();
-        let _ = b.undefine();
-        let _ = c.close();
-        assert_eq!(outcome.0.as_deref(), Some("uuidprobe-a"), "by UUID");
-        assert_eq!(outcome.1.as_deref(), Some("uuidprobe-a"), "by name");
-        assert_eq!(outcome.2, None, "an unknown UUID is not found");
-        assert_eq!(
-            outcome.3.as_deref(),
-            Some(weird),
-            "a UUID-shaped name falls back to the name"
-        );
-    }
 
     #[test]
     fn only_the_canonical_uuid_shape_is_tried_as_a_uuid() {

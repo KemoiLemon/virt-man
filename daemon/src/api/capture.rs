@@ -572,7 +572,7 @@ fn arp(p: &[u8], l: &mut Line) {
 
 /// "A? github.com" for a query, "A github.com → 140.82.112.3" for an answer.
 fn dns_summary(b: &[u8]) -> String {
-    let Some(q) = crate::ipam::dns::question_any(b) else {
+    let Some(q) = dns_question(b) else {
         return String::new();
     };
     let ty = match q.1 {
@@ -587,7 +587,7 @@ fn dns_summary(b: &[u8]) -> String {
         t => return format!("type {t} {}", q.0),
     };
     if b.len() > 2 && b[2] & 0x80 != 0 {
-        let ips = crate::ipam::dns::a_records(b);
+        let ips = dns_a_records(b);
         let ans: Vec<String> = ips.iter().map(ToString::to_string).collect();
         if ans.is_empty() {
             let rcode = b.get(3).map_or(0, |r| r & 0x0f);
@@ -604,6 +604,82 @@ fn dns_summary(b: &[u8]) -> String {
         return format!("{ty} {} → {}", q.0, ans.join(", "));
     }
     format!("{ty}? {}", q.0)
+}
+
+/// Name and type of the first question in a DNS message, query or response,
+/// for display.
+fn dns_question(b: &[u8]) -> Option<(String, u16)> {
+    if b.len() < 12 || u16::from_be_bytes([b[4], b[5]]) == 0 {
+        return None;
+    }
+    let mut i = 12;
+    let mut labels = Vec::new();
+    loop {
+        let len = *b.get(i)? as usize;
+        if len == 0 {
+            i += 1;
+            break;
+        }
+        if len & 0xc0 != 0 || labels.len() > 127 {
+            return None;
+        }
+        labels.push(String::from_utf8_lossy(b.get(i + 1..i + 1 + len)?).to_ascii_lowercase());
+        i += 1 + len;
+    }
+    let qtype = u16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?]);
+    Some((labels.join("."), qtype))
+}
+
+/// The IPv4 addresses a response gives, following the CNAME chain as a
+/// resolver does (every A in the answer section counts).
+fn dns_a_records(b: &[u8]) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    if b.len() < 12 {
+        return out;
+    }
+    let qd = u16::from_be_bytes([b[4], b[5]]);
+    let an = u16::from_be_bytes([b[6], b[7]]);
+    let mut i = 12;
+    for _ in 0..qd {
+        let Some(n) = skip_dns_name(b, i) else {
+            return out;
+        };
+        i = n + 4;
+    }
+    for _ in 0..an {
+        let Some(n) = skip_dns_name(b, i) else {
+            return out;
+        };
+        let Some(h) = b.get(n..n + 10) else {
+            return out;
+        };
+        let ty = u16::from_be_bytes([h[0], h[1]]);
+        let len = u16::from_be_bytes([h[8], h[9]]) as usize;
+        let Some(rd) = b.get(n + 10..n + 10 + len) else {
+            return out;
+        };
+        if ty == 1 && len == 4 {
+            out.push(Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]));
+        }
+        i = n + 10 + len;
+    }
+    out
+}
+
+/// Offset just past a (possibly compressed) name at `i`.
+fn skip_dns_name(b: &[u8], mut i: usize) -> Option<usize> {
+    for _ in 0..128 {
+        let len = *b.get(i)?;
+        if len == 0 {
+            return Some(i + 1);
+        }
+        if len & 0xc0 == 0xc0 {
+            b.get(i + 1)?;
+            return Some(i + 2);
+        }
+        i += 1 + len as usize;
+    }
+    None
 }
 
 /// Captured frames as a classic pcap file (Ethernet link type).
@@ -705,8 +781,19 @@ mod tests {
 
     #[test]
     fn dns_queries_and_answers_show_the_name_and_addresses() {
-        // Built with the resolver's own encoder, so both ends agree.
-        let q = crate::ipam::dns::tests::query("github.com", 1);
+        // A hand-built A query and its answer, so both ends are known here.
+        let qname = {
+            let mut v = Vec::new();
+            for label in ["github", "com"] {
+                v.push(label.len() as u8);
+                v.extend_from_slice(label.as_bytes());
+            }
+            v.push(0);
+            v.extend_from_slice(&[0, 1, 0, 1]); // A, IN
+            v
+        };
+        let mut q = vec![0xc3, 0x50, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        q.extend_from_slice(&qname);
         let mut udp = vec![0xc3, 0x50, 0, 53, 0, 0, 0, 0];
         udp.extend_from_slice(&q);
         let l = decode(
@@ -720,12 +807,11 @@ mod tests {
             (l.proto.as_str(), l.info.as_str()),
             ("dns", "A? github.com")
         );
-        let question = crate::ipam::dns::question(&q).unwrap();
-        let ans = crate::ipam::dns::respond(
-            &q,
-            &question,
-            &crate::ipam::dns::Local::A(vec!["140.82.112.3".parse().unwrap()]),
-        );
+        // The answer: the same question, plus one A record pointing at it.
+        let mut ans = vec![0xc3, 0x50, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
+        ans.extend_from_slice(&qname);
+        ans.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+        ans.extend_from_slice(&[140, 82, 112, 3]);
         let mut udp = vec![0, 53, 0xc3, 0x50, 0, 0, 0, 0];
         udp.extend_from_slice(&ans);
         let l = decode(
