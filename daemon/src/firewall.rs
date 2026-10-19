@@ -10,12 +10,16 @@
 //! Direction semantics, mirroring a firewall appliance:
 //!   - `in`      traffic entering the guest network (`ip daddr <subnet>`)
 //!   - `out`     traffic leaving the guest network (`ip saddr <subnet>`)
-//!   - `forward` all routed traffic (no subnet constraint)
+//!   - `forward` all routed traffic (no subnet constraint; a `forward` default
+//!     policy is scoped to the network's bridge instead)
 //!
 //! Port forwards are DNAT rules on the prerouting hook: a WAN destination
 //! address (0.0.0.0 = any, excluding the guest subnet) and port are rewritten
-//! to an internal address and port. The `vm-postrouting` chain masquerades a
-//! NAT network's outbound traffic, so replies find their way back.
+//! to an internal address and port, for traffic arriving from outside the
+//! network (never off its own guest bridge, so a guest dialling the forwarded
+//! port on its way out is not redirected to another guest). The
+//! `vm-postrouting` chain masquerades a NAT network's outbound traffic, so
+//! replies find their way back.
 //!
 //! The table also owns what libvirt's network driver used to: a per-network
 //! accept/drop pair on the network's bridge (NAT forwards its guests, an
@@ -341,7 +345,7 @@ pub fn render_ruleset(nets: &[RenderedNet], vms: &[RenderedVm]) -> String {
         }
         defaults.extend(net_policy_defaults(n));
         for f in n.forwards {
-            if let Some(line) = render_forward(f, &n.subnet) {
+            if let Some(line) = render_forward(f, &n.subnet, &n.bridge) {
                 forwards.push(line);
             }
         }
@@ -462,7 +466,15 @@ fn net_masquerade(n: &RenderedNet) -> Option<String> {
 
 /// Default-policy lines for a network. Only non-ACCEPT policies need a rule:
 /// the chain base policy is ACCEPT, so anything without one falls through.
+/// Called for active networks only.
 fn net_policy_defaults(n: &RenderedNet) -> Vec<String> {
+    // A bridge network borrows a bridge the operator owns, so its policy is
+    // the operator's firewall's job. Structural, not just an API check: our
+    // verdicts must never name an operator bridge, even if a stored policy
+    // somehow reaches the renderer.
+    if n.mode == Mode::Bridge {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     if n.policy.in_ != Policy::Accept {
         out.push(format!("ip daddr {} {}", n.subnet, n.policy.in_.action()));
@@ -470,9 +482,13 @@ fn net_policy_defaults(n: &RenderedNet) -> Vec<String> {
     if n.policy.out != Policy::Accept {
         out.push(format!("ip saddr {} {}", n.subnet, n.policy.out.action()));
     }
-    // forward is unscoped, matching how a forward rule behaves.
+    // forward is scoped to this network's bridge in both directions. Unscoped,
+    // one network owner's `drop` would blackhole every other network's guest
+    // forwarding too, since the chain is shared.
     if n.policy.forward != Policy::Accept {
-        out.push(n.policy.forward.action().to_string());
+        let action = n.policy.forward.action();
+        out.push(format!("iifname \"{}\" {action}", n.bridge));
+        out.push(format!("oifname \"{}\" {action}", n.bridge));
     }
     out
 }
@@ -566,11 +582,14 @@ fn render_vm_rule(r: &Rule, macs: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn render_forward(f: &Forward, subnet: &str) -> Option<String> {
-    let mut m = Vec::new();
+/// A forward is for traffic arriving from outside the network, so one arriving
+/// on the network's own guest bridge never matches: a guest dialling the
+/// forwarded port on its way out must not be redirected to another guest.
+fn render_forward(f: &Forward, subnet: &str, bridge: &str) -> Option<String> {
+    let mut m = vec![format!("iifname != \"{bridge}\"")];
     if f.wan_ip == "0.0.0.0" {
         // "Any WAN address" must not DNAT traffic between guests, so exclude
-        // the guest subnet as a destination.
+        // the guest subnet as a destination too.
         m.push(format!("ip daddr != {subnet}"));
     } else {
         m.push(format!("ip daddr {}", f.wan_ip));
@@ -709,8 +728,8 @@ mod tests {
             proto: "tcp".into(),
         };
         assert_eq!(
-            render_forward(&f, "192.168.167.0/24").unwrap(),
-            "ip daddr 203.0.113.7 tcp dport 2222 dnat to 192.168.167.5:22"
+            render_forward(&f, "192.168.167.0/24", "virbr1").unwrap(),
+            "iifname != \"virbr1\" ip daddr 203.0.113.7 tcp dport 2222 dnat to 192.168.167.5:22"
         );
     }
 
@@ -724,8 +743,40 @@ mod tests {
             proto: "tcp".into(),
         };
         assert_eq!(
-            render_forward(&f, "192.168.167.0/24").unwrap(),
-            "ip daddr != 192.168.167.0/24 tcp dport 80 dnat to 192.168.167.5:8080"
+            render_forward(&f, "192.168.167.0/24", "virbr1").unwrap(),
+            "iifname != \"virbr1\" ip daddr != 192.168.167.0/24 tcp dport 80 dnat to 192.168.167.5:8080"
+        );
+    }
+
+    #[test]
+    fn a_wan_forward_ignores_traffic_from_its_own_guests() {
+        // A guest's outbound connection on the forwarded port must reach the
+        // WAN, not be DNAT'd to another guest: the rule only matches traffic
+        // arriving from outside the network's bridge.
+        let f = Forward {
+            wan_ip: "0.0.0.0".into(),
+            wan_port: 443,
+            lan_ip: "10.9.0.10".into(),
+            lan_port: 443,
+            proto: "tcp".into(),
+        };
+        let line = render_forward(&f, "10.9.0.0/24", "vbr5b92a1a5").unwrap();
+        assert!(line.starts_with("iifname != \"vbr5b92a1a5\" "), "{line}");
+        let nets = [RenderedNet {
+            subnet: "10.9.0.0/24".into(),
+            mode: Mode::Nat,
+            bridge: "vbr5b92a1a5".into(),
+            active: true,
+            rules: &[],
+            forwards: &[f],
+            policy: PolicySet::default(),
+        }];
+        let out = render_ruleset(&nets, &[]);
+        assert!(
+            out.contains(
+                "iifname != \"vbr5b92a1a5\" ip daddr != 10.9.0.0/24 tcp dport 443 dnat to 10.9.0.10:443"
+            ),
+            "{out}"
         );
     }
 
@@ -857,7 +908,7 @@ mod tests {
         let policy = PolicySet {
             in_: Policy::Drop,
             out: Policy::Accept,
-            forward: Policy::Accept,
+            forward: Policy::Drop,
         };
         let nets = [RenderedNet {
             subnet: "10.9.0.0/24".into(),
@@ -915,11 +966,27 @@ mod tests {
     #[test]
     fn a_bridge_network_leaves_forwarding_to_the_operator() {
         // Bridge mode borrows a bridge the operator owns, so the operator's
-        // firewall is the one that decides what crosses it.
-        let nets = [rendered("10.9.0.0/24", Mode::Bridge, "br0", true)];
+        // firewall is the one that decides what crosses it. Its policy defaults
+        // are skipped structurally, so even a stored non-ACCEPT policy cannot
+        // name the operator's bridge.
+        let nets = [RenderedNet {
+            policy: PolicySet {
+                in_: Policy::Drop,
+                out: Policy::Drop,
+                forward: Policy::Drop,
+            },
+            ..rendered("10.9.0.0/24", Mode::Bridge, "br0", true)
+        }];
         let out = render_ruleset(&nets, &[]);
+        assert_eq!(out, render_ruleset(&[], &[]), "{out}");
         assert!(!out.contains("br0"), "{out}");
         assert!(!out.contains("masquerade"), "{out}");
+        for verdict in ["drop", "reject"] {
+            assert!(
+                !out.contains(verdict),
+                "{verdict} for a bridge network: {out}"
+            );
+        }
     }
 
     #[test]
@@ -997,9 +1064,9 @@ mod tests {
         };
         let nets = [RenderedNet {
             subnet: "192.168.167.0/24".into(),
-            // Bridge mode adds no base rules, so this test sees only the
-            // policy defaults it is about.
-            mode: Mode::Bridge,
+            // A managed network, like anything the API would save rules for;
+            // a bridge network renders no policy defaults at all.
+            mode: Mode::Nat,
             bridge: "virbr1".into(),
             active: true,
             rules: &[explicit],
@@ -1009,16 +1076,94 @@ mod tests {
         let out = render_ruleset(&nets, &[]);
         let explicit_pos = out.find("tcp dport 443 accept").unwrap();
         let in_default = out.find("ip daddr 192.168.167.0/24 drop").unwrap();
-        let fwd_default = out.find("reject").unwrap();
+        let fwd_default = out.find("iifname \"virbr1\" reject").unwrap();
         assert!(explicit_pos < in_default, "explicit rules precede defaults");
         assert!(
             in_default < fwd_default,
-            "in default precedes the unscoped forward default"
+            "in default precedes the forward defaults"
+        );
+        assert!(out.contains("oifname \"virbr1\" reject"), "{out}");
+        assert_eq!(
+            out.matches("ip saddr 192.168.167.0/24").count(),
+            1,
+            "an ACCEPT out policy emits no rule; the masquerade is the only saddr: {out}"
         );
         assert!(
-            !out.contains("ip saddr 192.168.167.0/24"),
-            "ACCEPT defaults emit no rule"
+            !out.contains("\n    reject\n"),
+            "no unscoped default verdict: {out}"
         );
+    }
+
+    /// One network's forward policy is its own: the chain is shared, so an
+    /// unscoped `drop` used to blackhole every other network's forwarding.
+    #[test]
+    fn a_networks_forward_policy_does_not_affect_another_network() {
+        let nets = [
+            RenderedNet {
+                policy: PolicySet {
+                    forward: Policy::Drop,
+                    ..PolicySet::default()
+                },
+                ..rendered("10.9.0.0/24", Mode::Nat, "vbr1", true)
+            },
+            rendered("10.10.0.0/24", Mode::Nat, "vbr2", true),
+        ];
+        let out = render_ruleset(&nets, &[]);
+        assert_eq!(
+            out.matches("iifname \"vbr1\" drop").count(),
+            1,
+            "the dropping network's policy is scoped to it: {out}"
+        );
+        assert_eq!(
+            out.matches("oifname \"vbr1\" drop").count(),
+            2,
+            "one policy line and one base line: {out}"
+        );
+        assert!(
+            !out.contains("iifname \"vbr2\" drop"),
+            "the second network is free: {out}"
+        );
+        assert!(
+            !out.contains("\n    drop\n"),
+            "no unscoped verdict for either network: {out}"
+        );
+    }
+
+    /// The operator's verdict for a network must precede the automatic base
+    /// rules, or a base `iifname accept` would end evaluation first.
+    #[test]
+    fn a_forward_policy_precedes_its_networks_base_rules() {
+        let nets = [RenderedNet {
+            policy: PolicySet {
+                forward: Policy::Drop,
+                ..PolicySet::default()
+            },
+            ..rendered("10.9.0.0/24", Mode::Nat, "vbr1", true)
+        }];
+        let out = render_ruleset(&nets, &[]);
+        let policy = out.find("iifname \"vbr1\" drop").unwrap();
+        let base_accept = out
+            .find("iifname \"vbr1\" oifname != \"vbr1\" accept")
+            .unwrap();
+        assert!(
+            policy < base_accept,
+            "the forward policy must come before the base accept: {out}"
+        );
+    }
+
+    #[test]
+    fn an_inactive_networks_forward_policy_emits_nothing() {
+        let policy = PolicySet {
+            forward: Policy::Drop,
+            ..PolicySet::default()
+        };
+        let nets = [RenderedNet {
+            policy,
+            ..rendered("10.9.0.0/24", Mode::Nat, "vbr5b92a1a5", false)
+        }];
+        let out = render_ruleset(&nets, &[]);
+        assert!(!out.contains("vbr5b92a1a5"), "{out}");
+        assert!(!out.contains("drop"), "{out}");
     }
 
     #[test]

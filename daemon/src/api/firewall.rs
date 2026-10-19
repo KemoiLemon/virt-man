@@ -6,6 +6,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -176,7 +177,7 @@ async fn put_network(
     save_store(&state, &store)?;
     apply_store(&state.ipam, &store)
         .await
-        .map_err(|e| ApiError::internal(format!("rules saved, apply failed: {e}")))?;
+        .map_err(apply_failed)?;
     Ok(Json(json!({"name": name, "saved": true, "applied": true})))
 }
 
@@ -211,8 +212,45 @@ async fn put_vm(
     save_store(&state, &store)?;
     apply_store(&state.ipam, &store)
         .await
-        .map_err(|e| ApiError::internal(format!("rules saved, apply failed: {e}")))?;
+        .map_err(apply_failed)?;
     Ok(Json(json!({"name": name, "saved": true, "applied": true})))
+}
+
+/// A network's rules as `apply_store` renders them: its stored definition plus
+/// its firewall policy.
+struct Net {
+    subnet: String,
+    mode: Mode,
+    bridge: String,
+    active: bool,
+    fw: NetworkFirewall,
+}
+
+/// A guest's rules with the MACs they are scoped to.
+struct Vm {
+    macs: Vec<String>,
+    fw: VmFirewall,
+}
+
+/// The guests whose rules can be scoped: a stored policy on a guest whose MACs
+/// are known. Both libvirt domains and direct-QEMU bridge NICs reach `macs`
+/// through the IPAM snapshot, so a QEMU VM's rules are rendered too.
+fn scoped_vms(
+    macs: std::collections::BTreeMap<String, Vec<String>>,
+    store: &HashMap<String, VmFirewall>,
+) -> Vec<Vm> {
+    macs.into_iter()
+        .filter_map(|(name, macs)| {
+            let fw = store.get(&name)?.clone();
+            (!macs.is_empty()).then_some(Vm { macs, fw })
+        })
+        .collect()
+}
+
+/// A save that reached disk but not the kernel. The response says "saved" and
+/// names the failure; it never claims the rules are applied.
+fn apply_failed(e: String) -> ApiError {
+    ApiError::internal(format!("rules saved, apply failed: {e}"))
 }
 
 /// Rebuild the whole `virt-man` nftables table from the persisted store.
@@ -227,18 +265,6 @@ async fn put_vm(
 /// The network API calls this on every lifecycle change (start, stop, create,
 /// delete, edit); nothing else re-installs a network's rules.
 pub async fn apply_store(ipam: &Ipam, store: &FirewallStore) -> Result<(), String> {
-    struct Net {
-        subnet: String,
-        mode: Mode,
-        bridge: String,
-        active: bool,
-        fw: NetworkFirewall,
-    }
-    struct Vm {
-        macs: Vec<String>,
-        fw: VmFirewall,
-    }
-
     // Snapshot the definitions and drop the lock: nothing below may hold it
     // across an await.
     let nets: Vec<Net> = {
@@ -301,13 +327,7 @@ pub async fn apply_store(ipam: &Ipam, store: &FirewallStore) -> Result<(), Strin
         }
     }
     // A guest with no MAC (none was recorded) cannot be matched by a rule.
-    let vms: Vec<Vm> = macs
-        .into_iter()
-        .filter_map(|(name, macs)| {
-            let fw = vm_store.get(&name).cloned()?;
-            (!macs.is_empty()).then_some(Vm { macs, fw })
-        })
-        .collect();
+    let vms = scoped_vms(macs, &vm_store);
 
     let rendered_nets: Vec<firewall::RenderedNet> = nets
         .iter()
@@ -399,6 +419,19 @@ mod tests {
     #[test]
     fn a_domain_without_interfaces_yields_no_macs() {
         assert!(domain_macs("<domain><devices/></domain>").is_empty());
+    }
+
+    /// A save that reached the file but not the kernel must not look applied.
+    #[tokio::test]
+    async fn an_apply_failure_is_reported_as_saved_not_applied() {
+        let res = apply_failed("nft: Operation not permitted".into()).into_response();
+        assert_eq!(res.status(), 500);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("rules saved, apply failed"), "{text}");
+        assert!(!text.contains("applied"), "{text}");
     }
 
     fn state_with(dir: &std::path::Path, id: &str, xml: &str) -> FirewallState {
@@ -513,6 +546,34 @@ mod tests {
             "the MAC merge reads the seeded guest"
         );
         assert!(!known_guest(&state.ipam, "550e8400-e29b-41d4-a716-446655440001").await);
+
+        // The same snapshot feeds the renderer: a QEMU bridge MAC is the scope
+        // of its per-VM rules, exactly as a libvirt domain's is.
+        let mut policies = HashMap::new();
+        policies.insert(
+            vm.to_string(),
+            VmFirewall {
+                rules: vec![firewall::Rule {
+                    direction: "in".into(),
+                    ..Default::default()
+                }],
+                policy: PolicySet::default(),
+            },
+        );
+        let vms = scoped_vms(state.ipam.guests_by_vm(), &policies);
+        let rendered: Vec<firewall::RenderedVm> = vms
+            .iter()
+            .map(|v| firewall::RenderedVm {
+                macs: v.macs.clone(),
+                rules: &v.fw.rules,
+                policy: v.fw.policy,
+            })
+            .collect();
+        let out = firewall::render_ruleset(&[], &rendered);
+        assert!(
+            out.contains("ether daddr { 52:54:00:aa:bb:01 } accept"),
+            "the QEMU NIC's MAC scopes its rules: {out}"
+        );
 
         let err = put_vm(
             State(state),
