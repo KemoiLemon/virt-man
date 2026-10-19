@@ -34,8 +34,8 @@ export interface AdminCtx {
   reloadConnections(): Promise<void>;
   openConnectionDialog(id?: string): void;
   deleteConnection(id: string): Promise<void>;
-  /// Open a guest or network in the main view.
-  openResource(kind: "vm" | "ct" | "network" | "pool", conn: string, name: string): void;
+  /// Open a guest, network or pool in the main view.
+  openResource(kind: "vm" | "network" | "pool", conn: string, name: string): void;
   /// Go to another admin section (through the router, so the URL follows).
   go(section: AdminSection, tab?: AdminTab): void;
   /// The section's open tab, from the URL.
@@ -48,7 +48,7 @@ export interface AdminCtx {
   createPool(conn: string, after: () => void): void;
   /// Delete one resource, using the same confirmation and running-guest stop
   /// as its own view; `after` repaints this page.
-  deleteResource(kind: AdminResource["kind"], conn: string, pool: string, name: string, after: () => void): void;
+  deleteResource(kind: Exclude<AdminResource["kind"], "ct">, conn: string, pool: string, name: string, after: () => void): void;
   /// The identity changed (your own groups, roles): refresh it and re-render.
   refreshMe(): Promise<void>;
   /// Put this section's primary action in the page header, inline with the
@@ -67,7 +67,6 @@ const LABEL: Record<AdminSection, string> = {
   permissions: "Permissions",
   daemons: "Daemons",
   vms: "VMs",
-  containers: "Containers",
   networks: "Networks",
   pools: "Storage Pools",
   quotas: "Quotas",
@@ -84,7 +83,6 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
   permissions: ic.perms,
   daemons: ic.server,
   vms: ic.vms,
-  containers: ic.container,
   networks: ic.network,
   pools: ic.storage,
   quotas: ic.quota,
@@ -97,7 +95,7 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
 /// live suite against ADMIN_SECTIONS), in the order they are listed.
 export const ADMIN_GROUPS: { label: string; sections: AdminSection[] }[] = [
   { label: "Access", sections: ["users", "groups", "roles", "permissions", "keys"] },
-  { label: "Infrastructure", sections: ["daemons", "vms", "containers", "networks", "pools", "ips"] },
+  { label: "Infrastructure", sections: ["daemons", "vms", "networks", "pools", "ips"] },
   { label: "Limits", sections: ["quotas"] },
   { label: "Audit", sections: ["activity"] },
 ];
@@ -529,7 +527,7 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
     // value stays the id: that is what the server stores and matches on.
     const shown = `/nodes/${c.name}`;
     out.push({ path: node, label: shown });
-    for (const k of ["vms", "containers", "networks", "storage", "bridges"]) {
+    for (const k of ["vms", "networks", "storage", "bridges"]) {
       out.push({ path: `${node}/${k}`, label: `${shown}/${k}` });
     }
     try {
@@ -547,11 +545,6 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
       for (const n of nets) out.push({ path: `${node}/networks/${n.name}`, label: `${shown}/networks/${n.title || n.name}` });
       for (const p of pools) out.push({ path: `${node}/storage/${p.name}`, label: `${shown}/storage/${p.title || p.name}` });
       for (const b of bridges) out.push({ path: `${node}/bridges/${b}`, label: `${shown}/bridges/${b}` });
-      // Containers apart: a host without the LXC driver still offers the rest.
-      const cts = await api.get<{ name: string; title?: string }[]>(`/proxy/${c.id}/containers`).catch(() => []);
-      for (const v of cts) {
-        out.push({ path: `${node}/containers/${v.name}`, label: `${shown}/containers/${v.title || v.name}` });
-      }
     } catch {
       // Offline daemon: its whole-daemon paths are still offered.
     }
@@ -688,11 +681,11 @@ const daemons_: Painter = async (ctx, area) => {
 /// owner stays, since "what does this user have" is the other common ask.
 let resOwner = "";
 
-const KIND_SECTION: Record<"vm" | "ct" | "network" | "pool", AdminSection> = {
-  vm: "vms", ct: "containers", network: "networks", pool: "pools",
+const KIND_SECTION: Record<"vm" | "network" | "pool", AdminSection> = {
+  vm: "vms", network: "networks", pool: "pools",
 };
 
-function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
+function resourcePage(kind: "vm" | "network" | "pool"): Painter {
   return async (ctx, area, gen) => {
     const conns = ctx.connections();
     const conn = ctx.tab() && conns.some((c) => c.id === ctx.tab()) ? ctx.tab()! : conns[0]?.id;
@@ -709,9 +702,9 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
     const tabs = `<div class="tabbar">
       ${conns.map((c) => `<button class="tab ${c.id === conn ? "active" : ""}" data-res-tab="${esc(c.id)}">
           ${c.online === false ? ic.offline(14) : ic.server(14)} ${esc(c.name)} <span class="tab-count">${counts.get(c.id) ?? 0}</span></button>`).join("")}
-      ${kind === "ct" ? "" : `<div class="tabbar-actions">
+      <div class="tabbar-actions">
         <button class="btn primary" id="res-new">${ic.plus(14)} ${kind === "vm" ? "VM" : kind === "network" ? "Network" : "Storage pool"}${kind === "pool" ? "" : " for user"}</button>
-      </div>`}
+      </div>
     </div>`;
 
     const paint = () => {
@@ -733,13 +726,13 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
         `<td class="tname row-link" data-open-res="${i}">${esc(r.title || r.name)}</td>`;
 
       let table: string;
-      if (kind === "vm" || kind === "ct") {
+      if (kind === "vm") {
         table = `<table class="grid">
           <tr><th>Name</th><th>Owner</th><th>State</th><th>vCPUs</th><th>Memory</th><th class="col-actions"></th></tr>
           ${shown.map((r, i) => `<tr class="${r.suspended ? "suspended" : ""}">
             ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}${r.privileged ? ` <span class="state bad">Privileged</span>` : ""}</td>
             <td>${r.vcpus ?? "—"}</td><td>${r.memory_mb ? fmtBytes(r.memory_mb * 1048576) : "—"}</td>
-            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No ${kind === "ct" ? "containers" : "VMs"}${resOwner ? " for this owner" : ""}.</td></tr>`}
+            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No VMs${resOwner ? " for this owner" : ""}.</td></tr>`}
         </table>`;
       } else if (kind === "network") {
         table = `<table class="grid">
@@ -805,11 +798,11 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
       }
       bind(area, "data-open-res", (i) => {
         const r = shown[Number(i)];
-        ctx.openResource(r.kind as "vm" | "ct" | "network" | "pool", r.conn, r.name);
+        ctx.openResource(r.kind as "vm" | "network" | "pool", r.conn, r.name);
       });
       bind(area, "data-del-res", (i) => {
         const r = shown[Number(i)];
-        ctx.deleteResource(r.kind, r.conn, r.pool ?? "", r.name, () => ctx.go(section, conn));
+        ctx.deleteResource(r.kind as Exclude<AdminResource["kind"], "ct">, r.conn, r.pool ?? "", r.name, () => ctx.go(section, conn));
       });
       bind(area, "data-owner-res", (i) => void changeOwner(ctx, shown[Number(i)], section));
       bind(area, "data-suspend-res", async (i) => {
@@ -1381,7 +1374,6 @@ const SECTIONS: Record<AdminSection, Painter> = {
   permissions: permissions_,
   daemons: daemons_,
   vms: resourcePage("vm"),
-  containers: resourcePage("ct"),
   networks: resourcePage("network"),
   pools: resourcePage("pool"),
   quotas: quotas_,

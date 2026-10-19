@@ -34,16 +34,8 @@ test("every view round-trips through its path", () => {
     { view: "vm", conn: "c1", vm: "web1", tab: "options" },
     { view: "vm", conn: "c1", vm: "web1", tab: "network" },
     { view: "vm", conn: "c1", vm: "web1", tab: "xml" },
-    { view: "dc", tab: "containers" },
     { view: "dc", tab: "networks" },
     { view: "dc", tab: "storage" },
-    { view: "conn", conn: "c1", tab: "containers" },
-    { view: "ct", conn: "c1", ct: "web", tab: "summary" },
-    { view: "ct", conn: "c1", ct: "web", tab: "console" },
-    { view: "ct", conn: "c1", ct: "web", tab: "hardware" },
-    { view: "ct", conn: "c1", ct: "web", tab: "network" },
-    { view: "ct", conn: "c1", ct: "web", tab: "options" },
-    { view: "ct", conn: "c1", ct: "web", tab: "xml" },
     { view: "net", conn: "c2", net: "default" },
     { view: "pool", conn: "c2", pool: "ISOs" },
   ];
@@ -63,9 +55,12 @@ test("paths use the node's name and read the way they were asked for", () => {
   assert.equal(r.routeToPath({ view: "pool", conn: "c1", pool: "ISOs" }, nodes), "/Main/storage/ISOs");
 });
 
-test("a container's hardware tab has its own path; an unknown tab lands on its summary", () => {  assert.equal(r.routeToPath({ view: "ct", conn: "c1", ct: "web", tab: "hardware" }, nodes), "/Main/containers/web/hardware");
-  assert.deepEqual(r.parsePath("/Main/containers/web/nonsense", nodes),
-    { view: "ct", conn: "c1", ct: "web", tab: "summary" });
+// Containers are not a web view for now: a stale /containers link must land on
+// the Datacenter, and a /<node>/containers link on that server's dashboard.
+test("container paths fall back to the nearest view that exists", () => {
+  assert.deepEqual(r.parsePath("/containers", nodes), { view: "dc", tab: "dashboard" });
+  assert.deepEqual(r.parsePath("/Main/containers/web", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
+  assert.deepEqual(r.parsePath("/Main/containers/web/hardware", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
 });
 
 test("names with spaces and slashes are encoded, and decode back", () => {
@@ -155,6 +150,7 @@ test("the admin page round-trips through the URL", () => {
   assert.deepEqual(r.parsePath("/admin/dashboard/ownership", nodes), dash("ownership"));
   assert.deepEqual(r.parsePath("/admin/dashboard/bogus", nodes), dash("overview"), "unknown tab");
   assert.deepEqual(r.parsePath("/admin/bogus", nodes), dash("overview"), "unknown section");
+  assert.deepEqual(r.parsePath("/admin/containers", nodes), dash("overview"), "the containers section is gone");
   // An untabbed section ignores a stray tab segment.
   assert.deepEqual(r.parsePath("/admin/users/x", nodes), { view: "admin", section: "users" });
   // The Datacenter's Servers tab is gone; an old link lands on Daemons.
