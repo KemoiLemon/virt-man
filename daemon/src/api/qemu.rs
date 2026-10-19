@@ -9,7 +9,7 @@ use serde_json::json;
 use super::ApiError;
 use super::firewall::FirewallState;
 use crate::ipam::server::Ipam;
-use crate::qemu::{Manager, Network, State as VmState, VmConfig};
+use crate::qemu::{DiskFormat, Manager, Network, State as VmState, VmConfig};
 use crate::qemu_network::HostForward;
 
 #[derive(Clone)]
@@ -146,6 +146,7 @@ async fn define(
             network: Default::default(),
             firewall: Default::default(),
             extra_nics: vec![],
+            extra_disks: vec![],
         })
         .map_err(err)?;
     Ok(Json(json!({"ok": true})))
@@ -234,7 +235,13 @@ async fn add_nic(
     s.manager
         .add_nic(&id, &body.device_id, network)
         .map_err(err)?;
-    // The new MAC is part of the guest's rules from now on.
+    // The new MAC is part of the guest's rules from now on. Refresh the guest
+    // snapshot first, so the reservation exists before the rules that are keyed
+    // by it are rebuilt instead of reading the 5 s-old map. No manager lock is
+    // held here; a failed pass is logged and the next one settles it.
+    if let Err(e) = crate::ipam::server::supervise_once(&s.ipam, &s.manager).await {
+        tracing::warn!("qemu: refreshing IPAM after adding a NIC: {e}");
+    }
     reapply(&s).await;
     Ok(Json(json!({"ok":true,"device_id":body.device_id})))
 }
@@ -244,10 +251,56 @@ async fn remove_nic(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pending = s.manager.remove_nic(&id, &device_id).map_err(err)?;
     if !pending {
+        // The MAC is gone from the guest snapshot, so the per-VM rules can drop
+        // it in the same request rather than one supervisor pass later.
+        if let Err(e) = crate::ipam::server::supervise_once(&s.ipam, &s.manager).await {
+            tracing::warn!("qemu: refreshing IPAM after removing a NIC: {e}");
+        }
         reapply(&s).await;
     }
     Ok(Json(
         json!({"ok":!pending,"pending":pending,"device_id":device_id}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddDisk {
+    id: String,
+    path: std::path::PathBuf,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+async fn add_disk(
+    State(s): State<QemuState>,
+    Path(id): Path<String>,
+    Json(body): Json<AddDisk>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::qemu::validate_new_disk_id(&body.id).map_err(ApiError::bad_request)?;
+    let format = match body.format.as_deref().unwrap_or("raw") {
+        "raw" => DiskFormat::Raw,
+        "qcow2" => DiskFormat::Qcow2,
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "unknown disk format '{other}'"
+            )));
+        }
+    };
+    let path = s
+        .manager
+        .add_disk(&id, &body.id, &body.path, format)
+        .map_err(err)?;
+    Ok(Json(json!({"ok":true,"id":body.id,"path":path})))
+}
+
+async fn remove_disk(
+    State(s): State<QemuState>,
+    Path((id, disk_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let pending = s.manager.remove_disk(&id, &disk_id).map_err(err)?;
+    Ok(Json(
+        json!({"ok":true,"id":disk_id,"device_id":disk_id,"pending":pending}),
     ))
 }
 async fn start(
@@ -289,6 +342,8 @@ pub fn routes(manager: Manager, ipam: Ipam, fw: FirewallState) -> Router {
         .route("/qemu/vms/{id}/firewall", get(firewall).put(set_firewall))
         .route("/qemu/vms/{id}/nics", post(add_nic))
         .route("/qemu/vms/{id}/nics/{device_id}", delete(remove_nic))
+        .route("/qemu/vms/{id}/disks", post(add_disk))
+        .route("/qemu/vms/{id}/disks/{disk_id}", delete(remove_disk))
         .route("/qemu/vms/{id}/start", post(start))
         .route("/qemu/vms/{id}/shutdown", post(shutdown))
         .route("/qemu/vms/{id}/force-stop", post(force_stop))
@@ -339,7 +394,19 @@ mod tests {
     }
 
     async fn put(app: Router, body: &str) -> (u16, serde_json::Value) {
-        let req = Request::put("/qemu/vms/550e8400-e29b-41d4-a716-446655440000/network")
+        call(
+            app,
+            "PUT",
+            "/qemu/vms/550e8400-e29b-41d4-a716-446655440000/network",
+            body,
+        )
+        .await
+    }
+
+    async fn call(app: Router, method: &str, path: &str, body: &str) -> (u16, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
             .header("content-type", "application/json")
             .body(Body::from(body.to_owned()))
             .unwrap();
@@ -407,6 +474,7 @@ mod tests {
                 },
                 firewall: Default::default(),
                 extra_nics: vec![],
+                extra_disks: vec![],
             })
             .unwrap();
         s.ipam.lock().networks.insert(
@@ -467,5 +535,29 @@ mod tests {
                 "mode":"bridge","network":"lab","bridge":"vbr0","mac":"52:54:00:aa:bb:cc"
             })
         );
+    }
+
+    /// A disk request is refused before it reaches the manager when its
+    /// identifier or format is not one QEMU could be given; an unknown VM is a
+    /// 404, and removal of an unknown disk likewise.
+    #[tokio::test]
+    async fn a_disk_request_validates_its_identifier_and_format() {
+        let dir = temp("disk");
+        let disk = disk(&dir, "extra");
+        let vm = "550e8400-e29b-41d4-a716-446655440000";
+        let path = format!("/qemu/vms/{vm}/disks");
+        let body = |id: &str, format: &str| {
+            serde_json::json!({"id": id, "path": disk, "format": format}).to_string()
+        };
+        let router = app(&dir);
+        let (status, b) = call(router.clone(), "POST", &path, &body("data", "qcow3")).await;
+        assert_eq!(status, 400, "{b}");
+        let (status, b) = call(router.clone(), "POST", &path, &body("disk0", "qcow2")).await;
+        assert_eq!(status, 400, "{b}");
+        let (status, b) = call(router.clone(), "POST", &path, &body("data", "qcow2")).await;
+        assert_eq!(status, 404, "{b}: no VM is defined");
+        let (status, b) = call(router, "DELETE", &format!("/qemu/vms/{vm}/disks/data"), "").await;
+        assert_eq!(status, 404, "{b}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

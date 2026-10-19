@@ -697,6 +697,7 @@ mod tests {
                     network: bridge_nic(2),
                 },
             ],
+            extra_disks: vec![],
         })
         .unwrap();
 

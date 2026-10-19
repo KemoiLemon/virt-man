@@ -130,6 +130,35 @@ impl<'de> Deserialize<'de> for Nic {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskFormat {
+    #[default]
+    Raw,
+    Qcow2,
+}
+
+impl DiskFormat {
+    /// The QEMU driver name, which is also the wire spelling of the format.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Qcow2 => "qcow2",
+        }
+    }
+}
+
+/// An extra disk, hot-added through QMP. The primary `VmConfig::disk` predates
+/// this and keeps its `-drive ... if=virtio` launch shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Disk {
+    /// QEMU device id; names the block nodes `file-<id>`/`drive-<id>` too.
+    pub id: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub format: DiskFormat,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VmConfig {
     pub id: String,
@@ -146,6 +175,8 @@ pub struct VmConfig {
     pub firewall: crate::qemu_network::InboundPolicy,
     #[serde(default)]
     pub extra_nics: Vec<Nic>,
+    #[serde(default)]
+    pub extra_disks: Vec<Disk>,
 }
 
 impl VmConfig {
@@ -323,6 +354,9 @@ impl Manager {
         }
         let mut config = config;
         config.disk = canonical_disk;
+        // QEMU's argv is UTF-8 text: refuse a primary path it cannot spell now,
+        // rather than defining a VM that can never start.
+        escape_drive_path(&config.disk)?;
         let mut all = self.read()?;
         if all.contains_key(&config.id) {
             return Err("VM already exists".into());
@@ -424,7 +458,7 @@ impl Manager {
         let mut all = self.read()?;
         {
             let rec = all.get(id).ok_or("unknown QEMU VM")?;
-            if rec.config.extra_nics.iter().any(|n| n.id == device_id) {
+            if device_id_taken(&rec.config, device_id) {
                 return Err("device identifier already exists".into());
             }
         }
@@ -536,6 +570,132 @@ impl Manager {
         self.save(&all)?;
         Ok(false)
     }
+    /// Attach a disk to a stopped guest by persisting it, or to a running one by
+    /// adding its block nodes and device through QMP first. The device is a
+    /// `virtio-blk-pci` over an explicit file → format node chain, so a live
+    /// guest can have exactly what the next launch will build.
+    pub fn add_disk(
+        &self,
+        id: &str,
+        disk_id: &str,
+        path: &Path,
+        format: DiskFormat,
+    ) -> Result<PathBuf, String> {
+        validate_new_disk_id(disk_id)?;
+        let path = check_disk_file(path)?;
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let rec = all.get(id).ok_or("unknown QEMU VM")?;
+        if device_id_taken(&rec.config, disk_id) {
+            return Err("device identifier already exists".into());
+        }
+        // One file backs one device: the same image attached twice is written
+        // by two guests and corrupts both.
+        if all.values().any(|rec| {
+            rec.config.disk == path || rec.config.extra_disks.iter().any(|d| d.path == path)
+        }) {
+            return Err("disk path is already attached to a VM".into());
+        }
+        let live = self.identity(rec);
+        let file_node = format!("file-{disk_id}");
+        let drive_node = format!("drive-{disk_id}");
+        let sock = self.vm_dir(id).join("qmp.sock");
+        if live {
+            let filename = path.to_str().ok_or("disk path is not valid UTF-8")?;
+            qmp_execute(
+                &sock,
+                "blockdev-add",
+                serde_json::json!({
+                    "driver":"file", "filename":filename, "node-name":&file_node
+                }),
+            )?;
+            if let Err(e) = qmp_execute(
+                &sock,
+                "blockdev-add",
+                serde_json::json!({
+                    "driver":format.as_str(), "file":&file_node, "node-name":&drive_node
+                }),
+            ) {
+                let _ = qmp_execute(
+                    &sock,
+                    "blockdev-del",
+                    serde_json::json!({"node-name":&file_node}),
+                );
+                return Err(e);
+            }
+            if let Err(e) = qmp_execute(
+                &sock,
+                "device_add",
+                serde_json::json!({
+                    "driver":"virtio-blk-pci", "id":disk_id, "drive":&drive_node
+                }),
+            ) {
+                let _ = qmp_execute(
+                    &sock,
+                    "blockdev-del",
+                    serde_json::json!({"node-name":&drive_node}),
+                );
+                let _ = qmp_execute(
+                    &sock,
+                    "blockdev-del",
+                    serde_json::json!({"node-name":&file_node}),
+                );
+                return Err(e);
+            }
+        }
+        all.get_mut(id).unwrap().config.extra_disks.push(Disk {
+            id: disk_id.to_owned(),
+            path: path.clone(),
+            format,
+        });
+        if let Err(e) = self.save(&all) {
+            if live {
+                // The device still references the node until the asynchronous
+                // `device_del` completes, so a `blockdev-del` may be refused;
+                // the guest keeps the disk rather than having it pulled away.
+                let _ = qmp_execute(&sock, "device_del", serde_json::json!({"id":disk_id}));
+                let _ = qmp_execute(
+                    &sock,
+                    "blockdev-del",
+                    serde_json::json!({"node-name":&drive_node}),
+                );
+                let _ = qmp_execute(
+                    &sock,
+                    "blockdev-del",
+                    serde_json::json!({"node-name":&file_node}),
+                );
+            }
+            return Err(format!("live disk added but persistence failed: {e}"));
+        }
+        Ok(path)
+    }
+    /// Detach a disk. A live guest's `device_del` is a request, so its metadata
+    /// stays until the guest acknowledges it — the same rule as a NIC. The file
+    /// is never deleted: it holds the guest's data, not the device's identity.
+    pub fn remove_disk(&self, id: &str, disk_id: &str) -> Result<bool, String> {
+        validate_device_id(disk_id)?;
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
+        let Some(index) = rec.config.extra_disks.iter().position(|d| d.id == disk_id) else {
+            return Err("unknown QEMU disk".into());
+        };
+        let live = self.identity(rec);
+        if live {
+            let sock = self.vm_dir(id).join("qmp.sock");
+            qmp_execute(&sock, "device_del", serde_json::json!({"id": disk_id}))?;
+            // QMP `device_del` completes asynchronously: the device may stay
+            // attached until the guest acknowledges it or the VM stops, which
+            // is what `pending` reports. Removing it from the stored config now
+            // is what keeps it from coming back at the next start, and makes a
+            // repeated DELETE an honest "unknown disk" instead of a QMP error.
+        }
+        rec.config.extra_disks.remove(index);
+        // A failed save keeps the old file: the caller sees the error and the
+        // disk is still in the definition (it may be live until the VM stops).
+        self.save(&all)?;
+        Ok(live)
+    }
     pub fn list(&self) -> Result<Vec<VmConfig>, String> {
         Ok(self.read()?.into_values().map(|r| r.config).collect())
     }
@@ -570,6 +730,16 @@ impl Manager {
         }
         if original.len() == 0 || original.len() != all.get(id).unwrap().disk_size {
             return Err("disk is empty or its size changed since VM definition".into());
+        }
+        // An extra disk was validated when it was added; re-check the stored
+        // path now, or a symlink swapped in since would be followed by QEMU.
+        for extra in &config.extra_disks {
+            if check_disk_file(&extra.path)? != extra.path {
+                return Err(format!(
+                    "disk '{}' changed since it was added; re-add it",
+                    extra.id
+                ));
+            }
         }
         let dir = self.vm_dir(id);
         private_dir(&self.state_root)?;
@@ -716,6 +886,7 @@ impl Manager {
             };
             args.extend(["-netdev".into(), netdev_arg, "-device".into(), device]);
         }
+        args.extend(disk_args(config)?);
         Ok(args)
     }
     fn identity(&self, r: &Record) -> bool {
@@ -941,6 +1112,11 @@ fn validate_new_nic_id(id: &str) -> Result<(), String> {
     if id == "net0" {
         return Err("'net0' is the primary NIC's identifier and cannot be reused".into());
     }
+    // QEMU device ids are one namespace, and `disk0` is the primary disk's
+    // reserved slot: a NIC may use neither.
+    if id == "disk0" {
+        return Err("'disk0' is the primary disk's identifier and cannot be reused".into());
+    }
     if id.is_empty()
         || id.len() > 20
         || !id
@@ -952,6 +1128,59 @@ fn validate_new_nic_id(id: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// A new extra disk's identifier: a token QEMU and QMP both accept, and never
+/// the primary disk's reserved `disk0` slot (it has no QMP device id).
+pub fn validate_new_disk_id(id: &str) -> Result<(), String> {
+    if id == "disk0" {
+        return Err("'disk0' is the primary disk's identifier and cannot be reused".into());
+    }
+    // QEMU device ids are one namespace, and `net0` is the primary NIC's
+    // reserved slot: a disk may use neither.
+    if id == "net0" {
+        return Err("'net0' is the primary NIC's identifier and cannot be reused".into());
+    }
+    if id.is_empty()
+        || id.len() > 20
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(
+            "a disk identifier is up to 20 characters of lowercase letters, digits and '-'".into(),
+        );
+    }
+    Ok(())
+}
+
+/// QEMU device ids are one namespace across device classes: a disk and a NIC
+/// cannot share one, or the second `device_add` and the launch argv collide.
+fn device_id_taken(config: &VmConfig, device_id: &str) -> bool {
+    config.extra_nics.iter().any(|n| n.id == device_id)
+        || config.extra_disks.iter().any(|d| d.id == device_id)
+}
+
+/// A disk file, canonicalised. A symlink is refused rather than followed: the
+/// stored path is what QEMU opens, so it must not point somewhere that can be
+/// re-pointed later.
+fn check_disk_file(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("disk must be an absolute file path".into());
+    }
+    let link_meta = fs::symlink_metadata(path).map_err(|e| format!("inspect disk: {e}"))?;
+    if !link_meta.file_type().is_file() {
+        return Err("disk must be a regular file, not a symlink".into());
+    }
+    let canonical = fs::canonicalize(path).map_err(|e| format!("canonicalize disk: {e}"))?;
+    let meta = fs::metadata(&canonical).map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.len() == 0 {
+        return Err("disk must be a non-empty regular file".into());
+    }
+    // QEMU's argv is UTF-8 text: a path it cannot spell would define a VM that
+    // can never start, so it is refused while the VM is still stoppable.
+    escape_blockdev_path(&canonical)?;
+    Ok(canonical)
 }
 
 /// A bridge NIC's MAC, generated or validated. A user-supplied MAC in canonical
@@ -1132,6 +1361,43 @@ fn delete_nic_taps(config: &VmConfig) {
         .collect();
     cleanup_taps(&taps);
 }
+/// The launch argv for every extra disk. Each is an explicit file → format node
+/// pair plus a device, the same shape `add_disk` builds through QMP, so a live
+/// guest and the next launch name the same block nodes.
+fn disk_args(config: &VmConfig) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for disk in &config.extra_disks {
+        if !seen.insert(disk.id.as_str()) {
+            return Err(format!("duplicate disk identifier '{}'", disk.id));
+        }
+        let file = format!("file-{}", disk.id);
+        let drive = format!("drive-{}", disk.id);
+        args.extend([
+            "-blockdev".into(),
+            format!(
+                "driver=file,filename={},node-name={file}",
+                escape_blockdev_path(&disk.path)?
+            ),
+            "-blockdev".into(),
+            format!(
+                "driver={},file={file},node-name={drive}",
+                disk.format.as_str()
+            ),
+            "-device".into(),
+            format!("virtio-blk-pci,id={},drive={drive}", disk.id),
+        ]);
+    }
+    Ok(args)
+}
+
+/// A `-blockdev` value: QEMU's option parser separates on commas and escapes a
+/// literal one by doubling it (the `-drive` backslash form is not this parser).
+fn escape_blockdev_path(path: &Path) -> Result<String, String> {
+    let s = path.to_str().ok_or("disk path is not valid UTF-8")?;
+    Ok(s.replace(',', ",,"))
+}
+
 fn escape_drive_path(path: &Path) -> Result<String, String> {
     let s = path.to_str().ok_or("disk path is not valid UTF-8")?;
     Ok(s.replace('\\', "\\\\")
@@ -1263,6 +1529,7 @@ mod tests {
                 network: Default::default(),
                 firewall: Default::default(),
                 extra_nics: vec![],
+                extra_disks: vec![],
             },
             disk_size: 0,
             pid: None,
@@ -1299,6 +1566,7 @@ mod tests {
             network: Network::User { hostfwd: vec![] },
             firewall: Default::default(),
             extra_nics: vec![],
+            extra_disks: vec![],
         }
     }
 
@@ -1521,6 +1789,252 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A disk identifier is a lowercase token and never the primary's reserved
+    /// `disk0`; its path must be a real, non-empty file, and neither the id nor
+    /// the file may be attached twice. Removal never deletes the file.
+    #[test]
+    fn an_extra_disk_is_validated_persisted_and_never_deletes_its_file() {
+        let (manager, root) = manager("diskid");
+        let disk = root.join("disk");
+        fs::write(&disk, b"x").unwrap();
+        let mut cfg = config(ID);
+        cfg.disk = disk;
+        manager.define(cfg).unwrap();
+        let extra = root.join("extra.qcow2");
+        fs::write(&extra, b"qcow2").unwrap();
+
+        for bad in ["disk0", "d 1", "D1", "d_1", "d.1", ""] {
+            assert!(
+                manager
+                    .add_disk(ID, bad, &extra, DiskFormat::Qcow2)
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            manager
+                .add_disk(ID, "disk0", &extra, DiskFormat::Qcow2)
+                .unwrap_err()
+                .contains("primary"),
+            "the primary slot is reserved"
+        );
+
+        assert!(
+            manager
+                .add_disk(ID, "data", Path::new("extra.qcow2"), DiskFormat::Raw)
+                .is_err(),
+            "a relative path is refused"
+        );
+        assert!(
+            manager
+                .add_disk(ID, "data", &root.join("missing"), DiskFormat::Raw)
+                .is_err()
+        );
+        assert!(
+            manager
+                .add_disk(ID, "data", &root, DiskFormat::Raw)
+                .is_err(),
+            "a directory is not a disk"
+        );
+        let empty = root.join("empty");
+        fs::write(&empty, b"").unwrap();
+        assert!(
+            manager
+                .add_disk(ID, "data", &empty, DiskFormat::Raw)
+                .is_err(),
+            "an empty file is not a disk"
+        );
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&extra, &link).unwrap();
+        assert!(
+            manager
+                .add_disk(ID, "data", &link, DiskFormat::Raw)
+                .is_err(),
+            "a symlink is refused, never followed"
+        );
+
+        let path = manager
+            .add_disk(ID, "data", &extra, DiskFormat::Qcow2)
+            .unwrap();
+        assert_eq!(path, fs::canonicalize(&extra).unwrap());
+        let stored = manager.list().unwrap().remove(0);
+        assert_eq!(
+            stored.extra_disks,
+            vec![Disk {
+                id: "data".into(),
+                path: fs::canonicalize(&extra).unwrap(),
+                format: DiskFormat::Qcow2,
+            }]
+        );
+        // The same id, and the same file under another id, are both refused.
+        assert_eq!(
+            manager
+                .add_disk(ID, "data", &extra, DiskFormat::Raw)
+                .unwrap_err(),
+            "device identifier already exists"
+        );
+        assert!(
+            manager
+                .add_disk(ID, "data2", &extra, DiskFormat::Raw)
+                .is_err()
+        );
+        let other = "550e8400-e29b-41d4-a716-446655440001";
+        let other_disk = root.join("disk2");
+        fs::write(&other_disk, b"x").unwrap();
+        let mut cfg = config(other);
+        cfg.disk = other_disk;
+        manager.define(cfg).unwrap();
+        assert!(
+            manager
+                .add_disk(other, "data", &extra, DiskFormat::Raw)
+                .is_err(),
+            "one file never backs two guests"
+        );
+
+        // A stopped guest's removal is durable and leaves the bytes alone. A
+        // live removal takes the same path after `device_del` (which may leave
+        // the device attached until the guest acks), so the definition no
+        // longer lists it and a repeat DELETE is an honest unknown-disk.
+        assert!(!manager.remove_disk(ID, "data").unwrap());
+        assert!(manager.list().unwrap()[0].extra_disks.is_empty());
+        assert!(extra.exists(), "removing a disk never deletes its file");
+        assert_eq!(
+            manager.remove_disk(ID, "data").unwrap_err(),
+            "unknown QEMU disk"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A disk identifier and a NIC identifier share one QEMU namespace, so a
+    /// hot-add may not name a device of the other kind — nor either primary's
+    /// reserved slot. The check runs before any QMP call.
+    #[test]
+    fn a_nic_and_a_disk_never_share_a_device_id() {
+        let (manager, root) = manager("idns");
+        let primary = root.join("disk");
+        fs::write(&primary, b"x").unwrap();
+        let extra = root.join("extra");
+        fs::write(&extra, b"y").unwrap();
+        let mut cfg = config(ID);
+        cfg.disk = primary;
+        manager.define(cfg).unwrap();
+
+        assert!(
+            manager
+                .add_nic(ID, "disk0", Network::User { hostfwd: vec![] })
+                .is_err(),
+            "the primary disk's slot is reserved"
+        );
+        assert!(
+            manager
+                .add_disk(ID, "net0", &extra, DiskFormat::Raw)
+                .is_err(),
+            "the primary NIC's slot is reserved"
+        );
+
+        manager
+            .add_nic(ID, "x", Network::User { hostfwd: vec![] })
+            .unwrap();
+        assert_eq!(
+            manager
+                .add_disk(ID, "x", &extra, DiskFormat::Raw)
+                .unwrap_err(),
+            "device identifier already exists"
+        );
+        manager.add_disk(ID, "y", &extra, DiskFormat::Raw).unwrap();
+        assert_eq!(
+            manager
+                .add_nic(ID, "y", Network::User { hostfwd: vec![] })
+                .unwrap_err(),
+            "device identifier already exists"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// QEMU's argv is UTF-8, so a path that cannot be spelled is refused at
+    /// definition/add time instead of yielding a VM that cannot start.
+    #[test]
+    fn a_non_utf8_disk_path_is_refused_before_it_is_stored() {
+        use std::os::unix::ffi::OsStringExt;
+        let (manager, root) = manager("nonutf8");
+        let bad = root.join(std::ffi::OsString::from_vec(b"bad\xff.img".to_vec()));
+        fs::write(&bad, b"x").unwrap();
+        let mut cfg = config(ID);
+        cfg.disk = bad.clone();
+        assert!(
+            manager.define(cfg).is_err(),
+            "a primary disk QEMU cannot spell is refused"
+        );
+
+        let good = root.join("disk");
+        fs::write(&good, b"x").unwrap();
+        let mut cfg = config(ID);
+        cfg.disk = good;
+        manager.define(cfg).unwrap();
+        assert!(manager.add_disk(ID, "data", &bad, DiskFormat::Raw).is_err());
+        assert!(manager.list().unwrap()[0].extra_disks.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Extras are explicit block nodes so QMP can add and drop them by name,
+    /// while the primary keeps the `-drive` shape older guests were defined
+    /// with. Every value is one argv element, never a shell string.
+    #[test]
+    fn the_argv_builds_one_block_node_pair_per_extra_disk() {
+        let (manager, root) = manager("diskargs");
+        let mut cfg = config(ID);
+        cfg.disk = PathBuf::from("/img/primary.raw");
+        cfg.extra_disks = vec![
+            Disk {
+                id: "data".into(),
+                path: PathBuf::from("/img/data.qcow2"),
+                format: DiskFormat::Qcow2,
+            },
+            Disk {
+                id: "scratch".into(),
+                path: PathBuf::from("/img/a,b.raw"),
+                format: DiskFormat::Raw,
+            },
+        ];
+        let args = manager.args(&cfg).unwrap();
+        assert_eq!(
+            values(&args, "-drive"),
+            ["file=/img/primary.raw,if=virtio"],
+            "the primary disk is unchanged"
+        );
+        assert_eq!(
+            values(&args, "-blockdev"),
+            [
+                "driver=file,filename=/img/data.qcow2,node-name=file-data",
+                "driver=qcow2,file=file-data,node-name=drive-data",
+                // A literal comma is doubled for QEMU's option parser.
+                "driver=file,filename=/img/a,,b.raw,node-name=file-scratch",
+                "driver=raw,file=file-scratch,node-name=drive-scratch",
+            ]
+        );
+        let devices: Vec<String> = values(&args, "-device")
+            .into_iter()
+            .filter(|d| d.starts_with("virtio-blk-pci"))
+            .collect();
+        assert_eq!(
+            devices,
+            [
+                "virtio-blk-pci,id=data,drive=drive-data",
+                "virtio-blk-pci,id=scratch,drive=drive-scratch",
+            ]
+        );
+        assert!(args.iter().all(|a| !a.contains(" -")));
+
+        // A duplicated id would give two devices one node namespace.
+        cfg.extra_disks.push(Disk {
+            id: "data".into(),
+            path: PathBuf::from("/img/other.raw"),
+            format: DiskFormat::Raw,
+        });
+        assert!(manager.args(&cfg).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn only_a_bridge_is_ever_attached_to_or_a_tap_deleted() {
         // `lo` exists on every host and is not a bridge, so this needs no root
@@ -1581,6 +2095,27 @@ mod tests {
         .unwrap();
         assert_eq!(bare.network, Network::User { hostfwd: vec![] });
         assert!(bare.extra_nics.is_empty());
+        assert!(bare.extra_disks.is_empty(), "no extras means none");
+        assert!(old.extra_disks.is_empty(), "metadata predates extra disks");
+
+        // A stored disk without a format is raw, not a failed VM list.
+        let legacy: VmConfig = serde_json::from_value(serde_json::json!({
+            "id": ID, "disk": "/disk", "memory_mib": 512, "vcpus": 1,
+            "extra_disks": [{"id": "data", "path": "/img/data"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy.extra_disks,
+            vec![Disk {
+                id: "data".into(),
+                path: PathBuf::from("/img/data"),
+                format: DiskFormat::Raw,
+            }]
+        );
+        assert_eq!(
+            serde_json::to_value(DiskFormat::Qcow2).unwrap(),
+            serde_json::json!("qcow2")
+        );
 
         // A malformed tagged value must not silently become user-mode NAT.
         assert!(
@@ -1606,9 +2141,15 @@ mod tests {
                 }],
             },
         }];
+        cfg.extra_disks = vec![Disk {
+            id: "data".into(),
+            path: PathBuf::from("/img/data.qcow2"),
+            format: DiskFormat::Qcow2,
+        }];
         let back: VmConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
         assert_eq!(back.network, cfg.network);
         assert_eq!(back.extra_nics, cfg.extra_nics);
+        assert_eq!(back.extra_disks, cfg.extra_disks);
         assert_eq!(
             serde_json::to_value(&cfg.network).unwrap(),
             serde_json::json!({

@@ -176,6 +176,9 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
         ("POST", ["qemu", "vms", _, "nics"]) | ("DELETE", ["qemu", "vms", _, "nics", _]) => {
             with(node.clone(), "Sys.Modify", Special::AdminOnly)
         }
+        ("POST", ["qemu", "vms", _, "disks"]) | ("DELETE", ["qemu", "vms", _, "disks", _]) => {
+            with(node.clone(), "Sys.Modify", Special::AdminOnly)
+        }
         ("POST", ["qemu", "vms", _, "start" | "shutdown" | "force-stop"])
         | ("DELETE", ["qemu", "vms", _]) => with(node.clone(), "Sys.Modify", Special::AdminOnly),
 
@@ -478,6 +481,8 @@ mod tests {
             ("PUT", "/qemu/vms/x/firewall", "Sys.Modify"),
             ("POST", "/qemu/vms/x/nics", "Sys.Modify"),
             ("DELETE", "/qemu/vms/x/nics/nic0", "Sys.Modify"),
+            ("POST", "/qemu/vms/x/disks", "Sys.Modify"),
+            ("DELETE", "/qemu/vms/x/disks/data", "Sys.Modify"),
             ("POST", "/qemu/vms/x/start", "Sys.Modify"),
             ("POST", "/qemu/vms/x/shutdown", "Sys.Modify"),
             ("POST", "/qemu/vms/x/force-stop", "Sys.Modify"),
@@ -492,6 +497,9 @@ mod tests {
             ("POST", "/qemu/vms/x/network"),
             ("DELETE", "/qemu/vms/x/nics"),
             ("PATCH", "/qemu/vms/x/firewall"),
+            ("GET", "/qemu/vms/x/disks"),
+            ("DELETE", "/qemu/vms/x/disks"),
+            ("PUT", "/qemu/vms/x/disks/data"),
         ] {
             assert!(classify("c", method, path).is_none(), "{method} {path}");
         }
