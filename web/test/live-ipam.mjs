@@ -1,14 +1,20 @@
 // The daemon's IPAM against a real DHCP client: boots the Alpine live ISO,
-// logs in on the serial console and runs udhcpc, so the addresses checked
-// here are what a guest actually received on the wire.
+// logs in on the serial console and runs udhcpc, so the addresses checked here
+// are what a guest actually received on the wire.
+//
+// Networks are the daemon's own: it owns the bridge, gives every running guest
+// a permanent reservation before anything asks, and runs one dnsmasq per active
+// network (static-only DHCP, DNS for the reserved names, upstream forwarding).
+// The suite therefore creates a NAT network when the host has none, reads the
+// reservations through the API, and finds dnsmasq by its per-network config file
+// — there is no libvirt network and no /etc/virt-man/ipam.json.
 //
 // Covers the reported bug (deleting a reservation, then restoring it, left the
 // guest with no address), permanent dynamic reservations, DNS for guest names
 // and forwarding, a VM deletion taking its reservation with it, and the access
 // log recording the guest's connections with the names it looked up.
 //
-// Needs sudo, the Alpine live ISO in the ISOs pool (ISO env to override), and
-// a daemon-served network (NET, default "internet").
+// Needs sudo and the Alpine live ISO in the ISOs pool (ISO env to override).
 //
 //   node test/live-ipam.mjs [base]      (default http://127.0.0.1:8799)
 
@@ -16,9 +22,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ensureTestNetwork, removeTestNetwork } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
-const NET = process.env.NET ?? "internet";
 const ISO = process.env.ISO ?? "alpine-standard-3.24.2-x86_64.iso";
 const VM = "vmtest-ipam";
 const MAC = "52:54:00:d4:c0:0e";
@@ -28,8 +34,25 @@ const sh = (...a) => execFileSync("sudo", a, { stdio: ["ignore", "pipe", "ignore
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail = "") => results.push([!!ok, name, detail]);
-const store = () => JSON.parse(sh("cat", "/etc/virt-man/ipam.json")).networks[NET];
-const mine = () => store()?.reservations.find((r) => r.mac === MAC);
+
+// The daemon's network: `name` is its key (a UUID), `bridge` is what the guest
+// NIC names, `gateway` is where its DNS and DHCP answer from.
+const net = await ensureTestNetwork(base);
+const NET = net.name;
+const NETP = `/networks/${encodeURIComponent(NET)}`;
+const ipamInfo = await api(`${NETP}/ipam`);
+const hosts = async () => (await api(`${NETP}/hosts`)).hosts ?? [];
+const mine = async () => (await hosts()).find((r) => r.mac === MAC);
+// The supervisor (every 5 s) is what allocates; nothing is created by asking
+// DHCP. Poll rather than assuming an exchange made the reservation.
+const waitForMine = async (ms = 15000) => {
+  for (let t = 0; t < ms; t += 1000) {
+    const r = await mine();
+    if (r) return r;
+    await wait(1000);
+  }
+  return await mine();
+};
 
 /// Type commands on the guest's serial console and return what it printed.
 function consoleRun(cmds, settleMs = 4000) {
@@ -56,16 +79,20 @@ const dhcp = async () => lease(await consoleRun(["ip addr flush dev eth0; udhcpc
 
 const tmp = mkdtempSync(join(tmpdir(), "vm-ipam-"));
 try {
-  // pgrep exits 1 when nothing matches, which is the answer we want here.
+  // One dnsmasq per active network, each with its own config. pgrep exits 1
+  // when nothing matches, which is the answer we want here.
   let dnsmasq = "";
-  try { dnsmasq = execFileSync("pgrep", ["-x", "dnsmasq", "-a"], { stdio: ["ignore", "pipe", "ignore"] }).toString(); } catch { /* none */ }
-  check("the network is served by the daemon, not dnsmasq",
-    !dnsmasq.split("\n").some((l) => l.includes(`/${NET}.conf`)) && (await api(`/networks/${NET}/ipam`)).serving === true);
+  try {
+    dnsmasq = execFileSync("pgrep", ["-f", `dnsmasq-${NET}.conf`],
+      { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  } catch { /* not running */ }
+  check("dnsmasq serves the network, from its own config",
+    dnsmasq.length > 0 && ipamInfo.serving === true, dnsmasq);
 
   writeFileSync(join(tmp, "vm.xml"), `<domain type='kvm'><name>${VM}</name><memory unit='MiB'>512</memory><vcpu>1</vcpu>
     <os><type arch='x86_64' machine='q35'>hvm</type><boot dev='cdrom'/></os><features><acpi/><apic/></features><devices>
     <disk type='volume' device='cdrom'><source pool='ISOs' volume='${ISO}'/><target dev='sda' bus='sata'/><readonly/></disk>
-    <interface type='network'><source network='${NET}'/><mac address='${MAC}'/><model type='virtio'/></interface>
+    <interface type='bridge'><source bridge='${net.bridge}'/><mac address='${MAC}'/><model type='virtio'/></interface>
     <serial type='pty'/><console type='pty'/></devices></domain>`);
   sh("virsh", "define", join(tmp, "vm.xml"));
   sh("virsh", "start", VM);
@@ -78,22 +105,35 @@ try {
   check("the live ISO booted to a login prompt", booted);
   await consoleRun(["root", "ip link set eth0 up"], 2500);
 
+  // Preallocated: the guest appearing on the bridge is what reserves an
+  // address, so this is settled before the guest ever asks DHCP.
+  const pre = await waitForMine();
+  check("a guest on the bridge is given a permanent reservation", pre?.dynamic === true && !!pre?.vm, JSON.stringify(pre));
   const first = await dhcp();
-  const r = mine();
-  check("a guest with no reservation gets an address from the range", !!first, first);
-  check("…and it is kept as a permanent reservation, tied to the VM", r?.ip === first && r?.dynamic === true && !!r?.vm, JSON.stringify(r));
+  check("…and the DHCP lease is that reservation's address", !!first && first === pre?.ip, `${first} vs ${pre?.ip}`);
   check("it gets the same address again after releasing it", (await dhcp()) === first);
 
   // The reported bug: delete the reservation, then restore it.
-  const br = readFileSync(`/sys/class/net/virbr1/ifindex`, "utf8").trim();
-  await api(`/networks/${NET}/hosts/${MAC}`, { method: "DELETE" });
+  const br = readFileSync(`/sys/class/net/${net.bridge}/ifindex`, "utf8").trim();
+  await api(`${NETP}/hosts/${MAC}`, { method: "DELETE" });
+  const again = await waitForMine();
+  check("after its reservation is deleted the guest is given a new one", !!again, JSON.stringify(again));
   const afterDelete = await dhcp();
-  check("after its reservation is deleted the guest still gets an address", !!afterDelete, afterDelete);
-  const restored = "192.168.167.77";
-  await api(`/networks/${NET}/hosts`, { method: "PUT", headers: { "content-type": "application/json" },
+  check("…and still gets an address", !!afterDelete && afterDelete === again?.ip, `${afterDelete} vs ${again?.ip}`);
+  // A free high address: the allocator hands out the lowest free ones, so walk
+  // down from the top of the range until one is not already reserved.
+  const taken = new Set((await hosts()).map((h) => h.ip));
+  const parts = ipamInfo.range_end.split(".").map(Number);
+  const stem = parts.slice(0, 3).join(".");
+  let restored = "";
+  for (let n = parts[3]; n > 1 && !restored; n--) {
+    const cand = `${stem}.${n}`;
+    if (!taken.has(cand)) restored = cand;
+  }
+  await api(`${NETP}/hosts`, { method: "PUT", headers: { "content-type": "application/json" },
     body: JSON.stringify({ mac: MAC, ip: restored, name: "ipamtest" }) });
   check("after restoring a reservation the guest gets exactly that address", (await dhcp()) === restored);
-  check("…and the network was never restarted", readFileSync(`/sys/class/net/virbr1/ifindex`, "utf8").trim() === br);
+  check("…and the network was never restarted", readFileSync(`/sys/class/net/${net.bridge}/ifindex`, "utf8").trim() === br);
 
   // Retried: the console read is a fixed window, and on a busy host the
   // guest's first lookup can land after it closes. The answer is what is
@@ -105,10 +145,13 @@ try {
   check("the guest resolves guest names through the gateway", dns.includes(`Address: ${restored}`), dns.slice(-400));
   const fwd = Number(dns.match(/FWD=(\d+)/)?.[1] ?? 0);
   check("…and outside names are forwarded upstream", fwd >= 1, `FWD=${fwd}`);
-  check("…with the gateway as its only nameserver", /nameserver 192\.168\.167\.1\s/.test(dns) && (dns.match(/^nameserver /gm) ?? []).length === 1);
+  const gwRe = new RegExp(`nameserver ${net.gateway.replace(/\./g, "\\.")}\\s`);
+  check("…with the gateway as its only nameserver",
+    gwRe.test(dns) && (dns.match(/^nameserver /gm) ?? []).length === 1, dns.slice(-200));
 
   // Access log: the connection and the lookup behind it, attributed to this
-  // VM, reached through the web server's store.
+  // VM, reached through the web server's store. The DNS row comes from
+  // dnsmasq's query log, read at the supervisor's pass, so allow for one tick.
   await consoleRun(["wget -q -O /dev/null -T 5 http://example.org; echo FETCHED"], 6000);
   const logsFor = async (extra) => (await (await fetch(`${base}/access-logs?${new URLSearchParams({ conn: conn.id, vm: VM, since_ms: "0", ...extra })}`)).json());
   let conns = null;
@@ -146,12 +189,13 @@ try {
   await api(`/domains/${VM}/destroy`, { method: "POST" });
   await api(`/domains/${VM}`, { method: "DELETE" });
   let gone = false;
-  for (let i = 0; i < 20 && !gone; i++) { await wait(1000); gone = !mine(); }
+  for (let i = 0; i < 20 && !gone; i++) { await wait(1000); gone = !(await mine()); }
   check("deleting the VM deletes its reservation", gone);
 } finally {
   try { sh("virsh", "destroy", VM); } catch { /* off */ }
   try { sh("virsh", "undefine", VM); } catch { /* gone */ }
-  await api(`/networks/${NET}/hosts/${MAC}`, { method: "DELETE" }).catch(() => {});
+  await api(`${NETP}/hosts/${MAC}`, { method: "DELETE" }).catch(() => {});
+  await removeTestNetwork(base, net);
   rmSync(tmp, { recursive: true, force: true });
 }
 

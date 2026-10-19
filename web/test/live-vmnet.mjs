@@ -1,20 +1,25 @@
 // VM Network tab, against a real running guest: live rate limits (checked on
-// the host's tc qdiscs, not just the XML), IPAM reservations (checked in the
-// daemon's store and in its DNS answers, with the bridge left untouched),
-// hot-add, hot-remove, NICs added elsewhere appearing, and the old /firewall URL.
+// the host's tc qdiscs, not just the XML), IPAM reservations (read back from
+// the API, checked in the network's DNS answers, with the network's bridge left
+// untouched), hot-add, hot-remove, NICs added elsewhere appearing, and the old
+// /firewall URL.
 //
-// Needs sudo (virsh, tc, reading /etc/virt-man/ipam.json) and a network named by
-// VM_NET (default "internet") that has a DHCP range. Defines and boots its own
-// throwaway guest from the same generator Create VM uses, and removes it.
+// Needs sudo (virsh, tc). Networks are the daemon's own, so nothing is named
+// after a libvirt network: the guest's NIC names the network's bridge, and the
+// daemon's supervisor pre-allocates a permanent reservation for it (there is no
+// "DHCP creates the reservation on first ask" step). When the host has no
+// active NAT network the suite creates one, and deletes only that one.
+// Defines and boots its own throwaway guest from the same generator Create VM
+// uses, and removes it.
 //
 //   node test/live-vmnet.mjs [base]      (default http://127.0.0.1:8799)
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestNetwork, removeTestNetwork } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
-const NET = process.env.VM_NET ?? "internet";
 const VM = "vmtest-vmnet";
 
 execFileSync("npx", ["vite", "build", "--logLevel", "error", "--outDir", "test/_live"],
@@ -25,19 +30,40 @@ const x = await import(new URL("./_build/xml.js", import.meta.url).href);
 const code = readFileSync("test/_live/app.iife.js", "utf8");
 const conn = (await (await fetch(base + "/connections")).json())[0];
 const sh = (...a) => execFileSync("sudo", a).toString();
-// The daemon's IPAM store: what its DHCP server will hand out.
-const reserved = (mac) => JSON.parse(sh("cat", "/etc/virt-man/ipam.json")).networks[NET]?.reservations.find((r) => r.mac === mac);
-const bridgeIndex = () => {
-  const br = sh("virsh", "net-info", NET).match(/Bridge:\s+(\S+)/)?.[1];
-  return readFileSync(`/sys/class/net/${br}/ifindex`, "utf8").trim();
+
+// The daemon's own network: `name` is its key (a UUID), `bridge` is what a
+// guest NIC names. Reservations are read through the API; the root-only store
+// is what answers if that call fails.
+const net = await ensureTestNetwork(base);
+const NET = net.name;
+const BRIDGE = net.bridge;
+const hostsPath = `/networks/${encodeURIComponent(NET)}/hosts`;
+const STORE = "/var/lib/virt-man-daemon/networks.json";
+const hosts = async () => {
+  const r = await fetch(`${base}/proxy/${conn.id}${hostsPath}`);
+  if (r.ok) return (await r.json()).hosts ?? [];
+  // The API is the live view; the store is what it is served from. It is
+  // root-only, and the suite already runs sudo for tc and virsh.
+  try {
+    const reservations = JSON.parse(sh("cat", STORE)).networks?.[NET]?.reservations;
+    if (Array.isArray(reservations)) return reservations;
+  } catch { /* fall through to the error */ }
+  throw new Error(
+    `GET ${hostsPath}: HTTP ${r.status}, and ${STORE} has no entry for ${NET}`);
 };
+const reserved = async (mac) => (await hosts()).find((r) => r.mac === mac);
+// The bridge's ifindex changes if the network is stopped and started, so it is
+// how "the network was not restarted" is measured. No virsh net-info: these
+// networks were never defined in libvirt.
+const bridgeIndex = () => readFileSync(`/sys/class/net/${BRIDGE}/ifindex`, "utf8").trim();
 
 const def = await fetch(`${base}/proxy/${conn.id}/domains?start=true`, {
   method: "POST", headers: { "Content-Type": "application/xml" },
-  body: x.domainXml({ name: VM, cpus: 1, memory_mb: 128, graphics: "vnc", network: NET, disks: [] }),
+  body: x.domainXml({ name: VM, cpus: 1, memory_mb: 128, graphics: "vnc", network: NET, bridge: BRIDGE, disks: [] }),
 });
 if (!def.ok) {
   console.error(`could not define ${VM}: ${await def.text()}`);
+  await removeTestNetwork(base, net);
   process.exit(1);
 }
 
@@ -59,6 +85,10 @@ try {
     for (let t = 0; t < ms; t += 100) { if (f()) return true; await wait(100); }
     return false;
   };
+  const untilAsync = async (f, ms = 8000) => {
+    for (let t = 0; t < ms; t += 100) { if (await f()) return true; await wait(100); }
+    return false;
+  };
   const rows = () => [...d.querySelectorAll("#vmnet-nics tr[data-nic]")];
   const toasts = () => [...d.querySelectorAll(".toast")].map((t) => t.textContent.trim()).join(" | ");
   const macOf = (r) => r?.textContent.match(/([0-9a-f]{2}:){5}[0-9a-f]{2}/)?.[0];
@@ -66,8 +96,18 @@ try {
   await until(() => rows().length);
   mac0 = macOf(rows()[0]);
   check("the Network tab opens from its URL", d.querySelector(".tab.active")?.textContent.trim() === "Network");
-  check("the guest's NIC is listed with its network", rows().length === 1 && rows()[0].textContent.includes(NET));
+  // The SPA shows the network's title (the UUID is its key), not the libvirt name.
+  check("the guest's NIC is listed with its network", rows().length === 1 && rows()[0].textContent.includes(net.title),
+    `${rows()[0]?.textContent} vs ${net.title}`);
   check("the firewall editor is on the same tab", await until(() => d.querySelector("#vmnet-fw #vmfw-apply")));
+
+  // The supervisor (every 5 s) gives a running guest on the bridge a permanent
+  // reservation; no DHCP exchange is needed first.
+  const auto = await untilAsync(async () => {
+    const r = await reserved(mac0);
+    return r?.dynamic === true && !!r?.vm;
+  }, 12000);
+  check("the supervisor pre-allocates a permanent reservation", auto, JSON.stringify(await reserved(mac0)));
 
   // Rate limits: verified on the host, where they are enforced.
   rows()[0].querySelector("[data-nic-rate]").click(); await wait(50);
@@ -75,35 +115,40 @@ try {
   d.querySelector("#rate-tx").value = "20";
   d.querySelector("#rate-ok").click();
   check("the table shows both limits", await until(() => /10 Mbps[\s\S]*20 Mbps/.test(rows()[0]?.textContent ?? "")));
-  const dev = sh("virsh", "domiflist", VM).match(new RegExp(`(vnet\\d+)\\s+network\\s+${NET}\\s+\\S+\\s+${mac0}`))?.[1];
+  const dev = sh("virsh", "domiflist", VM).match(new RegExp(`(vnet\\d+)\\s+bridge\\s+${BRIDGE}\\s+\\S+\\s+${mac0}`))?.[1];
   const cls = sh("tc", "class", "show", "dev", dev);
   const pol = sh("tc", "filter", "show", "dev", dev, "parent", "ffff:");
   check("RX limit is enforced on the host tap (htb, ~10 Mbit)", /rate 97\d\dKbit/.test(cls), cls.trim());
   check("TX limit is enforced by the ingress policer (~20 Mbit)", /rate 19\d\d\dKbit/.test(pol), pol.trim().slice(0, 120));
 
   // IPAM: in the daemon's store, served by its DNS, and the network is not
-  // restarted to apply it (a restart recreates the bridge: a new ifindex).
+  // restarted to apply it (a restart recreates the bridge: a new ifindex). Only
+  // dnsmasq is restarted, so the bridge stays.
   const bridgeBefore = bridgeIndex();
   rows()[0].querySelector("[data-nic-ipam]").click(); await wait(50);
   const ip = d.querySelector("#ipam-ip").value;
   check("IPAM suggests a free address", /^\d+\.\d+\.\d+\.\d+$/.test(ip), ip);
   d.querySelector("#ipam-ok").click();
   check("the table shows the reserved address", await until(() => rows()[0]?.textContent.includes(ip)));
-  check("the reservation is in the daemon's IPAM, as a manual one", reserved(mac0)?.ip === ip && reserved(mac0)?.dynamic === false,
-    JSON.stringify(reserved(mac0)));
-  const gw = JSON.parse(sh("cat", "/etc/virt-man/ipam.json")).networks[NET].gateway;
-  const dug = execFileSync("dig", ["+short", `@${gw}`, VM, "A"]).toString().trim();
+  const rsv = await reserved(mac0);
+  check("the reservation is in the daemon's IPAM, as a manual one", rsv?.ip === ip && rsv?.dynamic === false,
+    JSON.stringify(rsv));
+  const dug = execFileSync("dig", ["+short", `@${net.gateway}`, rsv?.name ?? VM, "A"]).toString().trim();
   check("…and its name resolves to it on the network's DNS", dug === ip, dug);
   check("the network was not restarted to apply it", bridgeIndex() === bridgeBefore);
 
-  // Hot-add from the tab.
+  // Hot-add from the tab. The network is chosen explicitly: an empty value is
+  // "None", which the API refuses.
   d.querySelector("#vmnet-add").click(); await wait(50);
+  const netSel = d.querySelector("#nic-net");
+  netSel.value = NET;
+  netSel.dispatchEvent(new w.Event("change", { bubbles: true }));
   d.querySelector("#nic-ok").click();
   check("a hot-added interface appears in the table", await until(() => rows().length === 2), toasts());
   check("…and is attached to the running guest", (sh("virsh", "domiflist", VM).match(/vnet\d+/g) ?? []).length === 2);
 
   // Added by another path (the hardware editor / virsh): it just shows up.
-  sh("virsh", "attach-interface", VM, "network", NET, "--model", "virtio", "--mac", "52:54:00:9a:00:09", "--live", "--config");
+  sh("virsh", "attach-interface", VM, "bridge", BRIDGE, "--model", "virtio", "--mac", "52:54:00:9a:00:09", "--live", "--config");
   d.querySelector('.tab[data-vmtab="summary"]').click(); await wait(800);
   d.querySelector('.tab[data-vmtab="network"]').click();
   check("a NIC added elsewhere appears in the tab", await until(() => rows().some((r) => macOf(r) === "52:54:00:9a:00:09")));
@@ -119,7 +164,12 @@ try {
   rows()[0].querySelector("[data-nic-ipam]").click(); await wait(50);
   check("an existing reservation offers Release", !!d.querySelector("#ipam-clear"));
   d.querySelector("#ipam-clear")?.click();
-  check("Release removes the reservation", await until(() => !reserved(mac0)));
+  // Release drops the *manual* reservation. The guest is still on the bridge,
+  // so the supervisor gives it an automatic one at its next pass; either state
+  // means the manual address is gone.
+  check("Release removes the manual reservation",
+    await untilAsync(async () => { const r = await reserved(mac0); return !r || r.dynamic === true; }),
+    JSON.stringify(await reserved(mac0)));
   check("…and still does not restart the network", bridgeIndex() === bridgeBefore);
 
   w.history.pushState(null, "", `/${encodeURIComponent(conn.name)}/vms/${VM}/firewall`);
@@ -131,7 +181,8 @@ try {
 } finally {
   try { sh("virsh", "destroy", VM); } catch { /* already off */ }
   try { sh("virsh", "undefine", VM); } catch { /* already gone */ }
-  if (mac0) await fetch(`${base}/proxy/${conn.id}/networks/${NET}/hosts/${mac0}`, { method: "DELETE" }).catch(() => {});
+  if (mac0) await fetch(`${base}/proxy/${conn.id}/networks/${encodeURIComponent(NET)}/hosts/${mac0}`, { method: "DELETE" }).catch(() => {});
+  await removeTestNetwork(base, net);
 }
 
 for (const [ok, name, detail] of results) console.log(`${ok ? "\u2714" : "\u2716"} ${name}${ok ? "" : `  — ${detail}`}`);

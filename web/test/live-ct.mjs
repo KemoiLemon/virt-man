@@ -11,12 +11,14 @@
 //   - its page has a Hardware tab (CPU, memory, swap, disk) that applies,
 //     and a text console that answers -- and shows output nobody typed for
 //   - a VM route cannot reach it, and a VM-only action is refused
-//   - it gets an address from the daemon's DHCP (read from the network's hosts)
+//   - it gets an address on the network the daemon gave it (read from the
+//     network's hosts: the supervisor reserves one; no DHCP exchange is needed)
 //   - deleting it removes its rootfs and keeps the template
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { ensureTestNetwork, removeTestNetwork } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
 const results = [];
@@ -66,14 +68,16 @@ if (!tpl) {
 check("an Alpine template is in the pool, listed as a CT template", tpl?.content === "vztmpl", tpl?.name);
 
 // ------------------------------------------------------------ the container
-const nets = (await j("GET", `${P}/networks`)).body.filter((n) => n.active && n.ip);
+// A container attaches to a network's bridge, like a VM. The fixture supplies
+// one, creating it when the host has none.
+const net = await ensureTestNetwork(base);
 const create = await j("POST", `${P}/containers`, {
   title: "live-ct suite",
   template: { pool, volume: tpl.name },
   rootfs: { pool, size_gb: 1 },
   memory_mb: 128,
   vcpus: 1,
-  networks: nets.length ? [nets[0].name] : [],
+  networks: [net.name],
   // A root password, so the suite can log in on the console (a template's
   // root is locked, and a login prompt runs nothing typed at it).
   password: "live-ct-suite",
@@ -89,15 +93,13 @@ try {
   check("a VM route does not reach a container", (await j("GET", `${P}/domains/${ct}`)).status !== 200);
   check("a VM-only action on it is refused", (await j("POST", `${P}/containers/${ct}/reset`)).status === 403);
 
-  if (nets.length) {
-    const hostsUrl = `${P}/networks/${encodeURIComponent(nets[0].name)}/hosts`;
-    let ip = null;
-    for (let i = 0; i < 40 && !ip; i++) {
-      await sleep(1000);
-      ip = (await j("GET", hostsUrl)).body.hosts?.find((h) => h.vm === ct)?.ip ?? null;
-    }
-    check("it gets an address from the daemon's DHCP", !!ip, `on ${nets[0].name}`);
+  const hostsUrl = `${P}/networks/${encodeURIComponent(net.name)}/hosts`;
+  let ip = null;
+  for (let i = 0; i < 40 && !ip; i++) {
+    await sleep(1000);
+    ip = (await j("GET", hostsUrl)).body.hosts?.find((h) => h.vm === ct)?.ip ?? null;
   }
+  check("it is given an address on the network", !!ip, `on ${net.title}`);
 
   // ---------------------------------------------------------- the SPA
   execFileSync("npx", ["vite", "build", "--logLevel", "error", "--outDir", "test/_live"],
@@ -236,6 +238,7 @@ try {
   const after = await vols();
   check("…and keeps the template", after.some((v) => v.name === tpl.name));
   check("…and no ct-<uuid> volume is left", !after.some((v) => v.name === `ct-${ct}.raw`));
+  await removeTestNetwork(base, net);
 }
 
 const failed = results.filter(([ok]) => !ok);
