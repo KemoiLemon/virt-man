@@ -328,16 +328,15 @@ measurement. Hence the testing rules in `AGENTS.md`.
 
 ## Containers
 
-Containers are **libvirt LXC** guests (`lxc:///system`), chosen over Incus or
-LXD because libvirt's network, storage and nwfilter drivers are shared by the
-whole host: a container's `<interface type='network'>` joins the same bridges
-as the VMs, so the daemon's DHCP/DNS, the firewall, port forwards, rate limits
-and access logs apply to it unchanged. The one rule that makes that true is
-that **nothing lists guests from one driver**: `libvirt::all_domains` walks
-both, and every caller that treats guests as a set (IPAM, firewall, metrics,
-tap reattachment, the in-use check) uses it. The `/containers` routes are the
-`/domains` handlers run with the LXC driver selected (`DRIVER` task-local), so
-the two cannot drift apart.
+Containers are **libvirt LXC** guests (`lxc:///system`). The network is not
+libvirt's: a container attaches with `<interface type='bridge'>` to the same
+daemon-owned bridge as a VM, so dnsmasq (DHCP/DNS), the `virt-man` nftables
+table, port forwards, rate limits, IPAM reservations and the access log apply to
+it unchanged. The one rule that keeps guests as a set is that **nothing lists
+guests from one driver**: `libvirt::all_domains` walks both, and every caller
+that treats guests as a set (the IPAM supervisor, firewall, metrics, the in-use
+check) uses it. The `/containers` routes are the `/domains` handlers run with the
+LXC driver selected (`DRIVER` task-local), so the two cannot drift apart.
 
 **Templates are pool volumes**, Proxmox-style: a rootfs tarball stored like an
 ISO and recognised by its extension, so it can arrive by download, upload, or a

@@ -352,16 +352,19 @@ work. Things that bite:
 
 - **Every daemon route takes a UUID or a name.** A middleware
   (`daemon/src/api/mod.rs` `resolve_uuids`) swaps a UUID segment for the name
-  before routing, so handlers and their name-keyed records are unchanged.
+  before routing, so handlers and their name-keyed records are unchanged. A
+  network is the exception: the `/networks` handlers resolve their own id or
+  title key themselves, so the middleware does not cover them.
 - **The web proxy resolves a UUID to its name before the permission check**
   (`api/proxy.rs` `canonical_path`). Grants, ownership and suspension are keyed
   by name; checking the UUID path instead let a user carved out of a guest
   reach it by UUID. `test/live-uuid.mjs` pins it.
 - **The daemon migrates existing resources itself** (`daemon/src/migrate.rs`):
-  a guest only while shut off, a network only when no running guest uses it, a
-  pool only when no guest names it; the old name becomes the title. It is gated
-  by `VIRT_MAN_MIGRATE_UUIDS=1` (off by default). `VIRT_MAN_MIGRATE_ONLY=<prefix>`
-  limits it to matching names, for testing on a host that has real guests.
+  a guest only while shut off, a pool only when no guest names it; the old name
+  becomes the title. It is gated by `VIRT_MAN_MIGRATE_UUIDS=1` (off by default).
+  `VIRT_MAN_MIGRATE_ONLY=<prefix>` limits it to matching names, for testing on a
+  host that has real guests. Networks are not migrated: they are the daemon's
+  own and already keyed by UUID.
 - **The web server follows the renames** (`web/server/src/rekey.rs`, every
   30 s): it remembers each UUID's name, and moves ownership and grants when the
   name changes. A rename it did not see is matched by title, but only for a
@@ -483,9 +486,10 @@ it to the token file instead of generating one.
 (`daemon/src/api/containers.rs`, `daemon/src/ct.rs`, DESIGN.md "Containers".)
 
 - **`libvirt::all_domains(c, flags)` is how anything treats guests as a set.**
-  IPAM (a container with no MAC in the snapshot gets no DHCP), the firewall,
-  metrics, `reattach_taps`, and the disk in-use check all go through it. A new
-  caller of `c.list_all_domains` silently leaves containers out.
+  The IPAM supervisor (a container with no MAC in the snapshot gets no
+  reservation), the firewall, metrics, and the disk in-use check all go
+  through it. A new caller of `c.list_all_domains` silently leaves containers
+  out.
 - **`/containers/...` is the `/domains` handlers under `DRIVER.scope(Lxc)`.**
   `containers::forward` rebuilds the request (it must not reuse the old one:
   axum keeps matched path params in the extensions, and a handler taking
@@ -594,91 +598,94 @@ re-adds only what that function returns. For the same reason the in-use checks
 backing store (`labels`/`plan_cleanup_connected`), or deleting a volume would
 take a running guest's disk when the two guests spell it differently.
 
-**The daemon is the DHCP and DNS server; libvirt runs no dnsmasq.**
-(`daemon/src/ipam/`.) Any libvirt network with an IPv4 `<ip>` is taken over:
-its `<dhcp>` range and hosts, `<dns>` forwarders and `<domain>` move into
-`/etc/virt-man/ipam.json`, and the definition gets `<dns enable='no'/>` and no
-`<dhcp>`, so libvirt starts no dnsmasq. A supervisor (every 5 s, and at start)
-does the takeover, binds DHCP (`0.0.0.0:67`, `SO_BINDTODEVICE` per bridge) and
-DNS (gateway `:53`, UDP+TCP) for each active managed network, and prunes.
+**Networks are the daemon's own; dnsmasq is their DHCP and DNS server.**
+(`daemon/src/ipam/`, `daemon/src/hostnet.rs`, `daemon/src/api/networks.rs`.)
+None of them is defined in libvirt, so nothing is taken over and nothing is
+read back: the store at `<data_dir>/networks.json` (default
+`/var/lib/virt-man-daemon/networks.json`, mode 0600) is the source of truth for
+mode, subnet, range, DNS and reservations.
 
-- **Every address is permanent.** A guest with no reservation is given the
-  lowest free address in the range at DISCOVER, and that becomes a `dynamic`
-  reservation tied to its VM UUID. Release, reboot, lease expiry and daemon
-  restarts never move it; deleting the VM removes it (by absence, on the next
-  supervisor pass). Deleting a reservation by hand just means the guest gets a
-  new one at its next DHCP. Only MACs of guests on this host are answered.
-- **DNS** answers A for reservation names (bare and `name.<domain>`), PTR for
-  the subnet, NXDOMAIN under the domain, and forwards everything else to the
-  network's forwarders or the host's `/etc/resolv.conf` (never to itself).
-- **The network editor still speaks libvirt XML.** `GET …/xml` puts the stored
-  IPAM back in (`ipam::xml::inject`); `PUT …/xml` takes it out (`strip`,
-  `merge`, which keeps a reservation's `dynamic`/`vm` when it comes back
-  unchanged) and redefines libvirt **only if what libvirt runs changed**
-  (`same_definition`). A NAT network's `<bridge name>` must survive the editor
-  (`networkXml`), or every save looked like a new bridge and restarted it.
-- **Restarting a network unplugs its guests.** Destroying it deletes the
-  bridge; libvirt does not reattach running guests' taps to the new one
-  (measured). Every restart path calls `networks::reattach_taps`. That missing
-  step is why "delete a reservation, then restore it" left a guest with no
-  address: the delete redefined the network.
+- **One bridge per network, named from its id.** A managed network gets
+  `vbr` + the first 12 hex of its UUID (`hostnet::bridge_name`), 15 characters,
+  the Linux limit; `Mode::Bridge` borrows the operator's bridge and is only
+  checked, never created or deleted. Two ids that would derive one bridge are
+  refused by the API (`check_bridge`), or one Start would flush the other's
+  address.
+- **dnsmasq runs per active network**, config in
+  `/run/virt-man-daemon/dnsmasq-<id>.conf`, bound to the bridge. DHCP is
+  static-only — `dhcp-range=<start>,static`; `start,end,<lease>,static` is
+  rejected by dnsmasq ("bad dhcp-range") — so only `dhcp-host` entries are
+  handed out, and only for MACs of guests whose NIC is on *that* bridge. Every
+  named reservation still answers DNS (`host-record`). `hostnet`'s test runs
+  `dnsmasq --test` over the generated file.
+- **Every address is permanent.** A supervisor (every 5 s) gives each guest
+  appearing on a network the lowest free address as a `dynamic` reservation
+  tied to its VM UUID, drops a reservation whose guest is gone, and folds
+  dnsmasq's lease file into `seen_ms` (expiry − lease time). Deleting a
+  reservation by hand means the guest gets a new one at the next pass.
+- **A stopped network answers nothing.** No bridge means the supervisor stops
+  its dnsmasq, and the firewall renders no rules for it. Networks are never
+  removed from the store by the supervisor; only the API deletes.
+- **Only what runs reprograms a network.** `PUT …/xml` stops and starts the
+  bridge only when the bridge, subnet or mode changed (decided by
+  `bridge_up`, not dnsmasq health). A range, forwarder, domain or reservation
+  edit just restarts dnsmasq, so a guest is not unplugged for a settings
+  change. A failed start puts the old definition back.
+- **The editor still speaks libvirt XML.** `netxml::render` writes it (name and
+  uuid are the id, the derived bridge is included, `parse` validates,
+  `merge` keeps autostart, the lease and reservations the editor did not see).
+  A title must be unique and not equal to another network's id, so a
+  display-name link resolves to exactly one network.
+- **The access log's DNS half is read from dnsmasq's query log**
+  (`daemon/src/ipam/dnslog.rs`). Each pass tails `<data_dir>/dnsmasq-<id>.log`
+  for every served network by byte offset, pairs a `reply`/`cached` with the
+  oldest pending `query[A]` for that name, records the first answer as a
+  `kind=dns` row, and remembers the name→address mapping a following connection
+  is attributed by. It starts at the end of a log it first sees, so a restart
+  does not replay old lookups; a shorter file is a rotation, read from the
+  start. A second A record names an address without a second row.
 
-**Port forwards must be admitted past libvirt's own network filter.**
-(`daemon/src/firewall.rs` `allow_forwarded`.) Our DNAT is correct on its own
-and still does not work, because libvirt renders, per network, a chain that
-accepts only replies to guest-initiated flows and rejects everything else. On
-its **iptables** backend that is `LIBVIRT_FWI`:
+**A guest's NIC names its network's bridge.** (`daemon/src/api/nics.rs`,
+`daemon/src/ct.rs`, `web/server/src/xmlcheck.rs`, `web/server/src/guard.rs`.)
+A VM's or container's interface is
+`<interface type='bridge'><source bridge='vbr…'/></interface>` — there is no
+libvirt network to name — so `nics::add` and `ct::domain_xml` resolve the key a
+request names (a network's id or title) through `Ipam::bridge_for`, and
+`GET …/interfaces` maps the bridge back to the network key. `xmlcheck` records
+the source bridge in `DomainSpec.bridges`/`ContainerSpec.bridges`; the proxy's
+`check_network_bridges` then requires `Network.Use` on **any** network using
+that bridge and refuses an unknown bridge outright, so an arbitrary host bridge
+is unreachable for a non-admin. A `Mode::Bridge` network may share its operator
+bridge, so a grant on any network on it is enough, and `network_for_bridge`
+answers the lowest stored key so a guest reads back the same network every time.
 
-```text
--A LIBVIRT_FWI -d 10.74.0.0/24 -o virbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A LIBVIRT_FWI -o virbr0 -j REJECT --reject-with icmp-port-unreachable
-```
+**The `virt-man` nftables table owns NAT, isolation and port forwarding.**
+(`daemon/src/firewall.rs`.) There is no libvirt network driver and no libvirt
+chain to get past. The daemon renders one IPv4 table for its own networks and
+applies it as a single `nft -f` transaction (`add table`, `flush table`, then
+the rendered block), so a failed script leaves the previous rules in force
+rather than an empty table.
 
-and on its **nftables** backend the same two rules live in
-`ip libvirt_network guest_input` (`oif "virbr1" ... ct state established,related accept`
-followed by `oif "virbr1" ... reject`). Which backend a host uses is not
-visible from our config — `/etc/libvirt/network.conf` leaves `firewall_backend`
-commented and libvirt picks — and the two hosts that have run this both differ:
-one is iptables, the local host is nftables. So `allow_forwarded` tries both.
-
-A forward's first packet is NEW, not established, so libvirt throws it away
-after our DNAT already rewrote it — the guest never sees the connection and
-the client is told "connection refused", since the reject answers with ICMP
-port-unreachable. Three things make this hard to read from the symptom:
-
-- **Nothing in our own table can fix it.** A verdict in one chain does not stop
-  a later chain of the same hook from rejecting. Measured on both backends: an
-  `accept` in our `vm-forward` (`priority filter - 1`) does not save the packet,
-  and neither does a DNAT with it. The accept has to sit *inside libvirt's
-  chain*, ahead of its reject — and libvirt has no way to declare a port forward
-  of ours (`network.rng` has no such element), so nowhere else will do.
-- **A packet capture misleads.** Filtered to the forward's own port it shows
-  only the inbound SYN and no reply at all, because the answer is ICMP.
-  Attribute it with libvirt's own counter instead: the reject rule counts
-  packets, and it rises by exactly one per connection attempt (34 → 37 → 39
-  across five attempts on the iptables host; 0 → 3 locally on nftables).
-- **The two backends spell the matcher differently.** nftables wants
-  `ct status dnat` and refuses `ct state dnat` ("Could not parse conntrack
-  state"); iptables takes `--ctstate DNAT`. Do not unify them.
-
-`allow_forwarded` inserts an accept scoped to translated traffic only — `ct
-status dnat`/`--ctstate DNAT`, exactly the connections we DNAT'd, leaving
-libvirt's filtering of everything else intact. It runs on every firewall apply,
-and the supervisor re-asserts it every pass, because **starting or restarting a
-network, and a libvirtd restart, make libvirt rewrite those chains without it**.
-Anything that recreates them silently re-breaks forwarding until the next pass.
-
-**The check is positional, not a presence test.** libvirt *inserts* its own
-two rules at the head of its chain, which pushes ours **behind** its reject
-rather than removing it — measured on an iptables host: a working forward, one
-network restart, and our rule sat at line 3 behind a reject counting one packet
-per attempt. `iptables -C` and a `contains` on the nft listing both answer "the
-rule exists", so a host in that state reported itself fixed on every pass while
-every forward was refused, and stayed broken until someone moved the rule by
-hand. So the pass reads the chain in order (`iptables -S`, `nft list chain`) and
-moves our rule to the head whenever it is missing *or* behind a reject — a rule
-that exists but is behind the reject admits nothing, because a forward's first
-packet is NEW.
+- **Base rules follow the bridge, not dnsmasq's health.** For an active NAT
+  network: accept from its bridge, accept established/related and `ct status
+  dnat` back in, drop the rest, and masquerade its subnet out of any interface
+  but its own (excluding the subnet itself and 224.0.0.0/24). An isolated
+  network drops both directions with `drop` (timeouts, not ICMP), but still
+  accepts `ct status dnat`, so explicit port forwards reach their guests. A
+  `Bridge` network gets no rules: the operator owns that bridge and its policy.
+- **Cross-network traffic is guarded, not ordered.** A flat chain would let one
+  network's `iifname ... accept` end evaluation before another network's
+  `oifname ... drop` is reached. Every accept for our own traffic therefore
+  excludes the set of all managed bridges (`oifname != { "vbr1", "vbr2" }`), so
+  guest-to-guest traffic between two networks is dropped whatever order the
+  definitions are stored in.
+- **A network whose bridge is down emits nothing** — no rules, no policy
+  defaults, no DNAT ports, no masquerade. The network API must call
+  `api::firewall::apply_store` on every lifecycle change; nothing else
+  re-installs a network's rules.
+- **Forwarding is enabled, never cleared.** `ip_forward` is host-wide and shared
+  with libvirt's LXC driver, Docker and other services; `apply_store` writes
+  `1` when an active NAT network exists and otherwise leaves it alone.
 
 **The daemon shell is a host login, and only an administrator's.** (`daemon/src/api/shell.rs`.) A Shell tab on a server page opens a login shell on the hypervisor host. Things that bite:
 
