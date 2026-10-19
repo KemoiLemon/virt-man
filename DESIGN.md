@@ -299,6 +299,21 @@ benefit.
 Nothing is cached: the SPA polls the daemon through the proxy. Live hypervisor
 state is the only state, so there is no invalidation logic to get wrong.
 
+**Storage pools are the daemon's own directories.** A pool is a host directory
+plus metadata — `title`, `path`, `autostart`, `active` — in
+`<daemon data dir>/pools.json`, keyed by the UUID the UI addresses it by. There
+is no libvirt storage driver: a read is a directory scan, so it is always
+current. Roots are arbitrary absolute directories an administrator chooses,
+canonicalised, kept apart from each other and from a deny list of system and
+daemon paths, and revalidated on every use (a root that has become a symlink is
+refused, not followed). Volumes are ordinary files: raw images are sparse,
+qcow2 images are created by `qemu-img` with mode 0600, and uploads and fetches
+place a dot-prefixed temp in the pool root and rename it into place so a failed
+transfer cannot damage an existing volume. Containers' rootfs images and
+template tarballs are the same kind of file, so quotas, deletion logging and
+the in-use check treat them like a VM disk. Existing libvirt pools are not
+imported: this host is greenfield and `pools.json` is the only source of truth.
+
 ## Bugs that shaped the design
 
 Kept here because each one changed how the code is written, not just what it

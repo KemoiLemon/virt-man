@@ -34,9 +34,6 @@ cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   live-history (needs the server to have been sampling for ~30 s),
 #   live-empty (no args: runs its own server against a stub daemon with no resources),
 #   live-ops (needs sudo: defines a SPICE guest, stops/starts the daemon),
-#   live-ct (needs the daemon's LXC driver: downloads an Alpine template if
-#   the first pool lacks one, makes a container, drives the SPA over it,
-#   types into its console, deletes it -- rootfs included, template kept)
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
@@ -182,22 +179,42 @@ recorded one, or a sidecar naming a different id, are all deleted rather than
 resumed. A restart is still fatal to a transfer **mid-body** (nothing complete
 to resume), and to nothing else.
 
-**A pool read refreshes the pool first.** `GET /pools/{name}` and
-`GET /pools/{name}/volumes` call `virStoragePoolRefresh` before answering
-(`daemon/src/api/pools.rs`, `pools::refresh_for_read`). libvirt caches a pool's
-volume list and its space figures, and only re-reads them when the *volume API*
-changed something — a file that arrives any other way (aria2, `cp`, `scp`) stays
-invisible, and the space figures stay stale, until something refreshes. That is
-the normal case here, not an edge case: the ISO pool directory is inside a
-Nextcloud sync folder, so files appear and vanish without this daemon being
-involved at all. Measured: a pool with 24 volumes and one with none both answer
-in ~44 ms, because that time is the libvirt connection rather than the directory
-scan — so it is cheaper to be accurate than to cache. The pool page polls every
-second and would otherwise repeat the same wrong answer forever. The all-pools
-list deliberately does not refresh every pool, keeping the sidebar's poll cheap.
+**Storage pools are daemon-owned directories.** (`daemon/src/pools.rs`,
+`daemon/src/api/pools.rs`, `volumes.rs`.) There is no libvirt storage driver: a
+pool is a host directory plus metadata in `<data_dir>/pools.json` (mode 0600,
+atomic temp+rename), keyed by the canonical UUID the UI addresses it by, with a
+display `title`, `autostart` and `active`. Only directory pools exist; LVM and
+filesystem pool types are refused with "not implemented natively". A root is an
+arbitrary absolute host directory, canonicalised and created on explicit
+create/start, refused when it overlaps another pool or falls in a small deny
+list (`/proc`, `/sys`, `/dev`, `/run`, `/etc`, `/root`, `/boot`, `/tmp`,
+`/var/tmp`, the daemon data dir, and the web server's `/var/lib/virt-man`;
+`/home` is allowed). **The stored root is revalidated on every use**: a root
+that is now a symlink, or resolves somewhere else, is refused with "re-point the
+pool" rather than followed — otherwise a link planted in its place would redirect
+scans, uploads and deletes.
+
+A read is a directory scan, so a file dropped in by `cp`, aria2 or a sync is
+visible immediately and there is nothing to refresh. Scans list regular files
+only (a symlink is skipped, never followed), skip dot-prefixed names (the
+atomic-write temporaries) and names the API could not address. `capacity` is the
+qcow2 virtual size from the header, falling back to the file length;
+`allocation` is `st_blocks*512`; pool capacity/available come from `statvfs`. The
+sidebar's poll uses a header-free block walk, not the volume list. Startup never
+creates a missing autostart root — an absent filesystem must not look like an
+empty pool — it only leaves it inactive; an explicit start recreates it.
+
+Volumes are files: raw ones are sparse (`set_len`), qcow2 ones are made by
+`qemu-img` with the target pre-created 0600, so its own 0644 default never lands.
+Upload and fetch write a dot-prefixed temp **in the pool root**, hash while
+copying, fsync and rename over the target, so a failed transfer leaves an
+existing volume untouched; an existing name is never overwritten (409). Deleting
+a pool removes only its definition, never its files, and is refused while a
+guest still holds one of its volumes. Existing libvirt pools are **not**
+imported: this host is greenfield, and `pools.json` is the only source of truth.
 
 **The URL is the view.** `web/src/route.ts` maps views to paths (`/`,
-`/servers`, `/guests`, `/containers`, `/networks`, `/storage`, `/<node>`,
+`/servers`, `/guests`, `/networks`, `/storage`, `/<node>`,
 `/<node>/vms|networks|storage|firewall`,
 `/<node>/vms/<vm>[/console|hardware|options|firewall|xml]`,
 `/<node>/networks/<net>`, `/<node>/storage/<pool>`) and is unit-tested. Every
@@ -209,13 +226,13 @@ poll never adds history. `renderCurrent()` (boot, Back/Forward) sets
 normalises (a deleted node, pool or network) replaces the dead URL instead of
 stacking it. A node is addressed by name unless that name is ambiguous or is a
 top-level path the web server answers itself (`/users`, `/activity`, ...) —
-or is a Datacenter tab (`route.ts` `DC_TABS`: `/guests`, `/containers`,
-`/networks`, `/storage`) — then by id, or a reload would get an admin page or
+or is a Datacenter tab (`route.ts` `DC_TABS`: `/guests`, `/networks`,
+`/storage`) — then by id, or a reload would get an admin page or
 the app's own Datacenter tab. **Keep `RESERVED` in
 `route.ts` in step with the server's top-level routes and `DC_TABS`.**
 
 **The Datacenter lists every server's resources, and creating one does not
-select a server.** Guests, Containers, Networks and Storage are tabs over the
+select a server.** Guests, Networks and Storage are tabs over the
 tree's per-server caches, each headed by the same `quickStats` cards, and each
 card carries its own owning server (`data-*-conn`), so an action on a card
 names the daemon it belongs to instead of the app's `selectedConn`. The create
@@ -345,10 +362,9 @@ Things that bite:
   `after` callback, and never navigates away from it.
 
 **Guests, networks and pools are named by their UUID.** A new one's
-libvirt name is its UUID and what the user typed is its `<title>` (a pool
-cannot hold a title: the daemon keeps pool titles in
-`/etc/virt-man/titles.json`). URLs name them by UUID; old name links still
-work. Things that bite:
+libvirt name is its UUID and what the user typed is its `<title>` (a pool has no
+libvirt definition: its title lives beside it in `pools.json`). URLs name them
+by UUID; old name links still work. Things that bite:
 
 - **Every daemon route takes a UUID or a name.** A middleware
   (`daemon/src/api/mod.rs` `resolve_uuids`) swaps a UUID segment for the name
@@ -359,12 +375,12 @@ work. Things that bite:
   (`api/proxy.rs` `canonical_path`). Grants, ownership and suspension are keyed
   by name; checking the UUID path instead let a user carved out of a guest
   reach it by UUID. `test/live-uuid.mjs` pins it.
-- **The daemon migrates existing resources itself** (`daemon/src/migrate.rs`):
-  a guest only while shut off, a pool only when no guest names it; the old name
-  becomes the title. It is gated by `VIRT_MAN_MIGRATE_UUIDS=1` (off by default).
-  `VIRT_MAN_MIGRATE_ONLY=<prefix>` limits it to matching names, for testing on a
-  host that has real guests. Networks are not migrated: they are the daemon's
-  own and already keyed by UUID.
+- **The daemon migrates existing guests itself** (`daemon/src/migrate.rs`):
+  a guest only while shut off; the old name becomes the title. It is gated by
+  `VIRT_MAN_MIGRATE_UUIDS=1` (off by default). `VIRT_MAN_MIGRATE_ONLY=<prefix>`
+  limits it to matching names, for testing on a host that has real guests.
+  Networks and pools are not migrated: they are the daemon's own and already
+  keyed by UUID (a pool from creation).
 - **The web server follows the renames** (`web/server/src/rekey.rs`, every
   30 s): it remembers each UUID's name, and moves ownership and grants when the
   name changes. A rename it did not see is matched by title, but only for a
@@ -768,9 +784,10 @@ Transitions go to the activity log as `system`.
 
 **ISOs can be fetched from a URL by the daemon itself** (`daemon/src/api/fetch.rs`,
 `POST /pools/{pool}/fetch`, `GET /fetches`). The bytes never touch the web
-server. The download spools to `/var/tmp` and is written into a new volume
-only once complete: short of `Content-Length`, empty, or failing an optional
-SHA-256, it stores nothing, and a write that fails deletes the volume. Existing
+server. The download spools to `/var/tmp` and is copied into a new volume only
+once complete: short of `Content-Length`, empty, or failing an optional SHA-256,
+it stores nothing, and the copy is a dot-prefixed temp in the pool root that is
+renamed into place (a failure removes the temp, never a target). Existing
 volumes are never overwritten (409). A fetch needs `Datastore.AllocateSpace` on the pool, and is refused to a user with a storage limit (its size is unknown up front).
 
 **Console frames are long-polled.** `GET …/console/frame` parks in the daemon
