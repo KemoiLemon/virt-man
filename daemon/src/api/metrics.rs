@@ -12,6 +12,7 @@
 
 use axum::Json;
 use axum::Router;
+use axum::extract::Extension;
 use axum::routing::get;
 use serde_json::{Value, json};
 use virt::connect::Connect;
@@ -20,12 +21,13 @@ use virt::domain::Domain;
 use super::ApiError;
 use crate::disks::attr;
 use crate::libvirt::{domain_state_name, with_conn};
+use crate::pools::Pools;
 
 pub fn routes() -> Router {
     Router::new().route("/metrics", get(metrics))
 }
 
-async fn metrics() -> Result<Json<Value>, ApiError> {
+async fn metrics(Extension(pools): Extension<Pools>) -> Result<Json<Value>, ApiError> {
     let stat = std::fs::read_to_string("/proc/stat")
         .map_err(|e| ApiError::internal(format!("read /proc/stat: {e}")))?;
     let meminfo = std::fs::read_to_string("/proc/meminfo")
@@ -38,9 +40,10 @@ async fn metrics() -> Result<Json<Value>, ApiError> {
         "mem_total_kib": super::host::meminfo_kib(&meminfo, "MemTotal").unwrap_or(0),
         "mem_available_kib": super::host::meminfo_kib(&meminfo, "MemAvailable").unwrap_or(0),
     });
-    let (domains, pools) = with_conn(|c| Ok((domains(c)?, pools(c)?)))
-        .await
-        .map_err(ApiError::internal)?;
+    let (domains, pools) = (
+        with_conn(domains).await.map_err(ApiError::internal)?,
+        pool_metrics(&pools),
+    );
     Ok(Json(json!({
         "sampled_at_ms": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -52,20 +55,30 @@ async fn metrics() -> Result<Json<Value>, ApiError> {
     })))
 }
 
-fn pools(c: &Connect) -> Result<Vec<Value>, crate::libvirt::LvError> {
-    let mut out = Vec::new();
-    for p in c.list_all_storage_pools(0)? {
-        let active = p.is_active().unwrap_or(false);
-        // An inactive pool reports zeros, which would read as an empty disk.
-        let info = if active { p.get_info().ok() } else { None };
-        out.push(json!({
-            "uuid": p.get_uuid_string()?,
-            "name": p.get_name().unwrap_or_default(),
-            "capacity": info.as_ref().map(|i| i.capacity),
-            "allocation": info.as_ref().map(|i| i.allocation),
-        }));
-    }
-    Ok(out)
+fn pool_metrics(pools: &Pools) -> Vec<Value> {
+    pools
+        .list()
+        .iter()
+        .map(|(key, p)| {
+            // An inactive pool reports no figures: zeros would read as an
+            // empty disk in the history chart.
+            let active = p.active && p.path.is_dir();
+            let (capacity, allocation) = if active {
+                match pools.stats(key) {
+                    Some((c, a, _)) => (c, a),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            json!({
+                "uuid": key,
+                "name": key,
+                "capacity": capacity,
+                "allocation": allocation,
+            })
+        })
+        .collect()
 }
 
 fn domains(c: &Connect) -> Result<Vec<Value>, crate::libvirt::LvError> {

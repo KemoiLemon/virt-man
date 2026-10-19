@@ -146,7 +146,6 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
         (_, ["health"] | ["version"]) if get => need(node, "Sys.Audit"),
         (_, ["features"]) if get => need(node, "Sys.Audit"),
         (_, ["host", "stats"]) if get => need(node, "Sys.Audit"),
-        (_, ["host", "pools", ..]) => with(node, "Sys.Audit", Special::AdminOnly),
         // Every guest on the host in one answer. The web server's samplers
         // read these directly; through the proxy they are an admin's view.
         (_, ["metrics"] | ["flows"]) if get => with(node, "Sys.Audit", Special::AdminOnly),
@@ -275,15 +274,18 @@ pub fn classify(conn: &str, method: &str, rest: &str) -> Option<Need> {
             }
         }
 
-        // Storage: pools are defined by administrators only.
+        // Storage: pools are defined by administrators only. Creating, deleting
+        // or re-pointing one chooses a host directory, so it is a host-level
+        // change (Sys.Modify) rather than a storage grant: an owner of a
+        // `Datastore.*` grant must not be able to expose `/var/lib/...`.
         (_, ["pools"]) if get => with(format!("{node}/storage"), "Sys.Audit", Special::ListPools),
-        ("POST", ["pools"]) => need(format!("{node}/storage"), "Datastore.Allocate"),
+        ("POST", ["pools"]) => with(format!("{node}/storage"), "Sys.Modify", Special::AdminOnly),
         (_, ["pools", pool, rest @ ..]) => {
             let p = pool_path(conn, pool);
             let pool = pool.to_string();
             match (method, rest) {
                 (_, [] | ["xml"]) if get => need(p, "Datastore.Audit"),
-                ("DELETE", []) | ("PUT", ["xml"]) => need(p, "Datastore.Allocate"),
+                ("DELETE", []) | ("PUT", ["xml"]) => with(p, "Sys.Modify", Special::AdminOnly),
                 ("POST", ["start" | "stop" | "refresh"]) => need(p, "Datastore.Allocate"),
                 (_, ["volumes"]) if get => {
                     with(p, "Datastore.Audit", Special::ListVolumes { pool })
@@ -497,11 +499,27 @@ mod tests {
 
     #[test]
     fn pools_are_admin_defined_and_users_allocate_space() {
-        assert_eq!(priv_of("POST", "/pools").unwrap().1, "Datastore.Allocate");
-        assert_eq!(
-            priv_of("DELETE", "/pools/p").unwrap().1,
-            "Datastore.Allocate"
-        );
+        // Choosing a pool root is a host-level change, not a storage grant.
+        for (method, path) in [
+            ("POST", "/pools"),
+            ("PUT", "/pools/p/xml"),
+            ("DELETE", "/pools/p"),
+        ] {
+            let n = classify("c", method, path)
+                .unwrap_or_else(|| panic!("{method} {path} not classified"));
+            assert_eq!(n.privilege, "Sys.Modify", "{method} {path}");
+            assert_eq!(n.special, Special::AdminOnly, "{method} {path}");
+        }
+        // Starting one only recreates its already-chosen root.
+        for (method, path) in [
+            ("POST", "/pools/p/start"),
+            ("POST", "/pools/p/stop"),
+            ("POST", "/pools/p/refresh"),
+        ] {
+            let n = classify("c", method, path).unwrap();
+            assert_eq!(n.privilege, "Datastore.Allocate", "{method} {path}");
+            assert_ne!(n.special, Special::AdminOnly, "{method} {path}");
+        }
         assert_eq!(
             priv_of("POST", "/pools/p/volumes").unwrap().1,
             "Datastore.AllocateSpace"
@@ -554,12 +572,6 @@ mod tests {
             classify("c", "GET", "/filters").unwrap().special,
             Special::AdminOnly
         );
-        for path in ["/host/pools", "/host/pools/images"] {
-            let n = classify("c", "GET", path).unwrap();
-            assert_eq!(n.special, Special::AdminOnly);
-        }
-        assert!(classify("c", "POST", "/host/pools").is_some());
-        assert!(classify("c", "GET", "/host/pools/not-configured").is_some());
     }
 
     /// The daemon shell is a login shell on the host, so every one of its

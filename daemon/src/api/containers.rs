@@ -20,12 +20,12 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use virt::domain::Domain;
-use virt::storage_vol::StorageVol;
 
 use super::ApiError;
 use crate::ct;
 use crate::ipam::server::Ipam;
 use crate::libvirt::{DRIVER, Driver, domain_state_name, with_conn};
+use crate::pools::Pools;
 
 /// Run `f` against the LXC driver.
 pub async fn lxc<F: std::future::Future>(f: F) -> F::Output {
@@ -329,6 +329,7 @@ fn new_uuid() -> String {
 
 async fn create(
     Extension(ipam): Extension<Ipam>,
+    Extension(pools): Extension<Pools>,
     Json(req): Json<CreateReq>,
 ) -> Result<Json<Value>, ApiError> {
     let title = req.title.trim().to_string();
@@ -384,8 +385,7 @@ async fn create(
         Some(ct::allocate_ids(&uuid).map_err(ApiError::internal)?)
     };
 
-    // Resolve the template and make the rootfs volume, on the qemu driver
-    // (the storage driver is shared, and that is where pools are managed).
+    // Resolve the template and make the rootfs file, both in native pools.
     let (tpool, tvol, rpool, size) = (
         req.template.pool.clone(),
         req.template.volume.clone(),
@@ -393,23 +393,27 @@ async fn create(
         req.rootfs.size_gb << 30,
     );
     let vol_name = format!("ct-{uuid}.raw");
-    let vn = vol_name.clone();
-    let (template_path, image) = with_conn(move |c| {
-        let tp = crate::libvirt::pool(c, &tpool)?;
-        super::pools::refresh_for_read(&tp);
-        let t = StorageVol::lookup_by_name(&tp, &tvol)
-            .map_err(|_| format!("no template '{tvol}' in pool {tpool}"))?;
-        let rp = crate::libvirt::pool(c, &rpool)?;
-        let v = StorageVol::create_xml(&rp, &super::volumes::volume_xml(&vn, size), 0)?;
-        Ok((t.get_path()?, v.get_path()?))
-    })
-    .await
-    .map_err(|e| {
-        if !req.privileged {
-            ct::release_ids(&uuid);
+    let prepared: Result<(String, String), String> = (|| {
+        let template = pools
+            .volume_path(&tpool, &tvol)
+            .ok_or_else(|| format!("no template '{tvol}' in pool {tpool}"))?;
+        let image = pools
+            .create_raw(&rpool, &vol_name, size)
+            .map_err(|e| format!("rootfs in pool {rpool}: {e}"))?;
+        Ok((
+            template.to_string_lossy().into_owned(),
+            image.to_string_lossy().into_owned(),
+        ))
+    })();
+    let (template_path, image) = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            if !req.privileged {
+                ct::release_ids(&uuid);
+            }
+            return Err(ApiError::bad_request(e));
         }
-        ApiError::bad_request(e)
-    })?;
+    };
 
     let (u, img, keys) = (
         uuid.clone(),
@@ -469,11 +473,9 @@ async fn create(
             // Never leave a half-made rootfs behind to count against a quota.
             let (u, img) = (uuid.clone(), image);
             let _ = tokio::task::spawn_blocking(move || ct::unmount(&u)).await;
-            let _ = with_conn(move |c| {
-                StorageVol::lookup_by_path(c, &img)?.delete(0)?;
-                Ok(())
-            })
-            .await;
+            if let Some(p) = pools.owned_file(&img) {
+                let _ = std::fs::remove_file(p);
+            }
             ct::release_ids(&uuid);
             Err(ApiError::bad_request(e))
         }
@@ -488,7 +490,10 @@ async fn create(
 /// undefining a live domain would leave it orphaned. So this asks the
 /// container to shut down, waits (bounded), then forces it off before the
 /// definition and its rootfs go.
-async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn delete(
+    Extension(pools): Extension<Pools>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     let stopped = lxc(crate::libvirt::stop_guest(
         &name,
         std::time::Duration::from_secs(30),
@@ -509,13 +514,11 @@ async fn delete(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     ct::release_ids(&uuid);
     let (mut removed, mut failed) = (vec![], vec![]);
     if let Some(img) = image {
-        let i = img.clone();
-        match with_conn(move |c| {
-            StorageVol::lookup_by_path(c, &i)?.delete(0)?;
-            Ok(())
-        })
-        .await
-        {
+        let outcome = pools
+            .owned_file(&img)
+            .ok_or_else(|| "the rootfs is not a file in a storage pool".to_string())
+            .and_then(|p| std::fs::remove_file(p).map_err(|e| e.to_string()));
+        match outcome {
             Ok(()) => removed.push(img),
             Err(e) => failed.push(json!({"disk": img, "error": e})),
         }
@@ -601,10 +604,7 @@ fn mib_of(xml: &str, tag: &str) -> u64 {
     }
 }
 
-fn read_hardware(
-    d: &Domain,
-    c: &virt::connect::Connect,
-) -> Result<(Hardware, String), crate::libvirt::LvError> {
+fn read_hardware(d: &Domain) -> Result<(Hardware, String), crate::libvirt::LvError> {
     let xml = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?;
     let memory_mb = mib_of(&xml, "memory");
     let hard = mib_of(&xml, "swap_hard_limit");
@@ -623,9 +623,9 @@ fn read_hardware(
         .unwrap_or(100_000);
     let image =
         ct::rootfs_of(&xml).ok_or_else(|| "this container records no rootfs image".to_string())?;
-    let disk_gb = StorageVol::lookup_by_path(c, &image)
-        .and_then(|v| v.get_info())
-        .map(|i| i.capacity.div_ceil(1 << 30))
+    // A raw rootfs image: its length is the disk the container sees.
+    let disk_gb = std::fs::metadata(&image)
+        .map(|m| m.len().div_ceil(1 << 30))
         .unwrap_or(0);
     Ok((
         Hardware {
@@ -646,9 +646,7 @@ fn read_hardware(
 async fn get_hardware(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let hw = lxc(with_conn(move |c| {
         let d = crate::libvirt::domain(c, &name)?;
-        // The rootfs volume lives on the storage driver; this connection is
-        // the LXC one, which reaches it through libvirtd all the same.
-        Ok(read_hardware(&d, c)?.0)
+        Ok(read_hardware(&d)?.0)
     }))
     .await
     .map_err(ApiError::not_found)?;
@@ -736,13 +734,14 @@ fn check_hardware(hw: &Hardware) -> Result<(), String> {
 /// `pending` until the next start rather than claimed. A bigger root disk is
 /// grown now, running or not: the volume, its loop device, then ext4 online.
 async fn put_hardware(
+    Extension(pools): Extension<Pools>,
     Path(name): Path<String>,
     Json(hw): Json<Hardware>,
 ) -> Result<Json<Value>, ApiError> {
     check_hardware(&hw).map_err(ApiError::bad_request)?;
     let v = lxc(with_conn(move |c| {
         let d = crate::libvirt::domain(c, &name)?;
-        let (cur, image) = read_hardware(&d, c)?;
+        let (cur, image) = read_hardware(&d)?;
         if hw.disk_gb < cur.disk_gb {
             return Err(format!(
                 "the root disk can only grow ({} GB now); shrinking it could lose data",
@@ -803,8 +802,17 @@ async fn put_hardware(
         }
         let mut grown = false;
         if hw.disk_gb > cur.disk_gb {
-            let vol = StorageVol::lookup_by_path(c, &image)?;
-            vol.resize(hw.disk_gb << 30, 0)?;
+            // The rootfs is a raw file in a pool: grow the file, then the
+            // ext4 inside it. Never touch a path outside a pool.
+            let path = pools
+                .owned_file(&image)
+                .ok_or_else(|| "the rootfs is not a file in a storage pool".to_string())?;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            file.set_len(hw.disk_gb << 30)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
             ct::grow_fs(&image)?;
             grown = true;
         }

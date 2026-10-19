@@ -23,7 +23,7 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::Path;
+use axum::extract::{Extension, Path};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 
 use super::ApiError;
 use super::fetch::{self, Expect};
+use crate::pools::Pools;
 
 const LXC_BASE: &str = "https://images.linuxcontainers.org";
 const TURNKEY_INDEX: &str = "https://releases.turnkeylinux.org/pve/aplinfo.dat";
@@ -259,6 +260,7 @@ struct DownloadReq {
 }
 
 async fn download(
+    Extension(pools): Extension<Pools>,
     Path(pool): Path<String>,
     Json(req): Json<DownloadReq>,
 ) -> Result<Json<Value>, ApiError> {
@@ -286,7 +288,7 @@ async fn download(
         (None, None) => return Err(ApiError::internal("template has no checksum")),
     };
     let url = reqwest::Url::parse(&e.url).map_err(ApiError::internal)?;
-    let job = fetch::begin(pool, url, e.file, Some(expect)).await?;
+    let job = fetch::begin(pools, pool, url, e.file, Some(expect)).await?;
     Ok(Json(serde_json::to_value(job).unwrap_or_default()))
 }
 

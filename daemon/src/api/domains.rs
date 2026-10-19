@@ -5,12 +5,12 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use virt::domain::Domain;
-use virt::storage_vol::StorageVol;
 
 use super::ApiError;
 use crate::disks;
 use crate::ipam::server::Ipam;
 use crate::libvirt::{domain_state_name, parse_graphics, with_conn};
+use crate::pools::Pools;
 
 pub fn routes() -> Router {
     Router::new()
@@ -128,6 +128,7 @@ async fn create(
 }
 
 async fn delete(
+    Extension(pools): Extension<Pools>,
     Path(name): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -150,7 +151,11 @@ async fn delete(
         // other guest. Only the guest's own disks are candidates — an attached
         // ISO, a read-only disk, or anything another guest references is kept.
         let plan = if remove_storage {
-            disks::plan_cleanup_connected(c, &xml, &disks::sources_used_elsewhere(c, Some(&name)))
+            disks::plan_cleanup_connected(
+                &pools,
+                &xml,
+                &disks::sources_used_elsewhere(c, &pools, Some(&name)),
+            )
         } else {
             disks::Cleanup::default()
         };
@@ -162,20 +167,22 @@ async fn delete(
         let mut removed = Vec::new();
         let mut failed = Vec::new();
         for src in &plan.removable {
-            // Best effort: a disk may live outside any pool, or the pool may be
-            // inactive. The VM is already gone either way, so a failure is
-            // reported rather than fatal.
-            let outcome = match src {
-                disks::DiskSource::Path(path) => {
-                    StorageVol::lookup_by_path(c, path).and_then(|vol| vol.delete(0))
-                }
-                disks::DiskSource::Volume { pool, volume } => crate::libvirt::pool(c, pool)
-                    .and_then(|p| StorageVol::lookup_by_name(&p, volume))
-                    .and_then(|vol| vol.delete(0)),
+            // Best effort: only a file inside one of our pools is removed, so
+            // a definition naming a host path (an ISO elsewhere, /etc/shadow)
+            // can never make a guest delete reach it.
+            let outcome: Result<(), String> = match src {
+                disks::DiskSource::Path(path) => pools
+                    .owned_file(path)
+                    .ok_or_else(|| "not a file in a storage pool".to_string())
+                    .and_then(|p| std::fs::remove_file(p).map_err(|e| e.to_string())),
+                disks::DiskSource::Volume { pool, volume } => pools
+                    .volume_path(pool, volume)
+                    .ok_or_else(|| format!("no volume '{volume}' in pool '{pool}'"))
+                    .and_then(|p| std::fs::remove_file(p).map_err(|e| e.to_string())),
             };
             match outcome {
                 Ok(()) => removed.push(src.describe()),
-                Err(e) => failed.push(json!({"disk": src.describe(), "error": e.to_string()})),
+                Err(e) => failed.push(json!({"disk": src.describe(), "error": e})),
             }
         }
         Ok(json!({
@@ -650,7 +657,15 @@ mod tests {
         .expect("start probe");
 
         // Delete it while it is running. The handler must stop it first.
-        let res = match delete(Path("delproberun".into()), Query(HashMap::new())).await {
+        let scratch = std::env::temp_dir().join(format!("delprobe-pools-{}", std::process::id()));
+        let pools = crate::pools::Pools::load(scratch.join("pools.json")).expect("pools store");
+        let res = match delete(
+            Extension(pools),
+            Path("delproberun".into()),
+            Query(HashMap::new()),
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => {
                 // Clean up before failing so a broken run leaves nothing.

@@ -10,10 +10,10 @@ mod ipam;
 mod libvirt;
 mod migrate;
 mod netxml;
+mod pools;
 mod qemu;
 mod qemu_network;
 mod rfb;
-mod titles;
 mod tls;
 mod volume_titles;
 
@@ -70,6 +70,11 @@ async fn run() -> Result<(), String> {
     // at startup.
     ipam::server::startup(ipam.clone()).await?;
 
+    // Storage pools are the daemon's own: a directory plus metadata. Startup
+    // recreates the autostart roots that are missing.
+    let pools = pools::Pools::load(cfg.data_dir.join("pools.json"))?;
+    pools.startup();
+
     // TLS: configured cert/key or generated self-signed.
     let (cert, key) = cfg.tls_cert_key();
     if cfg.tls.cert.is_none() || cfg.tls.key.is_none() {
@@ -82,10 +87,11 @@ async fn run() -> Result<(), String> {
     // Networks: the supervisor keeps each stored network's bridge and dnsmasq
     // in step with the guests (startup already did the first pass).
     tokio::spawn(ipam::server::supervise(ipam.clone()));
-    // Rename guests and pools to their UUIDs, now and as they become free to
-    // rename (a guest once it is shut off). Off until the web server addresses
+    // Rename guests to their UUIDs, now and as they become free to rename
+    // (a guest once it is shut off). Off until the web server addresses
     // everything by UUID: renaming first would leave its name-keyed links,
-    // grants and ownership pointing at nothing.
+    // grants and ownership pointing at nothing. Pools need no migration: the
+    // daemon names them by UUID when they are created.
     // ponytail: gated by env var until the web side ships; remove the gate then.
     if std::env::var("VIRT_MAN_MIGRATE_UUIDS").is_ok_and(|v| v == "1") {
         tokio::spawn(migrate::run(ipam.clone()));
@@ -101,7 +107,7 @@ async fn run() -> Result<(), String> {
         let owners = ipam.clone();
         ipam::flows::listen(ipam.flows.clone(), move |ip| owners.owner(ip));
     }
-    let app = api::build(auth, ipam, qemu_manager);
+    let app = api::build(auth, ipam, pools, qemu_manager);
 
     // Unix socket listener.
     let sock_path = cfg.unix_socket_path();

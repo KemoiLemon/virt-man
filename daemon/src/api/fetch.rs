@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::extract::Path;
+use axum::extract::{Extension, Path};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
@@ -25,10 +25,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use virt::storage_vol::StorageVol;
 
 use super::ApiError;
-use crate::libvirt::with_conn;
+use crate::pools::Pools;
 
 /// A finished job stays listed this long, then is dropped (the activity log
 /// in the web UI is the durable record).
@@ -154,11 +153,12 @@ fn percent_decode(s: &str) -> String {
 }
 
 async fn start(
+    Extension(pools): Extension<Pools>,
     Path(pool): Path<String>,
     Json(req): Json<StartReq>,
 ) -> Result<Json<Value>, ApiError> {
     let (url, name, sha) = check(&req).map_err(ApiError::bad_request)?;
-    let job = begin(pool, url, name, sha.map(Expect::Sha256)).await?;
+    let job = begin(pools, pool, url, name, sha.map(Expect::Sha256)).await?;
     Ok(Json(serde_json::to_value(job).unwrap_or_default()))
 }
 
@@ -174,22 +174,25 @@ pub enum Expect {
 /// the template download, so a template is exactly as safe as an ISO: spooled,
 /// complete, verified, never overwriting.
 pub async fn begin(
+    pools: Pools,
     pool: String,
     url: reqwest::Url,
     name: String,
     expect: Option<Expect>,
 ) -> Result<Job, ApiError> {
     // Refuse up front what would fail at the end, after gigabytes: a missing
-    // pool, or a volume that already exists (never overwritten).
-    let (p, n) = (pool.clone(), name.clone());
-    let exists = with_conn(move |c| {
-        let pool = crate::libvirt::pool(c, &p)?;
-        super::pools::refresh_for_read(&pool);
-        Ok(StorageVol::lookup_by_name(&pool, &n).is_ok())
-    })
-    .await
-    .map_err(ApiError::bad_request)?;
-    if exists {
+    // or stopped pool, or a name that already exists (never overwritten).
+    let key = pools
+        .resolve_key(&pool)
+        .ok_or_else(|| ApiError::bad_request(format!("no pool '{pool}'")))?;
+    let p = pools.get(&key).expect("resolved pool is present");
+    if !p.active {
+        return Err(ApiError::conflict(format!("pool '{pool}' is not active")));
+    }
+    // The root itself is revalidated: a symlinked or replaced root is a
+    // conflict the administrator fixes by re-pointing the pool.
+    pools.root(&key).map_err(ApiError::conflict)?;
+    if pools.entry_exists(&key, &name) {
         return Err(ApiError::conflict(format!(
             "a volume named '{name}' already exists in {pool}"
         )));
@@ -227,7 +230,7 @@ pub async fn begin(
         .expect("fetch jobs poisoned")
         .insert(id.clone(), job.clone());
     tokio::spawn(async move {
-        let result = run(&id, url, expect).await;
+        let result = run(&pools, &id, url, expect).await;
         let mut map = jobs().lock().expect("fetch jobs poisoned");
         if let Some(j) = map.get_mut(&id) {
             j.finished_ms = now_ms();
@@ -277,12 +280,17 @@ fn update(id: &str, f: impl FnOnce(&mut Job)) -> bool {
 
 /// The whole job: download to a spool file, check it, write it into a new
 /// volume. Returns the SHA-256 of what was written.
-async fn run(id: &str, url: reqwest::Url, expect: Option<Expect>) -> Result<String, String> {
+async fn run(
+    pools: &Pools,
+    id: &str,
+    url: reqwest::Url,
+    expect: Option<Expect>,
+) -> Result<String, String> {
     let spool = super::volumes::spool_dir().join(format!("virtman-fetch-{id}.part"));
     let r = download(id, url, &spool).await;
     let out = match r {
         Ok((size, digest, digest512)) => {
-            finish(id, &spool, size, &digest, &digest512, expect).await
+            finish(pools, id, &spool, size, &digest, &digest512, expect).await
         }
         Err(e) => Err(e),
     };
@@ -360,6 +368,7 @@ fn complete(got: u64, total: Option<u64>) -> Result<(), String> {
 }
 
 async fn finish(
+    pools: &Pools,
     id: &str,
     spool: &std::path::Path,
     size: u64,
@@ -385,28 +394,27 @@ async fn finish(
         let j = map.get(id).ok_or("job vanished")?;
         (j.pool.clone(), j.name.clone())
     };
-    let path = spool.to_path_buf();
-    let written = with_conn(move |c| {
-        let p = crate::libvirt::pool(c, &pool)?;
-        let vol = StorageVol::create_xml(&p, &super::volumes::volume_xml(&name, size), 0)?;
-        match super::volumes::upload_from_file(c, &vol, &path, size) {
-            Ok(sha) => Ok(sha),
-            Err(e) => {
-                // Never leave a half-written volume that looks like the image.
-                let _ = vol.delete(0);
-                Err(e)
-            }
-        }
+    // The bytes are already complete; the write is a copy into a temp file in
+    // the pool root, hashed again against the download and renamed into place
+    // only when they agree. A mismatch leaves no volume behind.
+    let pools = pools.clone();
+    let spool = spool.to_path_buf();
+    let want = digest.to_string();
+    let (written, placed) = tokio::task::spawn_blocking(move || {
+        super::volumes::place_spooled(&pools, &pool, &name, &spool, false, Some(&want))
     })
-    .await?;
-    // The same bytes went in as came down; if the write path disagrees, the
-    // volume is not the file that was checked.
-    if written != digest {
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if placed != digest {
         return Err(format!(
-            "written volume hash {written} differs from the download {digest}"
+            "written volume hash {placed} differs from the download {digest}"
         ));
     }
-    Ok(written)
+    if written != size {
+        return Err(format!("wrote {written} bytes but downloaded {size}"));
+    }
+    Ok(placed)
 }
 
 async fn list() -> Json<Value> {
@@ -501,6 +509,74 @@ mod tests {
         assert_eq!(percent_decode("a%é.iso"), "a%é.iso");
         assert_eq!(percent_decode("%"), "%");
         assert_eq!(percent_decode("x%4"), "x%4");
+    }
+
+    fn pool_fixture(tag: &str) -> (Pools, std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-pools")
+            .join(format!("fetch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("images");
+        std::fs::create_dir_all(&root).unwrap();
+        let pools = Pools::load(dir.join("state/pools.json")).unwrap();
+        let key = "3d9f1e2a-7b6c-4d5e-9f8a-1b2c3d4e5f60";
+        {
+            let mut s = pools.lock();
+            s.pools.insert(
+                key.into(),
+                crate::pools::Pool {
+                    title: String::new(),
+                    path: root.clone(),
+                    autostart: true,
+                    active: true,
+                },
+            );
+            pools.save(&s).unwrap();
+        }
+        (pools, root, dir)
+    }
+
+    /// A fetch refuses before downloading: an existing volume (409) and a root
+    /// that became a symlink (409), both without opening a connection.
+    #[tokio::test]
+    async fn a_fetch_refuses_an_existing_volume_or_a_hijacked_root() {
+        use axum::http::StatusCode;
+        const KEY: &str = "3d9f1e2a-7b6c-4d5e-9f8a-1b2c3d4e5f60";
+        let (pools, root, dir) = pool_fixture("refuse");
+        let url = || reqwest::Url::parse("https://example.invalid/x.iso").unwrap();
+
+        std::fs::write(root.join("x.iso"), b"old").unwrap();
+        let e = begin(pools.clone(), KEY.into(), url(), "x.iso".into(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.message.contains("already exists"), "{}", e.message);
+
+        let e = begin(pools.clone(), KEY.into(), url(), "new.iso".into(), None).await;
+        // The URL is unreachable, but begin accepted it and spawned a download;
+        // refuse instead of starting one by making the pool inactive.
+        assert!(e.is_ok(), "a free name passes the up-front checks");
+
+        pools.lock().pools.get_mut(KEY).unwrap().active = false;
+        let e = begin(pools.clone(), KEY.into(), url(), "other.iso".into(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.message.contains("not active"), "{}", e.message);
+        pools.lock().pools.get_mut(KEY).unwrap().active = true;
+
+        // A root replaced by a symlink is refused with the re-point reason.
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::rename(&root, dir.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &root).unwrap();
+        let e = begin(pools, KEY.into(), url(), "third.iso".into(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.message.contains("re-point the pool"), "{}", e.message);
+        assert!(!elsewhere.join("third.iso").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

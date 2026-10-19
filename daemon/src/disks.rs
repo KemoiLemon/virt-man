@@ -16,7 +16,8 @@
 
 use std::collections::HashSet;
 use virt::connect::Connect;
-use virt::storage_vol::StorageVol;
+
+use crate::pools::Pools;
 
 /// A disk's backing store, from the domain XML.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,26 +48,26 @@ impl DiskSource {
     }
 }
 
-/// The absolute path behind a pool+volume reference, when libvirt can resolve
-/// it.
-fn volume_path(c: &Connect, pool: &str, volume: &str) -> Option<String> {
-    let p = crate::libvirt::pool(c, pool).ok()?;
-    let v = StorageVol::lookup_by_name(&p, volume).ok()?;
-    v.get_path().ok().filter(|s| !s.is_empty())
+/// The absolute path behind a pool+volume reference, when the pool store can
+/// resolve it.
+fn volume_path(pools: &Pools, pool: &str, volume: &str) -> Option<String> {
+    pools
+        .volume_path(pool, volume)
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Every label a reference answers to: its own, plus the file label of the
 /// same backing store when it is a volume.
 ///
-/// Both forms mean one file, and guests defined before paths were used still
-/// name their disks as pool+volume. Without this, deleting a volume would
-/// happily remove a running guest's disk because that guest spells it another
-/// way — the exact corruption the in-use check exists to prevent. Volume
-/// lookups cost a libvirt round trip, so this is only for the delete paths.
-fn labels(c: &Connect, source: &DiskSource) -> Vec<String> {
+/// Both forms mean one file, and a guest may name its disk either way. Without
+/// this, deleting a volume would happily remove a running guest's disk because
+/// that guest spells it another way — the exact corruption the in-use check
+/// exists to prevent. Volume lookups cost a pool store read, so this is only
+/// for the delete paths.
+fn labels(pools: &Pools, source: &DiskSource) -> Vec<String> {
     let mut out = vec![source.label()];
     if let DiskSource::Volume { pool, volume } = source
-        && let Some(path) = volume_path(c, pool, volume)
+        && let Some(path) = volume_path(pools, pool, volume)
     {
         out.push(DiskSource::Path(path).label());
     }
@@ -253,10 +254,14 @@ pub fn plan_cleanup(
     plan
 }
 
-/// [`plan_cleanup`] against a live connection, so a volume reference and the
+/// [`plan_cleanup`] against the pool store, so a volume reference and the
 /// file it points at are recognised as one backing store.
-pub fn plan_cleanup_connected(c: &Connect, xml: &str, used_elsewhere: &HashSet<String>) -> Cleanup {
-    plan_cleanup(xml, used_elsewhere, |s| labels(c, s))
+pub fn plan_cleanup_connected(
+    pools: &Pools,
+    xml: &str,
+    used_elsewhere: &HashSet<String>,
+) -> Cleanup {
+    plan_cleanup(xml, used_elsewhere, |s| labels(pools, s))
 }
 
 /// Every backing store referenced by a domain other than `excluding`.
@@ -264,7 +269,11 @@ pub fn plan_cleanup_connected(c: &Connect, xml: &str, used_elsewhere: &HashSet<S
 /// Both the running and the persistent definition are read: a guest that is
 /// currently running holds its disks even if the persistent definition was
 /// just removed.
-pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<String> {
+pub fn sources_used_elsewhere(
+    c: &Connect,
+    pools: &Pools,
+    excluding: Option<&str>,
+) -> HashSet<String> {
     let mut used = HashSet::new();
     // Cannot enumerate: nothing is reported in use. The caller's own ISO and
     // read-only guards still apply, and a failure must not block a delete.
@@ -276,7 +285,7 @@ pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<S
         }
         if let Ok(xml) = d.get_xml_desc(0) {
             for r in disk_refs(&xml) {
-                used.extend(labels(c, &r.source));
+                used.extend(labels(pools, &r.source));
             }
         }
     }
@@ -286,7 +295,10 @@ pub fn sources_used_elsewhere(c: &Connect, excluding: Option<&str>) -> HashSet<S
 /// Every disk label (volume reference and path) mapped to the guests that
 /// hold it, built from one pass over the domains. For a volume list: asking
 /// `referencing_domains` per volume walks every guest once per volume.
-pub fn holders_by_label(c: &Connect) -> std::collections::HashMap<String, Vec<String>> {
+pub fn holders_by_label(
+    c: &Connect,
+    pools: &Pools,
+) -> std::collections::HashMap<String, Vec<String>> {
     let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
     let domains = crate::libvirt::all_domains(c, 0);
     for d in domains {
@@ -294,7 +306,7 @@ pub fn holders_by_label(c: &Connect) -> std::collections::HashMap<String, Vec<St
             continue;
         };
         for r in disk_refs(&xml) {
-            for l in labels(c, &r.source) {
+            for l in labels(pools, &r.source) {
                 let v = out.entry(l).or_default();
                 if !v.contains(&name) {
                     v.push(name.clone());
@@ -330,20 +342,24 @@ pub fn holders_of(
     out
 }
 
+/// Whether any of these disk references is `target`'s backing store, however
+/// the guest spells it (path or pool+volume).
+pub fn references_target(pools: &Pools, refs: &[DiskRef], target: &DiskSource) -> bool {
+    let wanted = labels(pools, target);
+    refs.iter()
+        .any(|r| labels(pools, &r.source).iter().any(|l| wanted.contains(l)))
+}
+
 /// Names of domains that reference `target`, for refusing a direct volume
 /// delete with a clear reason.
-pub fn referencing_domains(c: &Connect, target: &DiskSource) -> Vec<String> {
-    let wanted = labels(c, target);
+pub fn referencing_domains(c: &Connect, pools: &Pools, target: &DiskSource) -> Vec<String> {
     let mut out = Vec::new();
     let domains = crate::libvirt::all_domains(c, 0);
     for d in domains {
         let Ok(xml) = d.get_xml_desc(0) else {
             continue;
         };
-        let held = disk_refs(&xml)
-            .iter()
-            .any(|r| labels(c, &r.source).iter().any(|l| wanted.contains(l)));
-        if held {
+        if references_target(pools, &disk_refs(&xml), target) {
             out.push(d.get_name().unwrap_or_default());
         }
     }
@@ -550,6 +566,52 @@ mod tests {
                 volume: "some-file.iso".into()
             }
         );
+    }
+
+    /// The volume-delete refusal compares backing stores, not spellings: a
+    /// guest naming the file by path must stop a delete addressed by
+    /// pool+volume. Pure, with a real temp pool root and no libvirt.
+    #[test]
+    fn a_volume_delete_sees_a_disk_the_guest_names_by_path() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-pools")
+            .join(format!("disks-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pools = crate::pools::Pools::load(dir.join("state/pools.json")).unwrap();
+        let root = dir.join("images");
+        std::fs::create_dir_all(&root).unwrap();
+        let key = "3d9f1e2a-7b6c-4d5e-9f8a-1b2c3d4e5f60";
+        {
+            let mut s = pools.lock();
+            s.pools.insert(
+                key.into(),
+                crate::pools::Pool {
+                    title: String::new(),
+                    path: root.clone(),
+                    autostart: true,
+                    active: true,
+                },
+            );
+            pools.save(&s).unwrap();
+        }
+        std::fs::write(root.join("disk.raw"), b"x").unwrap();
+        let target = DiskSource::Volume {
+            pool: key.into(),
+            volume: "disk.raw".into(),
+        };
+        let xml = format!(
+            "<domain><devices><disk type='file' device='disk'>\
+             <source file='{}/disk.raw'/></disk></devices></domain>",
+            root.display()
+        );
+        assert!(references_target(&pools, &disk_refs(&xml), &target));
+        assert!(!references_target(
+            &pools,
+            &disk_refs(&xml.replace("disk.raw", "other.raw")),
+            &target
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

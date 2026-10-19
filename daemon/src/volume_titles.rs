@@ -49,6 +49,28 @@ pub fn set(pool: &str, volume: &str, title: &str) -> Result<(), String> {
     save(path, titles)
 }
 
+/// Forget every title of a deleted pool: the keys name volumes that no longer
+/// belong to anything, and the file would otherwise keep them forever.
+pub fn clear_pool(pool: &str) -> Result<(), String> {
+    let mut s = store().lock().expect("volume titles lock");
+    let prefix = format!("{pool}/");
+    let before = s.1.len();
+    s.1.retain(|k, _| !k.starts_with(&prefix));
+    if s.1.len() == before {
+        return Ok(());
+    }
+    let (path, titles) = &*s;
+    save(path, titles)
+}
+
+/// Point the store at a test file, returning the previous one so the test can
+/// put it back. Only tests call this; production always uses `TITLES_PATH`.
+#[cfg(test)]
+fn replace_store(path: PathBuf, titles: Titles) -> (PathBuf, Titles) {
+    let mut s = store().lock().expect("volume titles lock");
+    std::mem::replace(&mut *s, (path, titles))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +89,43 @@ mod tests {
         );
         assert_ne!(key("p1", "disk"), key("p2", "disk"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The real `clear_pool`, against a temp store: it forgets exactly the
+    /// deleted pool's volumes and leaves every other key alone.
+    #[test]
+    fn clear_pool_forgets_only_the_deleted_pools_volumes() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-pools")
+            .join(format!("volume-titles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("titles.json");
+        let mut titles = Titles::new();
+        titles.insert(key("p1", "disk"), "Root disk".into());
+        titles.insert(key("p1", "iso"), "Media".into());
+        titles.insert(key("p2", "disk"), "Other pool".into());
+        titles.insert(key("p10", "disk"), "Not p1".into());
+        save(&path, &titles).unwrap();
+
+        let previous = replace_store(path.clone(), titles.clone());
+        let outcome = clear_pool("p1");
+        let left: Titles = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        replace_store(previous.0, previous.1);
+
+        outcome.unwrap();
+        assert!(!left.contains_key(&key("p1", "disk")));
+        assert!(!left.contains_key(&key("p1", "iso")));
+        assert_eq!(
+            left.get(&key("p2", "disk")).map(String::as_str),
+            Some("Other pool"),
+            "another pool's title is kept"
+        );
+        assert_eq!(
+            left.get(&key("p10", "disk")).map(String::as_str),
+            Some("Not p1"),
+            "a prefix match is keyed by pool, not by string prefix"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

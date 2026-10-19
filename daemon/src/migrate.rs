@@ -1,5 +1,5 @@
-//! Rename existing guests and pools so their libvirt name is their UUID,
-//! keeping the old name as their display name.
+//! Rename existing guests so their libvirt name is their UUID, keeping the old
+//! name as their display name.
 //!
 //! Runs by itself: at startup and then on a timer, so updating the daemon on
 //! any server migrates that server with no manual step. Each pass is a no-op
@@ -11,13 +11,11 @@
 //! - A **guest** is renamed only while shut off (libvirt's rule, and the only
 //!   safe moment); a running one is retried on a later pass. Its UEFI variable
 //!   store is renamed with it, or it would boot with fresh variables.
-//! - A **pool** is renamed only when no guest references it by pool name
-//!   (`<source pool=...>`); guests given disks by path, as the app does, are
-//!   unaffected by a pool's name.
 //! - Firewall rules for guests follow their new name.
 //!
-//! Networks are not migrated: the daemon owns them now and stores them by
-//! their UUID already, so there is no libvirt network to rename.
+//! Storage pools are not migrated: the daemon owns them now, names them by
+//! their UUID when they are created, and keeps their metadata in `pools.json`.
+//! Networks are not migrated either: they are already keyed by UUID.
 //!
 //! Every step is re-checked against libvirt, not a cached view, and any
 //! failure leaves the resource under its old name for the next pass.
@@ -46,22 +44,6 @@ pub fn plan_domain(name: &str, uuid: &str, shut_off: bool) -> Plan {
     }
 }
 
-/// A pool: rename only when no guest names it (a `<source pool=...>` disk
-/// reference). Such references are rare -- the app gives disks by path -- and
-/// rewriting them is not worth the risk of a guest that will not boot.
-pub fn plan_pool(name: &str, uuid: &str, referenced_by: &[String]) -> Plan {
-    if name == uuid {
-        Plan::Done
-    } else if referenced_by.is_empty() {
-        Plan::Rename
-    } else {
-        Plan::Wait(format!(
-            "referenced by name from guest(s) {}; left under its name",
-            referenced_by.join(", ")
-        ))
-    }
-}
-
 /// Swap a definition's `<name>` for `new`, and give it `<title>old</title>`
 /// if it has no title yet. None if the XML has no `<name>`.
 ///
@@ -79,13 +61,6 @@ pub fn renamed_xml(xml: &str, old: &str, new: &str) -> Option<String> {
     }
     out.push_str(&xml[end..]);
     Some(out)
-}
-
-/// Whether a guest's XML references a pool by name.
-pub fn uses_pool(xml: &str, pool: &str) -> bool {
-    ['\'', '"']
-        .iter()
-        .any(|q| xml.contains(&format!("pool={q}{}{q}", escape_attr(pool))))
 }
 
 /// The guest's UEFI variable store, if it has one: the path in `<nvram>`.
@@ -125,9 +100,6 @@ fn escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
-fn escape_attr(s: &str) -> String {
-    escape(s).replace('\'', "&apos;").replace('"', "&quot;")
-}
 
 /// Move a name-keyed record to its new key, in any map keyed by name. True if
 /// something moved. A record already under the new key is not overwritten.
@@ -158,15 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_named_by_a_guest_is_left_alone() {
-        assert_eq!(plan_pool("default", U, &[]), Plan::Rename);
-        assert!(matches!(
-            plan_pool("default", U, &["alpine".into()]),
-            Plan::Wait(_)
-        ));
-    }
-
-    #[test]
     fn the_old_name_becomes_the_title_unless_one_is_set() {
         let x = "<domain type='kvm'>\n  <name>Debian-13</name>\n  <uuid>u</uuid>\n</domain>";
         let got = renamed_xml(x, "Debian-13", U).unwrap();
@@ -184,17 +147,6 @@ mod tests {
         let got = renamed_xml("<domain><name>a&amp;b</name></domain>", "a&b", U).unwrap();
         assert!(got.contains("<title>a&amp;b</title>"), "{got}");
         assert!(renamed_xml("<domain/>", "x", U).is_none());
-    }
-
-    #[test]
-    fn pool_references_are_found_by_exact_name() {
-        let x = "<source pool='default' volume='a.qcow2'/>";
-        assert!(uses_pool(x, "default"));
-        assert!(!uses_pool(x, "def"));
-        assert!(!uses_pool(
-            "<source file='/var/lib/libvirt/images/default.qcow2'/>",
-            "default"
-        ));
     }
 
     #[test]
@@ -230,7 +182,6 @@ mod tests {
 use crate::libvirt::with_conn;
 use virt::connect::Connect;
 use virt::domain::Domain;
-use virt::storage_pool::StoragePool;
 
 /// Seconds between passes. A guest that was running is renamed within this
 /// long of being shut off.
@@ -249,7 +200,6 @@ fn everything(_: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Renamed {
     Domain { old: String, new: String },
-    Pool { old: String, new: String },
 }
 
 /// Limit the pass to names starting with `VIRT_MAN_MIGRATE_ONLY`, when set.
@@ -299,21 +249,6 @@ pub async fn pass(_ipam: &crate::ipam::server::Ipam, only: Filter) -> Result<Vec
 fn rename_all(c: &Connect, only: Filter) -> Vec<Renamed> {
     let mut done = vec![];
     let domains = c.list_all_domains(0).unwrap_or_default();
-    // Guest definitions, read once: the pool plan looks at them.
-    let guest_xml = |c: &Connect| -> Vec<(String, bool, String)> {
-        c.list_all_domains(0)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|d| {
-                let name = d.get_name().ok()?;
-                let off = !d.is_active().unwrap_or(true);
-                let xml = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE).ok()?;
-                Some((name, off, xml))
-            })
-            .collect()
-    };
-
-    // Guests first: a guest renamed while shut off does not hold a pool's users.
     for d in &domains {
         let (Ok(name), Ok(uuid)) = (d.get_name(), d.get_uuid_string()) else {
             continue;
@@ -331,31 +266,6 @@ fn rename_all(c: &Connect, only: Filter) -> Vec<Renamed> {
                     new: uuid,
                 }),
                 Err(e) => tracing::warn!("migrate: guest {name}: {e}"),
-            },
-        }
-    }
-
-    for p in c.list_all_storage_pools(0).unwrap_or_default() {
-        let (Ok(name), Ok(uuid)) = (p.get_name(), p.get_uuid_string()) else {
-            continue;
-        };
-        if !only(&name) {
-            continue;
-        }
-        let refs: Vec<String> = guest_xml(c)
-            .into_iter()
-            .filter(|(_, _, x)| uses_pool(x, &name))
-            .map(|(g, _, _)| g)
-            .collect();
-        match plan_pool(&name, &uuid, &refs) {
-            Plan::Done => {}
-            Plan::Wait(why) => tracing::info!("migrate: pool {name}: {why}"),
-            Plan::Rename => match rename_pool(c, &p, &name, &uuid) {
-                Ok(()) => done.push(Renamed::Pool {
-                    old: name,
-                    new: uuid,
-                }),
-                Err(e) => tracing::warn!("migrate: pool {name}: {e}"),
             },
         }
     }
@@ -404,62 +314,14 @@ fn rename_domain(c: &Connect, d: &Domain, old: &str, uuid: &str) -> Result<(), S
     Ok(())
 }
 
-/// A pool no guest names: redefine it under its UUID, keeping it running.
-/// Its display name goes to `titles`, since a pool has no `<title>`.
-fn rename_pool(c: &Connect, p: &StoragePool, old: &str, uuid: &str) -> Result<(), String> {
-    let xml = p
-        .get_xml_desc(virt::sys::VIR_STORAGE_XML_INACTIVE)
-        .map_err(|e| e.to_string())?;
-    let start = xml.find("<name>").ok_or("no <name> in the definition")?;
-    let end = start + xml[start..].find("</name>").ok_or("no </name>")? + "</name>".len();
-    let next = format!(
-        "{}<name>{}</name>{}",
-        &xml[..start],
-        escape(uuid),
-        &xml[end..]
-    );
-    let was_active = p.is_active().unwrap_or(false);
-    let autostart = p.get_autostart().unwrap_or(false);
-    if crate::titles::get(uuid).is_none() {
-        crate::titles::set(uuid, old)?;
-    }
-    if was_active {
-        p.destroy().map_err(|e| format!("stop: {e}"))?;
-    }
-    p.undefine().map_err(|e| {
-        if was_active {
-            let _ = p.create(0);
-        }
-        format!("undefine: {e}")
-    })?;
-    let restore = |why: String| -> String {
-        if let Ok(back) = StoragePool::define_xml(c, &xml, 0) {
-            let _ = back.set_autostart(autostart);
-            if was_active {
-                let _ = back.create(0);
-            }
-        }
-        why
-    };
-    let new = StoragePool::define_xml(c, &next, 0).map_err(|e| restore(format!("define: {e}")))?;
-    let _ = new.set_autostart(autostart);
-    if was_active {
-        new.create(0)
-            .map_err(|e| format!("renamed, but starting it failed: {e}"))?;
-    }
-    Ok(())
-}
-
 /// Move the daemon's name-keyed records to the new names: firewall rules for
 /// guests. Network definitions are the daemon's own and already keyed by UUID.
 fn follow_records(done: &[Renamed]) -> Result<(), String> {
     let path = std::path::Path::new(crate::firewall::FIREWALL_PATH);
     let mut fw = crate::firewall::load(path)?;
     let mut changed = false;
-    for r in done {
-        if let Renamed::Domain { old, new } = r {
-            changed |= rekey(&mut fw.vms, old, new);
-        }
+    for Renamed::Domain { old, new } in done {
+        changed |= rekey(&mut fw.vms, old, new);
     }
     if changed {
         crate::firewall::save(path, &fw)?;
@@ -481,30 +343,23 @@ mod live {
 
     #[tokio::test]
     #[ignore = "needs root and a reachable qemu:///system"]
-    async fn migrates_a_guest_and_a_pool() {
+    async fn migrates_a_guest() {
         const NV: &str = "/var/lib/libvirt/qemu/nvram/migprobe-vm_VARS.fd";
-        let dir = "/tmp/migprobe-pool";
-        std::fs::create_dir_all(dir).unwrap();
-        let (vm_u, pool_u) = with_conn(move |c| {
-            let pool = StoragePool::define_xml(
-                c,
-                &format!("<pool type='dir'><name>migprobe-pool</name><target><path>{dir}</path></target></pool>"),
-                0,
-            )?;
+        let vm_u = with_conn(move |c| {
             let vm = Domain::define_xml(
                 c,
                 &format!(
-                    "<domain type='kvm'><name>migprobe-vm</name><memory unit='KiB'>131072</memory><vcpu>1</vcpu>\\
-                     <os><type arch='x86_64' machine='q35'>hvm</type>\\
-                     <loader readonly='yes' type='pflash' format='raw'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>\\
-                     <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd' format='raw'>{NV}</nvram></os>\\
+                    "<domain type='kvm'><name>migprobe-vm</name><memory unit='KiB'>131072</memory><vcpu>1</vcpu>\
+                     <os><type arch='x86_64' machine='q35'>hvm</type>\
+                     <loader readonly='yes' type='pflash' format='raw'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>\
+                     <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd' format='raw'>{NV}</nvram></os>\
                      <features><acpi/></features><devices></devices></domain>"
                 ),
             )?;
-            Ok((vm.get_uuid_string()?, pool.get_uuid_string()?))
+            Ok(vm.get_uuid_string()?)
         })
         .await
-        .expect("define probes");
+        .expect("define probe");
         std::fs::write(NV, b"probe-vars").unwrap();
 
         // A scratch IPAM, so the pass never touches the host's own networks.
@@ -515,47 +370,39 @@ mod live {
         let first = pass(&ipam, only_probes).await;
         let second = pass(&ipam, only_probes).await;
 
-        let (v2, p2) = (vm_u.clone(), pool_u.clone());
+        let v2 = vm_u.clone();
         let after = with_conn(move |c| {
             let vm = crate::libvirt::domain(c, &v2)?;
-            let pool = crate::libvirt::pool(c, &p2)?;
             Ok((
                 vm.get_name()?,
                 vm.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)?,
-                pool.get_name()?,
             ))
         })
         .await;
         let new_nv = format!("/var/lib/libvirt/qemu/nvram/{vm_u}_VARS.fd");
         let vars = std::fs::read(&new_nv).ok();
         let old_nv_left = std::path::Path::new(NV).exists();
-        let pool_title = crate::titles::get(&pool_u);
 
         // Clean up whatever state it ended in, before asserting.
-        let (v3, p3) = (vm_u.clone(), pool_u.clone());
+        let v3 = vm_u.clone();
         let _ = with_conn(move |c| {
             if let Ok(d) = crate::libvirt::domain(c, &v3) {
                 let _ = d.undefine_flags(virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM);
             }
-            if let Ok(p) = crate::libvirt::pool(c, &p3) {
-                let _ = p.undefine();
-            }
             Ok(())
         })
         .await;
-        let _ = crate::titles::set(&pool_u, "");
         let _ = std::fs::remove_file(NV);
         let _ = std::fs::remove_file(&new_nv);
-        let _ = std::fs::remove_dir(dir);
         let _ = std::fs::remove_file(&scratch);
 
         let first = first.expect("first pass");
-        assert_eq!(first.len(), 2, "guest and pool renamed: {first:?}");
+        assert_eq!(first.len(), 1, "guest renamed: {first:?}");
         assert!(
             second.expect("second pass").is_empty(),
             "a second pass is a no-op"
         );
-        let (vm_name, vm_xml, pool_name) = after.expect("found by UUID");
+        let (vm_name, vm_xml) = after.expect("found by UUID");
         assert_eq!(vm_name, vm_u, "guest named by its UUID");
         assert!(
             vm_xml.contains("<title>migprobe-vm</title>"),
@@ -571,11 +418,5 @@ mod live {
             "and its contents kept"
         );
         assert!(!old_nv_left, "the old store file is gone");
-        assert_eq!(pool_name, pool_u);
-        assert_eq!(
-            pool_title.as_deref(),
-            Some("migprobe-pool"),
-            "pool title kept"
-        );
     }
 }

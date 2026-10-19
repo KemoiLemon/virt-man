@@ -93,7 +93,6 @@ macro_rules! by_id {
     };
 }
 by_id!(domain, virt::domain::Domain);
-by_id!(pool, virt::storage_pool::StoragePool);
 
 /// The `<title>` of a definition, if it has one (and it is not empty).
 /// Guests and networks keep their display name there; libvirt's own name is

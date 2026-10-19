@@ -8,7 +8,6 @@ pub mod filters;
 pub mod firewall;
 pub mod health;
 pub mod host;
-pub mod host_pools;
 pub mod metrics;
 pub mod networks;
 pub mod nics;
@@ -89,7 +88,8 @@ fn named_segment(path: &str) -> Option<(usize, Named)> {
 
 /// The libvirt name a UUID segment means. Containers are domains on the LXC
 /// driver: that connection must be opened, since this runs before any handler
-/// picks a driver.
+/// picks a driver. A pool is not libvirt's any more: its stored key is found
+/// directly.
 fn libvirt_name(c: &virt::connect::Connect, kind: Named, id: &str) -> Option<String> {
     match kind {
         Named::Domain => crate::libvirt::domain(c, id).ok()?.get_name().ok(),
@@ -101,7 +101,7 @@ fn libvirt_name(c: &virt::connect::Connect, kind: Named, id: &str) -> Option<Str
             let _ = lxc.close();
             n
         }
-        Named::Pool => crate::libvirt::pool(c, id).ok()?.get_name().ok(),
+        Named::Pool => None,
     }
 }
 
@@ -109,11 +109,12 @@ fn libvirt_name(c: &virt::connect::Connect, kind: Named, id: &str) -> Option<Str
 ///
 /// A handler knows its guest or pool by name: firewall rules, titles and the
 /// web server's records are keyed on it, and some handlers must compare it.
-/// So the one UUID segment is swapped for the libvirt name before the handler
+/// So the one UUID segment is swapped for the stored name before the handler
 /// runs. A UUID that matches nothing is passed through unchanged, so the
 /// handler answers "not found" exactly as it would for a wrong name. Only the
 /// canonical UUID shape is looked up; anything else is a name already.
 async fn resolve_uuids(
+    pools: crate::pools::Pools,
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -126,10 +127,13 @@ async fn resolve_uuids(
             .collect();
         let id = seg[i].clone();
         let name = if crate::libvirt::is_uuid(&id) {
-            crate::libvirt::with_conn(move |c| Ok(libvirt_name(c, kind, &id)))
-                .await
-                .ok()
-                .flatten()
+            match kind {
+                Named::Pool => pools.resolve_key(&id),
+                _ => crate::libvirt::with_conn(move |c| Ok(libvirt_name(c, kind, &id)))
+                    .await
+                    .ok()
+                    .flatten(),
+            }
         } else {
             None
         };
@@ -163,6 +167,7 @@ fn encode(s: &str) -> String {
 pub fn build(
     auth: Auth,
     ipam: crate::ipam::server::Ipam,
+    pools: crate::pools::Pools,
     qemu_manager: crate::qemu::Manager,
 ) -> Router {
     let fw = firewall::FirewallState::new(ipam.clone());
@@ -176,14 +181,16 @@ pub fn build(
         .merge(firewall::routes(fw.clone()))
         .merge(nics::routes(fw.clone()));
     // Containers reach these handlers through `containers::forward`, which
-    // oneshots this router directly rather than the outer one, so the store it
-    // needs must be on this router too.
-    let for_ct = guest.clone().layer(Extension(ipam.clone()));
+    // oneshots this router directly rather than the outer one, so the stores
+    // they need must be on this router too.
+    let for_ct = guest
+        .clone()
+        .layer(Extension(ipam.clone()))
+        .layer(Extension(pools.clone()));
     let authed = Router::new()
         .merge(health::routes())
         .route("/features", axum::routing::get(feature_status))
         .merge(host::routes())
-        .merge(host_pools::routes())
         .merge(metrics::routes())
         .merge(guest)
         .merge(containers::routes())
@@ -210,11 +217,16 @@ pub fn build(
         .merge(authed)
         .merge(console::routes())
         // Outermost, so the rewrite happens before routing picks a handler.
-        .layer(middleware::from_fn(resolve_uuids))
+        .layer(middleware::from_fn({
+            let pools = pools.clone();
+            move |req, next| resolve_uuids(pools.clone(), req, next)
+        }))
         .layer(Extension(auth))
         // The networks store: a guest's NIC names a bridge, and only the store
         // knows which network that is. Handlers take it as an extractor.
         .layer(Extension(ipam))
+        // Storage pools and their volumes are the daemon's own.
+        .layer(Extension(pools))
 }
 
 /// Report the runtime boundary explicitly: container endpoints currently use
