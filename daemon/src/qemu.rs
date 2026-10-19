@@ -11,9 +11,13 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
+
+use crate::hostnet::SYS_NET;
+pub use crate::hostnet::is_bridge;
+pub use crate::qemu_network::HostForward;
 
 #[derive(Clone, Debug)]
 pub struct Manager {
@@ -23,19 +27,143 @@ pub struct Manager {
     lock: std::sync::Arc<Mutex<()>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum Network {
+    /// QEMU's own user-mode NAT: no host interface, no address from the store.
+    User {
+        #[serde(default)]
+        hostfwd: Vec<HostForward>,
+    },
+    /// A host tap plugged into a stored network's bridge.
+    Bridge {
+        /// The stored network key the NIC is on, for the address reservation.
+        network: String,
+        bridge: String,
+        mac: String,
+    },
+}
+
+/// The first release wrote user-mode networking as a bare block
+/// (`{"hostfwd":[...]}`), before a NIC could be on a bridge. That shape must
+/// still load, or a daemon upgrade would refuse the file it finds.
+impl<'de> Deserialize<'de> for Network {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "mode", rename_all = "snake_case")]
+        enum Tagged {
+            User {
+                #[serde(default)]
+                hostfwd: Vec<HostForward>,
+            },
+            Bridge {
+                network: String,
+                bridge: String,
+                mac: String,
+            },
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyUser {
+            #[serde(default)]
+            hostfwd: Vec<HostForward>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Tagged(Tagged),
+            // `deny_unknown_fields` keeps a malformed tagged value from
+            // silently becoming user-mode NAT.
+            LegacyUser(LegacyUser),
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Tagged(Tagged::User { hostfwd }) | Repr::LegacyUser(LegacyUser { hostfwd }) => {
+                Network::User { hostfwd }
+            }
+            Repr::Tagged(Tagged::Bridge {
+                network,
+                bridge,
+                mac,
+            }) => Network::Bridge {
+                network,
+                bridge,
+                mac,
+            },
+        })
+    }
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self::User { hostfwd: vec![] }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Nic {
+    /// QEMU device id; the primary NIC is "net0", extras are user-supplied.
+    pub id: String,
+    pub network: Network,
+}
+
+/// The first release stored an extra NIC as a bare device id. Both that shape
+/// and the object form must load.
+impl<'de> Deserialize<'de> for Nic {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Id(String),
+            Full {
+                id: String,
+                #[serde(default)]
+                network: Network,
+            },
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Id(id) => Nic {
+                id,
+                network: Network::default(),
+            },
+            Repr::Full { id, network } => Nic { id, network },
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VmConfig {
     pub id: String,
+    /// What the user calls it: the IPAM name (DNS/DHCP) and what `list` shows.
+    #[serde(default)]
+    pub title: String,
     pub disk: PathBuf,
     pub memory_mib: u32,
     pub vcpus: u16,
     #[serde(default)]
-    pub network: crate::qemu_network::UserNetwork,
+    pub network: Network,
     /// Explicit inbound host-forward allowlist; empty means deny all inbound.
     #[serde(default)]
     pub firewall: crate::qemu_network::InboundPolicy,
     #[serde(default)]
-    pub extra_nics: Vec<String>,
+    pub extra_nics: Vec<Nic>,
+}
+
+impl VmConfig {
+    /// The primary NIC, then every extra one, as (id, network). One path for
+    /// the launch argv, the host taps and the address reservations.
+    pub fn nics(&self) -> impl Iterator<Item = (&str, &Network)> {
+        std::iter::once(("net0", &self.network))
+            .chain(self.extra_nics.iter().map(|n| (n.id.as_str(), &n.network)))
+    }
+
+    /// The name the store and DNS use: the title, else the id.
+    pub fn name(&self) -> &str {
+        if self.title.is_empty() {
+            &self.id
+        } else {
+            &self.title
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,16 +209,45 @@ impl Manager {
         let mut all = self.read()?;
         let mut changed = false;
         for rec in all.values_mut() {
-            if !self.identity(rec) {
-                rec.pid = None;
-                rec.start_ticks = None;
-                changed = true;
-            }
+            changed |= self.clear_dead(rec);
         }
         if changed {
             self.save(&all)?;
         }
         Ok(())
+    }
+    /// Delete the taps of every record whose process is gone. A guest that
+    /// powered itself off or was killed outside the manager never went through
+    /// `powerdown`, so this is the sweep the supervisor runs every pass.
+    /// A live process's tap is never touched.
+    pub fn sweep_dead_taps(&self) -> Result<(), String> {
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let mut changed = false;
+        for rec in all.values_mut() {
+            changed |= self.clear_dead(rec);
+        }
+        if changed {
+            self.save(&all)?;
+        }
+        Ok(())
+    }
+    /// Forget a dead record's process identity and remove its NIC taps. The
+    /// process identity is pid + start ticks + executable, so a reused pid is
+    /// not mistaken for the guest. Returns whether there was an identity to
+    /// forget: the sweep runs every pass and must not rewrite the file when
+    /// nothing changed.
+    fn clear_dead(&self, rec: &mut Record) -> bool {
+        if self.identity(rec) {
+            return false;
+        }
+        let had_identity = rec.pid.is_some() || rec.start_ticks.is_some();
+        // Taps are removed even when the identity was cleared by an earlier
+        // pass: a guest that powered itself off can leave one at any time.
+        delete_nic_taps(&rec.config);
+        rec.pid = None;
+        rec.start_ticks = None;
+        had_identity
     }
     fn records(&self) -> PathBuf {
         self.data_dir.join("qemu-vms.json")
@@ -181,22 +338,64 @@ impl Manager {
         );
         self.save(&all)
     }
-    pub fn set_network(
-        &self,
-        id: &str,
-        network: crate::qemu_network::UserNetwork,
-    ) -> Result<(), String> {
-        network.validate()?;
+    pub fn set_network(&self, id: &str, network: Network) -> Result<(), String> {
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let rec = all.get(id).ok_or("unknown QEMU VM")?;
+        if self.identity(rec) {
+            return Err("VM must be stopped to change networking".into());
+        }
+        // hostfwd is policy, never an independent networking knob.
+        let hostfwd = rec.config.firewall.hostfwd.clone();
+        let old = rec.config.network.clone();
+        let network = match network {
+            Network::User { .. } => Network::User { hostfwd },
+            Network::Bridge {
+                network,
+                bridge,
+                mac,
+            } => {
+                if network.is_empty() {
+                    return Err("a bridge NIC must name its network".into());
+                }
+                // The bridge need not exist yet: a NIC may be configured before
+                // its network is started. `start` verifies it via `ensure_tap`.
+                Network::Bridge {
+                    network,
+                    bridge,
+                    mac: mac_for(&all, id, "net0", &mac)?,
+                }
+            }
+        };
+        // The primary tap's name is derived from the VM and interface, so a
+        // switch to another network (or to user mode) must drop the old one or
+        // the next start would find it on the wrong bridge.
+        if matches!(old, Network::Bridge { .. }) {
+            delete_nic_tap(id, "net0");
+        }
+        all.get_mut(id).unwrap().config.network = network;
+        self.save(&all)
+    }
+
+    /// Point one stored bridge NIC at the bridge its network has now. Called
+    /// before a start, because a network's mode edit or re-create changes the
+    /// derived bridge and a cached one would attach the tap to the old network.
+    /// Stopped only: a live guest's tap is still on the old bridge.
+    pub fn rebind_bridge(&self, id: &str, nic_id: &str, bridge: &str) -> Result<(), String> {
+        if !crate::hostnet::valid_name(bridge) {
+            return Err("invalid bridge name".into());
+        }
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         let mut all = self.read()?;
         let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
         if self.identity(rec) {
             return Err("VM must be stopped to change networking".into());
         }
-        // hostfwd is policy, never an independent networking knob.
-        rec.config.network.hostfwd = rec.config.firewall.hostfwd.clone();
-        rec.config.network = network;
-        rec.config.network.hostfwd = rec.config.firewall.hostfwd.clone();
+        match nic_network_mut(&mut rec.config, nic_id) {
+            Some(Network::Bridge { bridge: b, .. }) => *b = bridge.to_string(),
+            Some(Network::User { .. }) => return Err("NIC is not on a bridge network".into()),
+            None => return Err("unknown QEMU NIC".into()),
+        }
         self.save(&all)
     }
 
@@ -213,41 +412,97 @@ impl Manager {
             return Err("VM must be stopped to change firewall policy".into());
         }
         rec.config.firewall = firewall.clone();
-        rec.config.network.hostfwd = firewall.hostfwd;
+        // hostfwd only exists on a user-mode NIC; a bridge NIC keeps none.
+        if let Network::User { hostfwd } = &mut rec.config.network {
+            *hostfwd = firewall.hostfwd;
+        }
         self.save(&all)
     }
-    pub fn add_nic(&self, id: &str, device_id: &str) -> Result<(), String> {
-        validate_device_id(device_id)?;
+    pub fn add_nic(&self, id: &str, device_id: &str, network: Network) -> Result<(), String> {
+        validate_new_nic_id(device_id)?;
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         let mut all = self.read()?;
-        let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
-        if rec.config.extra_nics.iter().any(|x| x == device_id) {
-            return Err("device identifier already exists".into());
+        {
+            let rec = all.get(id).ok_or("unknown QEMU VM")?;
+            if rec.config.extra_nics.iter().any(|n| n.id == device_id) {
+                return Err("device identifier already exists".into());
+            }
         }
-        let net_id = format!("net-{device_id}");
-        if self.identity(rec) {
+        let network = match network {
+            // hostfwd belongs to the primary NIC's firewall policy only, so an
+            // extra user-mode NIC never carries one.
+            Network::User { .. } => Network::User { hostfwd: vec![] },
+            Network::Bridge {
+                network,
+                bridge,
+                mac,
+            } => {
+                if network.is_empty() {
+                    return Err("a bridge NIC must name its network".into());
+                }
+                // The bridge need not exist yet; `start`/this call's live path
+                // verifies it via `ensure_tap`.
+                Network::Bridge {
+                    network,
+                    bridge,
+                    mac: mac_for(&all, id, device_id, &mac)?,
+                }
+            }
+        };
+        let live = self.identity(all.get(id).ok_or("unknown QEMU VM")?);
+        let net_id = netdev_id(device_id);
+        let mut tap = None;
+        if live {
             let sock = self.vm_dir(id).join("qmp.sock");
-            qmp_execute(
-                &sock,
-                "netdev_add",
-                serde_json::json!({"type":"user", "id":net_id}),
-            )?;
-            if let Err(e) = qmp_execute(
-                &sock,
-                "device_add",
-                serde_json::json!({"driver":"virtio-net-pci", "id":device_id, "netdev":net_id}),
-            ) {
+            let add = match &network {
+                Network::User { .. } => serde_json::json!({"type":"user", "id":net_id}),
+                Network::Bridge { bridge, .. } => {
+                    let name = tap_name(id, device_id);
+                    // Before QMP: a device whose host tap is missing must never
+                    // be published to the guest.
+                    ensure_tap(&name, bridge)?;
+                    tap = Some(name.clone());
+                    serde_json::json!({
+                        "type":"tap", "id":net_id, "ifname":name,
+                        "script":"no", "downscript":"no"
+                    })
+                }
+            };
+            if let Err(e) = qmp_execute(&sock, "netdev_add", add) {
+                if let Some(tap) = &tap {
+                    cleanup_taps(std::slice::from_ref(tap));
+                }
+                return Err(e);
+            }
+            let device = match &network {
+                Network::Bridge { mac, .. } => serde_json::json!({
+                    "driver":"virtio-net-pci", "id":device_id, "netdev":net_id, "mac":mac
+                }),
+                Network::User { .. } => serde_json::json!({
+                    "driver":"virtio-net-pci", "id":device_id, "netdev":net_id
+                }),
+            };
+            if let Err(e) = qmp_execute(&sock, "device_add", device) {
                 let _ = qmp_execute(&sock, "netdev_del", serde_json::json!({"id":net_id}));
+                if let Some(tap) = &tap {
+                    cleanup_taps(std::slice::from_ref(tap));
+                }
                 return Err(e);
             }
         }
-        rec.config.extra_nics.push(device_id.to_owned());
-        let live = self.identity(rec);
+        all.get_mut(id).unwrap().config.extra_nics.push(Nic {
+            id: device_id.to_owned(),
+            network,
+        });
         if let Err(e) = self.save(&all) {
             if live {
                 let sock = self.vm_dir(id).join("qmp.sock");
                 let _ = qmp_execute(&sock, "device_del", serde_json::json!({"id":device_id}));
                 let _ = qmp_execute(&sock, "netdev_del", serde_json::json!({"id":net_id}));
+                // QEMU still holds the device until the asynchronous
+                // `device_del` completes; deleting its tap here would pull the
+                // backing out from under the guest. The tap name is derived,
+                // so stop/reconcile removes it.
             }
             return Err(format!("live NIC added but persistence failed: {e}"));
         }
@@ -258,7 +513,7 @@ impl Manager {
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         let mut all = self.read()?;
         let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
-        if !rec.config.extra_nics.iter().any(|x| x == device_id) {
+        if !rec.config.extra_nics.iter().any(|n| n.id == device_id) {
             return Err("unknown QEMU NIC".into());
         }
         if self.identity(rec) {
@@ -267,9 +522,17 @@ impl Manager {
             // QMP device_del completes asynchronously; keep durable metadata until an
             // authoritative DEVICE_DELETED event can be observed. Never infer from
             // query-pci's human-oriented topology dump.
+            // The tap is left alone for the same reason: QEMU still holds the
+            // device, and deleting its backing would break the guest. Its name is
+            // derived from the VM and interface, so stop/reconcile removes it.
             return Ok(true);
         }
-        rec.config.extra_nics.retain(|x| x != device_id);
+        if let Some(nic) = rec.config.extra_nics.iter().find(|n| n.id == device_id)
+            && matches!(nic.network, Network::Bridge { .. })
+        {
+            delete_nic_tap(id, device_id);
+        }
+        rec.config.extra_nics.retain(|n| n.id != device_id);
         self.save(&all)?;
         Ok(false)
     }
@@ -291,7 +554,7 @@ impl Manager {
         if self.identity(all.get(id).unwrap()) {
             return Err("VM already running".into());
         }
-        let config = all.get(id).unwrap().config.clone();
+        let mut config = all.get(id).unwrap().config.clone();
         let link_meta =
             fs::symlink_metadata(&config.disk).map_err(|e| format!("inspect disk: {e}"))?;
         if !link_meta.file_type().is_file() {
@@ -318,46 +581,50 @@ impl Manager {
         private_dir(&self.state_root)?;
         private_dir(&dir)?;
         let _ = fs::remove_file(&sock);
-        let mut network = config.network.clone();
-        network.hostfwd = config.firewall.hostfwd.clone();
-        let netdev = network.qemu_netdev()?;
-        let mut child = Command::new(&self.qemu)
-            .args([
-                "-name",
-                id,
-                "-m",
-                &config.memory_mib.to_string(),
-                "-smp",
-                &config.vcpus.to_string(),
-            ])
-            .arg("-drive")
-            .arg(format!("file={},if=virtio", escape_drive_path(&disk)?))
-            .arg("-qmp")
-            .arg(format!("unix:{},server=on,wait=off", sock.display()))
-            .arg("-display")
-            .arg("none")
-            .arg("-netdev")
-            .arg(netdev)
-            .args(["-device", "virtio-net-pci,netdev=net0"])
-            .args(config.extra_nics.iter().flat_map(|nic| {
-                [
-                    "-netdev".to_owned(),
-                    format!("user,id=net-{nic}"),
-                    "-device".to_owned(),
-                    format!("virtio-net-pci,id={nic},netdev=net-{nic}"),
-                ]
-            }))
+        // hostfwd is policy: the firewall allowlist decides it, not the NIC's
+        // stored network object (which is `User` when the guest is on NAT).
+        let hostfwd = config.firewall.hostfwd.clone();
+        if let Network::User { hostfwd: h } = &mut config.network {
+            *h = hostfwd;
+        }
+        let argv = self.args(&config)?;
+        // Taps first: a bridge NIC whose host interface is missing must fail the
+        // start, not hand QEMU a device with nowhere to send packets.
+        let mut created: Vec<String> = Vec::new();
+        for (nic_id, network) in config.nics() {
+            let Network::Bridge { bridge, .. } = network else {
+                continue;
+            };
+            let tap = tap_name(&config.id, nic_id);
+            let existed = Path::new(SYS_NET).join(&tap).exists();
+            if let Err(e) = ensure_tap(&tap, bridge) {
+                cleanup_taps(&created);
+                return Err(e);
+            }
+            if !existed {
+                created.push(tap);
+            }
+        }
+        let mut child = match Command::new(&self.qemu)
+            .args(&argv)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("launch QEMU: {e}"))?;
+        {
+            Ok(child) => child,
+            Err(e) => {
+                cleanup_taps(&created);
+                return Err(format!("launch QEMU: {e}"));
+            }
+        };
         let pid = child.id();
         if fs::canonicalize(format!("/proc/{pid}/exe")).ok().as_deref()
             != fs::canonicalize(&self.qemu).ok().as_deref()
         {
             let _ = child.kill();
             let _ = child.wait();
+            cleanup_taps(&created);
             return Err("QEMU executable identity mismatch".into());
         }
         let ticks = match process_ticks(pid) {
@@ -365,6 +632,7 @@ impl Manager {
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
+                cleanup_taps(&created);
                 return Err("QEMU exited before process identity was recorded".into());
             }
         };
@@ -376,12 +644,14 @@ impl Manager {
         if let Err(e) = self.save(&all) {
             let _ = child.kill();
             let _ = child.wait();
+            cleanup_taps(&created);
             return Err(e);
         }
         // Do not publish a stale PID if QEMU died while metadata was being saved.
         if !self.identity(all.get(id).unwrap()) || qmp(&sock, "query-status").is_err() {
             let _ = child.kill();
             let _ = child.wait();
+            cleanup_taps(&created);
             let rec = all.get_mut(id).unwrap();
             rec.pid = None;
             rec.start_ticks = None;
@@ -390,6 +660,63 @@ impl Manager {
         }
         drop(child);
         Ok(())
+    }
+    /// The QEMU launch argv: pure, so the device shape can be asserted without
+    /// a QEMU or root. The taps it names are created by the caller.
+    fn args(&self, config: &VmConfig) -> Result<Vec<String>, String> {
+        let sock = self.vm_dir(&config.id).join("qmp.sock");
+        let mut args: Vec<String> = vec![
+            "-name".into(),
+            config.id.clone(),
+            "-m".into(),
+            config.memory_mib.to_string(),
+            "-smp".into(),
+            config.vcpus.to_string(),
+            "-drive".into(),
+            format!("file={},if=virtio", escape_drive_path(&config.disk)?),
+            "-qmp".into(),
+            format!("unix:{},server=on,wait=off", sock.display()),
+            "-display".into(),
+            "none".into(),
+        ];
+        for (nic_id, network) in config.nics() {
+            let netdev = netdev_id(nic_id);
+            // The primary NIC has no device id (QEMU invents one); an extra
+            // NIC is addressed by QMP by the user's id.
+            let id = if nic_id == "net0" {
+                String::new()
+            } else {
+                format!("id={nic_id},")
+            };
+            let (netdev_arg, device) = match network {
+                Network::User { hostfwd } => {
+                    // hostfwd is the primary NIC's firewall policy; an extra
+                    // NIC has none, or it would open ports the policy never saw.
+                    let hostfwd = if nic_id == "net0" {
+                        hostfwd.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let user = crate::qemu_network::UserNetwork { hostfwd };
+                    (
+                        user.qemu_netdev_for(&netdev)?,
+                        format!("virtio-net-pci,{id}netdev={netdev}"),
+                    )
+                }
+                Network::Bridge { mac, .. } => {
+                    if mac.is_empty() {
+                        return Err(format!("NIC '{nic_id}' has no MAC address"));
+                    }
+                    let tap = tap_name(&config.id, nic_id);
+                    (
+                        format!("tap,id={netdev},ifname={tap},script=no,downscript=no"),
+                        format!("virtio-net-pci,{id}netdev={netdev},mac={mac}"),
+                    )
+                }
+            };
+            args.extend(["-netdev".into(), netdev_arg, "-device".into(), device]);
+        }
+        Ok(args)
     }
     fn identity(&self, r: &Record) -> bool {
         r.pid
@@ -445,37 +772,74 @@ impl Manager {
             signal_verified(rec, libc::SIGKILL)?;
         } else {
             qmp(&path, "system_powerdown")?;
-            drop(guard);
-            let until = std::time::Instant::now() + Duration::from_secs(30);
-            while process_ticks(pid) == Some(ticks) && std::time::Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if process_ticks(pid) == Some(ticks) {
-                return Err("QEMU did not exit after graceful shutdown request".into());
-            }
-            let _guard = self.lock.lock().map_err(|e| e.to_string())?;
-            let mut all = self.read()?;
-            if let Some(rec) = all
-                .get_mut(id)
-                .filter(|r| r.pid == Some(pid) && r.start_ticks == Some(ticks))
-            {
-                rec.pid = None;
-                rec.start_ticks = None;
-                self.save(&all)?;
-            }
         }
+        drop(guard);
+        // The lock is released for the wait: a graceful shutdown can take
+        // seconds. Re-acquiring it is what makes the tap cleanup safe — a new
+        // start must not have made the same tap meanwhile, and if it did, this
+        // stop must leave that tap alone. A tap also outlives the process, so
+        // it is deleted only after QEMU is confirmed gone, never before.
+        let secs = if force { 5 } else { 30 };
+        if !wait_exit(pid, ticks, secs) {
+            return Err("QEMU did not exit after the stop request".into());
+        }
+        let guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let mut stopped = None;
+        if let Some(rec) = all.get_mut(id)
+            && rec.pid == Some(pid)
+            && rec.start_ticks == Some(ticks)
+        {
+            rec.pid = None;
+            rec.start_ticks = None;
+            stopped = Some(rec.config.clone());
+        }
+        if let Some(config) = stopped {
+            self.save(&all)?;
+            // Inside the lock: a start cannot create the same tap until this
+            // cleanup is done.
+            delete_nic_taps(&config);
+        }
+        drop(guard);
         Ok(())
     }
     pub fn force_stop(&self, id: &str) -> Result<(), String> {
         if !Self::valid_id(id) {
             return Err("invalid VM id".into());
         }
-        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let guard = self.lock.lock().map_err(|e| e.to_string())?;
         let all = self.read()?;
         let rec = all.get(id).ok_or("unknown QEMU VM")?;
-        if self.identity(rec) {
-            signal_verified(rec, libc::SIGKILL)?;
+        let Some((pid, ticks)) = rec
+            .pid
+            .zip(rec.start_ticks)
+            .filter(|(p, t)| process_ticks(*p) == Some(*t))
+        else {
+            return Ok(());
+        };
+        signal_verified(rec, libc::SIGKILL)?;
+        drop(guard);
+        if !wait_exit(pid, ticks, 5) {
+            return Err("QEMU did not exit after SIGKILL".into());
         }
+        // Same check as `powerdown`: only clean up if this record is still the
+        // process that was waited on.
+        let guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let mut stopped = None;
+        if let Some(rec) = all.get_mut(id)
+            && rec.pid == Some(pid)
+            && rec.start_ticks == Some(ticks)
+        {
+            rec.pid = None;
+            rec.start_ticks = None;
+            stopped = Some(rec.config.clone());
+        }
+        if let Some(config) = stopped {
+            self.save(&all)?;
+            delete_nic_taps(&config);
+        }
+        drop(guard);
         Ok(())
     }
     /// Removes metadata/runtime only after the managed process is gone; disk files are never removed.
@@ -491,6 +855,7 @@ impl Manager {
         if self.identity(r) {
             return Err("VM is running; stop it before deletion".into());
         }
+        delete_nic_taps(&r.config);
         let runtime = self.vm_dir(id);
         let staged = runtime.with_extension("deleting");
         if runtime.exists() {
@@ -519,6 +884,253 @@ fn process_ticks(pid: u32) -> Option<u64> {
 }
 fn process_exe_matches(pid: u32, executable: &Path) -> bool {
     fs::canonicalize(format!("/proc/{pid}/exe")).ok() == fs::canonicalize(executable).ok()
+}
+fn wait_exit(pid: u32, ticks: u64, secs: u64) -> bool {
+    let until = Instant::now() + Duration::from_secs(secs);
+    while process_ticks(pid) == Some(ticks) {
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// A deterministic MAC for one VM interface: QEMU's `52:54:00` prefix (unicast
+/// and locally administered) plus 24 bits of a hash of the VM and interface.
+/// Stable across restarts and identical for every caller, so the address
+/// reservation, the DHCP host entry and QEMU itself all name the same NIC.
+pub fn stable_mac(id: &str, nic_id: &str) -> String {
+    stable_mac_salted(id, nic_id, 0)
+}
+
+/// The base with a salt mixed in, used when the deterministic MAC is already
+/// taken. Only 24 bits are available, so a collision is re-derived rather than
+/// handed to dnsmasq as a second guest's address.
+fn stable_mac_salted(id: &str, nic_id: &str, salt: u32) -> String {
+    let mut h = crate::hostnet::fnv1a(&format!("{id}/{nic_id}"));
+    if salt != 0 {
+        h = h.wrapping_add(u64::from(salt).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    }
+    format!(
+        "52:54:00:{:02x}:{:02x}:{:02x}",
+        (h >> 16) as u8,
+        (h >> 8) as u8,
+        h as u8
+    )
+}
+
+/// The host tap for one VM interface: `tap` + 10 hex, 13 characters. Derived,
+/// never stored, so a restart finds the same interface again.
+pub fn tap_name(id: &str, nic_id: &str) -> String {
+    let h = crate::hostnet::fnv1a(&format!("tap/{id}/{nic_id}"));
+    format!("tap{:010x}", h & 0xff_ffff_ffff)
+}
+
+fn netdev_id(nic_id: &str) -> String {
+    if nic_id == "net0" {
+        "net0".into()
+    } else {
+        format!("net-{nic_id}")
+    }
+}
+
+/// A new extra NIC's identifier: a token QEMU and `ip` both accept, and never
+/// the primary NIC's reserved `net0` slot.
+fn validate_new_nic_id(id: &str) -> Result<(), String> {
+    if id == "net0" {
+        return Err("'net0' is the primary NIC's identifier and cannot be reused".into());
+    }
+    if id.is_empty()
+        || id.len() > 20
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(
+            "a NIC identifier is up to 20 characters of lowercase letters, digits and '-'".into(),
+        );
+    }
+    Ok(())
+}
+
+/// A bridge NIC's MAC, generated or validated. A user-supplied MAC in canonical
+/// form is used as given (it is how a guest keeps its address across metadata
+/// rewrites), but it must be unicast, not all-zero, and free in this manager.
+fn mac_for(
+    all: &BTreeMap<String, Record>,
+    id: &str,
+    nic_id: &str,
+    mac: &str,
+) -> Result<String, String> {
+    let used = used_macs(all, id, nic_id);
+    if mac.trim().is_empty() {
+        // The deterministic base first; only if another NIC already holds it
+        // does a salted re-derivation run (24 bits is small but not zero).
+        let base = stable_mac(id, nic_id);
+        if !used.contains(&base) {
+            return Ok(base);
+        }
+        for salt in 1..=1024 {
+            let candidate = stable_mac_salted(id, nic_id, salt);
+            if !used.contains(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        return Err("cannot derive a free MAC address".into());
+    }
+    let m = crate::ipam::store::normalize_mac(mac)
+        .ok_or_else(|| format!("'{mac}' is not a MAC address"))?;
+    let first = u8::from_str_radix(&m[..2], 16).map_err(|e| e.to_string())?;
+    if first & 1 == 1 {
+        return Err(format!("'{mac}' is a multicast address"));
+    }
+    if m == "00:00:00:00:00:00" {
+        return Err("'00:00:00:00:00:00' is the all-zero address".into());
+    }
+    if used.contains(&m) {
+        return Err(format!("MAC address {m} is already used by another NIC"));
+    }
+    Ok(m)
+}
+
+/// The MACs this manager's other NICs already have. The slot being assigned is
+/// excluded, so re-setting a stored MAC is not a collision with itself. One MAC
+/// belongs to one NIC: dnsmasq's reservation and the firewall's rules are keyed
+/// by it.
+fn used_macs(
+    all: &BTreeMap<String, Record>,
+    id: &str,
+    nic_id: &str,
+) -> std::collections::BTreeSet<String> {
+    let mut used = std::collections::BTreeSet::new();
+    for (vm, rec) in all {
+        for (nic, network) in rec.config.nics() {
+            if vm == id && nic == nic_id {
+                continue;
+            }
+            if let Network::Bridge { mac, .. } = network
+                && !mac.is_empty()
+            {
+                used.insert(mac.clone());
+            }
+        }
+    }
+    used
+}
+
+/// The stored network of one NIC, primary (`net0`) or extra.
+fn nic_network_mut<'a>(config: &'a mut VmConfig, nic_id: &str) -> Option<&'a mut Network> {
+    if nic_id == "net0" {
+        return Some(&mut config.network);
+    }
+    config
+        .extra_nics
+        .iter_mut()
+        .find(|n| n.id == nic_id)
+        .map(|n| &mut n.network)
+}
+
+fn interface_exists(name: &str) -> bool {
+    crate::hostnet::valid_name(name) && Path::new(SYS_NET).join(name).exists()
+}
+
+/// The interface is a tun/tap. Anything else (a bridge, a physical NIC, a
+/// veth) is never deleted or enslaved by these helpers.
+fn is_tap(name: &str) -> bool {
+    crate::hostnet::valid_name(name) && Path::new(SYS_NET).join(name).join("tun_flags").exists()
+}
+
+/// The bridge a tap is enslaved to, from sysfs. None means free (or gone).
+fn tap_master(name: &str) -> Option<String> {
+    std::fs::read_link(Path::new(SYS_NET).join(name).join("master"))
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
+pub fn tap_attached(tap: &str, bridge: &str) -> bool {
+    is_tap(tap) && tap_master(tap).as_deref() == Some(bridge)
+}
+
+fn run_ip(args: &[&str]) -> Result<(), String> {
+    let out = Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(|e| format!("run ip: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let msg = String::from_utf8_lossy(&out.stderr);
+    Err(format!("ip {}: {}", args.join(" "), msg.trim()))
+}
+
+/// Give this VM interface a host tap on `bridge`, reusing the one a previous
+/// run or a daemon restart left behind. A tap another bridge owns is never
+/// moved, and an interface of any other kind is never adopted.
+pub fn ensure_tap(tap: &str, bridge: &str) -> Result<(), String> {
+    if !crate::hostnet::valid_name(tap) || !crate::hostnet::valid_name(bridge) {
+        return Err("invalid tap or bridge name".into());
+    }
+    if !is_bridge(bridge) {
+        return Err(format!(
+            "'{bridge}' is not a Linux bridge; start the network first"
+        ));
+    }
+    // Already ours: a daemon restart must reuse the tap, not fail on "exists".
+    if tap_attached(tap, bridge) {
+        return run_ip(&["link", "set", tap, "up"]);
+    }
+    if interface_exists(tap) {
+        if !is_tap(tap) {
+            return Err(format!("'{tap}' exists and is not a tun/tap"));
+        }
+        if let Some(master) = tap_master(tap)
+            && master != bridge
+        {
+            return Err(format!("tap '{tap}' is attached to bridge '{master}'"));
+        }
+    } else {
+        run_ip(&["tuntap", "add", "dev", tap, "mode", "tap"])?;
+    }
+    // Both steps are idempotent, so the reuse path takes them too: a tap left
+    // free by a recreated bridge is plugged back in here.
+    run_ip(&["link", "set", tap, "master", bridge])?;
+    run_ip(&["link", "set", tap, "up"])
+}
+
+/// Remove a tap. Only a tun/tap is ever deleted; an absent one is success.
+pub fn delete_tap(tap: &str) -> Result<(), String> {
+    if !is_tap(tap) {
+        return Ok(());
+    }
+    match run_ip(&["link", "del", tap]) {
+        Err(e) if e.contains("Cannot find device") => Ok(()),
+        other => other,
+    }
+}
+
+fn cleanup_taps(taps: &[String]) {
+    for tap in taps {
+        if let Err(e) = delete_tap(tap) {
+            tracing::warn!("qemu: removing tap {tap}: {e}");
+        }
+    }
+}
+
+fn delete_nic_tap(id: &str, nic_id: &str) {
+    cleanup_taps(&[tap_name(id, nic_id)]);
+}
+
+/// Remove every tap a config's bridge NICs own. User-mode NICs have none.
+fn delete_nic_taps(config: &VmConfig) {
+    let taps: Vec<String> = config
+        .nics()
+        .filter(|(_, n)| matches!(n, Network::Bridge { .. }))
+        .map(|(nic, _)| tap_name(&config.id, nic))
+        .collect();
+    cleanup_taps(&taps);
 }
 fn escape_drive_path(path: &Path) -> Result<String, String> {
     let s = path.to_str().ok_or("disk path is not valid UTF-8")?;
@@ -644,6 +1256,7 @@ mod tests {
         let record = Record {
             config: VmConfig {
                 id: "another-id".into(),
+                title: String::new(),
                 disk: PathBuf::from("/disk"),
                 memory_mib: 1,
                 vcpus: 1,
@@ -662,5 +1275,346 @@ mod tests {
         .unwrap();
         assert!(manager.read().unwrap_err().contains("does not match"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn manager(tag: &str) -> (Manager, PathBuf) {
+        let root = std::env::temp_dir().join(format!("virt-man-qemu-{tag}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let manager = Manager {
+            data_dir: root.clone(),
+            state_root: root.join("state"),
+            qemu: PathBuf::from("qemu"),
+            lock: Default::default(),
+        };
+        (manager, root)
+    }
+
+    fn config(id: &str) -> VmConfig {
+        VmConfig {
+            id: id.into(),
+            title: "web".into(),
+            disk: PathBuf::from("/disk"),
+            memory_mib: 512,
+            vcpus: 2,
+            network: Network::User { hostfwd: vec![] },
+            firewall: Default::default(),
+            extra_nics: vec![],
+        }
+    }
+
+    /// The values given to one argv flag, in order.
+    fn values(args: &[String], flag: &str) -> Vec<String> {
+        args.windows(2)
+            .filter(|w| w[0] == flag)
+            .map(|w| w[1].clone())
+            .collect()
+    }
+
+    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn a_mac_and_a_tap_are_stable_and_distinct_per_interface() {
+        let mac = stable_mac(ID, "net0");
+        assert_eq!(mac, stable_mac(ID, "net0"), "same NIC, same MAC");
+        assert_eq!(mac.len(), 17);
+        assert!(mac.starts_with("52:54:00:"), "{mac}");
+        assert_eq!(mac, mac.to_ascii_lowercase());
+        assert_eq!(
+            u8::from_str_radix(&mac[..2], 16).unwrap() & 1,
+            0,
+            "a NIC's MAC is unicast"
+        );
+        assert_ne!(mac, stable_mac(ID, "nic1"));
+        assert_ne!(
+            mac,
+            stable_mac("550e8400-e29b-41d4-a716-446655440001", "net0")
+        );
+
+        let tap = tap_name(ID, "net0");
+        assert_eq!(tap, tap_name(ID, "net0"), "same NIC, same tap");
+        assert!(tap.starts_with("tap"), "{tap}");
+        assert!(tap.len() <= 15, "the Linux interface-name limit: {tap}");
+        assert!(tap[3..].chars().all(|c| c.is_ascii_hexdigit()), "{tap}");
+        assert_ne!(tap, tap_name(ID, "nic1"));
+    }
+
+    #[test]
+    fn a_supplied_mac_is_normalized_and_must_be_unicast() {
+        let none = BTreeMap::new();
+        assert_eq!(
+            mac_for(&none, ID, "net0", "52-54-00-AB-CD-EF").unwrap(),
+            "52:54:00:ab:cd:ef"
+        );
+        assert_eq!(
+            mac_for(&none, ID, "net0", " ").unwrap(),
+            stable_mac(ID, "net0")
+        );
+        assert!(
+            mac_for(&none, ID, "net0", "01:00:5e:00:00:01").is_err(),
+            "multicast"
+        );
+        assert!(
+            mac_for(&none, ID, "net0", "00:00:00:00:00:00").is_err(),
+            "the all-zero address names no NIC"
+        );
+        assert!(mac_for(&none, ID, "net0", "52:54:00:aa:bb").is_err());
+        assert!(mac_for(&none, ID, "net0", "52:54:00:aa:bb:zz").is_err());
+    }
+
+    /// A generated MAC that another NIC already holds is re-derived with a
+    /// salt, and an explicitly supplied one that is taken is refused: one MAC
+    /// per NIC or dnsmasq would hand one address to two guests.
+    #[test]
+    fn a_mac_is_never_shared_between_nics() {
+        let (a, b) = (ID, "550e8400-e29b-41d4-a716-446655440001");
+        let base = stable_mac(b, "net0");
+        let mut taken = config(a);
+        taken.network = Network::Bridge {
+            network: "lab".into(),
+            bridge: "vbr0".into(),
+            mac: base.clone(),
+        };
+        let all = BTreeMap::from([(a.to_string(), record(taken))]);
+
+        let generated = mac_for(&all, b, "net0", "").unwrap();
+        assert_ne!(generated, base, "the taken MAC is skipped");
+        assert_eq!(
+            generated,
+            stable_mac_salted(b, "net0", 1),
+            "the first free salt wins, deterministically"
+        );
+        assert!(
+            mac_for(&all, b, "net0", &base).is_err(),
+            "a supplied duplicate is refused"
+        );
+        // The slot being re-set is not a collision with itself.
+        assert_eq!(mac_for(&all, a, "net0", &base).unwrap(), base);
+    }
+
+    fn record(config: VmConfig) -> Record {
+        Record {
+            config,
+            disk_size: 0,
+            pid: None,
+            start_ticks: None,
+        }
+    }
+
+    /// `net0` is the primary NIC's slot and an identifier is a lowercase token.
+    /// A NIC's bridge is stored even before its network exists, so a guest can
+    /// be configured before the network is started; `start` verifies it.
+    #[test]
+    fn an_extra_nic_is_named_safely_and_may_precede_its_network() {
+        let (manager, root) = manager("nicid");
+        let disk = root.join("disk");
+        fs::write(&disk, b"x").unwrap();
+        let mut cfg = config(ID);
+        cfg.disk = disk;
+        manager.define(cfg).unwrap();
+
+        for bad in ["net0", "nic 1", "Nic1", "net_1", "nic.1", ""] {
+            let e = manager
+                .add_nic(ID, bad, Network::User { hostfwd: vec![] })
+                .unwrap_err();
+            assert!(!e.is_empty(), "{bad}");
+        }
+        assert!(
+            manager
+                .add_nic(ID, "net0", Network::User { hostfwd: vec![] })
+                .unwrap_err()
+                .contains("primary"),
+            "the primary slot is reserved"
+        );
+
+        manager
+            .add_nic(ID, "nic1", Network::User { hostfwd: vec![] })
+            .unwrap();
+        manager
+            .add_nic(
+                ID,
+                "nic2",
+                Network::Bridge {
+                    network: "lab".into(),
+                    bridge: "vbrnosuch".into(),
+                    mac: String::new(),
+                },
+            )
+            .unwrap();
+        let stored = manager.list().unwrap().remove(0);
+        assert_eq!(
+            stored.extra_nics[1].network,
+            Network::Bridge {
+                network: "lab".into(),
+                bridge: "vbrnosuch".into(),
+                mac: stable_mac(ID, "nic2"),
+            },
+            "a stopped network's bridge is accepted and a MAC is generated"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every NIC goes through one argv builder: user-mode NAT stays exactly as
+    /// it was, and a bridge NIC names the deterministic tap and MAC, with no
+    /// scripting hook (the daemon owns the tap, not QEMU).
+    #[test]
+    fn the_argv_builds_one_netdev_and_device_per_nic() {
+        let (manager, root) = manager("argv");
+
+        let args = manager.args(&config(ID)).unwrap();
+        assert_eq!(values(&args, "-netdev"), ["user,id=net0"]);
+        assert_eq!(values(&args, "-device"), ["virtio-net-pci,netdev=net0"]);
+
+        let mut cfg = config(ID);
+        cfg.network = Network::Bridge {
+            network: "lab".into(),
+            bridge: "vbr5b92a1a54f00".into(),
+            mac: "52:54:00:aa:bb:01".into(),
+        };
+        cfg.extra_nics = vec![
+            Nic {
+                id: "nic1".into(),
+                network: Network::User {
+                    hostfwd: vec![HostForward {
+                        protocol: crate::qemu_network::Protocol::Tcp,
+                        host_port: 2222,
+                        guest_ip: "192.0.2.2".parse().unwrap(),
+                        guest_port: 22,
+                    }],
+                },
+            },
+            Nic {
+                id: "nic2".into(),
+                network: Network::Bridge {
+                    network: "lab".into(),
+                    bridge: "vbr5b92a1a54f00".into(),
+                    mac: "52:54:00:aa:bb:02".into(),
+                },
+            },
+        ];
+        let args = manager.args(&cfg).unwrap();
+        assert_eq!(
+            values(&args, "-netdev"),
+            [
+                format!(
+                    "tap,id=net0,ifname={},script=no,downscript=no",
+                    tap_name(ID, "net0")
+                ),
+                // hostfwd is the primary's policy: an extra user NIC never
+                // opens a port the firewall allowlist did not see.
+                "user,id=net-nic1".to_string(),
+                format!(
+                    "tap,id=net-nic2,ifname={},script=no,downscript=no",
+                    tap_name(ID, "nic2")
+                ),
+            ]
+        );
+        assert_eq!(
+            values(&args, "-device"),
+            [
+                "virtio-net-pci,netdev=net0,mac=52:54:00:aa:bb:01".to_string(),
+                "virtio-net-pci,id=nic1,netdev=net-nic1".to_string(),
+                "virtio-net-pci,id=nic2,netdev=net-nic2,mac=52:54:00:aa:bb:02".to_string(),
+            ]
+        );
+        // Nothing is handed to a shell: each argument is one argv element.
+        assert!(args.iter().all(|a| !a.contains(" -")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_bridge_is_ever_attached_to_or_a_tap_deleted() {
+        // `lo` exists on every host and is not a bridge, so this needs no root
+        // and no interface creation.
+        assert!(!is_bridge("lo"));
+        assert!(ensure_tap("tap1234567890", "lo").is_err());
+        assert!(!tap_attached("lo", "lo"));
+        assert!(delete_tap("lo").is_ok(), "a non-tap is never deleted");
+        assert!(delete_tap("tapnosuch0").is_ok(), "an absent tap is success");
+    }
+
+    /// Metadata written before bridge mode existed must still load, byte for
+    /// byte: user-mode networking was a bare block and an extra NIC was a bare
+    /// device id. New files keep the tagged/object shapes.
+    #[test]
+    fn old_metadata_shapes_load_and_new_ones_round_trip() {
+        let old: VmConfig = serde_json::from_value(serde_json::json!({
+            "id": ID,
+            "disk": "/disk",
+            "memory_mib": 512,
+            "vcpus": 1,
+            "network": {"hostfwd": [{
+                "protocol": "tcp", "host_port": 2222,
+                "guest_ip": "192.0.2.2", "guest_port": 22
+            }]},
+            "extra_nics": ["nic1", "nic2"]
+        }))
+        .unwrap();
+        assert_eq!(old.title, "");
+        assert_eq!(
+            old.network,
+            Network::User {
+                hostfwd: vec![HostForward {
+                    protocol: crate::qemu_network::Protocol::Tcp,
+                    host_port: 2222,
+                    guest_ip: "192.0.2.2".parse().unwrap(),
+                    guest_port: 22,
+                }]
+            }
+        );
+        assert_eq!(
+            old.extra_nics,
+            vec![
+                Nic {
+                    id: "nic1".into(),
+                    network: Network::User { hostfwd: vec![] },
+                },
+                Nic {
+                    id: "nic2".into(),
+                    network: Network::User { hostfwd: vec![] },
+                },
+            ]
+        );
+        // A missing network defaults to user-mode NAT, not a failed VM list.
+        let bare: VmConfig = serde_json::from_value(serde_json::json!({
+            "id": ID, "disk": "/disk", "memory_mib": 512, "vcpus": 1
+        }))
+        .unwrap();
+        assert_eq!(bare.network, Network::User { hostfwd: vec![] });
+        assert!(bare.extra_nics.is_empty());
+
+        // A malformed tagged value must not silently become user-mode NAT.
+        assert!(
+            serde_json::from_value::<Network>(serde_json::json!({"mode":"bridge","network":"lab"}))
+                .is_err(),
+            "a bridge block missing its bridge/mac is refused"
+        );
+
+        let mut cfg = config(ID);
+        cfg.network = Network::Bridge {
+            network: "lab".into(),
+            bridge: "vbr5b92a1a54f00".into(),
+            mac: "52:54:00:aa:bb:01".into(),
+        };
+        cfg.extra_nics = vec![Nic {
+            id: "nic1".into(),
+            network: Network::User {
+                hostfwd: vec![HostForward {
+                    protocol: crate::qemu_network::Protocol::Tcp,
+                    host_port: 2222,
+                    guest_ip: "192.0.2.2".parse().unwrap(),
+                    guest_port: 22,
+                }],
+            },
+        }];
+        let back: VmConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+        assert_eq!(back.network, cfg.network);
+        assert_eq!(back.extra_nics, cfg.extra_nics);
+        assert_eq!(
+            serde_json::to_value(&cfg.network).unwrap(),
+            serde_json::json!({
+                "mode":"bridge","network":"lab","bridge":"vbr5b92a1a54f00",
+                "mac":"52:54:00:aa:bb:01"
+            })
+        );
     }
 }

@@ -68,7 +68,7 @@ async fn run() -> Result<(), String> {
     // rebuild the firewall table from the store. nftables is not persistent
     // across a reboot, so this is what restores it; nothing else re-applies it
     // at startup.
-    ipam::server::startup(ipam.clone()).await?;
+    ipam::server::startup(ipam.clone(), qemu_manager.clone()).await?;
 
     // Storage pools are the daemon's own: a directory plus metadata. Startup
     // recreates the autostart roots that are missing.
@@ -86,7 +86,7 @@ async fn run() -> Result<(), String> {
 
     // Networks: the supervisor keeps each stored network's bridge and dnsmasq
     // in step with the guests (startup already did the first pass).
-    tokio::spawn(ipam::server::supervise(ipam.clone()));
+    tokio::spawn(ipam::server::supervise(ipam.clone(), qemu_manager.clone()));
     // Rename guests to their UUIDs, now and as they become free to rename
     // (a guest once it is shut off). Off until the web server addresses
     // everything by UUID: renaming first would leave its name-keyed links,

@@ -9,7 +9,7 @@
 //! `Mode::Bridge` only verifies the operator's bridge and never runs a
 //! dnsmasq of ours.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,16 +25,13 @@ const SUPERVISE_SECS: u64 = 5;
 /// name its DNS record answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestNic {
-    /// libvirt UUID of the guest.
+    /// libvirt UUID of the guest, or a direct-QEMU VM's id.
     pub uuid: String,
     /// What the user calls it: its `<title>`, else libvirt's name.
     pub name: String,
     /// The Linux bridge it is plugged into. Empty while the guest is still
     /// defined on a libvirt network, which this host no longer has.
     pub bridge: String,
-    /// Whether the guest is running now. A network delete is refused for any
-    /// defined guest's NIC, running or not; this records the live state.
-    pub running: bool,
 }
 
 /// Shared by the supervisor and the API.
@@ -55,6 +52,9 @@ pub struct Ipam {
     /// Set while the guest snapshot is failing, so an outage is logged once
     /// rather than every five seconds. Cleared (and logged once) on recovery.
     snapshot_stale: Arc<AtomicBool>,
+    /// The same, for the direct-QEMU metadata read: a corrupt file must not
+    /// spam the log every pass, and must not stop the libvirt half either.
+    qemu_stale: Arc<AtomicBool>,
 }
 
 impl Ipam {
@@ -67,6 +67,7 @@ impl Ipam {
             flows: Default::default(),
             dns_logs: Default::default(),
             snapshot_stale: Default::default(),
+            qemu_stale: Default::default(),
         })
     }
 
@@ -208,17 +209,38 @@ impl Ipam {
             .cloned()
             .collect()
     }
+
+    /// Each guest's MACs, grouped by its UUID. The firewall scopes per-VM
+    /// rules by MAC, and this is the one list that already covers both libvirt
+    /// domains and direct-QEMU VMs.
+    pub fn guests_by_vm(&self) -> BTreeMap<String, Vec<String>> {
+        let guests = self.guests.lock().expect("guests poisoned");
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (mac, nic) in guests.iter() {
+            out.entry(nic.uuid.clone()).or_default().push(mac.clone());
+        }
+        out
+    }
+
+    /// Whether a guest with this UUID has a NIC in the last snapshot.
+    pub fn has_vm(&self, uuid: &str) -> bool {
+        self.guests
+            .lock()
+            .expect("guests poisoned")
+            .values()
+            .any(|nic| nic.uuid == uuid)
+    }
 }
 
 /// Run the supervisor loop. The first pass is immediate, so a network that was
 /// brought down while the daemon was not running is noticed at once. `startup`
 /// is the caller's job (main runs it once, before the API is served).
-pub async fn supervise(ipam: Ipam) {
+pub async fn supervise(ipam: Ipam, qemu: crate::qemu::Manager) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(SUPERVISE_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        if let Err(e) = supervise_once(&ipam).await {
+        if let Err(e) = supervise_once(&ipam, &qemu).await {
             tracing::warn!("ipam: {e}");
         }
     }
@@ -228,11 +250,11 @@ pub async fn supervise(ipam: Ipam) {
 /// guests, bring up the networks that are meant to be up, give their guests
 /// an address, and rebuild the firewall table from the store (nftables does
 /// not survive a reboot).
-pub async fn startup(ipam: Ipam) -> Result<(), String> {
+pub async fn startup(ipam: Ipam, qemu: crate::qemu::Manager) -> Result<(), String> {
     // libvirtd may be down (or the host mid-boot): log and carry on, because
     // network lifecycle must not depend on it. A failed *store* write is the
     // one thing that is fatal — it would lose the reservations just made.
-    let guests_read = match snapshot(&ipam).await {
+    let guests_read = match snapshot(&ipam, &qemu).await {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!("ipam: reading guests: {e}");
@@ -277,12 +299,18 @@ pub async fn startup(ipam: Ipam) -> Result<(), String> {
 
 /// One supervisor pass: refresh the guests, settle the reservations, and match
 /// dnsmasq to each network's state.
-pub async fn supervise_once(ipam: &Ipam) -> Result<(), String> {
+pub async fn supervise_once(ipam: &Ipam, qemu: &crate::qemu::Manager) -> Result<(), String> {
+    // A guest that powered itself off, or was killed outside the manager,
+    // leaves its tap behind: this pass removes it. A live guest's tap is not
+    // touched (the manager decides from process identity).
+    if let Err(e) = qemu.sweep_dead_taps() {
+        tracing::warn!("ipam: sweeping QEMU taps of dead guests: {e}");
+    }
     // A libvirtd outage must not stop the networks: keep the last snapshot,
     // skip reconcile (it would prune every reservation from stale or empty
     // data), and still do the per-network dnsmasq, lease and log work. The
     // failure is logged once, not every five seconds.
-    let fresh = match snapshot(ipam).await {
+    let fresh = match snapshot(ipam, qemu).await {
         Ok(()) => {
             if ipam.snapshot_stale.swap(false, Ordering::Relaxed) {
                 tracing::info!("ipam: guest snapshot is readable again; reconciling reservations");
@@ -421,22 +449,65 @@ fn record_leases(ipam: &Ipam, id: &str) -> Result<(), String> {
 }
 
 /// Read the guests and keep only what this daemon acts on: the MACs, the
-/// bridge each is plugged into, and who it is. A failed read is an error, not
-/// an empty host: forgetting every guest would prune every reservation.
-async fn snapshot(ipam: &Ipam) -> Result<(), String> {
-    let guests = snapshot_guests().await?;
+/// bridge each is plugged into, and who it is. A failed libvirt read is an
+/// error, not an empty host: forgetting every guest would prune every
+/// reservation. A failed QEMU metadata read is not: core networking keeps
+/// running with the libvirt half, and the next good pass restores the rest.
+async fn snapshot(ipam: &Ipam, qemu: &crate::qemu::Manager) -> Result<(), String> {
+    let mut guests = snapshot_libvirt().await?;
+    match qemu_nics(qemu) {
+        Ok(nics) => {
+            if ipam.qemu_stale.swap(false, Ordering::Relaxed) {
+                tracing::info!("ipam: QEMU VM metadata is readable again");
+            }
+            guests.extend(nics);
+        }
+        Err(e) => {
+            // Log once per outage: this runs every five seconds.
+            if !ipam.qemu_stale.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "ipam: reading QEMU VM metadata: {e}; keeping libvirt guests and leaving QEMU addresses to the next good pass"
+                );
+            }
+        }
+    }
     *ipam.guests.lock().expect("guests poisoned") = guests;
     Ok(())
 }
 
-async fn snapshot_guests() -> Result<HashMap<String, GuestNic>, String> {
+/// A direct-QEMU VM's bridge NICs, keyed by MAC, exactly as a libvirt
+/// domain's interfaces are. A user-mode NIC has no host bridge, so it is
+/// skipped: the store gives it no address, because QEMU's own NAT owns it.
+fn qemu_nics(qemu: &crate::qemu::Manager) -> Result<Vec<(String, GuestNic)>, String> {
+    let mut out = Vec::new();
+    for cfg in qemu.list()? {
+        for (_, network) in cfg.nics() {
+            let crate::qemu::Network::Bridge { bridge, mac, .. } = network else {
+                continue;
+            };
+            if mac.is_empty() || bridge.is_empty() {
+                continue;
+            }
+            out.push((
+                mac.clone(),
+                GuestNic {
+                    uuid: cfg.id.clone(),
+                    name: cfg.name().to_string(),
+                    bridge: bridge.clone(),
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
+async fn snapshot_libvirt() -> Result<HashMap<String, GuestNic>, String> {
     with_conn(|c| {
         let mut out = HashMap::new();
         for d in crate::libvirt::all_domains(c, 0) {
             let (Ok(uuid), Ok(name)) = (d.get_uuid_string(), d.get_name()) else {
                 continue;
             };
-            let running = d.is_active().unwrap_or(false);
             let Ok(x) = d.get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE) else {
                 continue;
             };
@@ -468,7 +539,6 @@ async fn snapshot_guests() -> Result<HashMap<String, GuestNic>, String> {
                         uuid: uuid.clone(),
                         name: guest_name.clone(),
                         bridge,
-                        running,
                     },
                 );
             }
@@ -581,6 +651,93 @@ mod tests {
     #[test]
     fn a_domain_without_interfaces_yields_nothing() {
         assert!(interfaces("<domain><devices/></domain>").is_empty());
+    }
+
+    /// A direct-QEMU VM's bridge NICs go into the same snapshot a libvirt
+    /// domain's do, so the supervisor gives the QEMU guest a permanent address
+    /// and dnsmasq a DHCP entry without a second code path. A user-mode NIC is
+    /// skipped: QEMU's own NAT owns it.
+    #[test]
+    fn a_qemu_bridge_nic_is_snapshotted_and_gets_a_reservation() {
+        let dir = std::env::temp_dir().join(format!("ipam-qemu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk = dir.join("disk.qcow2");
+        std::fs::write(&disk, b"x").unwrap();
+        let qemu = crate::qemu::Manager::with_qemu(
+            dir.join("data"),
+            dir.join("state"),
+            "/nonexistent/qemu",
+        )
+        .unwrap();
+        let net_id = "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00";
+        let bridge = crate::hostnet::bridge_name(net_id);
+        let mac = |n: u8| format!("52:54:00:aa:bb:{n:02x}");
+        let bridge_nic = |n: u8| crate::qemu::Network::Bridge {
+            network: net_id.into(),
+            bridge: bridge.clone(),
+            mac: mac(n),
+        };
+        let vm_id = "550e8400-e29b-41d4-a716-446655440000";
+        qemu.define(crate::qemu::VmConfig {
+            id: vm_id.into(),
+            title: "web".into(),
+            disk: disk.clone(),
+            memory_mib: 128,
+            vcpus: 1,
+            network: bridge_nic(1),
+            firewall: Default::default(),
+            extra_nics: vec![
+                crate::qemu::Nic {
+                    id: "nic1".into(),
+                    network: crate::qemu::Network::User { hostfwd: vec![] },
+                },
+                crate::qemu::Nic {
+                    id: "nic2".into(),
+                    network: bridge_nic(2),
+                },
+            ],
+        })
+        .unwrap();
+
+        let snapshot = super::qemu_nics(&qemu).unwrap();
+        assert_eq!(snapshot.len(), 2, "the user-mode NIC has no bridge");
+        for (found, nic) in &snapshot {
+            assert!(found == &mac(1) || found == &mac(2), "{found}");
+            assert_eq!(nic.uuid, vm_id);
+            assert_eq!(nic.name, "web", "the title, not the UUID, is the DNS name");
+            assert_eq!(nic.bridge, bridge);
+        }
+
+        let ipam = super::Ipam::load(dir.join("networks.json"), dir.clone()).unwrap();
+        ipam.guests.lock().unwrap().extend(snapshot);
+        {
+            let mut s = ipam.lock();
+            s.networks.insert(
+                net_id.into(),
+                crate::ipam::store::import(
+                    "<network><title>lab</title><ip address='10.9.0.1' netmask='255.255.255.0'/></network>",
+                )
+                .unwrap(),
+            );
+        }
+        super::reconcile(&ipam).unwrap();
+        let s = ipam.lock();
+        for m in [mac(1), mac(2)] {
+            let r = s.networks[net_id]
+                .reservations
+                .iter()
+                .find(|r| r.mac == m)
+                .unwrap_or_else(|| panic!("no reservation for {m}"));
+            assert_eq!(r.vm.as_deref(), Some(vm_id));
+            assert!(
+                r.name.as_deref().is_some_and(|n| n.starts_with("web")),
+                "the guest's name answers DNS: {:?}",
+                r.name
+            );
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A network is reached by its stored id or its title, and a guest's NIC is
@@ -697,7 +854,6 @@ mod tests {
                     uuid: format!("u-{mac}"),
                     name: mac.into(),
                     bridge,
-                    running: false,
                 },
             );
         }

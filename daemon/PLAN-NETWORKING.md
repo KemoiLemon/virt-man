@@ -25,16 +25,17 @@ defined in libvirt are not adopted, converted or renamed.
   render into one IPv4 nftables table (`virt-man`) and are applied as a single
   transaction on every lifecycle change. The access log's DNS rows come from
   dnsmasq's query log. A stopped network answers nothing.
-- **Direct-QEMU VMs.** Persisted, validated per-VM user-mode NAT
-  (`-netdev user`) with TCP/UDP forwarding to unicast guest IPv4. QEMU owns this
-  mode's NAT. Bridge/tap mode, DHCP/DNS and daemon-managed host firewall rules
-  are not implemented on this path.
+- **Direct-QEMU VMs.** Either user-mode NAT (`-netdev user`, QEMU's own NAT,
+  TCP/UDP forwarding to unicast guest IPv4) or a stored network's bridge through
+  a daemon-created tap, per NIC and for hot-added NICs. A bridge NIC gets a
+  deterministic MAC and tap, and feeds the same IPAM reservations, DHCP/DNS and
+  per-VM firewall rules as a libvirt guest. Rate limits are not applied on this
+  path.
 
 ## Remaining stages
 
-1. Give direct-QEMU VMs the same bridge/tap path: create the tap, apply
-   ownership and rate limits, pass it to QEMU, and record enough state to
-   recover or clean up orphaned taps.
+1. Apply rate limits to direct-QEMU NICs: the tap, the stored bridge and tap
+   recovery/cleanup are in place; a host-side per-NIC limit is not.
 2. IPv6: the store and the nftables table are IPv4-only, and IPv6 is neither
    filtered nor forwarded.
 3. Keep the packet-path tests in step: addresses, DNS and forwarding are

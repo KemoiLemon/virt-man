@@ -203,12 +203,12 @@ pub fn build(
             }),
         )
         .merge(templates::routes())
-        .merge(networks::routes(ipam.clone(), fw))
+        .merge(networks::routes(ipam.clone(), fw.clone()))
         .merge(filters::routes())
         .merge(pools::routes())
         .merge(volumes::routes())
         .merge(fetch::routes())
-        .merge(qemu::routes(qemu_manager))
+        .merge(qemu::routes(qemu_manager, ipam.clone(), fw))
         .layer(middleware::from_fn(crate::auth::require_token));
 
     // console authenticates via ?token= (browsers can't set WS headers), so it

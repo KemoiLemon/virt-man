@@ -44,7 +44,8 @@ impl UserNetwork {
         Ok(())
     }
 
-    pub fn qemu_netdev(&self) -> Result<String, String> {
+    /// The same netdev under another id, for a VM's extra interfaces.
+    pub fn qemu_netdev_for(&self, id: &str) -> Result<String, String> {
         self.validate()?;
         let forwards = self
             .hostfwd
@@ -63,9 +64,9 @@ impl UserNetwork {
             })
             .collect::<Vec<_>>();
         Ok(if forwards.is_empty() {
-            "user,id=net0".into()
+            format!("user,id={id}")
         } else {
-            format!("user,id=net0,{}", forwards.join(","))
+            format!("user,id={id},{}", forwards.join(","))
         })
     }
 }
@@ -88,7 +89,7 @@ mod user_tests {
             }],
         };
         assert_eq!(
-            cfg.qemu_netdev().unwrap(),
+            cfg.qemu_netdev_for("net0").unwrap(),
             "user,id=net0,hostfwd=tcp:2222-192.0.2.2:22"
         );
         let mut invalid = cfg.clone();

@@ -1060,11 +1060,9 @@ mod tests {
             ipam.save(&s).unwrap();
         }
         let app = routes(ipam.clone(), FirewallState::new(ipam.clone()));
-        // Neither a running nor a shut-off guest may lose its bridge.
-        for (mac, name, running) in [
-            ("52:54:00:aa:bb:cc", "web", false),
-            ("52:54:00:aa:bb:cd", "db", true),
-        ] {
+        // A defined guest may not lose its bridge, running or not: the delete
+        // is refused for any NIC still on it.
+        for (mac, name) in [("52:54:00:aa:bb:cc", "web"), ("52:54:00:aa:bb:cd", "db")] {
             ipam.guests.lock().unwrap().clear();
             ipam.guests.lock().unwrap().insert(
                 mac.into(),
@@ -1072,7 +1070,6 @@ mod tests {
                     uuid: format!("u-{name}"),
                     name: name.into(),
                     bridge: hostnet::bridge_for(&net, id),
-                    running,
                 },
             );
             let r = app
@@ -1084,7 +1081,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(r.status(), 409, "running: {running}");
+            assert_eq!(r.status(), 409, "guest {name} holds {mac}");
             let body = axum::body::to_bytes(r.into_body(), usize::MAX)
                 .await
                 .unwrap();

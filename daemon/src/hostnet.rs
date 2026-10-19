@@ -25,7 +25,7 @@ use crate::ipam::store::{Mode, Net, Reservation, normalize_mac, valid_domain};
 
 /// Where pid and config files live. Tmpfs, so a reboot starts clean.
 pub const RUN_DIR: &str = "/run/virt-man-daemon";
-const SYS_NET: &str = "/sys/class/net";
+pub(crate) const SYS_NET: &str = "/sys/class/net";
 const DNSMASQ: &str = "/usr/sbin/dnsmasq";
 
 /// A deterministic bridge name for a network id: `vbr` plus twelve hex digits,
@@ -47,7 +47,8 @@ pub fn bridge_name(id: &str) -> String {
 }
 
 /// FNV-1a, 64-bit: small, stable across builds, and we need no dependency.
-fn fnv1a(s: &str) -> u64 {
+/// Shared with the QEMU manager, whose tap and MAC names must also be stable.
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
         h ^= u64::from(*b);
@@ -88,7 +89,7 @@ pub fn bridge_exists(name: &str) -> bool {
 }
 
 /// The interface exists and the kernel says it is a bridge.
-fn is_bridge(name: &str) -> bool {
+pub fn is_bridge(name: &str) -> bool {
     valid_name(name) && Path::new(SYS_NET).join(name).join("bridge").exists()
 }
 

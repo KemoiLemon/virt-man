@@ -33,6 +33,15 @@ impl FirewallState {
             ipam,
         }
     }
+
+    /// Rebuild the live ruleset from the persisted store. A NIC change adds or
+    /// removes a MAC, and the per-VM rules are scoped to MACs, so the change
+    /// must reach nftables. Serialised with rule writes for the same reason.
+    pub async fn reapply(&self) -> Result<(), String> {
+        let _guard = self.lock.lock().await;
+        let store = firewall::load(&self.path)?;
+        apply_store(&self.ipam, &store).await
+    }
 }
 
 pub fn routes(state: FirewallState) -> Router {
@@ -105,6 +114,23 @@ struct VmReq {
     policy: PolicySet,
 }
 
+/// Whether per-VM rules can be scoped to this guest: a libvirt domain, or a
+/// direct-QEMU VM the IPAM snapshot knows. QEMU rules are keyed by the VM's id
+/// (the name `GET /qemu/vms` lists), never by its title.
+async fn known_guest(ipam: &Ipam, name: &str) -> bool {
+    let n = name.to_string();
+    if crate::libvirt::with_conn(move |c| {
+        crate::libvirt::domain(c, &n).map(|_| ())?;
+        Ok(())
+    })
+    .await
+    .is_ok()
+    {
+        return true;
+    }
+    ipam.has_vm(name)
+}
+
 async fn put_network(
     State(state): State<FirewallState>,
     Path(name): Path<String>,
@@ -163,14 +189,12 @@ async fn put_vm(
     let mut store = load_store(&state)?;
 
     // Rules are scoped to this guest's MACs, so a typo'd name would silently
-    // persist but never apply. Fail fast instead.
-    let n = name.clone();
-    crate::libvirt::with_conn(move |c| {
-        crate::libvirt::domain(c, &n).map(|_| ())?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| ApiError::not_found(format!("domain '{name}': {e}")))?;
+    // persist but never apply. Fail fast instead. A direct-QEMU VM is not a
+    // libvirt domain: its rules are keyed by its id, and its MACs come from
+    // the IPAM snapshot.
+    if !known_guest(&state.ipam, &name).await {
+        return Err(ApiError::not_found(format!("domain or QEMU VM '{name}'")));
+    }
 
     let mut fw = VmFirewall::default();
     for r in &req.rules {
@@ -194,9 +218,11 @@ async fn put_vm(
 /// Rebuild the whole `virt-man` nftables table from the persisted store.
 ///
 /// The networks come from the daemon's own definitions: each one's subnet,
-/// mode, bridge and whether its bridge is up. Guests still come from libvirt,
-/// since a VM's rules are scoped to the MACs it is defined with. All of it has
-/// to be read at apply time — the rules match live identities.
+/// mode, bridge and whether its bridge is up. Guest MACs come from the IPAM
+/// guest snapshot (libvirt domains and direct-QEMU VMs alike), since a VM's
+/// rules are scoped to the MACs it is defined with. A QEMU VM's key is its id —
+/// the name `GET /qemu/vms` lists — never its title, which can change. All of
+/// it has to be read at apply time — the rules match live identities.
 ///
 /// The network API calls this on every lifecycle change (start, stop, create,
 /// delete, edit); nothing else re-installs a network's rules.
@@ -234,36 +260,54 @@ pub async fn apply_store(ipam: &Ipam, store: &FirewallStore) -> Result<(), Strin
     };
 
     let vm_store = store.vms.clone();
-    // Per-VM rules need the guest list. With libvirtd down that read fails, and
-    // dropping the whole ruleset (or the network half with it) would take every
-    // network's NAT and isolation away over an unrelated outage: apply the
-    // network rules and log the gap, and the next apply restores the VM rules.
-    let vms: Vec<Vm> = match crate::libvirt::with_conn(move |c| {
-        let mut vms: Vec<Vm> = Vec::new();
+    // Per-VM rules are scoped to the MACs a guest is defined with. The IPAM
+    // snapshot is the one list that covers both libvirt domains and
+    // direct-QEMU VMs, so a QEMU VM's bridge NIC gets its rules too.
+    let mut macs: std::collections::BTreeMap<String, Vec<String>> =
+        ipam.guests_by_vm().into_iter().collect();
+    // libvirt is read as well, for a domain the snapshot has not reached yet
+    // (it runs every few seconds) or one the supervisor could not see.
+    let wanted = vm_store.clone();
+    let libvirt_macs = crate::libvirt::with_conn(move |c| {
+        let mut found: Vec<(String, Vec<String>)> = Vec::new();
         for d in crate::libvirt::all_domains(c, 0) {
             let name = d.get_name().unwrap_or_default();
-            if let Some(fw) = vm_store.get(&name).cloned() {
+            if wanted.contains_key(&name) {
                 let xml = d
                     .get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)
                     .unwrap_or_default();
-                vms.push(Vm {
-                    macs: domain_macs(&xml),
-                    fw,
-                });
+                found.push((name, domain_macs(&xml)));
             }
         }
-        Ok(vms)
+        Ok(found)
     })
-    .await
-    {
-        Ok(vms) => vms,
-        Err(e) => {
-            tracing::warn!(
-                "firewall: cannot read guests, applying network rules only (per-guest rules are off until the next apply): {e}"
-            );
-            Vec::new()
+    .await;
+    match libvirt_macs {
+        Ok(found) => {
+            for (name, guest_macs) in found {
+                let entry = macs.entry(name).or_default();
+                for mac in guest_macs {
+                    if !entry.contains(&mac) {
+                        entry.push(mac);
+                    }
+                }
+            }
         }
-    };
+        Err(e) => {
+            // The network half must still be applied: losing it over an
+            // unrelated libvirt outage would drop every network's NAT and
+            // isolation. The next apply restores the per-guest rules.
+            tracing::warn!("firewall: cannot read guests, applying the known MACs only: {e}");
+        }
+    }
+    // A guest with no MAC (none was recorded) cannot be matched by a rule.
+    let vms: Vec<Vm> = macs
+        .into_iter()
+        .filter_map(|(name, macs)| {
+            let fw = vm_store.get(&name).cloned()?;
+            (!macs.is_empty()).then_some(Vm { macs, fw })
+        })
+        .collect();
 
     let rendered_nets: Vec<firewall::RenderedNet> = nets
         .iter()
@@ -437,6 +481,49 @@ mod tests {
         let err = get_network(State(state), Path("nope".into()))
             .await
             .unwrap_err();
+        assert_eq!(err.into_response().status(), 404);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A direct-QEMU VM can own per-VM rules: the gate accepts it by its id
+    /// (the `GET /qemu/vms` name), and the IPAM MAC merge is keyed by that same
+    /// id. An unknown name is still a 404.
+    #[tokio::test]
+    async fn a_qemu_guest_can_own_per_vm_rules() {
+        let dir = std::env::temp_dir().join(format!("fw-qemu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vm = "550e8400-e29b-41d4-a716-446655440000";
+        let state = FirewallState {
+            path: dir.join("firewall.json"),
+            lock: Arc::new(Mutex::new(())),
+            ipam: Ipam::load(dir.join("networks.json"), dir.clone()).unwrap(),
+        };
+        state.ipam.guests.lock().unwrap().insert(
+            "52:54:00:aa:bb:01".into(),
+            crate::ipam::server::GuestNic {
+                uuid: vm.into(),
+                name: "web".into(),
+                bridge: "vbr0".into(),
+            },
+        );
+        assert!(known_guest(&state.ipam, vm).await);
+        assert_eq!(
+            state.ipam.guests_by_vm()[vm],
+            vec!["52:54:00:aa:bb:01".to_string()],
+            "the MAC merge reads the seeded guest"
+        );
+        assert!(!known_guest(&state.ipam, "550e8400-e29b-41d4-a716-446655440001").await);
+
+        let err = put_vm(
+            State(state),
+            Path("nope".into()),
+            Json(VmReq {
+                rules: Vec::new(),
+                policy: PolicySet::default(),
+            }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.into_response().status(), 404);
         let _ = std::fs::remove_dir_all(dir);
     }
