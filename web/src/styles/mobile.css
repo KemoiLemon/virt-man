@@ -52,14 +52,18 @@
   .host { font-size: 10px; }
 
   /* ---------------------------------------------------------- content */
-  .detail { padding: 14px 12px; overflow-x: auto; }
+  /* The page itself must not scroll sideways; a table that is wider than the
+     pane scrolls inside its own box (below). */
+  .detail { padding: 14px 12px; overflow-x: hidden; }
   .dtitle { font-size: 16px; }
   .actions { gap: 6px; }
   .tabbar { margin-bottom: 14px; }
   .tab { padding: 10px 11px; }
 
   /* Wide tables scroll sideways rather than squeezing cells into unreadable
-     columns; `.detail` and `.modal-body` above and below are the scrollers. */
+     columns. The table is its own scroller: making the pane the scroller moved
+     the whole page under the user's finger. */
+  table.grid { display: block; max-width: 100%; overflow-x: auto; }
   table.grid td, table.grid th { white-space: nowrap; }
   .al-filters { grid-template-columns: 1fr 1fr; }
   .al-filters .al-grow { grid-column: span 2; }
@@ -93,7 +97,7 @@
      six columns are unreadable, so let them wrap into twos again. */
   .pf-limit .specs { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
   .hw-modal, .add-hw-modal { height: auto; max-height: 100dvh; }
-  .modal-body { overflow-x: auto; }
+  .modal-body { overflow-x: hidden; }
   .modal-foot { flex-wrap: wrap; }
   .tayne-back { padding-top: max(8vh, var(--safe-top)); }
   .tayne { max-height: 70dvh; }

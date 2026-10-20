@@ -194,8 +194,8 @@ back.
   that open menus on hover. Absolute tap/drag/long-press covers the common
   cases.
 - **A card-per-row layout for the wide tables** (volumes, access log, users).
-  `.detail { overflow-x: auto }` is the cheap version; revisit if those tables
-  turn out to be unusable at 375 px.
+  They scroll inside their own table instead; revisit a card layout if those
+  tables turn out to be unusable at 375 px.
 - **A browser-driven test.** The suites are jsdom, which does no layout and
   evaluates no media queries; adding Playwright or Puppeteer to test a media
   query is not worth the dependency. What *is* tested is the pure gesture

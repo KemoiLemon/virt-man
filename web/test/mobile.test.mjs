@@ -58,6 +58,20 @@ test("the phone layer really is last in the shipped bundle", () => {
   assert.ok(densityRule < mobileQuery, "mobile rules come after density rules");
 });
 
+test("wide tables scroll inside their own box, not the phone page", () => {
+  // `.detail` used to be the horizontal scroller, so dragging a wide table
+  // moved the whole page sideways. The pane clips; the table scrolls.
+  const q = css.search(WIDTH_QUERY);
+  const block = css.slice(q, q + 3000);
+  const detail = block.match(/\.detail\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(detail, /overflow-x:hidden/, "the pane does not scroll sideways");
+  const table = block.match(/table\.grid\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(table, /display:block/, "the table becomes its own scroller");
+  assert.match(table, /overflow-x:auto/, "and scrolls itself");
+  const modal = block.match(/\.modal-body\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(modal, /overflow-x:hidden/, "a dialog body does not scroll sideways either");
+});
+
 test("the sidebar leaves the flow instead of squeezing the content", () => {
   // .layout was minmax(300px, 21vw) 1fr: below 375px the 300px minimum won and
   // the content pane was ~35px wide.
