@@ -254,11 +254,11 @@ function volumeXml(name) {
 /// A minimal VNC guest: disk (when a pool exists), one NIC (when a network
 /// exists) and the pty serial/console pair the app's reader expects. Defined
 /// shut off, which is what the state-aware action checks want.
-function domainXml(name, pool, volume, network) {
+function domainXml(name, title, pool, volume, network) {
   const disk = pool && volume
-    ? `<disk type="volume" device="disk">
+    ? `<disk type="file" device="disk">
       <driver name="qemu" type="qcow2"/>
-      <source pool="${pool}" volume="${volume}"/>
+      <source file="${pool.path}/${volume}"/>
       <target dev="vda" bus="virtio"/>
     </disk>`
     : "";
@@ -272,6 +272,7 @@ function domainXml(name, pool, volume, network) {
     : "";
   return `<domain type="kvm">
   <name>${name}</name>
+  <title>${title}</title>
   <memory unit="KiB">524288</memory>
   <vcpu>1</vcpu>
   <os><type arch="x86_64" machine="q35">hvm</type></os>
@@ -306,12 +307,15 @@ export async function ensureTestVm(base) {
   }
 
   const pool = await pickPool(base, conn);
+  const poolPath = pool ? await poolRoot(base, conn, pool) : null;
+  const diskPool = poolPath ? { path: poolPath } : null;
   const picked = await pickNetwork(base, conn);
   const network = picked
     ? { created: false, name: picked.name, bridge: picked.bridge, conn }
     : await ensureTestNetwork(base);
-  const volume = pool ? `${FIXTURE}.qcow2` : null;
-  if (pool) {
+  const fixtureId = randomUUID();
+  const volume = diskPool ? `${fixtureId}.qcow2` : null;
+  if (pool && volume) {
     await json(base, `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -321,9 +325,9 @@ export async function ensureTestVm(base) {
   await json(base, `/proxy/${conn}/domains?start=false`, {
     method: "POST",
     headers: { "Content-Type": "application/xml" },
-    body: domainXml(FIXTURE, pool, volume, network),
+    body: domainXml(fixtureId, FIXTURE, diskPool, volume, network),
   });
-  return { created: true, name: FIXTURE, conn, network };
+  return { created: true, name: fixtureId, conn, network };
 }
 
 /// Remove the fixture domain (and its disk) when this run created it, then the
