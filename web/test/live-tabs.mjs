@@ -83,7 +83,7 @@ check("the dashboard is the landing tab and shows host + resource summaries", ()
 tabNamed("Networks")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1500);
 
-check("Networks tab renders cards with type, subnet and merged controls", () => {
+check("Networks tab renders cards with subnet and gateway, no bridge", () => {
   const active = document.querySelector(".tabbar .tab.active")?.textContent.trim();
   assert.equal(active, "Networks", "Networks tab active");
   const cards = [...document.querySelectorAll("#nets-list .net-card")];
@@ -91,10 +91,10 @@ check("Networks tab renders cards with type, subnet and merged controls", () => 
   const first = cards[0];
   const badges = [...first.querySelectorAll(".storage-card-head .badge")].map((b) => b.textContent.trim());
   assert.ok(badges.some((b) => ["NAT", "Bridge", "Isolated"].includes(b)), `type badge (${badges})`);
-  // Bridge stacked above subnet.
   const specLabels = [...first.querySelectorAll(".spec b")].map((b) => b.textContent.trim());
-  assert.ok(specLabels.indexOf("Bridge") < specLabels.indexOf("Subnet"),
-    `Bridge above Subnet (${specLabels})`);
+  assert.deepEqual(specLabels.slice(0, 2), ["Subnet", "Gateway"],
+    `subnet and gateway specs (${specLabels})`);
+  assert.ok(!specLabels.includes("Bridge"), `no bridge spec (${specLabels})`);
   // Merged start/stop toggle: icon-only, no text.
   const toggle = first.querySelector("[data-net-toggle]");
   assert.ok(toggle, "merged start/stop toggle");
@@ -190,6 +190,7 @@ check("a network page shows card info and an IPAM table", () => {
   for (const want of ["TYPE", "SUBNET", "GATEWAY", "DHCP IPS REMAINING"]) {
     assert.ok(labels.includes(want), `${want} card present (${labels})`);
   }
+  assert.ok(!labels.includes("BRIDGE"), `no bridge card (${labels})`);
   const remaining = cards.find((c) => c.querySelector("i")?.textContent.trim() === "DHCP IPS REMAINING");
   // Either "free / total" for a subnet, or a dash for a network with no pool.
   assert.match(remaining.querySelector("b").textContent.trim(), /^(\d+ \/ \d+|—)$/, "remaining count shape");

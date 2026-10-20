@@ -1917,9 +1917,9 @@ async function loadDcDashboard() {
     <div class="dash-section">
       <div class="section-title">Networking</div>
       <table class="grid">
-        <tr><th>Name</th><th>Server</th><th>Bridge</th><th>State</th></tr>
+        <tr><th>Name</th><th>Server</th><th>Subnet</th><th>State</th></tr>
         ${nets.map(({ c, n }) => `
-          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${c.id}"><td>${esc(n.title || n.name)}</td><td>${esc(c.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${c.id}"><td>${esc(n.title || n.name)}</td><td>${esc(c.name)}</td><td>${n.ip ? esc(n.ip) : "—"}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -2184,7 +2184,6 @@ async function renderNetPage() {
       </div>
       <div class="cards">
         <div class="card"><span class="card-ic">${ic.network(20)}</span><div><b>${esc(typeLabel)}</b><i>TYPE</i></div></div>
-        <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${esc(form.bridge || "—")}</b><i>BRIDGE</i></div></div>
         <div class="card"><span class="card-ic">${ic.circleDot(20)}</span><div><b>${esc(form.ip || "—")}</b><i>SUBNET</i></div></div>
         <div class="card"><span class="card-ic">${ic.chevron(20)}</span><div><b>${esc(gateway)}</b><i>GATEWAY</i></div></div>
         <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${remaining ? `${remaining.free} / ${remaining.total}` : "—"}</b><i>DHCP IPS REMAINING</i></div></div>
@@ -2618,9 +2617,9 @@ async function loadDashboard() {
     <div class="dash-section">
       <div class="section-title">Networking</div>
       <table class="grid">
-        <tr><th>Name</th><th>Bridge</th><th>State</th></tr>
+        <tr><th>Name</th><th>Subnet</th><th>State</th></tr>
         ${nets.map((n) => `
-          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.title || n.name)}</td><td>${esc(n.bridge)}</td>
+          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.title || n.name)}</td><td>${n.ip ? esc(n.ip) : "—"}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -3179,6 +3178,7 @@ async function loadVms() {
 /// card's actions have to name their own, not the app's selected one.
 function netCard(n: NetworkSummary, conn: string, server?: string): string {
   const typeLabel = n.forward === "bridge" ? "Bridge" : n.forward === "nat" ? "NAT" : "Isolated";
+  const gateway = n.ip ? n.ip.split("/")[0] : "";
   return `
       <div class="storage-card net-card ${n.active ? "ok" : ""}" data-open tabindex="0" data-net-open="${esc(n.name)}" data-net-conn="${esc(conn)}">
         <div class="storage-card-head">
@@ -3189,8 +3189,8 @@ function netCard(n: NetworkSummary, conn: string, server?: string): string {
           <span class="badge ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span>
         </div>
         <div class="specs">
-          <div class="spec"><b>Bridge</b><span>${esc(n.bridge || "—")}</span></div>
           <div class="spec"><b>Subnet</b><span>${n.ip ? esc(n.ip) : "—"}</span></div>
+          <div class="spec"><b>Gateway</b><span>${gateway ? esc(gateway) : "—"}</span></div>
         </div>
         <div class="storage-card-actions net-actions">
           <button class="btn icon ${n.active ? "on" : ""}" data-net-toggle="${esc(n.name)}" data-net-conn="${esc(conn)}" data-net-action="${n.active ? "stop" : "start"}" title="${n.active ? "Stop" : "Start"}">${n.active ? ic.stop() : ic.start()}</button>

@@ -736,12 +736,12 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
         </table>`;
       } else if (kind === "network") {
         table = `<table class="grid">
-          <tr><th>Name</th><th>Owner</th><th>State</th><th>Mode</th><th>Subnet</th><th>Bridge</th><th class="col-actions"></th></tr>
+          <tr><th>Name</th><th>Owner</th><th>State</th><th>Mode</th><th>Subnet</th><th class="col-actions"></th></tr>
           ${shown.map((r, i) => `<tr class="${r.suspended ? "suspended" : ""}">
             ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}</td>
             <td>${esc(r.forward === "nat" ? "NAT" : r.forward === "bridge" ? "Bridge" : "Isolated")}</td>
-            <td class="mono">${esc(r.ip || "—")}</td><td class="mono">${esc(r.bridge || "—")}</td>
-            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">No networks${resOwner ? " for this owner" : ""}.</td></tr>`}
+            <td class="mono">${esc(r.ip || "—")}</td>
+            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No networks${resOwner ? " for this owner" : ""}.</td></tr>`}
         </table>`;
       } else {
         // A card per pool (as on the datacenter dashboard), its volumes below.

@@ -92,7 +92,7 @@ check("Networks is its own page, tabbed by daemon", () => {
   assert.ok(tabs.length >= 1, "a tab per daemon");
   assert.equal(admin.$(".tab.active")?.dataset.resTab, conn);
   const heads = [...admin.d.querySelectorAll("#admin-area table.grid th")].map((t) => t.textContent.trim());
-  assert.deepEqual(heads.slice(0, 6), ["Name", "Owner", "State", "Mode", "Subnet", "Bridge"], "network columns");
+  assert.deepEqual(heads.slice(0, 5), ["Name", "Owner", "State", "Mode", "Subnet"], "network columns");
 });
 
 // ---- Admin: create a network for bob without leaving the admin page.
