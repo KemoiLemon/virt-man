@@ -822,7 +822,17 @@ impl Manager {
             .args(&argv)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Keep QEMU's own reason. Without it a readiness failure is only
+            // "did not answer", which says nothing about the argv it refused.
+            .stderr(Stdio::from(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(dir.join("qemu.log"))
+                    .map_err(|e| format!("prepare QEMU log: {e}"))?,
+            ))
             .spawn()
         {
             Ok(child) => child,
@@ -831,7 +841,12 @@ impl Manager {
                     let _ = stop_swtpm(&dir);
                 }
                 cleanup_taps(&created);
-                return Err(format!("launch QEMU: {e}"));
+                let detail = qemu_log_tail(&dir);
+                return Err(if detail.is_empty() {
+                    format!("launch QEMU: {e}")
+                } else {
+                    format!("launch QEMU: {e}: {detail}")
+                });
             }
         };
         let pid = child.id();
@@ -888,7 +903,12 @@ impl Manager {
             // them, including one a previous run left behind and this start
             // reused (which `created` does not name).
             let _ = self.save(&all);
-            return Err("QEMU failed readiness check".into());
+            let detail = qemu_log_tail(&dir);
+            return Err(if detail.is_empty() {
+                "QEMU failed readiness check".into()
+            } else {
+                format!("QEMU failed readiness check: {detail}")
+            });
         }
         drop(child);
         Ok(())
@@ -1558,6 +1578,20 @@ impl Manager {
     }
 }
 
+/// The last few lines QEMU wrote to its per-guest log, flattened for an API
+/// error. Best effort: an unreadable or empty log just yields "".
+fn qemu_log_tail(dir: &Path) -> String {
+    let text = fs::read_to_string(dir.join("qemu.log")).unwrap_or_default();
+    let mut lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(6)
+        .collect();
+    lines.reverse();
+    lines.join(" | ")
+}
+
 fn process_ticks(pid: u32) -> Option<u64> {
     let s = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let tail = s.rsplit_once(") ")?.1;
@@ -2130,6 +2164,21 @@ fn signal_verified(r: &Record, sig: i32) -> Result<(), String> {
 fn qmp(path: &Path, command: &str) -> Result<String, String> {
     qmp_execute(path, command, serde_json::json!({}))
 }
+/// QEMU creates its QMP socket with the process umask (0755 here). The parent
+/// directory is already 0700, but tighten the socket itself before trusting it;
+/// an open group/other bit is not a reason to fail the start after QEMU is up.
+fn secure_qmp_socket(path: &Path) -> Result<(), String> {
+    let md = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !md.file_type().is_socket() {
+        return Err("QMP socket has unsafe type".into());
+    }
+    if md.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("tighten QMP socket: {e}"))?;
+    }
+    Ok(())
+}
+
 fn qmp_execute(path: &Path, command: &str, args: serde_json::Value) -> Result<String, String> {
     let mut s = None;
     for _ in 0..100 {
@@ -2140,10 +2189,7 @@ fn qmp_execute(path: &Path, command: &str, args: serde_json::Value) -> Result<St
         std::thread::sleep(Duration::from_millis(20));
     }
     let mut s = s.ok_or("QMP socket unavailable")?;
-    let md = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if !md.file_type().is_socket() || md.permissions().mode() & 0o077 != 0 {
-        return Err("QMP socket has unsafe type or permissions".into());
-    }
+    secure_qmp_socket(path)?;
     s.set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| e.to_string())?;
     let mut lines = BufReader::new(s.try_clone().map_err(|e| e.to_string())?);
@@ -2783,6 +2829,23 @@ mod tests {
 
     /// A TPM is a chardev into a running swtpm; without one the argv is refused
     /// rather than handing QEMU a socket that does not exist.
+    #[test]
+    fn a_qmp_socket_is_tightened_and_a_non_socket_refused() {
+        let dir = std::env::temp_dir().join(format!("vmqmp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("qmp.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        fs::set_permissions(&sock, fs::Permissions::from_mode(0o755)).unwrap();
+        secure_qmp_socket(&sock).unwrap();
+        let mode = fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let file = dir.join("not-a-socket");
+        fs::write(&file, b"x").unwrap();
+        assert!(secure_qmp_socket(&file).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_tpm_needs_its_swtpm_socket() {
         use std::os::unix::net::UnixListener;

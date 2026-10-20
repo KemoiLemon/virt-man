@@ -8,6 +8,11 @@ Type=simple
 ExecStart=/usr/local/bin/virt-man-daemon
 Restart=on-failure
 RestartSec=3
+# QEMU, swtpm and dnsmasq are children of this daemon but must outlive a
+# daemon restart: the manager reconciles their recorded pid/start-ticks. The
+# default control-group kill mode would stop every running guest with the
+# service.
+KillMode=process
 # Runs as root: it creates taps and bridges, programs nftables and starts
 # dnsmasq. The token and TLS key live under /etc/virt-man-daemon.
 
