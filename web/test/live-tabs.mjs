@@ -191,6 +191,7 @@ check("a network page shows card info and an IPAM table", () => {
     assert.ok(labels.includes(want), `${want} card present (${labels})`);
   }
   assert.ok(!labels.includes("BRIDGE"), `no bridge card (${labels})`);
+  assert.ok(!labels.includes("PERSISTENCE"), `no persistence card (${labels})`);
   const remaining = cards.find((c) => c.querySelector("i")?.textContent.trim() === "DHCP IPS REMAINING");
   // Either "free / total" for a subnet, or a dash for a network with no pool.
   assert.match(remaining.querySelector("b").textContent.trim(), /^(\d+ \/ \d+|—)$/, "remaining count shape");
@@ -320,6 +321,7 @@ check("Options tab shows editable metadata read from the guest", () => {
   for (const want of ["On Poweroff", "On Reboot", "On Crash", "Machine", "Architecture"]) {
     assert.ok(lifecycle.includes(want), `${want} shown (${lifecycle})`);
   }
+  assert.ok(!lifecycle.includes("Persistence"), `no persistence row (${lifecycle})`);
   const machineRow = [...document.querySelectorAll(".hwrow")]
     .find((s) => s.querySelector(".hwrow-label b")?.textContent.trim() === "Machine");
   assert.match(machineRow?.querySelector(".hwctl")?.textContent ?? "", /pc-|q35/, `real machine type`);

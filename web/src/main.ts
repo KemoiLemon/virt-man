@@ -2189,7 +2189,6 @@ async function renderNetPage() {
         <div class="card"><span class="card-ic">${ic.circle(20)}</span><div><b>${remaining ? `${remaining.free} / ${remaining.total}` : "—"}</b><i>DHCP IPS REMAINING</i></div></div>
         <div class="card"><span class="card-ic">${ic.circleDot(20)}</span><div><b>${dhcpRange ? `${esc(dhcpRange.start)} – ${esc(dhcpRange.end.split(".").pop() ?? "")}` : "—"}</b><i>DHCP RANGE</i></div></div>
         <div class="card"><span class="card-ic">${ic.options(20)}</span><div><b>${esc(dnsLabel)}</b><i>DNS</i></div></div>
-        <div class="card"><span class="card-ic">${ic.autostart(20)}</span><div><b>${net.persistent ? "Persistent" : "Transient"}</b><i>PERSISTENCE</i></div></div>
       </div>
 
       ${ipam ? `
@@ -3892,7 +3891,6 @@ async function renderVmBody(vm: string) {
       const onPoweroff = pick(/<on_poweroff>([^<]*)<\/on_poweroff>/);
       const onReboot = pick(/<on_reboot>([^<]*)<\/on_reboot>/);
       const onCrash = pick(/<on_crash>([^<]*)<\/on_crash>/);
-      const autostartHint = info.persistent ? "persistent" : "transient";
       const running = info.active === true;
 
       setHtml(body, `
@@ -3949,11 +3947,6 @@ async function renderVmBody(vm: string) {
             <span class="hwrow-ic">${ic.forceStop()}</span>
             <div class="hwrow-label"><b>On Crash</b></div>
             <div class="hwctl hwctl-static">${esc(capLabel(onCrash))}</div>
-          </div>
-          <div class="hwrow">
-            <span class="hwrow-ic">${ic.autostart()}</span>
-            <div class="hwrow-label"><b>Persistence</b></div>
-            <div class="hwctl hwctl-static">${esc(capLabel(autostartHint))}</div>
           </div>
           <div class="hwrow">
             <span class="hwrow-ic">${ic.cpu()}</span>
