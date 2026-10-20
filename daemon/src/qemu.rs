@@ -802,6 +802,20 @@ impl Manager {
             if !existed {
                 created.push(tap.clone());
             }
+            // `<bandwidth>` is not part of QEMU's argv: without this, a tap
+            // that outlived a stop (or a reused one) would run unshaped. Only
+            // bridge NICs reach here; user-mode NICs have no host tap.
+            let rx = iface.bandwidth.inbound.as_ref().and_then(|r| r.average);
+            let tx = iface.bandwidth.outbound.as_ref().and_then(|r| r.average);
+            if (rx.is_some() || tx.is_some())
+                && let Err(e) = crate::hostnet::apply_tc(&tap, rx, tx)
+            {
+                if tpm {
+                    let _ = stop_swtpm(&dir);
+                }
+                cleanup_taps(&created);
+                return Err(e);
+            }
             taps.push(tap);
         }
         let mut child = match Command::new(&self.qemu)
@@ -1089,8 +1103,8 @@ impl Manager {
             args.extend(["-device".into(), device]);
         }
         for iface in &d.interfaces {
-            // `<bandwidth>` is carried in the definition; `api::nics` installs
-            // the `tc` shaping from it when a limit changes on a running guest.
+            // `<bandwidth>` is not in QEMU's argv: `Manager::start` installs the
+            // `tc` shaping on the tap, and `api::nics` when a limit changes.
             let mac = iface
                 .mac
                 .as_deref()

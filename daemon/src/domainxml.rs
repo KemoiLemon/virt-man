@@ -135,7 +135,8 @@ impl Rate {
 }
 
 /// A NIC's `<bandwidth>`. Recorded so a hardware save carries it through; the
-/// daemon does not install the `tc` shaping for it yet.
+/// QEMU manager installs the `tc` shaping from it at start and `api::nics` when
+/// a limit changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bandwidth {
     pub inbound: Option<Rate>,

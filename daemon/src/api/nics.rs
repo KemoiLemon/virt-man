@@ -3,8 +3,8 @@
 //! Every change is applied to the definition the QEMU manager stores and, when
 //! the guest is running, to the live process as well, so it takes effect now
 //! and survives a restart. The manager owns the QMP side; this module owns the
-//! XML the form sends and the host `tc` shaping, because only the API may run
-//! host commands.
+//! XML the form sends, and `hostnet::apply_tc` the host shaping, because only
+//! the daemon may run host commands (a start installs the same plan).
 //!
 //! Rates are taken in Mbit/s (what people think in) and stored as KiB/s.
 //! `inbound` is traffic *to* the guest (its RX), `outbound` from it (TX).
@@ -14,7 +14,6 @@ use axum::routing::{post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::process::Command;
 
 use super::ApiError;
 use super::firewall::FirewallState;
@@ -208,7 +207,7 @@ async fn set_bandwidth(
     // A running bridge NIC has a tap; a stopped (or user-mode) one took the
     // definition only, and the answer says it is pending.
     if let Some(tap) = &tap {
-        apply_tc(tap, rx_kib, tx_kib).map_err(ApiError::internal)?;
+        crate::hostnet::apply_tc(tap, rx_kib, tx_kib).map_err(ApiError::internal)?;
     }
     let live = tap.is_some();
     Ok(Json(json!({
@@ -216,82 +215,6 @@ async fn set_bandwidth(
         "rx_mbps": rx.map(|x| kib_to_mbps(mbps_to_kib(x))),
         "tx_mbps": tx.map(|x| kib_to_mbps(mbps_to_kib(x))),
     })))
-}
-
-/// One `tc` invocation. A `del` is best-effort: the qdisc may not be there.
-#[derive(Debug, PartialEq, Eq)]
-struct TcCommand {
-    args: Vec<String>,
-    ignore_failure: bool,
-}
-
-fn cmd(args: &[&str]) -> TcCommand {
-    TcCommand {
-        args: args.iter().map(|s| s.to_string()).collect(),
-        ignore_failure: false,
-    }
-}
-
-fn del(args: &[&str]) -> TcCommand {
-    TcCommand {
-        args: args.iter().map(|s| s.to_string()).collect(),
-        ignore_failure: true,
-    }
-}
-
-/// The host shaping for one tap. RX (traffic *to* the guest) is the tap's
-/// egress, so it is an htb class; TX (from the guest) arrives on the tap's
-/// ingress, so it is a policer. A direction with no limit has its qdisc removed
-/// instead, or a cleared limit would keep shaping.
-fn tc_plan(tap: &str, rx_kib: Option<u64>, tx_kib: Option<u64>) -> Vec<TcCommand> {
-    let mut out = Vec::new();
-    match rx_kib.filter(|k| *k > 0) {
-        Some(k) => {
-            let rate = format!("{k}kbit");
-            out.push(cmd(&[
-                "qdisc", "replace", "dev", tap, "root", "handle", "1:", "htb", "default", "1",
-            ]));
-            out.push(cmd(&[
-                "class", "replace", "dev", tap, "parent", "1:", "classid", "1:1", "htb", "rate",
-                &rate, "ceil", &rate,
-            ]));
-        }
-        None => out.push(del(&["qdisc", "del", "dev", tap, "root"])),
-    }
-    match tx_kib.filter(|k| *k > 0) {
-        Some(k) => {
-            let rate = format!("{k}kbit");
-            out.push(cmd(&[
-                "qdisc", "replace", "dev", tap, "handle", "ffff:", "ingress",
-            ]));
-            out.push(cmd(&[
-                "filter", "replace", "dev", tap, "parent", "ffff:", "protocol", "all", "prio", "1",
-                "u32", "match", "u32", "0", "0", "police", "rate", &rate, "burst", "1m", "drop",
-                "flowid", ":1",
-            ]));
-        }
-        None => out.push(del(&["qdisc", "del", "dev", tap, "ingress"])),
-    }
-    out
-}
-
-/// Run the plan with argv only. A failed `replace` is an error: the definition
-/// already holds the limit, so silently not enforcing it would be a lie.
-fn apply_tc(tap: &str, rx_kib: Option<u64>, tx_kib: Option<u64>) -> Result<(), String> {
-    for c in tc_plan(tap, rx_kib, tx_kib) {
-        let out = Command::new("tc")
-            .args(&c.args)
-            .output()
-            .map_err(|e| format!("run tc: {e}"))?;
-        if !out.status.success() && !c.ignore_failure {
-            return Err(format!(
-                "tc {}: {}",
-                c.args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// The NIC change itself succeeded; a firewall re-apply failure is reported
@@ -364,45 +287,5 @@ mod tests {
             !interface_xml("vbr0", "virtio", None).contains("<mac"),
             "the manager generates the MAC"
         );
-    }
-
-    /// The exact argv: RX is the egress htb class, TX the ingress policer. A
-    /// cleared direction deletes its qdisc instead, best-effort.
-    #[test]
-    fn the_tc_plan_shapes_both_directions_and_clears_them() {
-        let both = tc_plan("tap0", Some(1250), Some(2500));
-        let args: Vec<String> = both
-            .iter()
-            .map(|c| format!("tc {}", c.args.join(" ")))
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "tc qdisc replace dev tap0 root handle 1: htb default 1",
-                "tc class replace dev tap0 parent 1: classid 1:1 htb rate 1250kbit ceil 1250kbit",
-                "tc qdisc replace dev tap0 handle ffff: ingress",
-                "tc filter replace dev tap0 parent ffff: protocol all prio 1 u32 match u32 0 0 police rate 2500kbit burst 1m drop flowid :1",
-            ]
-        );
-        assert!(both.iter().all(|c| !c.ignore_failure));
-
-        let cleared = tc_plan("tap0", None, None);
-        let args: Vec<String> = cleared
-            .iter()
-            .map(|c| format!("tc {}", c.args.join(" ")))
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "tc qdisc del dev tap0 root",
-                "tc qdisc del dev tap0 ingress"
-            ]
-        );
-        assert!(cleared.iter().all(|c| c.ignore_failure));
-
-        let rx_only = tc_plan("tap0", Some(100), None);
-        assert_eq!(rx_only.len(), 3);
-        assert!(rx_only[1].args.contains(&"100kbit".to_string()));
-        assert!(rx_only[2].ignore_failure, "the ingress qdisc is cleared");
     }
 }

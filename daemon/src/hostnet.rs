@@ -341,6 +341,88 @@ pub fn enable_ip_forward() -> Result<(), String> {
         .map_err(|e| format!("enable ip_forward: {e}"))
 }
 
+// ------------------------------------------------------------ rate limits
+
+/// One `tc` invocation. A `del` is best-effort: the qdisc may not be there.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TcCommand {
+    args: Vec<String>,
+    ignore_failure: bool,
+}
+
+pub fn cmd(args: &[&str]) -> TcCommand {
+    TcCommand {
+        args: args.iter().map(|s| s.to_string()).collect(),
+        ignore_failure: false,
+    }
+}
+
+pub fn del(args: &[&str]) -> TcCommand {
+    TcCommand {
+        args: args.iter().map(|s| s.to_string()).collect(),
+        ignore_failure: true,
+    }
+}
+
+/// The host shaping for one tap. RX (traffic *to* the guest) is the tap's
+/// egress, so it is an htb class; TX (from the guest) arrives on the tap's
+/// ingress, so it is a policer. A direction with no limit has its qdisc removed
+/// instead, or a cleared limit would keep shaping.
+pub fn tc_plan(tap: &str, rx_kib: Option<u64>, tx_kib: Option<u64>) -> Vec<TcCommand> {
+    let mut out = Vec::new();
+    match rx_kib.filter(|k| *k > 0) {
+        Some(k) => {
+            let rate = format!("{k}kbit");
+            out.push(cmd(&[
+                "qdisc", "replace", "dev", tap, "root", "handle", "1:", "htb", "default", "1",
+            ]));
+            out.push(cmd(&[
+                "class", "replace", "dev", tap, "parent", "1:", "classid", "1:1", "htb", "rate",
+                &rate, "ceil", &rate,
+            ]));
+        }
+        None => out.push(del(&["qdisc", "del", "dev", tap, "root"])),
+    }
+    match tx_kib.filter(|k| *k > 0) {
+        Some(k) => {
+            let rate = format!("{k}kbit");
+            out.push(cmd(&[
+                "qdisc", "replace", "dev", tap, "handle", "ffff:", "ingress",
+            ]));
+            out.push(cmd(&[
+                "filter", "replace", "dev", tap, "parent", "ffff:", "protocol", "all", "prio", "1",
+                "u32", "match", "u32", "0", "0", "police", "rate", &rate, "burst", "1m", "drop",
+                "flowid", ":1",
+            ]));
+        }
+        None => out.push(del(&["qdisc", "del", "dev", tap, "ingress"])),
+    }
+    out
+}
+
+/// Run the plan with argv only. A failed `replace` is an error: the definition
+/// already holds the limit, so silently not enforcing it would be a lie.
+///
+/// Called both when a limit changes on a running guest and when QEMU starts:
+/// `<bandwidth>` is not part of QEMU's argv, so a tap that outlives a stop
+/// would otherwise lose its shaping.
+pub fn apply_tc(tap: &str, rx_kib: Option<u64>, tx_kib: Option<u64>) -> Result<(), String> {
+    for c in tc_plan(tap, rx_kib, tx_kib) {
+        let out = std::process::Command::new("tc")
+            .args(&c.args)
+            .output()
+            .map_err(|e| format!("run tc: {e}"))?;
+        if !out.status.success() && !c.ignore_failure {
+            return Err(format!(
+                "tc {}: {}",
+                c.args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------ dnsmasq
 
 /// Rotate past this, keeping one old file. A query log at `extra` verbosity
@@ -1282,6 +1364,76 @@ mod tests {
         assert!(dir.join("dnsmasq-n9.log.1").exists());
         assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The exact argv: RX is the egress htb class, TX the ingress policer. A
+    /// cleared direction deletes its qdisc instead, best-effort.
+    #[test]
+    fn the_tc_plan_shapes_both_directions_and_clears_them() {
+        let both = tc_plan("tap0", Some(1250), Some(2500));
+        let args: Vec<String> = both
+            .iter()
+            .map(|c| format!("tc {}", c.args.join(" ")))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "tc qdisc replace dev tap0 root handle 1: htb default 1",
+                "tc class replace dev tap0 parent 1: classid 1:1 htb rate 1250kbit ceil 1250kbit",
+                "tc qdisc replace dev tap0 handle ffff: ingress",
+                "tc filter replace dev tap0 parent ffff: protocol all prio 1 u32 match u32 0 0 police rate 2500kbit burst 1m drop flowid :1",
+            ]
+        );
+        assert!(both.iter().all(|c| !c.ignore_failure));
+
+        let cleared = tc_plan("tap0", None, None);
+        let args: Vec<String> = cleared
+            .iter()
+            .map(|c| format!("tc {}", c.args.join(" ")))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "tc qdisc del dev tap0 root",
+                "tc qdisc del dev tap0 ingress"
+            ]
+        );
+        assert!(cleared.iter().all(|c| c.ignore_failure));
+
+        let rx_only = tc_plan("tap0", Some(100), None);
+        assert_eq!(rx_only.len(), 3);
+        assert!(rx_only[1].args.contains(&"100kbit".to_string()));
+        assert!(rx_only[2].ignore_failure, "the ingress qdisc is cleared");
+    }
+
+    /// What `Manager::start` feeds the tap is read from the parsed definition:
+    /// inbound is the guest's RX (the tap's egress class), outbound its TX (the
+    /// ingress policer). Pure, so no tap or root is needed.
+    #[test]
+    fn a_nics_bandwidth_becomes_the_start_time_tc_plan() {
+        let iface = crate::domainxml::parse_interface_xml(
+            "<interface type='bridge'><source bridge='vbr0'/>\
+             <mac address='52:54:00:aa:bb:01'/><model type='virtio'/>\
+             <bandwidth><inbound average='1250'/><outbound average='2500'/></bandwidth>\
+             </interface>",
+        )
+        .unwrap();
+        let rx = iface.bandwidth.inbound.and_then(|r| r.average);
+        let tx = iface.bandwidth.outbound.and_then(|r| r.average);
+        assert_eq!((rx, tx), (Some(1250), Some(2500)));
+        let args: Vec<String> = tc_plan("tap0", rx, tx)
+            .iter()
+            .map(|c| format!("tc {}", c.args.join(" ")))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "tc qdisc replace dev tap0 root handle 1: htb default 1",
+                "tc class replace dev tap0 parent 1: classid 1:1 htb rate 1250kbit ceil 1250kbit",
+                "tc qdisc replace dev tap0 handle ffff: ingress",
+                "tc filter replace dev tap0 parent ffff: protocol all prio 1 u32 match u32 0 0 police rate 2500kbit burst 1m drop flowid :1",
+            ]
+        );
     }
 
     #[test]
