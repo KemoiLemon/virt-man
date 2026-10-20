@@ -6,21 +6,21 @@ the decisions that were reversed and why.
 
 ## The problem
 
-Proxmox is too heavy for a personal hypervisor; raw `virsh` is too light. This
-is the middle: a real UI over libvirt, usable from a browser on the LAN,
+Proxmox is too heavy for a personal hypervisor; raw QEMU is too light. This
+is the middle: a real UI over direct QEMU, usable from a browser on the LAN,
 without running a distro-sized management stack.
 
 ## Shape
 
 ```text
-browser ──HTTPS(8006)── virt-man-web ──HTTPS(8443, pinned cert)── virt-man-daemon ── libvirt
+browser ──HTTPS(8006)── virt-man-web ──HTTPS(8443, pinned cert)── virt-man-daemon ── QEMU
             (auth, RBAC,             (on the hypervisor)
              daemon proxy)
 ```
 
 Two processes, two deliberate choices:
 
-**The daemon owns libvirt and nothing else.** No users, no sessions, no
+**The daemon owns QEMU, the host's networks and its storage pools, and nothing else.** No users, no sessions, no
 policy — one token, one hypervisor. That keeps the privileged component small
 enough to reason about. It listens on `[::]:8443` because remote management
 is the point; TLS is what makes that acceptable.
@@ -35,6 +35,33 @@ router and one auth middleware, so an unauthenticated request over the socket is
 daemons live here. It is also the only thing that talks to daemons, so **the
 daemon token never reaches the browser** — the backend attaches it server-side
 on every proxied call.
+
+## Backends
+
+**A VM is a direct QEMU process.** The daemon launches QEMU with an explicit
+argument vector and drives it over QMP. There is no libvirt daemon or library in
+the path. The SPA still writes libvirt-shaped domain XML, and that XML is the
+guest's durable definition: it is parsed into the argv, hotplug calls and device
+list, not handed to another manager. A guest is keyed by its manager UUID, its
+runtime lives under `<data dir>/qemu/<uuid>` (QMP and guest-agent sockets, UEFI
+variable store, swtpm state), and its swtpm is started and stopped with it.
+NICs and disks hot-add and hot-remove over QMP; a removal is reported `pending`
+until QEMU confirms it.
+
+**Networks and storage are the daemon's own.** `<data dir>/networks.json` holds
+mode, subnet, range, DNS and reservations; a managed network owns a bridge
+named from its UUID and one dnsmasq. NAT, isolation and port forwarding are
+rendered into the daemon's IPv4 nftables table, and a direct-QEMU NIC reaches
+the network through a daemon-created tap, so DHCP/DNS, per-VM firewall rules and
+`tc` rate limits apply to it. IPv6 guest networking is out of scope. Pools are
+directories plus `<data dir>/pools.json`; a volume is a file, a read is a
+directory scan, and there is no storage driver cache to invalidate.
+
+**Metrics and capture come from the guests themselves.** Host figures are read
+from `/proc`; per-guest counters come from QEMU and the guest agent, with the
+definition supplying every guest's NIC and disk list so a failed read never
+looks like a removed device. Packet capture is an `AF_PACKET` socket on the
+guest's tap, polled only while someone watches, and nothing is stored.
 
 ## Certificate pinning, not a CA
 
@@ -75,7 +102,7 @@ its node, so one grant on `/nodes/<conn>` covers a whole server:
 ```
 /                                       everything
 /nodes/<conn>                           one daemon
-/nodes/<conn>/{vms,containers,networks,storage,bridges}[/<name>]
+/nodes/<conn>/{vms,networks,storage,bridges}[/<name>]
 ```
 
 The **deepest** path carrying an entry for the user decides, and at one level
@@ -106,9 +133,9 @@ path-prefix mapping, where a new daemon endpoint was reachable by default.
 Lists (guests, networks, pools, bridges) are filtered per user, including
 answers served from the read cache.
 
-**What a non-admin may ask libvirt to define is an allowlist**
-(`xmlcheck.rs`). libvirt defines as root, so guest XML is a request to the
-host: a `<hostdev>` hands over a device, a `<disk>` can name `/etc/shadow`, a
+**What a non-admin may ask the daemon to define is an allowlist**
+(`xmlcheck.rs`). The daemon launches QEMU as root, so guest XML is a request to
+the host: a `<hostdev>` hands over a device, a `<disk>` can name `/etc/shadow`, a
 `<qemu:commandline>` runs anything. So non-admin XML may contain only what the
 app's own forms write, and everything it names must be the user's to use
 (`guard.rs`): networks need `Network.Use`; a writable disk must be a volume
@@ -116,23 +143,7 @@ they own, a read-only one any volume in a pool they can read (ISOs); and a disk
 may be qcow2 only if it was created empty here — a qcow2 header can name any
 host file as its backing store, and qemu opens it. A bridge-mode network needs
 `Bridge.Use` on that bridge. Pools are defined by administrators; users
-allocate space in them. Administrators skip these checks: they have all of
-libvirt, as before.
-
-**Containers have their own privileges** (`CT.Audit`, `CT.Allocate`,`CT.Config`, `CT.PowerMgmt`, `CT.Console`) and roles (`CTUser`, `CTAdmin`),
-beside the VM set rather than folded into it: a VM grant reaches no container
-and the reverse, so an admin can hand someone guests of one kind only. The
-daemon enforces the split too: `/domains` never sees a container.
-
-**`CT.Privileged` is granted, never owned.** A privileged container has no
-user namespace, so its root is the host's root. Ownership gives a container's
-owner every `CT.*` privilege *except* this one, or anyone who can create a
-container could make it privileged by editing it. It is checked on create
-(`privileged: true`) and on any XML write that drops or changes the
-`<idmap>`, and an owner cannot share a privileged container (its console is a
-root shell on the host). The only record of "privileged" is the absence of
-`<idmap>` in the definition: the web server reads it back from the daemon
-rather than keeping a flag that could drift from what runs.
+allocate space in them. Administrators skip these checks: they hold every privilege.
 
 **Limits** (`perm::Quota`): VMs, vCPUs, memory, storage and networks, applied
 per daemon or pooled across all of them, with per-daemon overrides. Usage is
@@ -182,7 +193,7 @@ Three decisions in it are load-bearing:
 
 It is **administrator work**, gated in `routes.rs` as `Special::AdminOnly`:
 `Sys.Modify` on the node plus the admin flag. The ACL exists to delegate
-libvirt resources, and deliberately has no privilege for "a shell on the host"
+VM and network resources, and deliberately has no privilege for "a shell on the host"
 — nothing narrower than administrator would be honest about what it grants.
 
 Two smaller ones, each because the obvious alternative is wrong:
@@ -190,7 +201,7 @@ Two smaller ones, each because the obvious alternative is wrong:
 - **The pty pump runs on `std::thread`, and the fork is a `forkpty`+`execve`
   with an async-signal-safe child.** The rest of the daemon is async, but the
   shell is a long-lived syscall loop per session, and a sync `std` thread is
-  what the container console already uses for exactly that.
+  what the console pump already uses for exactly that.
 - **The child parks its error pipe at fd 3 before `close_range(4, …)`.** The
   pipe must outlive the fd sweep or a failed `execve` would look like a clean
   one; fd 0/1/2 are the pty `forkpty` already pointed at the child. Everything
@@ -248,10 +259,10 @@ past 1:1, so a small guest stays crisp.
 ### SPICE
 
 Not supported natively, by choice. SPICE is not RFB, and the browser has no
-usable client. Those guests get a **virt-viewer `.vv` file** instead of a
-console that silently does nothing. A guest offering both servers is the common
-case: the built-in viewer takes VNC, the `.vv` takes SPICE (virt-viewer handles
-it better — audio, clipboard, USB).
+usable client. A guest's definition carries one display adapter, so a SPICE
+guest gets a **virt-viewer `.vv` file** instead of a console that silently does
+nothing, and a VNC guest gets the built-in viewer. virt-viewer handles SPICE
+better anyway — audio, clipboard, USB.
 
 The trade-off: SPICE users leave the browser. That is honest, and it is better
 than the two previous designs, which pretended to work.
@@ -289,42 +300,37 @@ map onto the existing mouse and keyboard paths rather than replacing them. See
 
 ## State and storage
 
-JSON files, not a database. The web backend keeps users, connections, and keys
-in its data dir (`/var/lib/virt-man` as root, `~/.local/share/virt-man` as a
-regular user); the daemon keeps a token and TLS material in `/etc/virt-man`.
-A personal hypervisor manager has single-digit users and single-digit daemons
-— a database would be infrastructure to back up, migrate, and corrupt for no
-benefit.
+JSON files, not a general database. The web backend keeps users, connections,
+and keys in `store.json` in its data dir (`/var/lib/virt-man` as root,
+`~/.local/share/virt-man` as a regular user); time-series history and access
+logs are SQLite (`history.db`, `access.db`) because they are not hand-edited
+records. The daemon keeps configuration, token and TLS material in
+`/etc/virt-man-daemon`, and durable VM definitions, pools and networks under
+`/var/lib/virt-man-daemon`. A personal hypervisor manager has single-digit users
+and single-digit daemons — a general database would be infrastructure to back
+up, migrate, and corrupt for no benefit.
 
-Nothing is cached: the SPA polls the daemon through the proxy. Live hypervisor
-state is the only state, so there is no invalidation logic to get wrong.
+Live hypervisor state is the only truth: the SPA polls through the proxy, and
+the proxy's short-lived read cache is a paint aid, never a source of truth, so
+there is no invalidation logic to get wrong.
 
 **Storage pools are the daemon's own directories.** A pool is a host directory
 plus metadata — `title`, `path`, `autostart`, `active` — in
-`<daemon data dir>/pools.json`, keyed by the UUID the UI addresses it by. There
-is no libvirt storage driver: a read is a directory scan, so it is always
-current. Roots are arbitrary absolute directories an administrator chooses,
+`<daemon data dir>/pools.json`, keyed by the UUID the UI addresses it by. A read
+is a directory scan, so it is always current and there is no cache to
+invalidate. Roots are arbitrary absolute directories an administrator chooses,
 canonicalised, kept apart from each other and from a deny list of system and
 daemon paths, and revalidated on every use (a root that has become a symlink is
 refused, not followed). Volumes are ordinary files: raw images are sparse,
 qcow2 images are created by `qemu-img` with mode 0600, and uploads and fetches
 place a dot-prefixed temp in the pool root and rename it into place so a failed
-transfer cannot damage an existing volume. Containers' rootfs images and
-template tarballs are the same kind of file, so quotas, deletion logging and
-the in-use check treat them like a VM disk. Existing libvirt pools are not
-imported: this host is greenfield and `pools.json` is the only source of truth.
+transfer cannot damage an existing volume. Pools are not imported: this host is
+greenfield and `pools.json` is the only source of truth.
 
 ## Bugs that shaped the design
 
 Kept here because each one changed how the code is written, not just what it
 does.
-
-**libvirt `Connect` has no `Drop`.** Event fds leaked on every request; the
-count climbed until every call failed with "Too many open files". `with_conn`
-now closes on both the ok and error paths. Two `--ignored` tests guard it: one
-asserts the fd count is flat across 200 connections, and a companion
-*demonstrates* the leak without `close()` so the guard cannot be "fixed" by
-deleting it. *Found by measuring, not reading.*
 
 **`parse_graphics` took the first `<graphics>` element.** Adding a VNC device
 alongside SPICE silently changed which server every caller got. It now picks by
@@ -335,64 +341,16 @@ type='address' address='10.0.0.5'/>` it found the `address` in `type='address'`,
 failed to parse, and fell back to loopback — so a guest listening on a real IP
 was silently unreachable. Caught by a test written for the dual-graphics case.
 
-**Live XML omits filterrefs added since boot.** Firewall reads and writes use
-`VIR_DOMAIN_XML_INACTIVE`, or saving loses rules.
-
 The pattern: every one of these was invisible in code review and obvious under
 measurement. Hence the testing rules in `AGENTS.md`.
-
-## Containers
-
-Containers are **libvirt LXC** guests (`lxc:///system`). The network is not
-libvirt's: a container attaches with `<interface type='bridge'>` to the same
-daemon-owned bridge as a VM, so dnsmasq (DHCP/DNS), the `virt-man` nftables
-table, port forwards, rate limits, IPAM reservations and the access log apply to
-it unchanged. The one rule that keeps guests as a set is that **nothing lists
-guests from one driver**: `libvirt::all_domains` walks both, and every caller
-that treats guests as a set (the IPAM supervisor, firewall, metrics, the in-use
-check) uses it. The `/containers` routes are the `/domains` handlers run with the
-LXC driver selected (`DRIVER` task-local), so the two cannot drift apart.
-
-**Templates are pool volumes**, Proxmox-style: a rootfs tarball stored like an
-ISO and recognised by its extension, so it can arrive by download, upload, or a
-file copied into the pool. The catalog merges linuxcontainers.org and
-TurnKey's index, both over HTTPS, every download checked against its published
-digest. Proxmox's own index is left out: its HTTPS certificate does not match
-its host, so it is reachable only over plain HTTP, where the index and the
-digests in it can be swapped together.
-
-**The rootfs is a raw ext4 image in a pool** (quotas, deletion logging and the
-in-use check treat it as a disk), mounted by the daemon, not by libvirt.
-Measured on libvirt 12.7: libvirt's own loop-mounted `<filesystem
-type='file'>` cannot be combined with an `<idmap>` — libvirt_lxc creates its
-mount point as the *mapped* root, which is denied. So the daemon loop-mounts
-each image under `/run/virt-man/ct/<uuid>` (every directory above it must be
-traversable by the mapped uid, hence `/run`, not the 0700 data dir) and remounts
-them at start, before starting autostart containers libvirt could not.
-
-**A template is unpacked inside the container's own uid mapping**
-(`unshare --map-users`), so the kernel shifts ownership and nothing runs as
-host root against a tree the template controls: a planted `evil -> /etc`
-symlink resolves inside the namespace, where `/etc` is not writable
-(measured). Switching a container between privileged and unprivileged changes
-the mapping but not the files, so the daemon re-owns the rootfs by the
-difference before the next start — with `lchown`, never following a link.
-
-**Things the LXC driver cannot do**, measured, and how each surfaces: it
-refuses to change a running container's NIC, so a rate limit is saved and
-reported `pending` until the next start rather than claimed; it refuses
-`VIR_DOMAIN_CONSOLE_FORCE`, so a console session is shared by every viewer of
-one container instead of stolen; and it has no bulk stats call, which the
-metrics sampler never used.
 
 ## Deliberately not built
 
 - **Clustering / migration / HA** — one hypervisor is the use case.
+- **Containers** — removed; direct QEMU is VM-only and there is no replacement
+  runtime.
 - **A database** — see above.
 - **VNC passwords, ZRLE/Tight** — noted ceilings, add when needed.
 - **SPICE in the browser** — tried twice; virt-viewer is the answer.
 - **Snapshots, backup scheduling, cloud-init** — not needed yet; the XML editor
   is the escape hatch for anything the UI does not expose.
-- **Container backups, snapshots, mount points beyond the rootfs, and turning
-  a container into a template** — add when needed. Separate container quotas
-  too: a container counts against the VM, vCPU, memory and storage limits.

@@ -1,22 +1,44 @@
-# Plan: UUID identity independent of libvirt
+# UUID identity
 
-## Goal
+## Decision
 
-Make UUIDs the stable identity for VMs, containers, networks, and pools, independent of libvirt naming and process identifiers.
+A resource is named by the UUID it got at creation, not by anything a host
+process or another manager assigned. Names are display data: a title can be
+changed and old links still resolve, but ownership, grants, history and access
+logs stay attached to the UUID. This host is greenfield, so there is no legacy
+name to import and no migration mode: UUIDs exist from creation.
 
-## Stages
+## Current identity
 
-1. **Define identity ownership.** Generate UUIDs in the daemon for new resources and persist them independently from display names and host process IDs.
-2. **Keep names mutable.** Resolve API/UI names and titles to UUIDs. Names must not be the durable key for ownership, grants, or history.
-3. **Add a compatibility resolver.** During migration, resolve legacy libvirt names and UUIDs to the same daemon identity. Detect collisions and report ambiguous names explicitly.
-4. **Preserve web metadata.** Keep ownership, ACL grants, history, activity, and access logs attached to the same UUID through backend changes and renames.
-5. **Import existing identities.** Prefer valid existing libvirt UUIDs. For resources without one, generate a UUID and record a legacy identifier mapping. Do not infer identity from an ambiguous title.
-6. **Update rename and delete flows.** Resolve UUID before authorization and destructive operations. Retain mappings needed for audit and rollback.
-7. **Test transitions.** Cover duplicate names across backends, renames, stale links, deletion/recreation with the same name, and UUID-based authorization.
+- **VM**: the manager UUID is the stored `<name>`, the `<uuid>`, the state
+  directory `<data dir>/qemu/<uuid>` and the URL segment. The user's display
+  name is `<title>`; routes resolve either, and an ambiguous title resolves to
+  nothing.
+- **Network**: the store key is a canonical UUID; `<name>` and `<uuid>` in the
+  editor are that key, and `<title>` is display-only. A title must be unique and
+  must not equal another network's key.
+- **Pool**: `pools.json` is keyed by the canonical UUID; `<title>` lives beside
+  it because a pool definition has no display field. A name that is not a
+  canonical UUID is refused on create.
+- **Volume**: a file name inside its pool, not a UUID. The pool UUID plus the
+  name is what the API addresses, and in-use checks follow the file path.
+- **Containers**: none. There is no container identity to carry.
+
+## Keeping the web metadata attached
+
+- The proxy resolves a UUID to its current name **before** the permission check
+  (`api/proxy.rs` `canonical_path`), because grants and ownership are keyed by
+  name.
+- The web server follows renames every 30 s (`web/server/src/rekey.rs`): it
+  remembers each UUID's name and moves ownership and grants when the name
+  changes. A rename it did not see is matched by title only for a resource named
+  by its own UUID, and never while the old name is still live.
+- History is keyed by UUID, so a renamed guest keeps its chart and a new guest
+  reusing a deleted name starts empty.
 
 ## Acceptance criteria
 
 - Renaming a resource does not change its identity, grants, or history.
 - Reusing an old name does not inherit the prior resource's ownership or history.
-- UUID and legacy-name paths resolve consistently while migration is enabled.
-- Ambiguous legacy identifiers fail safely rather than selecting an arbitrary resource.
+- A UUID and its current title resolve to the same resource; an ambiguous title
+  fails rather than selects one.

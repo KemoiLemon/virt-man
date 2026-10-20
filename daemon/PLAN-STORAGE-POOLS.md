@@ -3,16 +3,12 @@
 ## Decision
 
 The daemon owns storage directly. A pool is a directory on the host plus a
-little metadata; libvirt's storage driver is not used at all. The reason is
-that libvirt caches a pool's volume list and space figures and only re-reads
-them when its own volume API changed something. A file that arrives another way
-(aria2, `cp`, a Nextcloud sync) stays invisible and the figures stay stale —
-which is the normal case here, not an edge case. A directory scan is both
-cheaper and always true.
+little metadata. A read is a directory scan, so it is always true: a file that
+arrives another way (aria2, `cp`, a Nextcloud sync) is visible immediately and
+the space figures cannot go stale.
 
-There is deliberately **no import or migration path**: this host is greenfield
-(no VMs, pools or networks exist), so `pools.json` is the only source of truth
-and no libvirt pool definition is read, adopted or rewritten.
+`pools.json` is the only source of truth. Nothing is imported or migrated from
+an older storage manager.
 
 ## Model
 
@@ -61,8 +57,8 @@ root.
 
 ## Volume operations
 
-- **Create**: name must be one safe component; `capacity` takes libvirt's
-  `<capacity unit='B|KiB|MiB|GiB'>`, default bytes. Raw is a sparse
+- **Create**: name must be one safe component; `capacity` takes a number with
+  an optional `B|KiB|MiB|GiB` unit (bytes when absent). Raw is a sparse
   `set_len` file; qcow2 is made by `qemu-img` with the destination pre-created
   mode 0600 (so qemu-img's own 0644 default never lands), with a temp-and-rename
   fallback for a qemu-img that refuses an existing destination. A partial file is
@@ -86,16 +82,7 @@ allocation,used_by,content}`; create returns `{name,path}`; upload returns
 `{name,uploaded,sha256,recv_bps,write_bps}`; metrics keep
 `{uuid,name,capacity,allocation}`. `?title=` is unchanged.
 
-## Containers
-
-A container's rootfs is a raw image in a native pool and its template is a
-tarball there, so quotas, deletion logging and the in-use check treat them like
-a VM disk. Container template lookup, rootfs creation, growth and deletion all
-go through the same `Pools` store; there are no `StorageVol`/`StoragePool`
-calls anywhere in the daemon.
-
 ## Non-goals
 
-- No libvirt pool/volume calls and no import of existing ones.
 - No LVM/filesystem pool types.
 - No client-side transfer state: staging and progress stay server-side.

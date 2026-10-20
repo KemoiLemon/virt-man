@@ -1,22 +1,21 @@
 # Virt-Man
 
-Personal VM manager: Proxmox is too heavy, raw libvirt is too light. A Rust
-**daemon** controls libvirt; a **web UI** (with user auth, RBAC, and a daemon
-proxy) sits on top.
+Personal VM manager: Proxmox is too heavy, raw QEMU is too light. A Rust
+**daemon** controls QEMU directly; a **web UI** (with user auth, RBAC, and a
+daemon proxy) sits on top.
 
 ## Components
 
 | Part | Path | What it is |
 |---|---|---|
-| daemon | `daemon/` | Rust + axum; token-authenticated HTTPS API over libvirt (VMs and LXC containers, networks, storage pools, volumes, container templates, lifecycle, native VNC console + virt-viewer handoff for SPICE, a text console for containers, a host login shell, host metrics) |
+| daemon | `daemon/` | Rust + axum; token-authenticated HTTPS API over direct QEMU/QMP (VMs, native directory storage pools and volumes, native networks with dnsmasq, nftables firewall, lifecycle and NIC/disk hotplug, native VNC console + virt-viewer handoff for SPICE, a host login shell, host and guest metrics) |
 | web UI | `web/` | Vite + TS SPA, served by the Rust backend in `web/server/` (users, RBAC, API keys, daemon connections + TLS-pinned proxy, daemon dashboard) |
 
 ## Install
 
 One script does both parts on **Debian / Ubuntu** (`apt`) and **Alpine**
-(`apk`): it installs the packages, a new enough Rust, and pnpm, enables
-libvirt, then builds and installs the service (systemd on Debian, OpenRC on
-Alpine).
+(`apk`): it installs the packages, a new enough Rust, and pnpm, then builds and
+installs the service (systemd on Debian, OpenRC on Alpine).
 
 ```bash
 git clone ssh://git@git.kemoi.top:2222/kemoi/virt-man.git && cd virt-man
@@ -42,48 +41,26 @@ distribution. Package names were checked on Debian 13 (trixie) and Alpine
 | Needed for | Debian / Ubuntu | Alpine (`community` repo) |
 | --- | --- | --- |
 | building | `build-essential pkg-config curl ca-certificates` | `build-base pkgconf curl ca-certificates bash sudo` |
-| daemon: VMs | `libvirt-daemon-system libvirt-daemon-driver-qemu libvirt-dev qemu-system-x86 ovmf` | `libvirt-daemon libvirt-qemu libvirt-dev qemu-system-x86_64 ovmf dbus` |
-| daemon: containers | `libvirt-daemon-driver-lxc e2fsprogs util-linux tar xz-utils zstd` | `libvirt-lxc e2fsprogs util-linux-misc tar xz zstd` |
-| daemon: networking | `nftables iproute2 openssl` | `nftables iproute2 openssl` |
+| daemon: QEMU and storage | `qemu-system-x86 qemu-utils ovmf` | `qemu-system-x86_64 qemu-img ovmf` |
+| daemon: TPM guests | `swtpm` | `swtpm` |
+| daemon: networking | `nftables iproute2 dnsmasq-base util-linux openssl` | `nftables iproute2 dnsmasq util-linux-misc openssl` |
 | web UI | `nodejs npm`, then `npm i -g pnpm` | `nodejs npm`, then `npm i -g pnpm` |
 | both | Rust ≥ 1.88 (via rustup: the distro's is older) | Rust ≥ 1.88 (via rustup: the distro's is older) |
 
 Then:
 
-- **Debian**: `systemctl enable --now libvirtd`, then `sudo daemon/install.sh`
-  and/or `sudo web/install.sh`.
-- **Alpine**: `rc-update add dbus && rc-update add libvirtd && rc-service libvirtd start`,
-  then `sudo SKIP_SYSTEMD=1 daemon/install.sh` and copy
+- **Debian**: `sudo daemon/install.sh` and/or `sudo web/install.sh`.
+- **Alpine**: `sudo SKIP_SYSTEMD=1 daemon/install.sh` and copy
   `daemon/openrc/virt-man-daemon` to `/etc/init.d/` (the same for `web/`).
-
-**Use `libvirtd`, not `virtlxcd`.** On systemd hosts the modular
-`virtlxcd.socket` conflicts with `libvirtd.socket`: starting it stops
-libvirtd and every guest network with it, and virtlxcd on its own cannot
-reach the network driver. `libvirtd` serves both VMs and containers.
-
-### Containers
-
-Containers are libvirt LXC guests made from templates, as in Proxmox. Open a
-storage pool and choose **CT templates** to download one (Debian, Alpine,
-Ubuntu, Arch, Fedora, ... from linuxcontainers.org, and TurnKey application
-templates), then **Create CT** from a server's Containers tab. A template can
-also be uploaded, or copied into the pool directory, as a `.tar.xz`, `.tar.zst`
-or `.tar.gz` rootfs tarball.
-
-Containers are **unprivileged** by default: their root is an unprivileged uid
-on the host (a user namespace). A privileged container, whose root is the
-host's root, needs the `CT.Privileged` permission (the `CTPrivileged` role),
-which only an administrator can grant.
 
 ## Administration
 
 The admin panel (`/admin`) manages users, groups, roles, permissions, daemons,
-quotas and API keys, and gives a per-daemon view of every VM, container,
-network and storage pool. From there an administrator can define a storage
-pool, create a VM or network *for* a user, and delete any resource — actions
-that go through the same forms and confirms as the resource's own page.
-Deleting a running guest stops it first, then removes it and (optionally) its
-disks.
+quotas and API keys, and gives a per-daemon view of every VM, network and
+storage pool. From there an administrator can define a storage pool, create a
+VM or network *for* a user, and delete any resource — actions that go through
+the same forms and confirms as the resource's own page. Deleting a running
+guest stops it first, then removes it and (optionally) its disks.
 
 ## Documentation
 

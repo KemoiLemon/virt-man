@@ -1,79 +1,90 @@
-# Plan: Replace libvirt with direct QEMU management
+# Direct QEMU management
 
-## Goal and scope
+## Goal and status
 
-Replace libvirt as the VM control plane with direct QEMU process management. The daemon continues to run as root. Start with a deliberately small VM feature set; do not attempt to replace every libvirt subsystem in the first milestone.
+The daemon controls VMs directly through QEMU and QMP. It does **not** use an
+external VM manager: no daemon, socket, connection, network or storage driver is
+read, and the daemon packages do not depend on one. Container support is
+removed entirely; there is no replacement runtime.
 
-This host has no existing VMs, storage pools or networks, so every resource
-created after the switch is managed natively. There is no conversion path from
-libvirt definitions: an existing guest would remain libvirt's until it is
-deleted, and none exist here.
+Direct QEMU is the only VM path. Host networking, IPAM, the firewall, storage
+pools and UUID identity are the daemon's own (see `PLAN-NETWORKING.md` and the
+storage notes in `AGENTS.md`).
 
-Keep configuration, durable daemon state, runtime files, and QEMU VM state separate:
+## Paths
 
-- `/etc/virt-man-daemon/` — daemon configuration, token, TLS material, firewall/IPAM/id-map configuration, and other configuration currently under `/etc/virt-man`.
-- `/var/lib/virt-man-daemon/` — durable daemon metadata and state that must survive restarts.
+- `/etc/virt-man-daemon/` — daemon configuration, token, TLS material, and the
+  firewall/IPAM configuration.
+- `/var/lib/virt-man-daemon/` — durable daemon metadata and state that must
+  survive restarts (VM definitions, pools, networks, history).
+- `/var/lib/virt-man-daemon/qemu/` — the QEMU VM state root (configurable as
+  `qemu_state_root`): one directory per guest holding its QMP/guest-agent
+  sockets, UEFI variable store, TPM state and swtpm socket/pid. It is a
+  subdirectory of the daemon data directory, not a second data root.
 - `/run/virt-man-daemon/` — sockets and other ephemeral daemon runtime files.
-- `/var/lib/libvirt-daemon/` — configurable QEMU VM state root for per-VM state and temporary files, as requested. Verify this path against target distributions' QEMU packaging conventions before finalizing it; do not use it as the general daemon data directory.
 
-## Stage 1: Configuration and installer transition
+This host is greenfield: nothing is imported and no hypervisor state is
+migrated from an older daemon data path.
 
-1. Change daemon defaults, examples, installer paths, and service documentation from `/etc/virt-man` to `/etc/virt-man-daemon`.
-2. Migrate token, TLS material, firewall, container id-map, and other daemon-owned files. Preserve token and certificate bytes so existing web-server authentication and certificate pins remain valid.
-3. Make migration idempotent: prefer an existing new-path file, copy/move a legacy file only when the destination is absent, preserve permissions, and report actions. Never overwrite new configuration with legacy data.
-4. Keep a compatibility fallback for legacy `/etc/virt-man` installations for a defined transition period; document rollback.
-5. Remove the daemon's libvirt service dependency only when the direct-QEMU backend no longer needs libvirt for the enabled feature set. The initial transition should not uninstall or disable libvirt.
+## Lifecycle
 
-## Stage 2: Direct QEMU process and QMP backend
+A guest's hardware is the libvirt-shaped domain XML the SPA writes; the launch
+argv, hotplug paths and host taps are derived from it. The manager launches
+QEMU with an explicit argument vector, never a shell string, and tracks each
+VM by UUID, process identity (pid + start ticks + executable), QMP socket and
+runtime directory in durable metadata.
 
-1. Add a backend boundary so API handlers depend on VM operations rather than libvirt types.
-2. Launch QEMU using an explicit argument vector, never a shell command string.
-3. Track each managed VM's UUID, PID/process identity, QMP socket, console endpoints, state directory, and configuration in durable daemon metadata.
-4. Use QMP for state queries and basic power operations. Validate socket ownership and permissions.
-5. On daemon restart, reconcile recorded VMs against live QEMU processes; avoid duplicate launches and detect stale metadata or untracked processes.
-6. Define safe cleanup behavior for a crashed or unexpectedly exited QEMU process. The daemon must distinguish its managed processes from unrelated QEMU instances.
-7. Build configuration under the QEMU state root, but keep authoritative persistent metadata under `/var/lib/virt-man-daemon`.
+- **Start**: validate the stored disks, create the per-guest runtime directory,
+  seed UEFI NVRAM from its template, start the guest's swtpm when the
+  definition has a `<tpm>`, create taps, launch QEMU, then confirm it is alive
+  through QMP. If any step fails, the taps and the TPM emulator are cleaned up
+  with it.
+- **TPM**: a `<tpm>` guest gets a per-guest `swtpm socket` process. The daemon
+  runs `/usr/bin/swtpm` with `--tpm2` for a 2.0 TPM and without it for 1.2,
+  state at `<runtime>/tpm`, control socket `<runtime>/swtpm.sock` and pid file
+  `<runtime>/swtpm.pid`. Stop, force-stop, delete and reconcile stop that
+  process for a dead guest; a running guest's swtpm is never stopped. Delete
+  removes the state directory with the rest of the runtime. A pid is signalled
+  only after `/proc/<pid>/cmdline` names this guest's state and socket.
+- **Stop / force stop**: ask QEMU to power down (or SIGKILL it), wait for the
+  process to exit, then remove its taps and its swtpm.
+- **Reconcile**: on startup and on every sweep, a recorded guest whose process
+  identity no longer matches is treated as stopped: its stale taps and swtpm
+  are removed, while a live guest's are left alone.
+- **Delete**: refused while QEMU is running. Runtime files (QMP socket, NVRAM,
+  TPM state) go; disk files never do.
 
-## Stage 3: Minimal usable VM lifecycle
+## Boundary (current)
 
-Support only an explicitly documented subset:
+The lifecycle is implemented. It is covered at unit level — argv, QMP wire
+shapes, UUID/pid identity, reconcile and swtpm cleanup, serde and validation —
+but not by a live QEMU start in the automated suite. libvirt is gone: no
+definition, socket or helper is part of this path.
 
-- list and inspect VMs managed by this daemon;
-- create a VM with disk path, memory, vCPU count, and one supported networking mode;
-- start, graceful shutdown, force stop, and delete;
-- report process state and basic resource usage;
-- provide console access only if it can be implemented and tested reliably in this stage.
+1. **Configuration transition** — daemon-owned files moved under
+   `/etc/virt-man-daemon`, with an idempotent migration that never overwrites
+   new configuration.
+2. **Direct QEMU process and QMP backend** — explicit argv, UUID/pid identity,
+   QMP state and power operations, startup reconcile, safe cleanup of a crashed
+   process.
+3. **Lifecycle** — list/inspect, create, start, graceful shutdown, force stop,
+   delete, process state and basic resource usage. Console support is VNC plus
+   a virt-viewer handoff for SPICE.
+4. **Disk handling** — disks are host paths, validated and canonicalised;
+   deleting a VM removes its runtime but never its disk files.
+5. **QEMU-managed hardware** — hotplug for disks and NICs, the hardware editor
+   including video and TPM, and the per-guest swtpm lifecycle described above.
 
-Retain existing API routes where their semantics are valid. Return explicit unsupported-feature errors for operations not yet implemented; do not silently approximate libvirt behavior. A minimal backend should not expose misleading network, storage, XML, or hotplug controls.
+## Not in scope
 
-## Stage 4: Disk handling
+- imported definitions, pools, networks or firewall rules;
+- containers and templates: removed, with no replacement runtime;
+- migration between hosts;
+- guest IPv6 networking: network, IPAM and firewall are IPv4-only.
 
-1. Treat disks as host paths initially; do not emulate libvirt pools in this milestone.
-2. Define and validate the allowed disk-path policy for the first release.
-3. Keep existing disk files in place and do not reformat or rewrite them.
-4. Preserve in-use checks and require explicit intent before deleting disk data with a VM.
-5. Defer volume creation, upload/fetch, pool capacity, templates, and storage quotas to the separate storage-pools plan.
+## Acceptance
 
-## Features explicitly deferred
-
-These have separate plans or require replacement designs and are not implied by basic QEMU lifecycle support:
-
-- LXC containers and templates (`PLAN-LXC.md`);
-- storage pools and volumes (`PLAN-STORAGE-POOLS.md`);
-- interfaces, bridges, DHCP/DNS, and NAT (`PLAN-NETWORKING.md`);
-- device hotplug (`PLAN-HOTPLUG.md`);
-- firewall policy and enforcement (`PLAN-FIREWALL.md`);
-- backend-independent UUID identity (`PLAN-UUIDS.md`);
-- libvirt XML editing, nwfilters, SPICE relay discovery, and libvirt-specific migration behavior.
-
-Until their replacements are available, retain libvirt packages, definitions, networks, and pools for resources that still depend on them. Clearly distinguish QEMU-managed VMs from libvirt-managed resources in daemon responses and errors.
-
-## Rollout and acceptance criteria
-
-1. Back up `/etc/virt-man` and relevant data before upgrading. Do not treat volatile libvirt runtime files as backups.
-2. Install the new configuration layout and confirm token/certificate continuity before changing VM backends.
-3. Keep libvirt installed and operational while validating the direct-QEMU backend; containers still use its LXC driver.
-4. Create one QEMU-managed VM, verify boot, disk access, state reporting, and recovery after daemon restart, then create further VMs as needed.
-5. Remove libvirt dependencies only in a later release, after required container, networking, storage, and firewall capabilities have replacement implementations.
-
-The first milestone is accepted when the new config layout migrates safely, a QEMU-managed VM can complete the supported basic lifecycle, and daemon restart does not duplicate or orphan it.
+The direct backend is accepted when a QEMU-managed VM completes the supported
+lifecycle (including a TPM guest, whose swtpm starts and stops with it), and a
+daemon restart neither duplicates nor orphans a guest or its swtpm. Unit tests
+pin the argv, identity and cleanup paths; a live QEMU run is still manual.

@@ -10,8 +10,12 @@ Two parts, one product:
 
 | Path | Build | Role |
 | --- | --- | --- |
-| `daemon/` | `cargo` | Rust + axum over libvirt (`qemu:///system` for VMs, `lxc:///system` for containers). Runs on the hypervisor host. Token auth, HTTPS `[::]:8443`. |
+| `daemon/` | `cargo` | Rust + axum over direct QEMU. Runs on the hypervisor host. Token auth, HTTPS `[::]:8443`. |
 | `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, ACL permissions, ownership, quotas, API keys, TLS-pinned daemon proxy). HTTPS `[::]:8006`. |
+
+Nothing in `daemon/` links libvirt. A guest is a direct QEMU process; the SPA
+still writes libvirt-shaped XML, which the daemon parses into an explicit argv
+and QMP calls without handing it to another manager.
 
 ## Commands
 
@@ -19,7 +23,7 @@ Two parts, one product:
 # frontend: typecheck, build, unit tests (225, incl. the mobile CSS contract)
 cd web && npx tsc --noEmit && npx vite build && pnpm test
 
-# web backend (133 tests: permissions/roles/key caps, routes, xmlcheck, shares...)
+# web backend (150 tests: permissions/roles/key caps, routes, xmlcheck, shares...)
 cd web/server && cargo clippy && cargo test
 
 # live suites — drive the real app in jsdom against a running backend
@@ -46,9 +50,7 @@ cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
 cd web && node test/live-redirect.mjs https://127.0.0.1:8006
 
 # daemon
-cd daemon && cargo clippy --all-targets && cargo test --bins   # 157 tests
-cd daemon && sudo -E cargo test --bins -- --ignored reowning   # rootfs re-owning (chown)
-cd daemon && cargo test --test fd_leak -- --ignored            # needs libvirt
+cd daemon && cargo clippy --all-targets && cargo test --bins   # 263 tests
 
 # web backend
 cd web/server && cargo clippy --all-targets
@@ -180,11 +182,11 @@ resumed. A restart is still fatal to a transfer **mid-body** (nothing complete
 to resume), and to nothing else.
 
 **Storage pools are daemon-owned directories.** (`daemon/src/pools.rs`,
-`daemon/src/api/pools.rs`, `volumes.rs`.) There is no libvirt storage driver: a
-pool is a host directory plus metadata in `<data_dir>/pools.json` (mode 0600,
-atomic temp+rename), keyed by the canonical UUID the UI addresses it by, with a
-display `title`, `autostart` and `active`. Only directory pools exist; LVM and
-filesystem pool types are refused with "not implemented natively". A root is an
+`daemon/src/api/pools.rs`, `volumes.rs`.) A pool is a host directory plus
+metadata in `<data_dir>/pools.json` (mode 0600, atomic temp+rename), keyed by
+the canonical UUID the UI addresses it by, with a display `title`, `autostart`
+and `active`. Only directory pools exist; LVM and filesystem pool types are
+refused with "not implemented natively". A root is an
 arbitrary absolute host directory, canonicalised and created on explicit
 create/start, refused when it overlaps another pool or falls in a small deny
 list (`/proc`, `/sys`, `/dev`, `/run`, `/etc`, `/root`, `/boot`, `/tmp`,
@@ -210,8 +212,8 @@ Upload and fetch write a dot-prefixed temp **in the pool root**, hash while
 copying, fsync and rename over the target, so a failed transfer leaves an
 existing volume untouched; an existing name is never overwritten (409). Deleting
 a pool removes only its definition, never its files, and is refused while a
-guest still holds one of its volumes. Existing libvirt pools are **not**
-imported: this host is greenfield, and `pools.json` is the only source of truth.
+guest still holds one of its volumes. Pools are not imported: this host is
+greenfield, and `pools.json` is the only source of truth.
 
 **The URL is the view.** `web/src/route.ts` maps views to paths (`/`,
 `/servers`, `/guests`, `/networks`, `/storage`, `/<node>`,
@@ -252,7 +254,7 @@ admin page — it never navigates to the resource. Things that bite:
 - **`AdminCtx` is the only surface `admin.ts` has into `main.ts`.** A new
   create or delete needs a method there (`createPool`, `deleteResource`) and a
   binding in `adminCtx`, not an import back into `main.ts`.
-- **`deleteResource` reuses `deleteVmOn`/`deleteCtOn`/`deleteNetworkOn`/
+- **`deleteResource` reuses `deleteVmOn`/`deleteNetworkOn`/
   `deletePoolOn`/`deleteVolumeOn`**, which are the same functions the guest,
   network and pool views call, so the two surfaces cannot drift — including the
   running-guest stop below.
@@ -260,17 +262,12 @@ admin page — it never navigates to the resource. Things that bite:
   ownership annotation; it is listed from the daemon's own pool list, which is
   why a freshly created pool shows up without an ownership record.
 
-**Deleting a running guest stops it first.** (`daemon/src/libvirt.rs`
-`stop_guest`, `daemon/src/api/domains.rs` `delete`, `containers.rs` `delete`.)
-Deletion used to `undefine` a live domain outright: libvirt keeps the domain
-running and merely makes it transient, so the guest was left orphaned with no
-definition to manage it by — and a container's rootfs could not even be
-unmounted. Now a delete asks the guest to shut down (`shutdown()`), polls for
-up to 30 s, then force-`destroy()`s it, and only then undefines and cleans up
-storage. The delete response carries `stopped` so the UI can say a running
-guest was stopped. A container's delete runs the same stop inside the LXC
-driver scope before reading its inactive XML and unmounting the rootfs. The SPA
-wraps the guest delete in `runTask` because that stop can take seconds.
+**Deleting a running guest stops it first.** (`daemon/src/api/domains.rs`
+`delete`, `daemon/src/qemu.rs` `powerdown`/`force_stop`.) A delete asks a
+running guest to power down, force-stops it if it does not, and only then
+removes the definition and cleans up storage. The delete response carries
+`stopped` so the UI can say a running guest was stopped. The SPA wraps the
+guest delete in `runTask` because that stop can take seconds.
 
 **Pages paint from cache, then from the daemon.** A remote daemon costs a
 round trip per read, so opening a view used to show nothing until it answered.
@@ -295,9 +292,9 @@ memory or disk figure is a wrong figure, and a chart that jumps as the fresh one
 lands looks broken. Those wait on their skeleton. Nor for a view holding user
 input (hardware, options, firewall editors): the second paint would discard what
 they typed during the round trip. What remains is names and states — the tree,
-the VM/network lists, filters, and XML. The stats series ignore a
-repeated `sampled_at_ms` for the same reason a cached-then-fresh paint would
-otherwise push a false 0% point.
+the VM/network lists, and XML. The stats series ignore a repeated
+`sampled_at_ms` for the same reason a cached-then-fresh paint would otherwise
+push a false 0% point.
 
 **Finished transfers are forgotten, not kept.** A completed or failed upload
 stays listed for 15 minutes (`FINISHED_TTL_MS`) and is then dropped, pruned when
@@ -322,8 +319,8 @@ dir. Two weeks are kept; `GET /history` serves one series averaged into ~240
 buckets. The range bar (Live/1h/6h/1d/7d/14d) sits on the datacenter and host
 dashboards and the VM summary; Live stays the page's own 1 s poll.
 
-- Rows are keyed by libvirt **UUID**, so a renamed guest keeps its history and
-  a new guest reusing a deleted one's name starts empty.
+- Rows are keyed by the QEMU manager's **UUID**, so a renamed guest keeps its
+  history and a new guest reusing a deleted one's name starts empty.
 - Deletion is **by absence**: a tick that no longer lists a guest, NIC or disk
   deletes its history (samples cascade), and removing a connection deletes all
   of its rows at once. So `/metrics` must fail rather than answer partially: a
@@ -362,25 +359,17 @@ Things that bite:
   `after` callback, and never navigates away from it.
 
 **Guests, networks and pools are named by their UUID.** A new one's
-libvirt name is its UUID and what the user typed is its `<title>` (a pool has no
-libvirt definition: its title lives beside it in `pools.json`). URLs name them
-by UUID; old name links still work. Things that bite:
+manager id is its UUID and what the user typed is its `<title>` (a pool has no
+definition of its own: its title lives beside it in `pools.json`). URLs name
+them by UUID; old name links still work. Things that bite:
 
-- **Every daemon route takes a UUID or a name.** A middleware
-  (`daemon/src/api/mod.rs` `resolve_uuids`) swaps a UUID segment for the name
-  before routing, so handlers and their name-keyed records are unchanged. A
-  network is the exception: the `/networks` handlers resolve their own id or
-  title key themselves, so the middleware does not cover them.
+- **Every daemon route takes a UUID or a name.** Each handler resolves the
+  stored key itself (a guest by id or title, a pool or network by UUID or
+  title), so no routing middleware rewrites the path.
 - **The web proxy resolves a UUID to its name before the permission check**
   (`api/proxy.rs` `canonical_path`). Grants, ownership and suspension are keyed
   by name; checking the UUID path instead let a user carved out of a guest
   reach it by UUID. `test/live-uuid.mjs` pins it.
-- **The daemon migrates existing guests itself** (`daemon/src/migrate.rs`):
-  a guest only while shut off; the old name becomes the title. It is gated by
-  `VIRT_MAN_MIGRATE_UUIDS=1` (off by default). `VIRT_MAN_MIGRATE_ONLY=<prefix>`
-  limits it to matching names, for testing on a host that has real guests.
-  Networks and pools are not migrated: they are the daemon's own and already
-  keyed by UUID (a pool from creation).
 - **The web server follows the renames** (`web/server/src/rekey.rs`, every
   30 s): it remembers each UUID's name, and moves ownership and grants when the
   name changes. A rename it did not see is matched by title, but only for a
@@ -455,10 +444,9 @@ why** — read it before changing anything below.
 ## Testing rules
 
 **Verify by measurement, not assumption.** This repo has a history of bugs that
-looked fine in code review and were only caught by measuring: an fd leak
-(counted fds across 200 connections), a console that connected but never
-rendered (decoded the frame bytes), a graphics parser that silently fell back
-to loopback (asserted the parsed address).
+looked fine in code review and were only caught by measuring: a console that
+connected but never rendered (decoded the frame bytes), a graphics parser that
+silently fell back to loopback (asserted the parsed address).
 
 Concretely:
 
@@ -498,114 +486,62 @@ token match). The SPA shows the script and polls
 cert through the normal `PUT`. `install.sh` honours `VIRT_MAN_TOKEN` by writing
 it to the token file instead of generating one.
 
-**Containers are domains on a second driver; never list guests from one.**
-(`daemon/src/api/containers.rs`, `daemon/src/ct.rs`, DESIGN.md "Containers".)
-
-- **`libvirt::all_domains(c, flags)` is how anything treats guests as a set.**
-  The IPAM supervisor (a container with no MAC in the snapshot gets no
-  reservation), the firewall, metrics, and the disk in-use check all go
-  through it. A new caller of `c.list_all_domains` silently leaves containers
-  out.
-- **`/containers/...` is the `/domains` handlers under `DRIVER.scope(Lxc)`.**
-  `containers::forward` rebuilds the request (it must not reuse the old one:
-  axum keeps matched path params in the extensions, and a handler taking
-  `Path<String>` then saw three). Only what differs has its own handler:
-  create, delete, start (mounts the rootfs first), bandwidth (config-only).
-- **Every `/containers` route must be in `web/server/src/routes.rs`**, on the
-  `CT.*` privileges. VM-only routes (reset, graphics, the VNC console) are not
-  classified, so they are refused for a container.
-- **Privileged is the absence of `<idmap>`, and nothing else.** Never add a
-  flag for it. `CT.Privileged` is never an owner privilege; an XML write that
-  drops or changes the idmap needs it (`guard.rs` `PutCtXml`).
-- **A container's rootfs is recorded in its metadata** (`virtman:container
-  rootfs=`), not a `<disk>`. `disks::disk_refs` reads it so the in-use check
-  and the delete cleanup see it; the daemon refuses a redefinition that changes
-  it or adds a second `<filesystem>` (`ct::same_rootfs`).
-- **The daemon mounts every rootfs, not libvirt** (`/run/virt-man/ct/<uuid>`,
-  0711). A start without it fails with "Failed to create .oldroot: Permission
-  denied"; that message means the mount or a directory above it, not the image.
-- **Use `libvirtd`, never start `virtlxcd`.** Its socket unit conflicts with
-  libvirtd's: starting it stopped libvirtd on this host, and every guest
-  network with it.
-
-**libvirt `Connect` has no `Drop`.** `with_conn` must call `close()` on both
-the ok and error paths, or event fds leak and every call fails with "Too many
-open files" after a few hundred requests (`daemon/src/libvirt.rs:45`).
-
 **A VM's networking lives on its Network tab, and applies live.** Interfaces,
 their IPAM reservations and rate limits, and the guest firewall are one tab
 (`/<node>/vms/<vm>/network`; the old `/firewall` path redirects). The daemon
 applies every change to the running guest *and* its definition
 (`daemon/src/api/nics.rs`, `networks.rs` `put_host`/`delete_host`):
 
-- Rate limits are `update_device_flags(AFFECT_LIVE|CONFIG)` with `<bandwidth>`
-  in KiB/s (taken as Mbit/s). They are enforced at once — libvirt installs an
-  htb class and an ingress policer on the host tap; `live-vmnet` reads them
-  back with `tc`, not from the XML.
+- Rate limits are `<bandwidth>` in KiB/s (taken as Mbit/s), applied to the
+  running guest and its definition. They are enforced at once — the daemon
+  installs an htb class and an ingress policer on the host tap; `live-vmnet`
+  reads them back with `tc`, not from the XML.
 - IPAM changes only the daemon's store (below); nothing is restarted.
   `live-vmnet` checks the bridge's ifindex is unchanged.
-- Hot-add needs a free PCIe root port. q35 gives each device its own and libvirt
-  only creates as many as boot needs, so new guests are defined with
-  `HOTPLUG_PORTS` (14, as virt-manager does; four were measured to be used up
-  by boot devices). Older guests without spares get an explanatory error.
+- Hot-add goes through QMP. A NIC is `netdev_add` then `device_add`, a disk is
+  `blockdev-add` then `device_add`; the request names no PCI address, so QEMU
+  picks the slot. A failed add rolls back the host resources it made, and a
+  failed persist rolls the live device back out.
 - Hot-remove is a *request* to the guest OS (ACPI eject). The API reports
   `pending` while the guest still holds the device; never claim it is gone.
 - The hardware editor rebuilds every `<interface>`, so it carries `<bandwidth>`
   through (`devicesFromXml`/`deviceXml`), or a hardware save would lift limits.
 
-**The video adapter is a device, and its model decides its attributes.**
-(`web/src/hardware.ts` `videoXml`, `HW_CATALOG` "video"; `xmlcheck.rs`.) It is
-the one `<video>`, added like any other device, so the model and its options are
-editable without the XML tab; a guest with none gets a `virtio` one seeded when
-the editor opens (libvirt wants exactly one). libvirt ties each attribute to its
-model — `ram`/`vgamem`/`vram64` are QXL's, `device`/`blob` are virtio's — and
-refuses a mismatched one, so the form hides fields by model rather than writing
-whatever is set. Two things that cost real time:
+**The video adapter is a device, and its model decides its QEMU options.**
+(`web/src/hardware.ts` `videoXml`, `HW_CATALOG` "video"; `daemon/src/domainxml.rs`.)
+It is the one `<video>`, added like any other device, so the model and its
+options are editable without the XML tab; a guest with none gets a `virtio` one
+seeded when the editor opens, so the device list stays complete. `domainxml`
+maps the model to a QEMU device and keeps only the attributes that device
+accepts — `ram`/`vgamem`/`vram64` are QXL's, `device`/`blob` are virtio's — and
+refuses a mismatch when the definition is saved rather than at start, so the
+form hides fields by model rather than writing whatever is set. Two things that
+cost real time:
 
-- **`<acceleration>` is a child of `<model>`, not a sibling.** As a sibling the
-  schema accepts it and the qemu driver ignores it, so a `virtio-vga-gl` device
-  was refused with "can be only with enabled 3d acceleration" *while naming
-  `<acceleration accel3d='yes'/>`* — the error pointed at the one thing that was
-  already right. `videoXml` writes it inside `<model>`.
+- **`<acceleration>` is a child of `<model>`, not a sibling.** Read as a
+  sibling it is ignored, leaving a `virtio-vga-gl` device defined without 3D
+  while the XML says otherwise. `videoXml` writes it inside `<model>`.
 - **A `*-gl` device and `accel3d='yes'` are one setting.** The form moves them
   together (choosing a gl device turns 3D on, and turning 3D on upgrades the
-  device), so the save cannot be refused for a mismatch the form allowed.
+  device), and `domainxml` refuses a definition where they disagree.
 
 `rendernode` is a host DRI path and a `vhost-user-*` device reads a host
 chardev, so both stay administrators' (`xmlcheck`'s `host_ref` scan and the
 `device` allowlist); every model and every guest-side option is a non-admin's.
 `accel3d` is harmless on any display, but a `*-gl` guest needs a GL-capable
 display (`egl-headless`, or SPICE with `<gl enable='yes'/>`) to actually start;
-this app writes neither, so a -gl guest defines and then fails at start with
-libvirt's own reason.
+this app writes neither, so a -gl guest defines and then fails at QEMU start
+with its own reason.
 
-**Guests are given disks by path, not by pool+volume.** `web/src/xml.ts` and
-`hardware.ts` write `<disk type='file'><source file='/…/x.qcow2'/>`. A
-`<disk type='volume'>` reference is resolvable only if the libvirt on that host
-can translate it into a path, and **libvirt 11.3.0 cannot** — measured on a
-Debian 13 host, where every volume-sourced disk, in any pool including a fresh
-one at the standard `/var/lib/libvirt/images` path, failed with `internal error:
-missing storage backend for 'volume' storage`. libvirt 12.7.0 resolves the same
-XML fine, so this is not our XML being wrong — it is a shape that does not work
-everywhere, and the failure is nasty because of where it lands:
-
-- The disk is never resolved, so libvirt never writes the guest's per-domain
-  AppArmor rules (`/etc/apparmor.d/libvirt/libvirt-<uuid>.files`, generated by
-  virt-aa-helper from the disk paths). With no rules, qemu is denied the disk.
-- qemu then fails with `Could not open '/…/x.qcow2': Permission denied`, and
-  **that message is a decoy**: the file is `0600 root:root` at that moment
-  because libvirt chowns a disk to the qemu user at start and *restores the
-  original owner when the start fails*. Chowning it by hand changes nothing, and
-  neither does an AppArmor path rule — the disk was never resolvable, so there
-  was nothing to allow.
-
-A path has no such dependency. So: `disk_path`/`iso_path` on `DomainForm`, and a
-`path` field on the disk/cdrom device, filled from the volume API's `path` (the
-SPA creates the volume, then names it) or from the volumes list when one is
-picked. `deviceXml`/`domainXml` use the path when they have one and keep the
-reference form when they do not, rather than inventing a path for a volume we
-cannot confirm. `driver type` travels with the disk — guessing qcow2 for a raw
-image makes qemu parse it as the wrong format.
+**Guests are given disks by path, not by pool+volume.** (`daemon/src/domainxml.rs`,
+`web/src/xml.ts`/`hardware.ts`.) The manager launches QEMU itself and opens every
+`<disk>` by its `<source file=...>`, so a disk's source is an absolute file path
+and nothing else. `<disk type='volume'>`, a `<source pool=... volume=...>` and a
+block-device source are refused by the parser with "attach it by its absolute
+path instead" rather than guessed at; the SPA fills the path from the volume
+API's `path` (it creates the volume, then names it) or from the volumes list
+when one is picked. `driver type` travels with the disk — guessing qcow2 for a
+raw image makes QEMU parse it as the wrong format.
 
 `devicesFromXml` **claims file-backed disks by path**. It used to skip them,
 which silently deleted them: the hardware editor strips every `<disk>` block and
@@ -616,10 +552,10 @@ take a running guest's disk when the two guests spell it differently.
 
 **Networks are the daemon's own; dnsmasq is their DHCP and DNS server.**
 (`daemon/src/ipam/`, `daemon/src/hostnet.rs`, `daemon/src/api/networks.rs`.)
-None of them is defined in libvirt, so nothing is taken over and nothing is
-read back: the store at `<data_dir>/networks.json` (default
-`/var/lib/virt-man-daemon/networks.json`, mode 0600) is the source of truth for
-mode, subnet, range, DNS and reservations.
+Nothing is read back from another network manager: the store at
+`<data_dir>/networks.json` (default `/var/lib/virt-man-daemon/networks.json`,
+mode 0600) is the source of truth for mode, subnet, range, DNS and
+reservations.
 
 - **One bridge per network, named from its id.** A managed network gets
   `vbr` + the first 12 hex of its UUID (`hostnet::bridge_name`), 15 characters,
@@ -647,8 +583,8 @@ mode, subnet, range, DNS and reservations.
   `bridge_up`, not dnsmasq health). A range, forwarder, domain or reservation
   edit just restarts dnsmasq, so a guest is not unplugged for a settings
   change. A failed start puts the old definition back.
-- **The editor still speaks libvirt XML.** `netxml::render` writes it (name and
-  uuid are the id, the derived bridge is included, `parse` validates,
+- **The editor still speaks libvirt-shaped XML.** `netxml::render` writes it
+  (name and uuid are the id, the derived bridge is included, `parse` validates,
   `merge` keeps autostart, the lease and reservations the editor did not see).
   A title must be unique and not equal to another network's id, so a
   display-name link resolves to exactly one network.
@@ -662,13 +598,13 @@ mode, subnet, range, DNS and reservations.
   start. A second A record names an address without a second row.
 
 **A guest's NIC names its network's bridge.** (`daemon/src/api/nics.rs`,
-`daemon/src/ct.rs`, `web/server/src/xmlcheck.rs`, `web/server/src/guard.rs`.)
-A VM's or container's interface is
+`web/server/src/xmlcheck.rs`, `web/server/src/guard.rs`.)
+A VM's interface is
 `<interface type='bridge'><source bridge='vbr…'/></interface>` — there is no
-libvirt network to name — so `nics::add` and `ct::domain_xml` resolve the key a
-request names (a network's id or title) through `Ipam::bridge_for`, and
-`GET …/interfaces` maps the bridge back to the network key. `xmlcheck` records
-the source bridge in `DomainSpec.bridges`/`ContainerSpec.bridges`; the proxy's
+separate network object to attach to, only the bridge the network runs — so
+`nics::add` resolves the key a request names (a network's id or title) through
+`Ipam::bridge_for`, and `GET …/interfaces` maps the bridge back to the network
+key. `xmlcheck` records the source bridge in `DomainSpec.bridges`; the proxy's
 `check_network_bridges` then requires `Network.Use` on **any** network using
 that bridge and refuses an unknown bridge outright, so an arbitrary host bridge
 is unreachable for a non-admin. A `Mode::Bridge` network may share its operator
@@ -676,11 +612,10 @@ bridge, so a grant on any network on it is enough, and `network_for_bridge`
 answers the lowest stored key so a guest reads back the same network every time.
 
 **The `virt-man` nftables table owns NAT, isolation and port forwarding.**
-(`daemon/src/firewall.rs`.) There is no libvirt network driver and no libvirt
-chain to get past. The daemon renders one IPv4 table for its own networks and
-applies it as a single `nft -f` transaction (`add table`, `flush table`, then
-the rendered block), so a failed script leaves the previous rules in force
-rather than an empty table.
+(`daemon/src/firewall.rs`.) There is no other firewall backend: the daemon
+renders one IPv4 table for its own networks and applies it as a single `nft -f`
+transaction (`add table`, `flush table`, then the rendered block), so a failed
+script leaves the previous rules in force rather than an empty table.
 
 - **Base rules follow the bridge, not dnsmasq's health.** For an active NAT
   network: accept from its bridge, accept established/related and `ct status
@@ -700,7 +635,7 @@ rather than an empty table.
   `api::firewall::apply_store` on every lifecycle change; nothing else
   re-installs a network's rules.
 - **Forwarding is enabled, never cleared.** `ip_forward` is host-wide and shared
-  with libvirt's LXC driver, Docker and other services; `apply_store` writes
+  with Docker and other services; `apply_store` writes
   `1` when an active NAT network exists and otherwise leaves it alone.
 
 **The daemon shell is a host login, and only an administrator's.** (`daemon/src/api/shell.rs`.) A Shell tab on a server page opens a login shell on the hypervisor host. Things that bite:
@@ -751,27 +686,27 @@ Rows go into a capture table as a whole `<table>` through `setHtml`: bare
 `<tr>` markup is dropped by the sanitizer outside a table, which once showed a
 capture counting packets while displaying none.
 
-**Read `VIR_DOMAIN_XML_INACTIVE` for firewall/filterref work.** A running
-guest's live XML omits filterrefs added since boot, so reading live XML loses
-them on the next write.
-
-**A domain can have two `<graphics>` devices** (one VNC, one SPICE). Never take
-the first one: `parse_graphics` prefers VNC (the only protocol the built-in
-viewer speaks) and the `.vv` endpoint prefers SPICE.
+**A guest has one `<graphics>` device, either VNC or SPICE.** `domainxml`
+refuses a second display adapter, so the definition's one device decides the
+console: the built-in viewer for VNC, the `.vv` handoff for SPICE. `pick_graphics`
+still selects by kind, preferring SPICE when no kind is named.
 
 **SPICE has no browser console.** Do not try to add one — the last attempt is
 documented in `DESIGN.md`. SPICE guests get a virt-viewer `.vv` file.
 
-**A `.vv` file names a one-shot relay, not the guest's display.** Guest
+**A `.vv` file names a short-lived relay, not the guest's display.** Guest
 displays listen on 127.0.0.1, so a file naming them only works on the
-hypervisor. `GET …/console/vv` opens a relay port (`[::]:0`) that accepts **one**
-connection, only from the address that asked, within 60 s, and splices it to
-the display (`console.rs` `relay_once`). The web proxy sets `client` from the
-browser's socket address and `host` to the name the viewer can reach, and
-strips any the browser sent: a client-chosen `client` would open the relay to
-anyone. The SPA fetches the file on click (`downloadVv`), never via a link,
-because the relay is gone a minute later. The host firewall must allow
-ephemeral TCP ports from viewers for this to work off-host.
+hypervisor. `GET …/console/vv` opens a relay port (`[::]:0`) that accepts
+connections for 60 s, and only from the address that asked, splicing each to the
+display (`console.rs` `relay_once`). It keeps accepting rather than taking one
+connection: SPICE opens a channel per socket (main, display, inputs, …), and a
+one-shot relay left virt-viewer unable to display anything. Channels already
+open when the minute ends keep working; new ones stop. The web proxy sets
+`client` from the browser's socket address and `host` to the name the viewer
+can reach, and strips any the browser sent: a client-chosen `client` would open
+the relay to anyone. The SPA fetches the file on click (`downloadVv`), never
+via a link, because the relay is gone a minute later. The host firewall must
+allow ephemeral TCP ports from viewers for this to work off-host.
 
 **Daemon reachability is probed server-side** (`web/server/src/health.rs`,
 every 3 s). Two failures in a row mark a server offline and one success brings
