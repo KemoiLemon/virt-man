@@ -63,8 +63,20 @@ function relTime(ms: number): string {
 /// esc() at the call site; DOMPurify is the sanitizing backstop the XSS rule
 /// requires.
 function setHtml(el: Element, html: string) {
+  // A poll repaints the whole pane, so a table that is its own horizontal
+  // scroller would jump back to column 1 every second. Keep each table's
+  // offset across a repaint of the same view. Only the content pane consumes
+  // the navigation reset, so a dialog repaint cannot swallow it mid-navigation.
+  const newView = tableScrollReset && (el as HTMLElement).id === "content";
+  if (newView) tableScrollReset = false;
+  const scrollLeft = newView
+    ? []
+    : [...el.querySelectorAll("table.grid")].map((t) => t.scrollLeft);
   // pi-lens-ignore: no-inner-html, no-inner-html-js
   el.innerHTML = DOMPurify.sanitize(html);
+  [...el.querySelectorAll("table.grid")].forEach((t, i) => {
+    if (scrollLeft[i]) t.scrollLeft = scrollLeft[i];
+  });
   // Every render path funnels through here, so this is the one place that has
   // to swap native <select> elements for the themed listbox.
   enhanceSelects(el);
@@ -290,9 +302,14 @@ function shownPool(name: string): string {
 /// A new view pushes a history entry (Back works); re-rendering the same view
 /// (the 1s poll) does not.
 let restoringRoute = false;
+/// A real navigation must not carry a table's scroll offset into the next
+/// view. `syncUrl` sets this when the path changes; the next `setHtml` consumes
+/// it, while the 1s poll (same path) keeps the offsets.
+let tableScrollReset = false;
 function syncUrl() {
   const path = routeToPath(currentRoute(), connections);
   if (location.pathname === path) return;
+  tableScrollReset = true;
   // A real navigation scrolled the drawer away with the page it belonged to.
   // Closing it HERE and nowhere else is deliberate: this function is the one
   // funnel every way of navigating passes through (tree, cards, tabs, context

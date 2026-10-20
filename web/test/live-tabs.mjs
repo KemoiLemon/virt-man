@@ -200,6 +200,21 @@ check("a network page shows card info and an IPAM table", () => {
   results.push(["info", `network cards: ${labels.join(", ")}`]);
 });
 
+// The 1s daemon poll repaints the pane. A wide table is its own scroller now,
+// so the repaint must not send it back to the first column.
+{
+  const table = document.querySelector("#ipam-hosts");
+  if (table) {
+    table.scrollLeft = 60;
+    await wait(1400);
+    check("a daemon poll keeps the table's horizontal position", () => {
+      const again = document.querySelector("#ipam-hosts");
+      assert.ok(again, "the table is still rendered");
+      assert.equal(again.scrollLeft, 60, "scrollLeft survives the repaint");
+    });
+  }
+}
+
 // Switching away from a resource page must stick: a stale selection lets the
 // 1s poll keep re-rendering the network page over whatever the user moved to,
 // which is the reported "the network page just returns".
