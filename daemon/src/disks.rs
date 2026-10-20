@@ -15,7 +15,6 @@
 //! disagree about what is safe to remove.
 
 use std::collections::HashSet;
-use virt::connect::Connect;
 
 use crate::pools::Pools;
 
@@ -30,8 +29,8 @@ pub enum DiskSource {
 
 impl DiskSource {
     /// Stable identity for "is this the same backing store?" comparisons.
-    /// Pool/volume names are case-sensitive in libvirt, so they compare as
-    /// written; paths are compared lexically.
+    /// Pool/volume names are case-sensitive, so they compare as written;
+    /// paths are compared lexically.
     pub fn label(&self) -> String {
         match self {
             DiskSource::Path(p) => format!("file:{p}"),
@@ -185,17 +184,6 @@ pub fn disk_refs(xml: &str) -> Vec<DiskRef> {
         }
         rest = &block[end + 7..];
     }
-    // A container's rootfs is not a <disk>: libvirt sees only the directory
-    // it is mounted on. The image is recorded in the definition's metadata
-    // (`ct::rootfs_of`) and counts as the guest's own disk, so the in-use
-    // check protects it and deleting the container removes it.
-    if let Some(path) = crate::ct::rootfs_of(xml) {
-        out.push(DiskRef {
-            source: DiskSource::Path(path),
-            device: "disk".into(),
-            readonly: false,
-        });
-    }
     out
 }
 
@@ -264,51 +252,40 @@ pub fn plan_cleanup_connected(
     plan_cleanup(xml, used_elsewhere, |s| labels(pools, s))
 }
 
-/// Every backing store referenced by a domain other than `excluding`.
+/// Every backing store referenced by a guest definition other than `excluding`.
 ///
-/// Both the running and the persistent definition are read: a guest that is
-/// currently running holds its disks even if the persistent definition was
-/// just removed.
+/// The definitions come from the direct-QEMU manager, the only source of VM
+/// definitions, so every disk a guest holds is visible to the in-use check.
 pub fn sources_used_elsewhere(
-    c: &Connect,
+    guests: &[(String, String)],
     pools: &Pools,
     excluding: Option<&str>,
 ) -> HashSet<String> {
     let mut used = HashSet::new();
-    // Cannot enumerate: nothing is reported in use. The caller's own ISO and
-    // read-only guards still apply, and a failure must not block a delete.
-    let domains = crate::libvirt::all_domains(c, 0);
-    for d in domains {
-        let name = d.get_name().unwrap_or_default();
+    for (name, xml) in guests {
         if Some(name.as_str()) == excluding {
             continue;
         }
-        if let Ok(xml) = d.get_xml_desc(0) {
-            for r in disk_refs(&xml) {
-                used.extend(labels(pools, &r.source));
-            }
+        for r in disk_refs(xml) {
+            used.extend(labels(pools, &r.source));
         }
     }
     used
 }
 
 /// Every disk label (volume reference and path) mapped to the guests that
-/// hold it, built from one pass over the domains. For a volume list: asking
-/// `referencing_domains` per volume walks every guest once per volume.
+/// hold it, built from one pass over the guest definitions. For a volume list:
+/// asking `referencing_domains` per volume walks every guest once per volume.
 pub fn holders_by_label(
-    c: &Connect,
+    guests: &[(String, String)],
     pools: &Pools,
 ) -> std::collections::HashMap<String, Vec<String>> {
     let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
-    let domains = crate::libvirt::all_domains(c, 0);
-    for d in domains {
-        let (Ok(xml), name) = (d.get_xml_desc(0), d.get_name().unwrap_or_default()) else {
-            continue;
-        };
-        for r in disk_refs(&xml) {
+    for (name, xml) in guests {
+        for r in disk_refs(xml) {
             for l in labels(pools, &r.source) {
                 let v = out.entry(l).or_default();
-                if !v.contains(&name) {
+                if !v.contains(name) {
                     v.push(name.clone());
                 }
             }
@@ -350,20 +327,32 @@ pub fn references_target(pools: &Pools, refs: &[DiskRef], target: &DiskSource) -
         .any(|r| labels(pools, &r.source).iter().any(|l| wanted.contains(l)))
 }
 
-/// Names of domains that reference `target`, for refusing a direct volume
+/// Names of guests that reference `target`, for refusing a direct volume
 /// delete with a clear reason.
-pub fn referencing_domains(c: &Connect, pools: &Pools, target: &DiskSource) -> Vec<String> {
+pub fn referencing_domains(
+    guests: &[(String, String)],
+    pools: &Pools,
+    target: &DiskSource,
+) -> Vec<String> {
     let mut out = Vec::new();
-    let domains = crate::libvirt::all_domains(c, 0);
-    for d in domains {
-        let Ok(xml) = d.get_xml_desc(0) else {
-            continue;
-        };
-        if references_target(pools, &disk_refs(&xml), target) {
-            out.push(d.get_name().unwrap_or_default());
+    for (name, xml) in guests {
+        if references_target(pools, &disk_refs(xml), target) {
+            out.push(name.clone());
         }
     }
     out
+}
+
+/// Every guest definition the in-use checks must see: the direct-QEMU
+/// manager's stored XMLs. The in-use checks use only this backend's own
+/// definitions, so a disk no manager VM holds is removable.
+pub fn guest_definitions(manager: &crate::qemu::Manager) -> Vec<(String, String)> {
+    manager
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| (c.id, c.xml))
+        .collect()
 }
 
 #[cfg(test)]
@@ -570,7 +559,7 @@ mod tests {
 
     /// The volume-delete refusal compares backing stores, not spellings: a
     /// guest naming the file by path must stop a delete addressed by
-    /// pool+volume. Pure, with a real temp pool root and no libvirt.
+    /// pool+volume. Pure, with a real temp pool root and no manager.
     #[test]
     fn a_volume_delete_sees_a_disk_the_guest_names_by_path() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -627,5 +616,43 @@ mod tests {
             plan_cleanup(xml, &empty(), |s| vec![s.label()]),
             Cleanup::default()
         );
+    }
+
+    /// The in-use checks read the direct-QEMU manager's definitions: a disk a
+    /// manager VM holds is visible to a volume list and blocks a delete, and
+    /// excluding the guest being removed leaves its own disk removable.
+    #[test]
+    fn the_in_use_checks_read_manager_definitions() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-pools")
+            .join(format!("disks-defs-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pools = crate::pools::Pools::load(dir.join("pools.json")).unwrap();
+        let define = |name: &str| {
+            (
+                name.to_string(),
+                format!(
+                    "<domain><devices><disk type='file' device='disk'>\
+                     <source file='/img/{name}.qcow2'/></disk></devices></domain>"
+                ),
+            )
+        };
+        let guests = vec![define("a"), define("b")];
+        let held = holders_by_label(&guests, &pools);
+        assert_eq!(
+            holders_of(&held, "p", "a.qcow2", "/img/a.qcow2"),
+            ["a"],
+            "a volume list sees the QEMU disk"
+        );
+        let used = sources_used_elsewhere(&guests, &pools, Some("a"));
+        assert!(used.contains(&DiskSource::Path("/img/b.qcow2".into()).label()));
+        assert!(
+            !used.contains(&DiskSource::Path("/img/a.qcow2".into()).label()),
+            "the guest being deleted is excluded"
+        );
+        let target = DiskSource::Path("/img/a.qcow2".into());
+        assert_eq!(referencing_domains(&guests, &pools, &target), ["a"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,36 +1,37 @@
 //! Guest network interfaces: hot-add, hot-remove and live rate limits.
 //!
-//! Every change is applied to the persistent definition and, when the guest is
-//! running, to the live guest as well (`AFFECT_LIVE | AFFECT_CONFIG`), so it
-//! takes effect now and survives a restart. Measured against libvirt 11 /
-//! QEMU 11, three facts shape this module:
+//! Every change is applied to the definition the QEMU manager stores and, when
+//! the guest is running, to the live process as well, so it takes effect now
+//! and survives a restart. The manager owns the QMP side; this module owns the
+//! XML the form sends and the host `tc` shaping, because only the API may run
+//! host commands.
 //!
-//! - A rate limit set live is enforced at once: libvirt installs an htb qdisc
-//!   and an ingress policer on the host tap (`tc` shows the rate), no restart.
-//! - Hot-add needs a hotplug-capable bus. q35 guests (what Create VM defines)
-//!   take it; an i440fx guest refuses with "Bus 'pci.0' does not support
-//!   hotplugging". That error is passed through rather than hidden.
-//! - Hot-remove is a *request* to the guest OS. libvirt returns success once it
-//!   has asked; a guest that ignores the ACPI eject (no OS, or one that blocks
-//!   it) keeps the NIC. So a removal reports `pending` when the device is still
-//!   in the live XML, instead of claiming it is gone.
-//!
-//! Rates are taken in Mbit/s (what people think in) and stored as libvirt's
-//! KiB/s. `inbound` is traffic *to* the guest (its RX), `outbound` from it (TX).
+//! Rates are taken in Mbit/s (what people think in) and stored as KiB/s.
+//! `inbound` is traffic *to* the guest (its RX), `outbound` from it (TX).
 
 use axum::extract::{Path, State};
 use axum::routing::{post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use virt::domain::Domain;
-use virt::sys;
+use std::process::Command;
 
 use super::ApiError;
 use super::firewall::FirewallState;
-use crate::libvirt::with_conn;
+use crate::ipam::server::Ipam;
+use crate::qemu::Manager;
 
-pub fn routes(fw: FirewallState) -> Router {
+#[derive(Clone)]
+struct NicState {
+    manager: Manager,
+    /// The network store: a NIC names a network, and only the store knows the
+    /// bridge that network runs now.
+    ipam: Ipam,
+    /// A NIC change adds or removes a MAC, and per-VM rules are scoped to MACs.
+    fw: FirewallState,
+}
+
+pub fn routes(manager: Manager, ipam: Ipam, fw: FirewallState) -> Router {
     Router::new()
         .route("/domains/{name}/interfaces", post(add))
         .route(
@@ -41,12 +42,12 @@ pub fn routes(fw: FirewallState) -> Router {
             "/domains/{name}/interfaces/{mac}/bandwidth",
             put(set_bandwidth),
         )
-        .with_state(fw)
+        .with_state(NicState { manager, ipam, fw })
 }
 
-/// One Mbit/s in libvirt's bandwidth unit (KiB/s): 10^6 / 8 / 1024.
+/// One Mbit/s in the stored `<bandwidth>` unit (KiB/s): 10^6 / 8 / 1024.
 const KIB_PER_MBIT: f64 = 1_000_000.0 / 8.0 / 1024.0;
-/// libvirt caps `average` at a 32-bit KiB/s; ~34 Tbit/s is no real limit.
+/// `average` is a 32-bit KiB/s; ~34 Tbit/s is no real limit.
 const MAX_MBPS: f64 = u32::MAX as f64 / KIB_PER_MBIT;
 
 pub fn mbps_to_kib(mbps: f64) -> u64 {
@@ -64,111 +65,28 @@ pub fn check_rate(v: Option<f64>, which: &str) -> Result<Option<f64>, String> {
         None => Ok(None),
         Some(x) if !x.is_finite() || x < 0.0 => Err(format!("{which} must be a positive number")),
         Some(0.0) => Ok(None),
-        Some(x) if x > MAX_MBPS => Err(format!("{which} is larger than libvirt accepts")),
-        // Below 1 KiB/s rounds to zero, which libvirt reads as "unlimited".
+        Some(x) if x > MAX_MBPS => Err(format!("{which} is larger than the maximum rate")),
+        // Below 1 KiB/s rounds to zero, which is read back as "unlimited".
         Some(x) if mbps_to_kib(x) == 0 => Err(format!("{which} is too small (under 1 KiB/s)")),
         Some(x) => Ok(Some(x)),
     }
 }
 
-/// A MAC in canonical lower-case colon form, or an error.
+/// A MAC in canonical lower-case colon form, unicast and not all-zero.
 pub fn normalize_mac(mac: &str) -> Result<String, String> {
-    let m = mac.trim().to_ascii_lowercase();
-    let parts: Vec<&str> = m.split(':').collect();
-    let ok = parts.len() == 6
-        && parts
-            .iter()
-            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()));
-    if !ok {
-        return Err(format!("'{mac}' is not a MAC address"));
-    }
-    // The low bit of the first octet marks multicast, which a NIC cannot use.
-    if u8::from_str_radix(parts[0], 16)
-        .map(|b| b & 1 == 1)
-        .unwrap_or(true)
-    {
-        return Err(format!("'{mac}' is a multicast address"));
-    }
-    Ok(m)
+    crate::domainxml::normalize_mac(mac)
 }
 
-/// The `<interface>...</interface>` block with this MAC, verbatim.
-pub fn interface_block<'a>(xml: &'a str, mac: &str) -> Option<&'a str> {
-    let mut rest = xml;
-    let mut offset = 0;
-    while let Some(i) = rest.find("<interface") {
-        let block = &rest[i..];
-        let end = block.find("</interface>")? + "</interface>".len();
-        let b = &block[..end];
-        if b.to_ascii_lowercase().contains(&format!("'{mac}'"))
-            || b.to_ascii_lowercase().contains(&format!("\"{mac}\""))
-        {
-            return Some(&xml[offset + i..offset + i + end]);
-        }
-        offset += i + end;
-        rest = &xml[offset..];
-    }
-    None
-}
-
-/// Replace (or add, or drop) the `<bandwidth>` of an interface block.
-pub fn with_bandwidth(block: &str, inbound_kib: Option<u64>, outbound_kib: Option<u64>) -> String {
-    // Remove any existing <bandwidth>, in either shape.
-    let mut out = block.to_string();
-    if let Some(s) = out.find("<bandwidth") {
-        let tail = &out[s..];
-        let end = if let Some(e) = tail.find("</bandwidth>") {
-            e + "</bandwidth>".len()
-        } else {
-            tail.find("/>").map(|e| e + 2).unwrap_or(tail.len())
-        };
-        // Also swallow the indentation/newline in front of it.
-        let start = out[..s].trim_end_matches([' ', '\t']).len();
-        let start = if out[..start].ends_with('\n') {
-            start - 1
-        } else {
-            start
-        };
-        out.replace_range(start..s + end, "");
-    }
-    if inbound_kib.is_none() && outbound_kib.is_none() {
-        return out;
-    }
-    let mut bw = String::from("\n  <bandwidth>");
-    if let Some(k) = inbound_kib {
-        bw.push_str(&format!("\n    <inbound average='{k}'/>"));
-    }
-    if let Some(k) = outbound_kib {
-        bw.push_str(&format!("\n    <outbound average='{k}'/>"));
-    }
-    bw.push_str("\n  </bandwidth>\n");
-    let close = out.rfind("</interface>").unwrap_or(out.len());
-    out.insert_str(close, &bw);
-    out
-}
-
-/// Read an `average` from a direction tag inside `<bandwidth>`.
-pub fn bandwidth_of(block: &str) -> (Option<u64>, Option<u64>) {
-    let Some(s) = block.find("<bandwidth") else {
-        return (None, None);
-    };
-    let bw = &block[s..];
-    let read = |dir: &str| -> Option<u64> {
-        let t = &bw[bw.find(&format!("<{dir}"))?..];
-        let t = &t[..t.find('>')?];
-        let a = &t[t.find("average=")? + "average=".len()..];
-        let q = a.chars().next()?;
-        let a = &a[1..];
-        a[..a.find(q)?].parse().ok()
-    };
-    (read("inbound"), read("outbound"))
-}
-
-/// Flags for a device change: always the persistent definition, and the live
-/// guest too when it is running.
-fn affect(d: &Domain) -> u32 {
-    let live = d.is_active().unwrap_or(false);
-    sys::VIR_DOMAIN_AFFECT_CONFIG | if live { sys::VIR_DOMAIN_AFFECT_LIVE } else { 0 }
+/// The `<interface>` element the add form asks for. The bridge comes from the
+/// store (a derived `vbr…` name or a checked operator bridge), never from the
+/// request, so nothing unvalidated is interpolated.
+fn interface_xml(bridge: &str, model: &str, mac: Option<&str>) -> String {
+    let mac = mac
+        .map(|m| format!("<mac address='{m}'/>"))
+        .unwrap_or_default();
+    format!(
+        "<interface type='bridge'>{mac}<source bridge='{bridge}'/><model type='{model}'/></interface>"
+    )
 }
 
 /// A NIC change alters the guest's MAC set, which scopes its firewall rules.
@@ -180,6 +98,23 @@ async fn reapply_firewall(fw: &FirewallState) -> Option<String> {
         Err(e) => return Some(e),
     };
     super::firewall::apply_store(&fw.ipam, &store).await.err()
+}
+
+/// Refresh the snapshot so a new MAC has its reservation before the rules that
+/// are keyed by it are rebuilt. A failed pass is logged; the supervisor's next
+/// pass settles it.
+async fn refresh_ipam(ipam: &Ipam, manager: &Manager) {
+    if let Err(e) = crate::ipam::server::supervise_once(ipam, manager).await {
+        tracing::warn!("nics: refreshing IPAM: {e}");
+    }
+}
+
+fn map_err(e: String) -> ApiError {
+    if e.contains("unknown QEMU") {
+        ApiError::not_found(e)
+    } else {
+        ApiError::bad_request(e)
+    }
 }
 
 #[derive(Deserialize)]
@@ -194,7 +129,7 @@ struct AddReq {
 }
 
 async fn add(
-    State(fw): State<FirewallState>,
+    State(s): State<NicState>,
     Path(name): Path<String>,
     Json(req): Json<AddReq>,
 ) -> Result<Json<Value>, ApiError> {
@@ -202,8 +137,10 @@ async fn add(
     if network.is_empty() || network.contains(['\'', '"', '<', '>', '&']) {
         return Err(ApiError::bad_request("choose a network"));
     }
+    // Models the direct-QEMU definition can express. Anything else is refused
+    // here rather than stored as a NIC QEMU cannot create.
     let model = req.model.unwrap_or_else(|| "virtio".into());
-    if !matches!(model.as_str(), "virtio" | "e1000e" | "e1000" | "rtl8139") {
+    if !matches!(model.as_str(), "virtio" | "e1000e" | "rtl8139") {
         return Err(ApiError::bad_request(format!(
             "unknown NIC model '{model}'"
         )));
@@ -212,73 +149,36 @@ async fn add(
         Some(m) => Some(normalize_mac(m).map_err(ApiError::bad_request)?),
         None => None,
     };
-    // These networks are not defined in libvirt: a guest is put on the
-    // network's bridge. The store is the only place that mapping lives.
-    let bridge = fw
+    let bridge = s
         .ipam
         .bridge_for(&network)
         .ok_or_else(|| ApiError::bad_request(format!("unknown network '{network}'")))?;
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        let live = d.is_active().unwrap_or(false);
-        let mac_xml = mac
-            .as_deref()
-            .map(|m| format!("<mac address='{m}'/>"))
-            .unwrap_or_default();
-        // `bridge` comes from the daemon's validated store (a derived `vbr…`
-        // name or the operator's checked bridge), never from the request, so
-        // it is safe to interpolate here.
-        let xml = format!(
-            "<interface type='bridge'>{mac_xml}<source bridge='{bridge}'/><model type='{model}'/></interface>"
-        );
-        d.attach_device_flags(&xml, affect(&d))
-            .map_err(|e| hotplug_hint(&e.to_string(), live))?;
-        // libvirt picks the MAC when none was given; report the one it chose
-        // (the last interface on the network is the one just added).
-        let after = d.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)?;
-        let chosen = mac.clone().or_else(|| {
-            super::firewall::domain_macs(&after).into_iter().last()
-        });
-        Ok(json!({"name": name, "mac": chosen, "live": live}))
-    })
-    .await
-    .map_err(ApiError::bad_request)?;
-    let fw_err = reapply_firewall(&fw).await;
-    Ok(Json(with_warning(v, fw_err)))
+    let xml = interface_xml(&bridge, &model, mac.as_deref());
+    let (mac, live) = s.manager.add_nic_xml(&name, &xml).map_err(map_err)?;
+    refresh_ipam(&s.ipam, &s.manager).await;
+    let fw_err = reapply_firewall(&s.fw).await;
+    Ok(Json(with_warning(
+        json!({"name": name, "mac": mac, "live": live}),
+        fw_err,
+    )))
 }
 
 async fn remove(
-    State(fw): State<FirewallState>,
+    State(s): State<NicState>,
     Path((name, mac)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let mac = normalize_mac(&mac).map_err(ApiError::bad_request)?;
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        let live = d.is_active().unwrap_or(false);
-        // Detach by the definition's own block, so libvirt matches it exactly.
-        let config = d.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)?;
-        let live_xml = d.get_xml_desc(0)?;
-        let block = interface_block(&config, &mac)
-            .or_else(|| interface_block(&live_xml, &mac))
-            .ok_or_else(|| format!("no interface with MAC {mac}"))?
-            .to_string();
-        let mut flags = sys::VIR_DOMAIN_AFFECT_CONFIG;
-        if live && interface_block(&live_xml, &mac).is_some() {
-            flags |= sys::VIR_DOMAIN_AFFECT_LIVE;
-        }
-        if interface_block(&config, &mac).is_none() {
-            // Only in the live guest (hot-added without config): live only.
-            flags = sys::VIR_DOMAIN_AFFECT_LIVE;
-        }
-        d.detach_device_flags(&block, flags)?;
-        // The guest may still be holding it: an unplug is only a request.
-        let pending = live && interface_block(&d.get_xml_desc(0)?, &mac).is_some();
-        Ok(json!({"name": name, "mac": mac, "removed": true, "pending": pending}))
-    })
-    .await
-    .map_err(ApiError::bad_request)?;
-    let fw_err = reapply_firewall(&fw).await;
-    Ok(Json(with_warning(v, fw_err)))
+    let pending = s.manager.remove_nic(&name, &mac).map_err(map_err)?;
+    if !pending {
+        // The MAC is gone from the definition, so the guest snapshot can drop
+        // it in the same request rather than one supervisor pass later.
+        refresh_ipam(&s.ipam, &s.manager).await;
+    }
+    let fw_err = reapply_firewall(&s.fw).await;
+    Ok(Json(with_warning(
+        json!({"name": name, "mac": mac, "removed": true, "pending": pending}),
+        fw_err,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -292,52 +192,106 @@ struct BandwidthReq {
 }
 
 async fn set_bandwidth(
+    State(s): State<NicState>,
     Path((name, mac)): Path<(String, String)>,
     Json(req): Json<BandwidthReq>,
 ) -> Result<Json<Value>, ApiError> {
     let mac = normalize_mac(&mac).map_err(ApiError::bad_request)?;
     let rx = check_rate(req.rx_mbps, "RX limit").map_err(ApiError::bad_request)?;
     let tx = check_rate(req.tx_mbps, "TX limit").map_err(ApiError::bad_request)?;
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        let live = d.is_active().unwrap_or(false);
-        // Edit the persistent block: it is the one that survives a restart,
-        // and update-device matches the live NIC by its MAC.
-        let config = d.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)?;
-        let block =
-            interface_block(&config, &mac).ok_or_else(|| format!("no interface with MAC {mac}"))?;
-        let updated = with_bandwidth(block, rx.map(mbps_to_kib), tx.map(mbps_to_kib));
-        d.update_device_flags(&updated, affect(&d))?;
-        Ok(json!({
-            "name": name, "mac": mac, "live": live,
-            "rx_mbps": rx.map(|x| kib_to_mbps(mbps_to_kib(x))),
-            "tx_mbps": tx.map(|x| kib_to_mbps(mbps_to_kib(x))),
-        }))
-    })
-    .await
-    .map_err(ApiError::bad_request)?;
-    Ok(Json(v))
+    let rx_kib = rx.map(mbps_to_kib);
+    let tx_kib = tx.map(mbps_to_kib);
+    let tap = s
+        .manager
+        .set_nic_bandwidth(&name, &mac, rx_kib, tx_kib)
+        .map_err(map_err)?;
+    // A running bridge NIC has a tap; a stopped (or user-mode) one took the
+    // definition only, and the answer says it is pending.
+    if let Some(tap) = &tap {
+        apply_tc(tap, rx_kib, tx_kib).map_err(ApiError::internal)?;
+    }
+    let live = tap.is_some();
+    Ok(Json(json!({
+        "name": name, "mac": mac, "live": live, "pending": !live,
+        "rx_mbps": rx.map(|x| kib_to_mbps(mbps_to_kib(x))),
+        "tx_mbps": tx.map(|x| kib_to_mbps(mbps_to_kib(x))),
+    })))
 }
 
-/// Turn libvirt's hot-plug failures into something actionable. Both mean the
-/// running guest has nowhere to put the device; the persistent definition is
-/// untouched, so the fix is to add it while the guest is shut off (libvirt
-/// then creates the slot), or to give the guest spare PCIe root ports.
-fn hotplug_hint(err: &str, live: bool) -> String {
-    let no_slot = err.contains("No more available PCI slots");
-    let no_hotplug = err.contains("does not support hotplugging");
-    if live && (no_slot || no_hotplug) {
-        let why = if no_slot {
-            "the running guest has no free PCIe slot"
-        } else {
-            "this guest's machine type cannot hot-plug devices"
-        };
-        return format!(
-            "{why}; shut it down and add the interface then (guests created by \
-             virt-man have spare slots for hot-plug). libvirt: {err}"
-        );
+/// One `tc` invocation. A `del` is best-effort: the qdisc may not be there.
+#[derive(Debug, PartialEq, Eq)]
+struct TcCommand {
+    args: Vec<String>,
+    ignore_failure: bool,
+}
+
+fn cmd(args: &[&str]) -> TcCommand {
+    TcCommand {
+        args: args.iter().map(|s| s.to_string()).collect(),
+        ignore_failure: false,
     }
-    err.to_string()
+}
+
+fn del(args: &[&str]) -> TcCommand {
+    TcCommand {
+        args: args.iter().map(|s| s.to_string()).collect(),
+        ignore_failure: true,
+    }
+}
+
+/// The host shaping for one tap. RX (traffic *to* the guest) is the tap's
+/// egress, so it is an htb class; TX (from the guest) arrives on the tap's
+/// ingress, so it is a policer. A direction with no limit has its qdisc removed
+/// instead, or a cleared limit would keep shaping.
+fn tc_plan(tap: &str, rx_kib: Option<u64>, tx_kib: Option<u64>) -> Vec<TcCommand> {
+    let mut out = Vec::new();
+    match rx_kib.filter(|k| *k > 0) {
+        Some(k) => {
+            let rate = format!("{k}kbit");
+            out.push(cmd(&[
+                "qdisc", "replace", "dev", tap, "root", "handle", "1:", "htb", "default", "1",
+            ]));
+            out.push(cmd(&[
+                "class", "replace", "dev", tap, "parent", "1:", "classid", "1:1", "htb", "rate",
+                &rate, "ceil", &rate,
+            ]));
+        }
+        None => out.push(del(&["qdisc", "del", "dev", tap, "root"])),
+    }
+    match tx_kib.filter(|k| *k > 0) {
+        Some(k) => {
+            let rate = format!("{k}kbit");
+            out.push(cmd(&[
+                "qdisc", "replace", "dev", tap, "handle", "ffff:", "ingress",
+            ]));
+            out.push(cmd(&[
+                "filter", "replace", "dev", tap, "parent", "ffff:", "protocol", "all", "prio", "1",
+                "u32", "match", "u32", "0", "0", "police", "rate", &rate, "burst", "1m", "drop",
+                "flowid", ":1",
+            ]));
+        }
+        None => out.push(del(&["qdisc", "del", "dev", tap, "ingress"])),
+    }
+    out
+}
+
+/// Run the plan with argv only. A failed `replace` is an error: the definition
+/// already holds the limit, so silently not enforcing it would be a lie.
+fn apply_tc(tap: &str, rx_kib: Option<u64>, tx_kib: Option<u64>) -> Result<(), String> {
+    for c in tc_plan(tap, rx_kib, tx_kib) {
+        let out = Command::new("tc")
+            .args(&c.args)
+            .output()
+            .map_err(|e| format!("run tc: {e}"))?;
+        if !out.status.success() && !c.ignore_failure {
+            return Err(format!(
+                "tc {}: {}",
+                c.args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The NIC change itself succeeded; a firewall re-apply failure is reported
@@ -353,40 +307,8 @@ fn with_warning(mut v: Value, fw_err: Option<String>) -> Value {
 mod tests {
     use super::*;
 
-    const XML: &str = "<domain><devices>
-    <interface type='network'>
-      <mac address='52:54:00:aa:bb:01'/>
-      <source network='internet'/>
-      <model type='virtio'/>
-    </interface>
-    <interface type='network'>
-      <mac address='52:54:00:aa:bb:02'/>
-      <source network='internal'/>
-      <model type='virtio'/>
-      <bandwidth>
-        <inbound average='1250'/>
-        <outbound average='2500'/>
-      </bandwidth>
-    </interface>
-  </devices></domain>";
-
     #[test]
-    fn hotplug_failures_explain_the_fix() {
-        let e = "internal error: No more available PCI slots";
-        assert!(hotplug_hint(e, true).starts_with("the running guest has no free PCIe slot"));
-        let e =
-            "unable to execute QEMU command 'device_add': Bus 'pci.0' does not support hotplugging";
-        assert!(hotplug_hint(e, true).contains("cannot hot-plug"));
-        assert_eq!(
-            hotplug_hint(e, false),
-            e,
-            "a shut-off guest's error is passed through"
-        );
-        assert_eq!(hotplug_hint("other", true), "other");
-    }
-
-    #[test]
-    fn mbps_round_trips_through_libvirts_unit() {
+    fn mbps_round_trips_through_kib_per_second() {
         assert_eq!(mbps_to_kib(10.0), 1221, "10 Mbit/s = 1220.7 KiB/s");
         for m in [1.0, 10.0, 100.0, 250.0, 1000.0] {
             assert_eq!(
@@ -404,7 +326,10 @@ mod tests {
         assert_eq!(check_rate(Some(50.0), "x"), Ok(Some(50.0)));
         assert!(check_rate(Some(-1.0), "x").is_err());
         assert!(check_rate(Some(f64::NAN), "x").is_err());
-        assert!(check_rate(Some(1e12), "x").is_err(), "beyond libvirt's u32");
+        assert!(
+            check_rate(Some(1e12), "x").is_err(),
+            "beyond the u32 KiB/s ceiling"
+        );
         assert!(
             check_rate(Some(0.001), "x").is_err(),
             "rounds to 0 KiB/s = unlimited"
@@ -426,52 +351,58 @@ mod tests {
         );
     }
 
+    /// The add form's element names the bridge, model and MAC the manager will
+    /// parse; a MAC the caller did not choose is absent, so the manager picks.
     #[test]
-    fn the_right_interface_block_is_found_by_mac() {
-        let b = interface_block(XML, "52:54:00:aa:bb:02").unwrap();
-        assert!(b.contains("internal") && !b.contains("internet"));
-        assert!(b.starts_with("<interface") && b.ends_with("</interface>"));
-        assert!(
-            interface_block(XML, "52:54:00:aa:bb:01")
-                .unwrap()
-                .contains("internet")
+    fn the_add_request_builds_an_interface_element() {
+        assert_eq!(
+            interface_xml("vbr0", "e1000e", Some("52:54:00:aa:bb:01")),
+            "<interface type='bridge'><mac address='52:54:00:aa:bb:01'/>\
+             <source bridge='vbr0'/><model type='e1000e'/></interface>"
         );
-        assert!(interface_block(XML, "52:54:00:aa:bb:99").is_none());
-    }
-
-    #[test]
-    fn bandwidth_is_read_per_direction() {
-        let b = interface_block(XML, "52:54:00:aa:bb:02").unwrap();
-        assert_eq!(bandwidth_of(b), (Some(1250), Some(2500)));
-        let none = interface_block(XML, "52:54:00:aa:bb:01").unwrap();
-        assert_eq!(bandwidth_of(none), (None, None));
-    }
-
-    #[test]
-    fn setting_bandwidth_replaces_rather_than_duplicates() {
-        let b = interface_block(XML, "52:54:00:aa:bb:02").unwrap();
-        let out = with_bandwidth(b, Some(100), None);
-        assert_eq!(out.matches("<bandwidth>").count(), 1, "old block removed");
-        assert_eq!(bandwidth_of(&out), (Some(100), None), "only inbound left");
         assert!(
-            out.contains("<source network='internal'/>"),
-            "rest untouched"
+            !interface_xml("vbr0", "virtio", None).contains("<mac"),
+            "the manager generates the MAC"
         );
-        assert!(out.trim_end().ends_with("</interface>"));
     }
 
+    /// The exact argv: RX is the egress htb class, TX the ingress policer. A
+    /// cleared direction deletes its qdisc instead, best-effort.
     #[test]
-    fn clearing_both_limits_drops_the_bandwidth_element() {
-        let b = interface_block(XML, "52:54:00:aa:bb:02").unwrap();
-        let out = with_bandwidth(b, None, None);
-        assert!(!out.contains("bandwidth"), "{out}");
-        assert!(out.contains("<mac address='52:54:00:aa:bb:02'/>"));
-    }
+    fn the_tc_plan_shapes_both_directions_and_clears_them() {
+        let both = tc_plan("tap0", Some(1250), Some(2500));
+        let args: Vec<String> = both
+            .iter()
+            .map(|c| format!("tc {}", c.args.join(" ")))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "tc qdisc replace dev tap0 root handle 1: htb default 1",
+                "tc class replace dev tap0 parent 1: classid 1:1 htb rate 1250kbit ceil 1250kbit",
+                "tc qdisc replace dev tap0 handle ffff: ingress",
+                "tc filter replace dev tap0 parent ffff: protocol all prio 1 u32 match u32 0 0 police rate 2500kbit burst 1m drop flowid :1",
+            ]
+        );
+        assert!(both.iter().all(|c| !c.ignore_failure));
 
-    #[test]
-    fn adding_bandwidth_to_an_unlimited_nic() {
-        let b = interface_block(XML, "52:54:00:aa:bb:01").unwrap();
-        let out = with_bandwidth(b, None, Some(42));
-        assert_eq!(bandwidth_of(&out), (None, Some(42)));
+        let cleared = tc_plan("tap0", None, None);
+        let args: Vec<String> = cleared
+            .iter()
+            .map(|c| format!("tc {}", c.args.join(" ")))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "tc qdisc del dev tap0 root",
+                "tc qdisc del dev tap0 ingress"
+            ]
+        );
+        assert!(cleared.iter().all(|c| c.ignore_failure));
+
+        let rx_only = tc_plan("tap0", Some(100), None);
+        assert_eq!(rx_only.len(), 3);
+        assert!(rx_only[1].args.contains(&"100kbit".to_string()));
+        assert!(rx_only[2].ignore_failure, "the ingress qdisc is cleared");
     }
 }

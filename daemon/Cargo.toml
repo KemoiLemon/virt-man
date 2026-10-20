@@ -15,7 +15,6 @@ path = "src/main.rs"
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
-virt = "0.4"
 rcgen = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,8 +35,10 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "stream"] }
 socket2 = { version = "0.6", features = ["all"] }
 uuid = { version = "1", features = ["v4"] }
-# Already in the tree through axum; `oneshot` re-dispatches /containers to
-# the /domains handlers under the LXC driver.
-tower = { version = "0.5", features = ["util"] }
+# The domain XML the SPA defines is nested (devices, disk sources, addresses),
+# and it is the durable definition now: a real parser, not string searches.
+roxmltree = "0.21.1"
 
 [dev-dependencies]
+# `oneshot` drives the routes directly in the in-module tests.
+tower = { version = "0.5", features = ["util"] }

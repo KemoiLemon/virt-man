@@ -1,8 +1,8 @@
 //! Per-network firewall rules and NAT port forwards.
 //!
-//! libvirt has no network-level firewall primitive (nwfilters apply to domain
-//! interfaces and have no "forward" direction or port forwarding), so these
-//! rules are enforced directly on the host with nftables. The daemon renders
+//! These rules are enforced directly on the host with nftables: there is no
+//! network-level firewall primitive above them, and per-interface filters have
+//! no "forward" direction or port forwarding. The daemon renders
 //! the whole set as one atomic `nft -f` script in its own `virt-man` table.
 //! Rules persist in `/etc/virt-man-daemon/firewall.json` and are re-applied at
 //! startup (nftables itself is not persistent across reboot).
@@ -21,7 +21,7 @@
 //! `vm-postrouting` chain masquerades a NAT network's outbound traffic, so
 //! replies find their way back.
 //!
-//! The table also owns what libvirt's network driver used to: a per-network
+//! The table also owns the network's base policy: a per-network
 //! accept/drop pair on the network's bridge (NAT forwards its guests, an
 //! isolated network drops their outbound traffic), with the masquerade for the
 //! NAT case. Those base rules are emitted after the explicit ones, so an
@@ -409,10 +409,10 @@ fn not_guest_bridge(field: &str, bridges: &[&str]) -> Option<String> {
 
 /// The automatic per-network forwarding rules for a network that is up.
 ///
-/// This is the half libvirt's network driver used to install: a NAT network
-/// lets its guests out and accepts only replies and DNAT'd connections back
-/// in; an isolated network drops guest traffic in both directions; a bridge
-/// network is the operator's, and the operator's firewall owns its policy.
+/// This is the network's base policy: a NAT network lets its guests out and
+/// accepts only replies and DNAT'd connections back in; an isolated network
+/// drops guest traffic in both directions; a bridge network is the operator's,
+/// and the operator's firewall owns its policy.
 ///
 /// The accepts are guarded against every other managed bridge, because one
 /// flat chain cannot "return to the network's own rules": an unguarded

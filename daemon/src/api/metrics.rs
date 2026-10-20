@@ -15,19 +15,20 @@ use axum::Router;
 use axum::extract::Extension;
 use axum::routing::get;
 use serde_json::{Value, json};
-use virt::connect::Connect;
-use virt::domain::Domain;
 
 use super::ApiError;
-use crate::disks::attr;
-use crate::libvirt::{domain_state_name, with_conn};
+use crate::domainxml::DiskDevice;
 use crate::pools::Pools;
+use crate::qemu::{Manager, VmConfig};
 
 pub fn routes() -> Router {
     Router::new().route("/metrics", get(metrics))
 }
 
-async fn metrics(Extension(pools): Extension<Pools>) -> Result<Json<Value>, ApiError> {
+async fn metrics(
+    Extension(pools): Extension<Pools>,
+    Extension(manager): Extension<Manager>,
+) -> Result<Json<Value>, ApiError> {
     let stat = std::fs::read_to_string("/proc/stat")
         .map_err(|e| ApiError::internal(format!("read /proc/stat: {e}")))?;
     let meminfo = std::fs::read_to_string("/proc/meminfo")
@@ -40,17 +41,20 @@ async fn metrics(Extension(pools): Extension<Pools>) -> Result<Json<Value>, ApiE
         "mem_total_kib": super::host::meminfo_kib(&meminfo, "MemTotal").unwrap_or(0),
         "mem_available_kib": super::host::meminfo_kib(&meminfo, "MemAvailable").unwrap_or(0),
     });
-    let (domains, pools) = (
-        with_conn(domains).await.map_err(ApiError::internal)?,
-        pool_metrics(&pools),
-    );
+    let domains = manager
+        .list()
+        .map_err(ApiError::internal)?
+        .iter()
+        .map(|cfg| domain(&manager, cfg))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(ApiError::internal)?;
     Ok(Json(json!({
         "sampled_at_ms": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         "host": host,
-        "pools": pools,
+        "pools": pool_metrics(&pools),
         "domains": domains,
     })))
 }
@@ -81,121 +85,145 @@ fn pool_metrics(pools: &Pools) -> Vec<Value> {
         .collect()
 }
 
-fn domains(c: &Connect) -> Result<Vec<Value>, crate::libvirt::LvError> {
-    let mut out = Vec::new();
-    for d in crate::libvirt::all_domains(c, 0) {
-        out.push(domain(&d)?);
-    }
-    Ok(out)
-}
-
-fn domain(d: &Domain) -> Result<Value, crate::libvirt::LvError> {
-    let info = d.get_info().ok();
-    let running = d.is_active().unwrap_or(false);
-    let (mut rss_kib, mut usable_kib) = (None::<u64>, None::<u64>);
-    if running && let Ok(stats) = d.memory_stats(0) {
-        for s in stats {
-            match s.tag {
-                7 => rss_kib = Some(s.val),    // VIR_DOMAIN_MEMORY_STAT_RSS
-                8 => usable_kib = Some(s.val), // VIR_DOMAIN_MEMORY_STAT_USABLE
-                _ => {}
-            }
-        }
-    }
-    // Live XML: a running guest's interfaces carry the `target dev` that
-    // interface_stats needs. A failed read fails the whole answer rather than
-    // listing the guest with no devices, which would delete their history.
-    let xml = d.get_xml_desc(0)?;
-    let uuid = d.get_uuid_string()?;
-    let nics: Vec<Value> = blocks(&xml, "<interface", "</interface>")
+/// One guest as the collector reads it. The definition supplies the device
+/// list, so a failed counter read is a zero on a known NIC, never a missing
+/// device whose history would be deleted.
+fn domain(manager: &Manager, cfg: &VmConfig) -> Result<Value, String> {
+    use std::os::unix::fs::MetadataExt;
+    let d = crate::domainxml::parse(&cfg.xml)?;
+    let stats = manager.stats(&cfg.id)?;
+    let nics: Vec<Value> = manager
+        .interfaces(&cfg.id)?
         .into_iter()
-        .filter_map(|b| {
-            let (dev, mac, _) = super::domains::interface_info(b);
-            let counters = dev.as_deref().and_then(|t| d.interface_stats(t).ok());
+        .filter_map(|i| {
             Some(json!({
-                "mac": mac?,
-                "rx_bytes": counters.as_ref().map(|s| s.rx_bytes.max(0)),
-                "tx_bytes": counters.as_ref().map(|s| s.tx_bytes.max(0)),
+                "name": i.dev.unwrap_or_default(),
+                "mac": i.mac?,
+                "rx_bytes": i.rx_bytes,
+                "tx_bytes": i.tx_bytes,
             }))
         })
         .collect();
-    let disks: Vec<Value> = disk_targets(&xml)
-        .into_iter()
-        .map(|dev| {
-            let bi = d.get_block_info(&dev, 0).ok();
+    let blocks = manager.block_stats(&cfg.id).unwrap_or_default();
+    let disks: Vec<Value> = d
+        .disks
+        .iter()
+        .filter(|x| x.device == DiskDevice::Disk)
+        .map(|x| {
+            // Capacity is the qcow2 virtual size when the header has one, as
+            // the storage pool reports it; allocation is the file's blocks.
+            let (capacity, allocation) = match &x.source {
+                Some(path) => match std::fs::metadata(path) {
+                    Ok(meta) => (
+                        Some(crate::pools::qcow2_capacity(path).unwrap_or(meta.len())),
+                        Some(meta.blocks().saturating_mul(512)),
+                    ),
+                    Err(_) => (None, None),
+                },
+                None => (None, None),
+            };
+            let (read_bytes, write_bytes) = blocks.get(&x.target).copied().unwrap_or((0, 0));
             json!({
-                "dev": dev,
-                "capacity": bi.as_ref().map(|b| b.capacity),
-                "allocation": bi.as_ref().map(|b| b.allocation),
+                // `dev` is what the history collector keys a disk series by;
+                // `target` names the same device in the definition.
+                "dev": x.target,
+                "target": x.target,
+                "capacity": capacity,
+                "allocation": allocation,
+                "read_bytes": read_bytes,
+                "write_bytes": write_bytes,
             })
         })
         .collect();
     Ok(json!({
-        "uuid": uuid,
-        // `ct` for a container: the web server keys history by UUID either
-        // way, but lists and permissions tell the two apart.
-        "kind": if xml.contains("<domain type='lxc'") { "ct" } else { "vm" },
-        "name": d.get_name().unwrap_or_default(),
-        "state": info.as_ref().map(|i| domain_state_name(i.state)).unwrap_or("unknown"),
-        "cpu_time_ns": info.as_ref().map(|i| i.cpu_time).unwrap_or(0),
-        "vcpus": info.as_ref().map(|i| i.nr_virt_cpu).unwrap_or(0),
-        "memory_kib": info.as_ref().map(|i| i.memory).unwrap_or(0),
-        "max_memory_kib": info.as_ref().map(|i| i.max_mem).unwrap_or(0),
-        "rss_kib": rss_kib,
-        "usable_kib": usable_kib,
+        "uuid": cfg.id,
+        "kind": "vm",
+        "name": cfg.name(),
+        "state": stats.state,
+        "cpu_time_ns": stats.cpu_time_ns,
+        "vcpus": u32::from(stats.vcpus),
+        "memory_kib": stats.memory_kib,
+        "max_memory_kib": stats.max_memory_kib,
+        "rss_kib": stats.rss_kib,
+        "usable_kib": stats.usable_kib,
         "nics": nics,
         "disks": disks,
     }))
 }
 
-/// Every `open … close` element in `xml`, as slices.
-fn blocks<'a>(xml: &'a str, open: &str, close: &str) -> Vec<&'a str> {
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(i) = rest.find(open) {
-        let block = &rest[i..];
-        let Some(end) = block.find(close) else { break };
-        out.push(&block[..end]);
-        rest = &block[end + close.len()..];
-    }
-    out
-}
-
-/// Target devs of the guest's disks (not cdroms or floppies: they hold shared
-/// media, whose fill level says nothing about the guest).
-fn disk_targets(xml: &str) -> Vec<String> {
-    blocks(xml, "<disk", "</disk>")
-        .into_iter()
-        .filter_map(|b| {
-            let open = &b[..b.find('>').unwrap_or(b.len())];
-            if attr(open, "device").unwrap_or("disk") != "disk" {
-                return None;
-            }
-            let t = &b[b.find("<target")?..];
-            attr(&t[..t.find('>')?], "dev").map(str::to_string)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::qemu::Manager;
 
-    #[test]
-    fn disk_targets_skip_shared_media() {
-        let xml = r#"<devices>
-          <disk type='file' device='disk'><source file='/a.qcow2'/><target dev='vda' bus='virtio'/></disk>
-          <disk type="volume" device="cdrom"><source pool="ISOs" volume="x.iso"/><target dev="sda"/></disk>
-          <disk type='volume'><source pool='p' volume='v'/><target dev='vdb'/></disk>
-        </devices>"#;
-        assert_eq!(disk_targets(xml), vec!["vda", "vdb"]);
+    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("metrics-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
+    /// A stopped guest still reports its memory, one zeroed NIC and one disk,
+    /// so the collector neither guesses nor loses their series.
     #[test]
-    fn blocks_are_split_in_order() {
-        let xml = "<interface a/>x</interface><interface b/>y</interface>";
-        let b = blocks(xml, "<interface", "</interface>");
-        assert_eq!(b.len(), 2);
-        assert!(b[0].contains(" a/") && b[1].contains(" b/"));
+    fn a_stopped_guest_reports_its_shape_with_zero_counters() {
+        let dir = scratch("stopped");
+        let disk = dir.join("disk.raw");
+        std::fs::write(&disk, b"hello").unwrap();
+        let iso = dir.join("a.iso");
+        std::fs::write(&iso, b"iso").unwrap();
+        let manager =
+            Manager::with_qemu(dir.join("data"), dir.join("state"), "/nonexistent/qemu").unwrap();
+        let xml = format!(
+            r#"<domain type="kvm">
+  <name>{ID}</name>
+  <uuid>{ID}</uuid>
+  <title>web</title>
+  <memory unit="KiB">524288</memory>
+  <vcpu>2</vcpu>
+  <os><type arch="x86_64" machine="q35">hvm</type></os>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="raw"/>
+      <source file="{}"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="{}"/>
+      <target dev="sda" bus="sata"/>
+    </disk>
+    <interface type="bridge">
+      <source bridge="vbr0"/>
+      <model type="virtio"/>
+      <mac address="52:54:00:aa:bb:01"/>
+    </interface>
+  </devices>
+</domain>"#,
+            disk.display(),
+            iso.display()
+        );
+        let cfg = manager.define(&xml).unwrap();
+        let row = domain(&manager, &cfg).unwrap();
+        assert_eq!(row["uuid"], ID);
+        assert_eq!(row["name"], "web");
+        assert_eq!(row["state"], "stopped");
+        assert_eq!(row["cpu_time_ns"], 0);
+        assert_eq!(row["vcpus"], 2);
+        assert_eq!(row["memory_kib"], 512 * 1024);
+        assert_eq!(row["max_memory_kib"], 512 * 1024);
+        assert_eq!(row["nics"][0]["mac"], "52:54:00:aa:bb:01");
+        assert_eq!(row["nics"][0]["name"], "");
+        assert_eq!(row["nics"][0]["rx_bytes"], 0);
+        assert_eq!(row["nics"][0]["tx_bytes"], 0);
+        assert_eq!(row["disks"].as_array().unwrap().len(), 1, "no cdrom");
+        assert_eq!(row["disks"][0]["dev"], "vda");
+        assert_eq!(row["disks"][0]["read_bytes"], 0);
+        assert_eq!(row["disks"][0]["write_bytes"], 0);
+        assert_eq!(row["disks"][0]["capacity"], 5);
+        assert!(row["disks"][0]["allocation"].as_u64().is_some());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

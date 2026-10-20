@@ -2,7 +2,7 @@
 //! bridge and dnsmasq, and the firewall table follows every lifecycle change.
 //!
 //! The SPA still edits a network as libvirt-shaped XML (`netxml`), but nothing
-//! here calls libvirt's network driver: these networks do not exist in it.
+//! here delegates to another network manager: the store is the only definition.
 
 use axum::Json;
 use axum::Router;
@@ -43,6 +43,17 @@ pub fn routes(ipam: Ipam, fw: FirewallState) -> Router {
         .route("/networks/{name}/ipam", get(get_ipam).put(put_ipam))
         .route("/flows", get(get_flows))
         .with_state(NetState { ipam, fw })
+}
+
+/// Whether `s` is a UUID in canonical 8-4-4-4-12 form, so a network's name can
+/// be one and an arbitrary string is refused.
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 /// The host's own interfaces and routes, as `(network address, prefix)`.
@@ -322,10 +333,10 @@ async fn get_one(
 
 /// Linux bridge devices, for the create/edit network form's bridge dropdown.
 ///
-/// Read from /sys/class/net rather than libvirt interfaces: a bridge does not
-/// have to be a libvirt interface, and scanning sysfs is what `ip link show
-/// type bridge` does under the hood. A device is a bridge iff it has a
-/// `bridge` subdirectory.
+/// Read from /sys/class/net rather than a manager's interface list: any host
+/// bridge qualifies, and scanning sysfs is what `ip link show type bridge`
+/// does under the hood. A device is a bridge iff it has a `bridge`
+/// subdirectory.
 async fn bridges() -> Result<Json<Value>, ApiError> {
     let v = std::fs::read_dir("/sys/class/net")
         .map_err(|e| ApiError::internal(format!("read /sys/class/net: {e}")))?
@@ -351,7 +362,7 @@ async fn get_xml(
 /// user typed in `<title>`, so the id and the display name cannot drift.
 async fn create(State(st): State<NetState>, body: String) -> Result<Json<Value>, ApiError> {
     let name = open_name(&body).ok_or_else(|| ApiError::bad_request("the network has no name"))?;
-    if !crate::libvirt::is_uuid(&name) {
+    if !is_uuid(&name) {
         return Err(ApiError::bad_request(format!(
             "network '{name}' must be named by a UUID"
         )));

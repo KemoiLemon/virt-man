@@ -1,7 +1,7 @@
 //! Firewall API: per-network rules + NAT forwards and per-VM rules, persisted
 //! to disk and enforced as an nftables table (see `crate::firewall`).
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -14,6 +14,7 @@ use super::ApiError;
 use crate::firewall::{self, FirewallStore, NetworkFirewall, PolicySet, VmFirewall};
 use crate::ipam::server::Ipam;
 use crate::ipam::store::Mode;
+use crate::qemu::Manager;
 
 #[derive(Clone)]
 pub struct FirewallState {
@@ -115,21 +116,11 @@ struct VmReq {
     policy: PolicySet,
 }
 
-/// Whether per-VM rules can be scoped to this guest: a libvirt domain, or a
-/// direct-QEMU VM the IPAM snapshot knows. QEMU rules are keyed by the VM's id
-/// (the name `GET /qemu/vms` lists), never by its title.
-async fn known_guest(ipam: &Ipam, name: &str) -> bool {
-    let n = name.to_string();
-    if crate::libvirt::with_conn(move |c| {
-        crate::libvirt::domain(c, &n).map(|_| ())?;
-        Ok(())
-    })
-    .await
-    .is_ok()
-    {
-        return true;
-    }
-    ipam.has_vm(name)
+/// Whether per-VM rules can be scoped to this guest: a direct-QEMU VM the
+/// manager knows, or one the IPAM snapshot has already seen. Rules are keyed
+/// by the VM's id (the name `GET /qemu/vms` lists), never by its title.
+async fn known_guest(ipam: &Ipam, manager: &Manager, name: &str) -> bool {
+    ipam.has_vm(name) || manager.xml(name).is_ok()
 }
 
 async fn put_network(
@@ -183,6 +174,7 @@ async fn put_network(
 
 async fn put_vm(
     State(state): State<FirewallState>,
+    Extension(manager): Extension<Manager>,
     Path(name): Path<String>,
     Json(req): Json<VmReq>,
 ) -> Result<Json<Value>, ApiError> {
@@ -190,11 +182,10 @@ async fn put_vm(
     let mut store = load_store(&state)?;
 
     // Rules are scoped to this guest's MACs, so a typo'd name would silently
-    // persist but never apply. Fail fast instead. A direct-QEMU VM is not a
-    // libvirt domain: its rules are keyed by its id, and its MACs come from
-    // the IPAM snapshot.
-    if !known_guest(&state.ipam, &name).await {
-        return Err(ApiError::not_found(format!("domain or QEMU VM '{name}'")));
+    // persist but never apply. Fail fast instead. A direct-QEMU VM's rules are
+    // keyed by its id, and its MACs come from the IPAM snapshot.
+    if !known_guest(&state.ipam, &manager, &name).await {
+        return Err(ApiError::not_found(format!("QEMU VM '{name}'")));
     }
 
     let mut fw = VmFirewall::default();
@@ -233,8 +224,8 @@ struct Vm {
 }
 
 /// The guests whose rules can be scoped: a stored policy on a guest whose MACs
-/// are known. Both libvirt domains and direct-QEMU bridge NICs reach `macs`
-/// through the IPAM snapshot, so a QEMU VM's rules are rendered too.
+/// are known. The MACs come from the IPAM snapshot, which reads the QEMU
+/// manager's definitions.
 fn scoped_vms(
     macs: std::collections::BTreeMap<String, Vec<String>>,
     store: &HashMap<String, VmFirewall>,
@@ -257,10 +248,10 @@ fn apply_failed(e: String) -> ApiError {
 ///
 /// The networks come from the daemon's own definitions: each one's subnet,
 /// mode, bridge and whether its bridge is up. Guest MACs come from the IPAM
-/// guest snapshot (libvirt domains and direct-QEMU VMs alike), since a VM's
-/// rules are scoped to the MACs it is defined with. A QEMU VM's key is its id —
-/// the name `GET /qemu/vms` lists — never its title, which can change. All of
-/// it has to be read at apply time — the rules match live identities.
+/// guest snapshot, which is read from the QEMU manager, since a VM's rules are
+/// scoped to the MACs it is defined with. A VM's key is its id — the name
+/// `GET /qemu/vms` lists — never its title, which can change. All of it has to
+/// be read at apply time — the rules match live identities.
 ///
 /// The network API calls this on every lifecycle change (start, stop, create,
 /// delete, edit); nothing else re-installs a network's rules.
@@ -287,45 +278,10 @@ pub async fn apply_store(ipam: &Ipam, store: &FirewallStore) -> Result<(), Strin
 
     let vm_store = store.vms.clone();
     // Per-VM rules are scoped to the MACs a guest is defined with. The IPAM
-    // snapshot is the one list that covers both libvirt domains and
-    // direct-QEMU VMs, so a QEMU VM's bridge NIC gets its rules too.
-    let mut macs: std::collections::BTreeMap<String, Vec<String>> =
+    // snapshot is read from the QEMU manager's definitions, so a bridge NIC
+    // gets its rules whether the guest is running or not.
+    let macs: std::collections::BTreeMap<String, Vec<String>> =
         ipam.guests_by_vm().into_iter().collect();
-    // libvirt is read as well, for a domain the snapshot has not reached yet
-    // (it runs every few seconds) or one the supervisor could not see.
-    let wanted = vm_store.clone();
-    let libvirt_macs = crate::libvirt::with_conn(move |c| {
-        let mut found: Vec<(String, Vec<String>)> = Vec::new();
-        for d in crate::libvirt::all_domains(c, 0) {
-            let name = d.get_name().unwrap_or_default();
-            if wanted.contains_key(&name) {
-                let xml = d
-                    .get_xml_desc(virt::sys::VIR_DOMAIN_XML_INACTIVE)
-                    .unwrap_or_default();
-                found.push((name, domain_macs(&xml)));
-            }
-        }
-        Ok(found)
-    })
-    .await;
-    match libvirt_macs {
-        Ok(found) => {
-            for (name, guest_macs) in found {
-                let entry = macs.entry(name).or_default();
-                for mac in guest_macs {
-                    if !entry.contains(&mac) {
-                        entry.push(mac);
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            // The network half must still be applied: losing it over an
-            // unrelated libvirt outage would drop every network's NAT and
-            // isolation. The next apply restores the per-guest rules.
-            tracing::warn!("firewall: cannot read guests, applying the known MACs only: {e}");
-        }
-    }
     // A guest with no MAC (none was recorded) cannot be matched by a rule.
     let vms = scoped_vms(macs, &vm_store);
 
@@ -361,64 +317,13 @@ pub async fn apply_store(ipam: &Ipam, store: &FirewallStore) -> Result<(), Strin
     Ok(())
 }
 
-/// Every `<mac address='...'/>` in a domain XML, in document order.
-pub fn domain_macs(xml: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(i) = rest.find("<mac") {
-        let tag = &rest[i..];
-        let end = tag.find('>').unwrap_or(tag.len());
-        let t = &tag[..=end];
-        if let Some(addr) = attr_value(t, "address") {
-            out.push(addr.to_string());
-        }
-        rest = &tag[end..];
-    }
-    out
-}
-
-/// Read one attribute's value out of a tag fragment, single- or double-quoted.
-fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let mut from = 0;
-    while let Some(rel) = tag[from..].find(name) {
-        let i = from + rel;
-        from = i + name.len();
-        let rest = tag[from..].trim_start();
-        let Some(rest) = rest.strip_prefix('=') else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        let quote = rest.chars().next()?;
-        if quote != '\'' && quote != '"' {
-            continue;
-        }
-        let inner = &rest[quote.len_utf8()..];
-        let j = inner.find(quote)?;
-        return Some(&inner[..j]);
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
 
-    #[test]
-    fn macs_are_parsed_from_domain_xml() {
-        let xml = r#"<domain><devices>
-          <interface type='network'><mac address='52:54:00:aa:bb:cc'/></interface>
-          <interface type='network'><mac address='52:54:00:dd:ee:ff'/></interface>
-        </devices></domain>"#;
-        assert_eq!(
-            domain_macs(xml),
-            vec!["52:54:00:aa:bb:cc", "52:54:00:dd:ee:ff"]
-        );
-    }
-
-    #[test]
-    fn a_domain_without_interfaces_yields_no_macs() {
-        assert!(domain_macs("<domain><devices/></domain>").is_empty());
+    fn manager(dir: &std::path::Path) -> Manager {
+        Manager::with_qemu(dir.join("data"), dir.join("state"), "/nonexistent/qemu").unwrap()
     }
 
     /// A save that reached the file but not the kernel must not look applied.
@@ -539,16 +444,23 @@ mod tests {
                 bridge: "vbr0".into(),
             },
         );
-        assert!(known_guest(&state.ipam, vm).await);
+        assert!(known_guest(&state.ipam, &manager(&dir), vm).await);
         assert_eq!(
             state.ipam.guests_by_vm()[vm],
             vec!["52:54:00:aa:bb:01".to_string()],
             "the MAC merge reads the seeded guest"
         );
-        assert!(!known_guest(&state.ipam, "550e8400-e29b-41d4-a716-446655440001").await);
+        assert!(
+            !known_guest(
+                &state.ipam,
+                &manager(&dir),
+                "550e8400-e29b-41d4-a716-446655440001"
+            )
+            .await
+        );
 
         // The same snapshot feeds the renderer: a QEMU bridge MAC is the scope
-        // of its per-VM rules, exactly as a libvirt domain's is.
+        // of its per-VM rules.
         let mut policies = HashMap::new();
         policies.insert(
             vm.to_string(),
@@ -577,6 +489,7 @@ mod tests {
 
         let err = put_vm(
             State(state),
+            Extension(manager(&dir)),
             Path("nope".into()),
             Json(VmReq {
                 rules: Vec::new(),

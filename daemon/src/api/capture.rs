@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::ApiError;
-use crate::libvirt::with_conn;
+use crate::qemu::{InterfaceStats, Manager, State as VmState};
 
 pub const IDLE: Duration = Duration::from_secs(20);
 pub const MAX_AGE: Duration = Duration::from_secs(30 * 60);
@@ -114,28 +114,24 @@ fn sessions() -> &'static Sessions {
     S.get_or_init(Default::default)
 }
 
-pub fn routes() -> Router {
+pub fn routes(manager: Manager) -> Router {
     Router::new()
         .route("/domains/{name}/capture", post(start))
         .route("/domains/{name}/capture/{id}", get(poll).delete(stop))
         .route("/domains/{name}/capture/{id}/pcap", get(pcap))
+        .with_state(manager)
 }
 
 async fn start(
+    State(manager): State<Manager>,
     Path(name): Path<String>,
     body: Option<Json<Filter>>,
 ) -> Result<Json<Value>, ApiError> {
     let filter = body.map(|Json(f)| f).unwrap_or_default();
-    let n = name.clone();
-    let taps = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &n)?;
-        if !d.is_active().unwrap_or(false) {
-            return Err("the guest is not running".to_string().into());
-        }
-        Ok(taps(&d.get_xml_desc(0)?))
-    })
-    .await
-    .map_err(ApiError::bad_request)?;
+    if manager.state(&name).map_err(capture_err)? != VmState::Running {
+        return Err(ApiError::bad_request("the guest is not running"));
+    }
+    let taps = tap_devices(manager.interfaces(&name).map_err(capture_err)?);
     if taps.is_empty() {
         return Err(ApiError::bad_request(
             "the guest has no network interface to capture",
@@ -702,20 +698,18 @@ pub fn write_pcap<'a>(frames: impl Iterator<Item = (u64, usize, &'a [u8])>) -> V
     out
 }
 
-/// Target devs of a running guest's interfaces.
-fn taps(xml: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(i) = rest.find("<interface") {
-        let block = &rest[i..];
-        let end = block.find("</interface>").unwrap_or(block.len());
-        let (dev, _, _) = super::domains::interface_info(&block[..end]);
-        if let Some(d) = dev {
-            out.push(d);
-        }
-        rest = &block[end.max(1)..];
+/// The guest's host taps: one per bridge NIC of a running guest. A user-mode
+/// NIC has no host interface, and a stopped guest reports none.
+fn tap_devices(interfaces: Vec<InterfaceStats>) -> Vec<String> {
+    interfaces.into_iter().filter_map(|i| i.dev).collect()
+}
+
+fn capture_err(e: String) -> ApiError {
+    if e.contains("unknown QEMU") {
+        ApiError::not_found(e)
+    } else {
+        ApiError::bad_request(e)
     }
-    out
 }
 
 fn rand_id() -> u64 {
@@ -959,10 +953,25 @@ mod tests {
     }
 
     #[test]
-    fn a_guests_taps_are_read_from_its_live_xml() {
-        let x = "<devices><interface type='network'><target dev='vnet3'/></interface>
-                 <interface type='network'><source network='x'/></interface>
-                 <interface type='bridge'><target dev='vnet9'/></interface></devices>";
-        assert_eq!(taps(x), vec!["vnet3", "vnet9"]);
+    fn a_guests_taps_come_from_its_bridge_nics() {
+        let nic = |dev: Option<&str>, network: Option<&str>| InterfaceStats {
+            dev: dev.map(str::to_string),
+            mac: Some("52:54:00:aa:bb:01".into()),
+            model: "virtio",
+            network: network.map(str::to_string),
+            rx_kib: None,
+            tx_kib: None,
+            rx_bytes: 0,
+            tx_bytes: 0,
+        };
+        assert_eq!(
+            tap_devices(vec![
+                nic(Some("tap0000000001"), Some("vbr0")),
+                nic(None, None),
+                nic(Some("tap0000000002"), Some("vbr1")),
+            ]),
+            ["tap0000000001", "tap0000000002"]
+        );
+        assert!(tap_devices(vec![nic(None, Some("vbr0"))]).is_empty());
     }
 }

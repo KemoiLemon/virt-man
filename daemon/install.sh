@@ -45,9 +45,6 @@ fi
 for tool in cargo rustc openssl; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
-if ! pkg-config --exists libvirt 2>/dev/null; then
-  die "libvirt development headers not found (pkg-config libvirt)"
-fi
 
 # --- build -----------------------------------------------------------------
 cd "$(dirname "$0")"

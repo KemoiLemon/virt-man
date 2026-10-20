@@ -1,5 +1,5 @@
-//! Host-level metrics for the daemon dashboard, read from /proc rather than
-//! libvirt so they work even when a guest management call is not involved.
+//! Host-level metrics for the daemon dashboard, read from /proc so they work
+//! even when no guest management call is involved.
 //!
 //! CPU is reported as raw jiffy counters (`cpu_total`, `cpu_idle`): a single
 //! reading cannot express "CPU %", so the client keeps the previous sample
@@ -40,6 +40,54 @@ async fn stats() -> Result<Json<Value>, ApiError> {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
     })))
+}
+
+/// Host CPU count, model and frequency, and total memory, for the guest stats
+/// endpoint.
+pub(super) fn node_info() -> (u32, u64, u32, String) {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let cpus = cpuinfo_count(&cpuinfo);
+    let memory_kib = meminfo_kib(&meminfo, "MemTotal").unwrap_or(0);
+    let mhz = cpuinfo_mhz(&cpuinfo);
+    let model = cpuinfo_model(&cpuinfo);
+    (cpus, memory_kib, mhz, model)
+}
+
+/// The number of `processor` entries; `available_parallelism` respects a
+/// container's affinity mask, which would under-report the host.
+pub(super) fn cpuinfo_count(cpuinfo: &str) -> u32 {
+    let n = cpuinfo
+        .lines()
+        .filter(|l| {
+            l.split_once(':')
+                .is_some_and(|(k, _)| k.trim() == "processor")
+        })
+        .count();
+    (n.max(1)) as u32
+}
+
+pub(super) fn cpuinfo_model(cpuinfo: &str) -> String {
+    cpuinfo
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == "model name").then(|| v.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn cpuinfo_mhz(cpuinfo: &str) -> u32 {
+    cpuinfo
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            if k.trim() != "cpu MHz" {
+                return None;
+            }
+            v.trim().parse::<f64>().ok().map(|m| m.round() as u32)
+        })
+        .unwrap_or(0)
 }
 
 /// Total and idle jiffies from the first `cpu` line of /proc/stat.
@@ -96,5 +144,22 @@ mod tests {
         assert_eq!(meminfo_kib(mem, "MemTotal"), Some(16_000_000));
         assert_eq!(meminfo_kib(mem, "memavailable"), Some(8_000_000));
         assert_eq!(meminfo_kib(mem, "SwapTotal"), None);
+    }
+
+    #[test]
+    fn node_info_is_read_from_cpuinfo() {
+        let cpuinfo = "\
+processor\t: 0
+model name\t: Example CPU
+cpu MHz\t\t: 2400.000
+
+processor\t: 1
+model name\t: Example CPU
+cpu MHz\t\t: 2400.000
+";
+        assert_eq!(cpuinfo_count(cpuinfo), 2, "one per processor entry");
+        assert_eq!(cpuinfo_model(cpuinfo), "Example CPU");
+        assert_eq!(cpuinfo_mhz(cpuinfo), 2400);
+        assert_eq!(cpuinfo_count(""), 1, "never reports zero processors");
     }
 }

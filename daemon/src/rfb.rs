@@ -558,9 +558,9 @@ fn clamp_rect(r: Rect, w: u16, h: u16) -> Rect {
 pub fn connect(id: &str, host: &str, port: u16) -> R<Arc<Session>> {
     disconnect(id);
 
-    // libvirt reports the graphics listen address, which is usually loopback
-    // but need not be; vm-man could assume 127.0.0.1 because it launched QEMU
-    // itself.
+    // The definition names the graphics listen address, which is usually
+    // loopback but need not be; vm-man could assume 127.0.0.1 because it
+    // launched QEMU itself.
     let addr = format!("{host}:{port}");
     let mut s = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
     s.set_nodelay(true).ok();

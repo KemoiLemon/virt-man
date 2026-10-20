@@ -2,7 +2,7 @@
 //!
 //! The wire shape is the one the SPA has always seen — libvirt's field names,
 //! `title`, `persistent`, `capacity`/`allocation`/`available` — but nothing
-//! here talks to libvirt's storage driver. The store in `crate::pools` is the
+//! here talks to an external storage driver. The store in `crate::pools` is the
 //! source of truth, and a read always scans the directory, so a file that
 //! arrived by `cp` or a sync is visible immediately.
 
@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use super::ApiError;
 use crate::disks;
-use crate::libvirt::with_conn;
 use crate::pools::{Pool, Pools};
+use crate::qemu::Manager;
 
 pub fn routes() -> Router {
     Router::new()
@@ -71,7 +71,7 @@ fn pool_xml(key: &str, path: &std::path::Path) -> String {
     format!(
         "<pool type='dir'>\n  <name>{key}</name>\n  <uuid>{key}</uuid>\n  \
          <target><path>{}</path></target>\n</pool>",
-        crate::ct::esc(&path.to_string_lossy())
+        crate::domainxml::esc(&path.to_string_lossy())
     )
 }
 
@@ -92,12 +92,12 @@ fn tag_text(xml: &str, tag: &str) -> Option<String> {
     let i = xml.find(&open)?;
     let rest = &xml[i + open.len()..];
     let end = rest.find(&format!("</{tag}>"))?;
-    Some(crate::libvirt::unescape(rest[..end].trim()))
+    Some(crate::domainxml::unescape(rest[..end].trim()))
 }
 
 /// What a pool definition must say: a canonical UUID name and an absolute
 /// directory. A non-directory type is refused here, once, with a reason —
-/// libvirt-supported LVM/fs pools are not implemented natively.
+/// LVM and filesystem pool types are not implemented natively.
 fn parse_pool_xml(xml: &str) -> Result<(String, String), String> {
     let open_end = xml.find('>').map(|e| e + 1).unwrap_or(xml.len());
     let kind = disks::attr(&xml[..open_end], "type").unwrap_or("dir");
@@ -271,8 +271,8 @@ async fn set_title(
 
 /// The first volume of the pool a guest still holds, and those guests.
 ///
-/// Split out so the decision can be tested with a seeded holder map, without
-/// libvirt: deletion of a pool must refuse exactly when some guest names one of
+/// Split out so the decision can be tested with a seeded holder map, without a
+/// manager: deletion of a pool must refuse exactly when some guest names one of
 /// its files (by path or by pool+volume).
 fn pool_in_use(
     volumes: &[crate::pools::Volume],
@@ -292,6 +292,7 @@ fn pool_in_use(
 /// the tree, or the next volume list would have nowhere to look.
 async fn delete(
     Extension(pools): Extension<Pools>,
+    Extension(manager): Extension<Manager>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let key = pools
@@ -299,12 +300,7 @@ async fn delete(
         .ok_or_else(|| ApiError::not_found(format!("no pool '{name}'")))?;
     let volumes = pools.scan(&key);
     if !volumes.is_empty() {
-        let held = {
-            let pools = pools.clone();
-            with_conn(move |c| Ok(disks::holders_by_label(c, &pools)))
-                .await
-                .map_err(ApiError::internal)?
-        };
+        let held = disks::holders_by_label(&disks::guest_definitions(&manager), &pools);
         if let Some((volume, users)) = pool_in_use(&volumes, &held, &key) {
             return Err(ApiError::conflict(format!(
                 "'{volume}' is in use by {} — detach it first",
@@ -396,7 +392,7 @@ mod tests {
     }
 
     /// Through the real router: create, read and delete, with the store as the
-    /// only state. No libvirt and no root.
+    /// only state. No manager and no root.
     #[tokio::test]
     async fn the_routes_create_read_and_delete_a_pool() {
         use axum::body::Body;
@@ -409,7 +405,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("images");
         let pools = Pools::load(dir.join("state/pools.json")).unwrap();
-        let app = || super::routes().layer(Extension(pools.clone()));
+        // Only the delete path reads guest definitions; no VM is defined here.
+        let manager = crate::qemu::Manager::with_qemu(
+            dir.join("qemu"),
+            dir.join("qemu-state"),
+            "/nonexistent/qemu",
+        )
+        .unwrap();
+        let app = || {
+            super::routes()
+                .layer(Extension(pools.clone()))
+                .layer(Extension(manager.clone()))
+        };
 
         let xml = format!(
             "<pool type='dir'><name>{U}</name><uuid>{U}</uuid>\

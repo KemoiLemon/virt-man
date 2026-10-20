@@ -5,14 +5,12 @@
 pub mod api;
 pub mod auth;
 pub mod config;
-pub mod ct;
 pub mod disks;
+pub mod domainxml;
 pub mod firewall;
 pub mod firmware;
 pub mod hostnet;
 pub mod ipam;
-pub mod libvirt;
-pub mod migrate;
 pub mod netxml;
 pub mod pools;
 pub mod qemu;

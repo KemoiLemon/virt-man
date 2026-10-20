@@ -2,8 +2,8 @@
 //!
 //! One JSON file (`<data_dir>/networks.json`), owned by the daemon. It is the
 //! source of truth for the networks the daemon runs: their mode, subnet, DNS
-//! and DHCP reservations. Nothing is read back from libvirt, which no longer
-//! defines these networks at all.
+//! and DHCP reservations. Nothing external defines these networks, so nothing
+//! is read back or reconciled against a second owner.
 //!
 //! A **reservation** binds a MAC to an address for good. Ones the user set are
 //! `manual`; one made because a guest is defined on the network is `dynamic`,
@@ -39,14 +39,14 @@ pub enum Mode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Net {
-    /// What the user calls the network. libvirt's name is its UUID.
+    /// What the user calls the network. Its id is its UUID.
     #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub mode: Mode,
     /// The operator's bridge, for `Mode::Bridge` only. A managed network's
     /// bridge is always derived from its id (`hostnet::bridge_name`), never
-    /// stored and never libvirt's `virbrN`.
+    /// stored and never an imported `virbrN`.
     #[serde(default)]
     pub bridge: String,
     #[serde(default = "default_true")]
@@ -84,15 +84,15 @@ pub struct Reservation {
     pub mac: String,
     pub ip: Ipv4Addr,
     /// Hostname: the guest's DHCP hostname, the name the user gave, or the
-    /// guest's display name (`<title>`, falling back to libvirt's name).
+    /// guest's display name (`<title>`, falling back to its id).
     /// Answers DNS queries. A duplicate is given a numeric suffix.
     #[serde(default)]
     pub name: Option<String>,
     /// Made by the DHCP server from the range (not by a person).
     #[serde(default)]
     pub dynamic: bool,
-    /// libvirt UUID of the guest owning this MAC, when known. Deleting that
-    /// guest deletes the reservation.
+    /// UUID of the guest owning this MAC, when known. Deleting that guest
+    /// deletes the reservation.
     #[serde(default)]
     pub vm: Option<String>,
     /// Last time the guest was given this address (ms since epoch), 0 = never.
@@ -441,16 +441,16 @@ pub fn valid_domain(raw: &str) -> Option<String> {
 
 // ------------------------------------------------------------ XML import
 
-/// Read a network definition — libvirt's shape, which is also what the SPA
-/// editor speaks — into the stored state. Every supported mode imports,
+/// Read a network definition — the XML shape the SPA editor speaks — into the
+/// stored state. Every supported mode imports,
 /// including one with no subnet of its own: a bridge network, or an isolated
 /// segment nothing serves. Returns an error for a mode this daemon cannot
 /// reproduce (`route`, `open`, `passthrough`) rather than silently forcing it
 /// into isolation.
 pub fn import(xml: &str) -> Result<Net, String> {
-    // Modes we can reproduce natively. libvirt's `route`, `open`, `passthrough`
-    // and anything newer have no native equivalent here yet, so such a
-    // definition is refused rather than silently forced into isolation.
+    // Modes we can reproduce natively. `route`, `open`, `passthrough` and
+    // anything newer have no native equivalent here yet, so such a definition
+    // is refused rather than silently forced into isolation.
     let mode = match open_tag(xml, "<forward ").and_then(|t| attr(t, "mode")) {
         Some("nat") => Mode::Nat,
         Some("bridge") => Mode::Bridge,
@@ -459,7 +459,7 @@ pub fn import(xml: &str) -> Result<Net, String> {
         Some(other) => return Err(format!("forward mode '{other}' is not supported")),
     };
     // Only an operator's bridge is stored: a managed network derives its own,
-    // and libvirt's `virbrN` is libvirt's.
+    // and an imported `virbrN` belongs to someone else.
     let bridge = if mode == Mode::Bridge {
         let b = open_tag(xml, "<bridge ")
             .and_then(|t| attr(t, "name"))
@@ -478,8 +478,8 @@ pub fn import(xml: &str) -> Result<Net, String> {
         title: element_text(xml, "title").unwrap_or_default(),
         mode,
         bridge,
-        // Autostart is a separate property in libvirt, not in the XML. A
-        // network this daemon defines starts on boot unless told otherwise.
+        // Autostart is not in the XML. A network this daemon defines starts on
+        // boot unless told otherwise.
         autostart: true,
         gateway: Ipv4Addr::UNSPECIFIED,
         prefix: 0,
@@ -561,7 +561,7 @@ fn element_text(xml: &str, name: &str) -> Option<String> {
     let close = format!("</{name}>");
     let i = xml.find(&open)? + open.len();
     let end = xml[i..].find(&close)?;
-    Some(crate::libvirt::unescape(xml[i..i + end].trim()))
+    Some(crate::domainxml::unescape(xml[i..i + end].trim()))
 }
 
 fn all_tags<'a>(xml: &'a str, start: &str) -> Vec<&'a str> {
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn a_libvirt_network_is_imported_with_its_range_forwarders_and_hosts() {
+    fn a_network_is_imported_with_its_range_forwarders_and_hosts() {
         let n = net();
         assert_eq!(
             (n.gateway, n.prefix),
@@ -656,13 +656,13 @@ mod tests {
     }
 
     #[test]
-    fn libvirt_forwarding_mode_bridge_and_title_are_imported() {
+    fn forwarding_mode_bridge_and_title_are_imported() {
         let x = "<network><title>Lab</title><forward mode='none'/><bridge name='br-lan'/><ip address='10.1.0.1' prefix='24'/></network>";
         let n = import(x).unwrap();
         assert_eq!(
             (n.mode, n.bridge.as_str(), n.title.as_str()),
             (Mode::Isolated, "", "Lab"),
-            "a managed network never keeps libvirt's bridge"
+            "a managed network never keeps an imported bridge"
         );
         // Only an operator's bridge is stored as one.
         let b = import(
@@ -674,11 +674,11 @@ mod tests {
             import("<network><forward mode='nat'/><ip address='10.1.0.1' prefix='24'/></network>")
                 .unwrap();
         assert_eq!(nat.mode, Mode::Nat);
-        // libvirt forwards nothing without a <forward> element.
+        // Nothing is forwarded without a <forward> element.
         let none = import("<network><ip address='10.1.0.1' prefix='24'/></network>").unwrap();
         assert_eq!(none.mode, Mode::Isolated);
         assert!(none.autostart);
-        // libvirt keeps autostart outside the XML; there is nothing to import.
+        // Autostart is outside the XML; there is nothing to import.
         assert!(
             import("<network><ip address='10.1.0.1' prefix='24'/></network>")
                 .unwrap()

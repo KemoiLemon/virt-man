@@ -11,8 +11,7 @@
 # then hands over to daemon/install.sh or web/install.sh, which build and
 # install the service. On Alpine the services are OpenRC, not systemd.
 #
-# Package names were checked against Debian 13 (trixie) and Alpine 3.22 in
-# containers made by virt-man itself.
+# Package names were checked against Debian 13 (trixie) and Alpine 3.22.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,7 +28,7 @@ esac
 
 # The user builds run as (repo artifacts stay theirs, rustup is theirs).
 BUILD_USER="${SUDO_USER:-root}"
-# SUDO_USER can name someone with no account here (a container entered with
+# SUDO_USER can name someone with no account here (entering via
 # nsenter inherits the host's): build as root then, rather than fail.
 if ! getent passwd "$BUILD_USER" >/dev/null 2>&1; then
   BUILD_USER=root
@@ -49,19 +48,17 @@ fi
 say "package manager: $PM"
 
 # ------------------------------------------------------------------ packages
-# Build: a C toolchain and pkg-config for the Rust crates, libvirt headers for
-# the daemon. Runtime, daemon: libvirt with the QEMU and LXC drivers,
-# nftables (firewall), iproute2 (bridge addressing), dnsmasq-base (the DHCP and
+# Build: a C toolchain and pkg-config for the Rust crates. Runtime, daemon:
+# QEMU with the x86_64 system emulator and qemu-img, OVMF firmware, nftables
+# (firewall), iproute2 (bridge addressing and taps), dnsmasq-base (the DHCP and
 # DNS server; the -base package has the binary without the distro's service,
-# which would bind :53 on every interface), and what builds a container rootfs:
-# e2fsprogs (mkfs.ext4), util-linux (unshare, mount), tar with xz and zstd,
-# openssl (password hashes and the TLS cert).
-apt_daemon=(libvirt-daemon-system libvirt-daemon-driver-qemu libvirt-daemon-driver-lxc libvirt-dev
-  qemu-system-x86 qemu-utils ovmf nftables iproute2 dnsmasq-base e2fsprogs util-linux tar xz-utils zstd openssl)
+# which would bind :53 on every interface), swtpm (TPM guests need it),
+# util-linux, and openssl for the TLS certificate.
+apt_daemon=(qemu-system-x86 qemu-utils ovmf nftables iproute2 dnsmasq-base swtpm util-linux openssl)
 apt_web=(nodejs npm)
 apt_build=(build-essential pkg-config curl ca-certificates)
-apk_daemon=(libvirt-daemon libvirt-qemu libvirt-lxc libvirt-dev qemu-system-x86_64 qemu-img ovmf
-  nftables iproute2 dnsmasq e2fsprogs util-linux-misc tar xz zstd openssl dbus)
+# Alpine has no swtpm-tools package; `swtpm` carries the emulator binary.
+apk_daemon=(qemu-system-x86_64 qemu-img ovmf nftables iproute2 dnsmasq swtpm util-linux-misc openssl)
 apk_web=(nodejs npm)
 apk_build=(build-base pkgconf curl ca-certificates bash sudo)
 
@@ -77,7 +74,7 @@ case "$PM" in
     apt-get install -y -q --no-install-recommends "${pkgs[@]}"
     ;;
   apk)
-    # libvirt, nodejs and ovmf are in community.
+    # nodejs and ovmf are in community.
     if ! grep -qE '^[^#].*/community' /etc/apk/repositories; then
       main="$(grep -m1 -E '^[^#].*/main' /etc/apk/repositories || true)"
       [[ -n "$main" ]] && echo "${main%/main}/community" >> /etc/apk/repositories
@@ -91,29 +88,6 @@ case "$PM" in
     ;;
 esac
 
-# ------------------------------------------------------------------ libvirt
-# One daemon for every driver. The modular split (virtqemud, virtlxcd, ...)
-# works too, but virtlxcd alone cannot reach the network driver, and its
-# socket unit conflicts with libvirtd's: starting it stops libvirtd, and
-# every guest's network with it (measured). So libvirtd serves both.
-if [[ $what != web ]]; then
-  say "enabling libvirtd"
-  if [[ $PM == apt ]]; then
-    systemctl disable --now virtlxcd.socket virtlxcd.service >/dev/null 2>&1 || true
-    systemctl enable --now libvirtd.service
-  else
-    rc-update add dbus default >/dev/null 2>&1 || true
-    rc-service dbus start >/dev/null 2>&1 || true
-    rc-update add libvirtd default
-    rc-service libvirtd restart
-  fi
-  # An unprivileged container's uids live in a user namespace; a kernel that
-  # forbids them would make every such container fail to start.
-  if [[ -r /proc/sys/user/max_user_namespaces ]] && [[ "$(cat /proc/sys/user/max_user_namespaces)" == 0 ]]; then
-    say "warning: user namespaces are disabled (user.max_user_namespaces=0); unprivileged containers will not start"
-  fi
-fi
-
 # ------------------------------------------------------------------ rust
 rust_ok() {
   local v
@@ -126,10 +100,9 @@ if ! rust_ok; then
 fi
 # The child installers find cargo on PATH, as the build user and as root.
 export PATH="$BUILD_HOME/.cargo/bin:$PATH"
-# rustup's musl toolchain links statically by default (`-static-pie`), and
-# there is no static libvirt: the link fails with "ld returned 1" (measured
-# on Alpine 3.22). Link against the system's shared libraries instead, as
-# Alpine's own rust package does.
+# rustup's musl toolchain links statically by default (`-static-pie`), which
+# does not link against the system's shared libraries on Alpine. Link against
+# them instead, as Alpine's own rust package does.
 if [[ $PM == apk ]]; then
   export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=-crt-static"
 fi

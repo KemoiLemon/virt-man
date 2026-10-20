@@ -1,14 +1,12 @@
 mod api;
 mod auth;
 mod config;
-mod ct;
 mod disks;
+mod domainxml;
 mod firewall;
 mod firmware;
 mod hostnet;
 mod ipam;
-mod libvirt;
-mod migrate;
 mod netxml;
 mod pools;
 mod qemu;
@@ -39,23 +37,6 @@ async fn run() -> Result<(), String> {
     // the aws-lc-rs one axum-server already uses, or building a client panics.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     config::ensure_privileges()?;
-    // libvirt's event loop, before any connection is opened. A remote
-    // connection (every one here goes through libvirtd's socket) only reads
-    // the socket when something drives it: with no loop, a console stream
-    // received output only as a side effect of sending input, so the
-    // container's console updated only when a key was pressed.
-    virt::event::event_register_default_impl().map_err(|e| format!("libvirt event loop: {e}"))?;
-    std::thread::Builder::new()
-        .name("libvirt-events".into())
-        .spawn(|| {
-            loop {
-                if let Err(e) = virt::event::event_run_default_impl() {
-                    tracing::warn!("libvirt event loop: {e}");
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            }
-        })
-        .map_err(|e| format!("libvirt event thread: {e}"))?;
 
     let cfg = config::Config::load()?;
     let qemu_manager = qemu::Manager::new(cfg.data_dir.clone(), cfg.qemu_state_root.clone())?;
@@ -87,21 +68,9 @@ async fn run() -> Result<(), String> {
     // Networks: the supervisor keeps each stored network's bridge and dnsmasq
     // in step with the guests (startup already did the first pass).
     tokio::spawn(ipam::server::supervise(ipam.clone(), qemu_manager.clone()));
-    // Rename guests to their UUIDs, now and as they become free to rename
-    // (a guest once it is shut off). Off until the web server addresses
-    // everything by UUID: renaming first would leave its name-keyed links,
-    // grants and ownership pointing at nothing. Pools need no migration: the
-    // daemon names them by UUID when they are created.
-    // ponytail: gated by env var until the web side ships; remove the gate then.
-    if std::env::var("VIRT_MAN_MIGRATE_UUIDS").is_ok_and(|v| v == "1") {
-        tokio::spawn(migrate::run(ipam.clone()));
-    }
     // Access log: guest connections from the kernel's connection tracker.
     // Live packet captures stop themselves when nobody is watching.
     tokio::spawn(api::capture::reaper());
-    // A host reboot unmounts every container rootfs, and libvirt's own
-    // autostart then fails for want of it: remount, then start those.
-    tokio::spawn(api::containers::restore());
     ipam::flows::enable_accounting();
     {
         let owners = ipam.clone();

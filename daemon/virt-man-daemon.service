@@ -1,9 +1,6 @@
 [Unit]
-Description=virt-man-daemon (libvirt HTTP control daemon)
-# The daemon creates the network bridges before libvirtd may autostart a guest
-# with a bridge NIC; startup() tolerates libvirtd being down.
+Description=virt-man-daemon (QEMU HTTPS control daemon)
 After=network-online.target
-Before=libvirtd.service
 Wants=network-online.target
 
 [Service]
@@ -11,11 +8,8 @@ Type=simple
 ExecStart=/usr/local/bin/virt-man-daemon
 Restart=on-failure
 RestartSec=3
-# Token and TLS key live under /etc/virt-man-daemon; run as a user in the libvirt
-# group, or root if libvirt access needs it. install.sh runs the daemon as
-# root by default; set User=libvirt-qemu + supplementary group if preferred.
-# User=libvirt-qemu
-# SupplementaryGroups=libvirt
+# Runs as root: it creates taps and bridges, programs nftables and starts
+# dnsmasq. The token and TLS key live under /etc/virt-man-daemon.
 
 [Install]
 WantedBy=multi-user.target

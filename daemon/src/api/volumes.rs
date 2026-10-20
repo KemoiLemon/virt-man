@@ -26,8 +26,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::ApiError;
 use crate::disks::{self, DiskSource};
-use crate::libvirt::with_conn;
 use crate::pools::{Pools, safe_name};
+use crate::qemu::Manager;
 
 pub fn routes() -> Router {
     Router::new()
@@ -59,20 +59,32 @@ fn key_of(pools: &Pools, pool: &str) -> Result<String, ApiError> {
         .ok_or_else(|| ApiError::not_found(format!("no pool '{pool}'")))
 }
 
+/// What a volume holds, in Proxmox's content-type words, so the pool page can
+/// split ISO images, container templates and disk images.
+fn content_of(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if n.ends_with(".iso") {
+        "iso"
+    } else if [".tar.xz", ".tar.zst", ".tar.gz", ".tgz", ".tar"]
+        .iter()
+        .any(|s| n.ends_with(s))
+    {
+        "vztmpl"
+    } else {
+        "images"
+    }
+}
+
 async fn list(
     Extension(pools): Extension<Pools>,
+    Extension(manager): Extension<Manager>,
     Path(pool): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let key = key_of(&pools, &pool)?;
     let vols = pools.scan(&key);
     // Which guests hold each volume, so a picker can say "in use by" and not
-    // offer one guest's disk to another. One pass over the domains.
-    let held = {
-        let pools = pools.clone();
-        with_conn(move |c| Ok(disks::holders_by_label(c, &pools)))
-            .await
-            .map_err(ApiError::internal)?
-    };
+    // offer one guest's disk to another. One pass over the definitions.
+    let held = disks::holders_by_label(&disks::guest_definitions(&manager), &pools);
     let arr: Vec<Value> = vols
         .iter()
         .map(|v| {
@@ -85,7 +97,7 @@ async fn list(
                 "allocation": v.allocation,
                 "used_by": disks::holders_of(&held, &key, &v.name, &path),
                 // iso / vztmpl / images, so the pool page can split them.
-                "content": super::templates::content_of(&v.name),
+                "content": content_of(&v.name),
             })
         })
         .collect();
@@ -128,7 +140,7 @@ fn open_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(&t[..t.find('>')? + 1])
 }
 
-/// The multiplier for a libvirt `<capacity unit=...>`. A missing unit is bytes,
+/// The multiplier for a `<capacity unit=...>`. A missing unit is bytes,
 /// which is what `volumeXml` in the SPA writes.
 fn capacity_unit(unit: &str) -> Result<u64, String> {
     Ok(match unit {
@@ -143,14 +155,14 @@ fn capacity_unit(unit: &str) -> Result<u64, String> {
 
 /// `<volume><name>..</name><capacity unit='..'>..</capacity><target><format
 /// type='raw|qcow2'/></target></volume>`, as `volumeXml` in the SPA writes it
-/// (bytes), with libvirt's units accepted too.
+/// (bytes), with every conventional unit accepted too.
 fn parse_volume_xml(xml: &str) -> Result<VolSpec, String> {
     let tag = |tag: &str| -> Option<String> {
         let open = open_tag(xml, tag)?;
         let i = xml.find(open)? + open.len();
         let rest = &xml[i..];
         let end = rest.find(&format!("</{tag}>"))?;
-        Some(crate::libvirt::unescape(rest[..end].trim()))
+        Some(crate::domainxml::unescape(rest[..end].trim()))
     };
     let name = tag("name").ok_or("the volume definition has no <name>")?;
     let name = safe_name(&name)?.to_string();
@@ -286,23 +298,18 @@ async fn set_title(
 
 async fn delete(
     Extension(pools): Extension<Pools>,
+    Extension(manager): Extension<Manager>,
     Path((pool, vol)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let key = key_of(&pools, &pool)?;
     // Refuse while any guest still has this disk attached: deleting it would
     // corrupt that guest's next boot, and the guest would look fine until it
-    // was restarted. Checked in its own connection so the refusal can be a
-    // 409 with the offending guest names rather than a blanket 500.
+    // was restarted.
     let target = DiskSource::Volume {
         pool: key.clone(),
         volume: vol.clone(),
     };
-    let holders = {
-        let pools = pools.clone();
-        with_conn(move |c| Ok(disks::referencing_domains(c, &pools, &target)))
-            .await
-            .map_err(ApiError::internal)?
-    };
+    let holders = disks::referencing_domains(&disks::guest_definitions(&manager), &pools, &target);
     if !holders.is_empty() {
         return Err(ApiError::conflict(format!(
             "'{vol}' is in use by {} — detach it first",
@@ -659,6 +666,18 @@ mod tests {
     }
 
     #[test]
+    fn content_type_follows_the_file_name() {
+        assert_eq!(content_of("alpine.iso"), "iso");
+        assert_eq!(
+            content_of("debian-13-standard_13.6-1_amd64.tar.zst"),
+            "vztmpl"
+        );
+        assert_eq!(content_of("x.TAR.GZ"), "vztmpl");
+        assert_eq!(content_of("disk.qcow2"), "images");
+        assert_eq!(content_of("rootfs.raw"), "images");
+    }
+
+    #[test]
     fn volume_xml_is_parsed_with_its_capacity_and_format() {
         let xml = "<volume>\n  <name>disk.qcow2</name>\n  <capacity>1073741824</capacity>\n  <target><format type=\"qcow2\"/></target>\n</volume>";
         assert_eq!(
@@ -690,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_units_follow_libvirts_multipliers() {
+    fn capacity_units_are_multipliers() {
         let with = |unit: &str| {
             format!(
                 "<volume><name>x</name><capacity unit='{unit}'>2</capacity>\
@@ -921,7 +940,7 @@ mod tests {
     }
 
     /// Through the real router: a create returns `{name,path}` and the volume
-    /// reads back. These two routes never touch libvirt.
+    /// reads back. These two routes never touch a hypervisor.
     #[tokio::test]
     async fn the_routes_create_and_read_a_raw_volume() {
         use axum::body::Body;

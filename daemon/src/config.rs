@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::ffi::CStr;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,7 +32,7 @@ impl Default for Config {
             unix_socket: None,
             token_path: PathBuf::from("/etc/virt-man-daemon/token"),
             cert_dir: PathBuf::from("/etc/virt-man-daemon/certs"),
-            qemu_state_root: PathBuf::from("/var/lib/libvirt-daemon"),
+            qemu_state_root: PathBuf::from("/var/lib/virt-man-daemon/qemu"),
             data_dir: PathBuf::from("/var/lib/virt-man-daemon"),
             tls: TlsConfig::default(),
         }
@@ -127,7 +126,6 @@ fn migrate_paths(old_root: PathBuf, new_root: PathBuf) -> Result<(), String> {
         "tls/cert.pem",
         "tls/key.pem",
         "firewall.json",
-        "idmap.json",
         "volume-titles.json",
     ];
     for relative in FILES {
@@ -292,56 +290,16 @@ pub fn dual_stack_addr(addr: &str) -> Result<std::net::SocketAddr, String> {
         .map_err(|e| format!("invalid http_addr {addr}: {e}"))
 }
 
-/// Reject startup unless running as root or in the `libvirt` group.
+/// Reject startup unless running as root: the daemon creates tap devices,
+/// bridges, nftables rules and dnsmasq processes, all of which need it.
 pub fn ensure_privileges() -> Result<(), String> {
-    if is_privileged() {
+    if unsafe { libc::geteuid() } == 0 {
         Ok(())
     } else {
-        Err("virt-man-daemon must run as root or as a user in the `libvirt` group".to_string())
-    }
-}
-
-fn is_privileged() -> bool {
-    if unsafe { libc::geteuid() } == 0 {
-        return true;
-    }
-    // Primary group first (getgroups() only lists supplementary groups).
-    if group_name(unsafe { libc::getegid() }) == "libvirt" {
-        return true;
-    }
-    supplementary_groups()
-        .iter()
-        .any(|g| group_name(*g) == "libvirt")
-}
-
-fn supplementary_groups() -> Vec<libc::gid_t> {
-    unsafe {
-        let n = libc::getgroups(0, std::ptr::null_mut());
-        if n <= 0 {
-            return Vec::new();
-        }
-        let mut groups = vec![0 as libc::gid_t; n as usize];
-        let got = libc::getgroups(n, groups.as_mut_ptr());
-        if got <= 0 {
-            return Vec::new();
-        }
-        groups.truncate(got as usize);
-        groups
-    }
-}
-
-/// getgrgid returns a static pointer and is not thread-safe; we only call it
-/// at startup before any threads spawn.
-fn group_name(gid: libc::gid_t) -> String {
-    unsafe {
-        let grp = libc::getgrgid(gid);
-        if grp.is_null() {
-            String::new()
-        } else {
-            CStr::from_ptr((*grp).gr_name)
-                .to_string_lossy()
-                .into_owned()
-        }
+        Err(
+            "virt-man-daemon must run as root (it needs tap/bridge, nftables and dnsmasq)"
+                .to_string(),
+        )
     }
 }
 

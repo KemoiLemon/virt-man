@@ -3,14 +3,14 @@ use axum::{
     extract::{Path, State},
     routing::{delete, get, post},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::ApiError;
 use super::firewall::FirewallState;
+use crate::domainxml::{self, IfaceKind, Interface};
 use crate::ipam::server::Ipam;
-use crate::qemu::{DiskFormat, Manager, Network, State as VmState, VmConfig};
-use crate::qemu_network::HostForward;
+use crate::qemu::{DiskFormat, Manager, State as VmState, VmConfig};
 
 #[derive(Clone)]
 struct QemuState {
@@ -32,21 +32,17 @@ fn err(e: String) -> ApiError {
 
 #[derive(Deserialize)]
 struct Define {
-    id: String,
-    #[serde(default)]
-    title: String,
-    disk: std::path::PathBuf,
-    memory_mib: u32,
-    vcpus: u16,
+    /// The SPA's domain XML, the definition the manager stores.
+    xml: String,
 }
 
-/// A NIC as a request or response: the same shape the stored config has.
+/// A NIC as a request: the shape the stored config used to answer with.
 #[derive(Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 enum NetworkSpec {
     User {
         #[serde(default)]
-        hostfwd: Vec<HostForward>,
+        hostfwd: Vec<crate::qemu_network::HostForward>,
     },
     Bridge {
         network: String,
@@ -55,21 +51,32 @@ enum NetworkSpec {
     },
 }
 
-/// Turn a request's spec into a stored network. A bridge NIC names a stored
-/// network by key or title; the bridge is derived from the store and never
-/// taken from the client, so a guest cannot be attached to an arbitrary host
-/// interface.
-fn resolve(s: &QemuState, spec: NetworkSpec) -> Result<Network, ApiError> {
+/// The NIC attachment a resolved request asks for: no bridge is QEMU
+/// user-mode; a MAC is used when the caller names one.
+struct NicLink {
+    bridge: Option<String>,
+    mac: String,
+}
+
+/// Turn a request's spec into a bridge (or user mode). A bridge NIC names a
+/// stored network by key or title; the bridge is derived from the store and
+/// never taken from the client, so a guest cannot be attached to an arbitrary
+/// host interface.
+fn resolve(s: &QemuState, spec: NetworkSpec) -> Result<NicLink, ApiError> {
     Ok(match spec {
         NetworkSpec::User { hostfwd } => {
             // Legacy hostfwd input is rejected: inbound policy has its own
-            // admin-only endpoint.
+            // endpoint, and user-mode port forwarding is not part of the
+            // domain definition this backend runs.
             if !hostfwd.is_empty() {
                 return Err(ApiError::bad_request(
                     "hostfwd must be configured through the firewall allowlist",
                 ));
             }
-            Network::User { hostfwd }
+            NicLink {
+                bridge: None,
+                mac: String::new(),
+            }
         }
         NetworkSpec::Bridge { network, mac } => {
             let key = s.ipam.resolve_key(&network).ok_or_else(|| {
@@ -79,13 +86,30 @@ fn resolve(s: &QemuState, spec: NetworkSpec) -> Result<Network, ApiError> {
                 .ipam
                 .bridge_for(&key)
                 .ok_or_else(|| ApiError::not_found(format!("network '{network}' has no bridge")))?;
-            Network::Bridge {
-                network: key,
-                bridge,
+            NicLink {
+                bridge: Some(bridge),
                 mac: mac.unwrap_or_default(),
             }
         }
     })
+}
+
+fn config(s: &QemuState, id: &str) -> Result<VmConfig, ApiError> {
+    s.manager
+        .list()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| ApiError::not_found("unknown QEMU VM"))
+}
+
+fn primary(s: &QemuState, id: &str) -> Result<Interface, ApiError> {
+    domainxml::parse(&config(s, id)?.xml)
+        .map_err(ApiError::internal)?
+        .interfaces
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::bad_request("the VM has no NIC"))
 }
 
 /// A stored bridge can go stale: editing a network's mode, or deleting and
@@ -95,26 +119,27 @@ fn resolve(s: &QemuState, spec: NetworkSpec) -> Result<Network, ApiError> {
 /// A stopped guest is updated in place; a running one is left alone, because
 /// its tap is already on the old bridge and the record describes what is live.
 fn rebind(s: &QemuState, id: &str) -> Result<(), ApiError> {
-    let config = s
-        .manager
-        .list()
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| ApiError::not_found("unknown QEMU VM"))?;
+    let cfg = config(s, id)?;
+    let domain = domainxml::parse(&cfg.xml).map_err(ApiError::internal)?;
     let stopped = s.manager.state(id).map_err(err)? == VmState::Stopped;
-    for (nic_id, network) in config.nics() {
-        let Network::Bridge {
-            network, bridge, ..
-        } = network
-        else {
+    for iface in domain.interfaces {
+        let IfaceKind::Bridge(bridge) = iface.kind else {
             continue;
         };
-        let now = s.ipam.bridge_for(network).ok_or_else(|| {
-            ApiError::conflict(format!("network '{network}' is not managed here"))
+        let Some(mac) = iface.mac else {
+            continue;
+        };
+        let key = s.ipam.network_for_bridge(&bridge).ok_or_else(|| {
+            ApiError::conflict(format!("bridge '{bridge}' belongs to no network here"))
         })?;
-        if stopped && &now != bridge {
-            s.manager.rebind_bridge(id, nic_id, &now).map_err(err)?;
+        let now = s
+            .ipam
+            .bridge_for(&key)
+            .ok_or_else(|| ApiError::conflict(format!("network '{key}' is not managed here")))?;
+        if stopped && now != bridge {
+            s.manager
+                .set_nic_bridge(id, &mac, Some(&now))
+                .map_err(err)?;
         }
     }
     Ok(())
@@ -129,75 +154,109 @@ async fn reapply(s: &QemuState) {
     }
 }
 
-async fn list(State(s): State<QemuState>) -> Result<Json<Vec<VmConfig>>, ApiError> {
-    s.manager.list().map(Json).map_err(ApiError::internal)
+#[derive(Serialize)]
+struct Row {
+    id: String,
+    title: String,
+    state: &'static str,
+    autostart: bool,
 }
+
+async fn list(State(s): State<QemuState>) -> Result<Json<Vec<Row>>, ApiError> {
+    let mut rows = Vec::new();
+    for cfg in s.manager.list().map_err(ApiError::internal)? {
+        let state = match s.manager.state(&cfg.id).map_err(err)? {
+            VmState::Running => "running",
+            VmState::Paused => "paused",
+            VmState::Stopped => "stopped",
+            VmState::Unknown => "unknown",
+        };
+        rows.push(Row {
+            id: cfg.id,
+            title: cfg.title,
+            state,
+            autostart: cfg.autostart,
+        });
+    }
+    Ok(Json(rows))
+}
+
 async fn define(
     State(s): State<QemuState>,
     Json(body): Json<Define>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    s.manager
-        .define(VmConfig {
-            id: body.id,
-            title: body.title,
-            disk: body.disk,
-            memory_mib: body.memory_mib,
-            vcpus: body.vcpus,
-            network: Default::default(),
-            firewall: Default::default(),
-            extra_nics: vec![],
-            extra_disks: vec![],
-        })
-        .map_err(err)?;
-    Ok(Json(json!({"ok": true})))
+    let config = s.manager.define(&body.xml).map_err(err)?;
+    Ok(Json(
+        json!({"ok": true, "id": config.id, "title": config.title}),
+    ))
 }
-async fn firewall(
+
+async fn xml(
     State(s): State<QemuState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let config = s
-        .manager
-        .list()
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| ApiError::not_found("unknown QEMU VM"))?;
     Ok(Json(
-        json!({"policy":"hostfwd_allowlist", "guest_filtering":"unsupported", "egress_filtering":"unsupported", "rules":config.firewall.hostfwd}),
+        json!({"id": id, "xml": s.manager.xml(&id).map_err(err)?}),
     ))
 }
+
+async fn put_xml(
+    State(s): State<QemuState>,
+    Path(id): Path<String>,
+    Json(body): Json<Define>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    s.manager.update_xml(&id, &body.xml).map_err(err)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// User-mode port forwarding is not part of the domain XML, so this backend
+/// has no allowlist to change. The route keeps its shape and says so, rather
+/// than accepting rules that would never reach a NIC.
+async fn firewall() -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(json!({
+        "policy": "hostfwd_allowlist",
+        "guest_filtering": "unsupported",
+        "egress_filtering": "unsupported",
+        "rules": [],
+    })))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetFirewall {
     #[serde(default)]
     rules: Vec<crate::qemu_network::HostForward>,
 }
+
 async fn set_firewall(
-    State(s): State<QemuState>,
-    Path(id): Path<String>,
+    State(_s): State<QemuState>,
+    Path(_id): Path<String>,
     Json(body): Json<SetFirewall>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let policy = crate::qemu_network::UserNetwork {
-        hostfwd: body.rules,
-    };
-    s.manager.set_firewall(&id, policy.clone()).map_err(err)?;
-    Ok(Json(
-        json!({"policy":"hostfwd_allowlist", "guest_filtering":"unsupported", "egress_filtering":"unsupported", "rules":policy.hostfwd}),
-    ))
+    if !body.rules.is_empty() {
+        return Err(ApiError::bad_request(
+            "user-mode port forwarding is not part of the domain definition; configure it on the guest",
+        ));
+    }
+    firewall().await
 }
+
 async fn network(
     State(s): State<QemuState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let config = s
-        .manager
-        .list()
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| ApiError::not_found("unknown QEMU VM"))?;
-    Ok(Json(json!(config.network)))
+    let domain = domainxml::parse(&config(&s, &id)?.xml).map_err(ApiError::internal)?;
+    let Some(iface) = domain.interfaces.into_iter().next() else {
+        return Ok(Json(json!({"mode": "none"})));
+    };
+    Ok(Json(match iface.kind {
+        IfaceKind::User => json!({"mode": "user", "hostfwd": [], "mac": iface.mac}),
+        IfaceKind::Bridge(bridge) => {
+            json!({"mode": "bridge", "bridge": bridge, "mac": iface.mac})
+        }
+    }))
 }
+
 async fn state(
     State(s): State<QemuState>,
     Path(id): Path<String>,
@@ -211,29 +270,37 @@ async fn state(
     };
     Ok(Json(json!({"id": id, "state": state})))
 }
+
 async fn set_network(
     State(s): State<QemuState>,
     Path(id): Path<String>,
     Json(body): Json<NetworkSpec>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let network = resolve(&s, body)?;
-    s.manager.set_network(&id, network).map_err(err)?;
+    let link = resolve(&s, body)?;
+    let mac = primary(&s, &id)?
+        .mac
+        .ok_or_else(|| ApiError::bad_request("the VM's NIC has no MAC address"))?;
+    s.manager
+        .set_nic_bridge(&id, &mac, link.bridge.as_deref())
+        .map_err(err)?;
     Ok(Json(json!({"ok": true})))
 }
+
 #[derive(Deserialize)]
 struct Nic {
-    device_id: String,
     network: NetworkSpec,
 }
+
 async fn add_nic(
     State(s): State<QemuState>,
     Path(id): Path<String>,
     Json(body): Json<Nic>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     rebind(&s, &id)?;
-    let network = resolve(&s, body.network)?;
-    s.manager
-        .add_nic(&id, &body.device_id, network)
+    let link = resolve(&s, body.network)?;
+    let mac = s
+        .manager
+        .add_nic(&id, link.bridge.as_deref(), &link.mac)
         .map_err(err)?;
     // The new MAC is part of the guest's rules from now on. Refresh the guest
     // snapshot first, so the reservation exists before the rules that are keyed
@@ -243,13 +310,15 @@ async fn add_nic(
         tracing::warn!("qemu: refreshing IPAM after adding a NIC: {e}");
     }
     reapply(&s).await;
-    Ok(Json(json!({"ok":true,"device_id":body.device_id})))
+    Ok(Json(json!({"ok": true, "mac": mac})))
 }
+
 async fn remove_nic(
     State(s): State<QemuState>,
-    Path((id, device_id)): Path<(String, String)>,
+    Path((id, mac)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let pending = s.manager.remove_nic(&id, &device_id).map_err(err)?;
+    let mac = domainxml::normalize_mac(&mac).map_err(ApiError::bad_request)?;
+    let pending = s.manager.remove_nic(&id, &mac).map_err(err)?;
     if !pending {
         // The MAC is gone from the guest snapshot, so the per-VM rules can drop
         // it in the same request rather than one supervisor pass later.
@@ -259,14 +328,13 @@ async fn remove_nic(
         reapply(&s).await;
     }
     Ok(Json(
-        json!({"ok":!pending,"pending":pending,"device_id":device_id}),
+        json!({"ok": !pending, "pending": pending, "mac": mac}),
     ))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AddDisk {
-    id: String,
     path: std::path::PathBuf,
     #[serde(default)]
     format: Option<String>,
@@ -277,7 +345,6 @@ async fn add_disk(
     Path(id): Path<String>,
     Json(body): Json<AddDisk>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::qemu::validate_new_disk_id(&body.id).map_err(ApiError::bad_request)?;
     let format = match body.format.as_deref().unwrap_or("raw") {
         "raw" => DiskFormat::Raw,
         "qcow2" => DiskFormat::Qcow2,
@@ -287,20 +354,17 @@ async fn add_disk(
             )));
         }
     };
-    let path = s
-        .manager
-        .add_disk(&id, &body.id, &body.path, format)
-        .map_err(err)?;
-    Ok(Json(json!({"ok":true,"id":body.id,"path":path})))
+    let (target, path) = s.manager.add_disk(&id, &body.path, format).map_err(err)?;
+    Ok(Json(json!({"ok": true, "target": target, "path": path})))
 }
 
 async fn remove_disk(
     State(s): State<QemuState>,
-    Path((id, disk_id)): Path<(String, String)>,
+    Path((id, target)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let pending = s.manager.remove_disk(&id, &disk_id).map_err(err)?;
+    let pending = s.manager.remove_disk(&id, &target).map_err(err)?;
     Ok(Json(
-        json!({"ok":true,"id":disk_id,"device_id":disk_id,"pending":pending}),
+        json!({"ok": true, "target": target, "pending": pending}),
     ))
 }
 async fn start(
@@ -337,13 +401,14 @@ pub fn routes(manager: Manager, ipam: Ipam, fw: FirewallState) -> Router {
     Router::new()
         .route("/qemu/vms", get(list).post(define))
         .route("/qemu/vms/{id}", delete(remove))
+        .route("/qemu/vms/{id}/xml", get(xml).put(put_xml))
         .route("/qemu/vms/{id}/state", get(state))
         .route("/qemu/vms/{id}/network", get(network).put(set_network))
         .route("/qemu/vms/{id}/firewall", get(firewall).put(set_firewall))
         .route("/qemu/vms/{id}/nics", post(add_nic))
-        .route("/qemu/vms/{id}/nics/{device_id}", delete(remove_nic))
+        .route("/qemu/vms/{id}/nics/{mac}", delete(remove_nic))
         .route("/qemu/vms/{id}/disks", post(add_disk))
-        .route("/qemu/vms/{id}/disks/{disk_id}", delete(remove_disk))
+        .route("/qemu/vms/{id}/disks/{target}", delete(remove_disk))
         .route("/qemu/vms/{id}/start", post(start))
         .route("/qemu/vms/{id}/shutdown", post(shutdown))
         .route("/qemu/vms/{id}/force-stop", post(force_stop))
@@ -393,14 +458,36 @@ mod tests {
         path
     }
 
-    async fn put(app: Router, body: &str) -> (u16, serde_json::Value) {
-        call(
-            app,
-            "PUT",
-            "/qemu/vms/550e8400-e29b-41d4-a716-446655440000/network",
-            body,
+    const VM: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn domain_xml(bridge: &str, disk: &std::path::Path) -> String {
+        format!(
+            r#"<domain type="kvm">
+  <name>{VM}</name>
+  <uuid>{VM}</uuid>
+  <title>web</title>
+  <memory unit="KiB">131072</memory>
+  <vcpu>1</vcpu>
+  <os><type arch="x86_64" machine="q35">hvm</type></os>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="raw"/>
+      <source file="{}"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <interface type="bridge">
+      <source bridge="{bridge}"/>
+      <model type="virtio"/>
+      <mac address="52:54:00:aa:bb:01"/>
+    </interface>
+  </devices>
+</domain>"#,
+            disk.display()
         )
-        .await
+    }
+
+    async fn put(app: Router, body: &str) -> (u16, serde_json::Value) {
+        call(app, "PUT", &format!("/qemu/vms/{VM}/network"), body).await
     }
 
     async fn call(app: Router, method: &str, path: &str, body: &str) -> (u16, serde_json::Value) {
@@ -457,25 +544,10 @@ mod tests {
     fn a_stale_bridge_is_resolved_again_from_the_store() {
         let dir = temp("rebind");
         let s = state(&dir);
-        let vm = "550e8400-e29b-41d4-a716-446655440000";
         let net_id = "5b92a1a5-4f00-4a1c-9f2e-1d3c5b7a9e00";
-        let mac = crate::qemu::stable_mac(vm, "net0");
+        let primary = disk(&dir, "disk");
         s.manager
-            .define(VmConfig {
-                id: vm.into(),
-                title: "web".into(),
-                disk: disk(&dir, "disk"),
-                memory_mib: 128,
-                vcpus: 1,
-                network: Network::Bridge {
-                    network: net_id.into(),
-                    bridge: "vbrstale00000".into(),
-                    mac: mac.clone(),
-                },
-                firewall: Default::default(),
-                extra_nics: vec![],
-                extra_disks: vec![],
-            })
+            .define(&domain_xml("vbrstale00000", &primary))
             .unwrap();
         s.ipam.lock().networks.insert(
             net_id.into(),
@@ -484,79 +556,61 @@ mod tests {
             )
             .unwrap(),
         );
-
-        assert!(rebind(&s, vm).is_ok());
-        assert_eq!(
-            s.manager.list().unwrap().remove(0).network,
-            Network::Bridge {
-                network: net_id.into(),
-                bridge: crate::hostnet::bridge_name(net_id),
-                mac,
-            }
+        let derived = crate::hostnet::bridge_name(net_id);
+        // A network whose current bridge differs from the stored one is
+        // refused until the network's own bridge is what the guest names.
+        assert!(
+            rebind(&s, VM).is_err(),
+            "the stored bridge belongs to no network"
         );
-
-        // A network that has gone away is refused, not started on the old name.
         s.manager
-            .set_network(
-                vm,
-                Network::Bridge {
-                    network: "gone".into(),
-                    bridge: "vbrstale00000".into(),
-                    mac: String::new(),
-                },
-            )
+            .set_nic_bridge(VM, "52:54:00:aa:bb:01", Some(&derived))
             .unwrap();
-        assert!(rebind(&s, vm).is_err());
+        assert!(rebind(&s, VM).is_ok());
+        assert_eq!(
+            domainxml::bridges(&s.manager.xml(VM).unwrap()).unwrap()[0].bridge,
+            derived
+        );
+        // A network that has gone away is refused, not started on the old name.
+        s.ipam.lock().networks.clear();
+        assert!(rebind(&s, VM).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn a_network_spec_round_trips_as_the_stored_shape() {
-        let user: NetworkSpec = serde_json::from_str(r#"{"mode":"user"}"#).unwrap();
-        assert!(matches!(user, NetworkSpec::User { hostfwd } if hostfwd.is_empty()));
-        let bridge: NetworkSpec =
-            serde_json::from_str(r#"{"mode":"bridge","network":"lab"}"#).unwrap();
-        assert!(
-            matches!(bridge, NetworkSpec::Bridge { network, mac } if network == "lab" && mac.is_none())
-        );
-        // The stored enum the GET answers with is the same tagged shape.
+    /// The primary NIC answers in the shape the Network tab reads, and a VM
+    /// with no NIC says so.
+    #[tokio::test]
+    async fn the_primary_nic_answers_as_its_wire_shape() {
+        let dir = temp("shape");
+        let s = state(&dir);
+        let primary = disk(&dir, "disk");
+        s.manager.define(&domain_xml("vbr0", &primary)).unwrap();
+        let Json(body) = network(State(s), Path(VM.into()))
+            .await
+            .ok()
+            .expect("the primary NIC answers");
         assert_eq!(
-            serde_json::to_value(Network::default()).unwrap(),
-            serde_json::json!({"mode":"user","hostfwd":[]})
+            body,
+            serde_json::json!({"mode":"bridge","bridge":"vbr0","mac":"52:54:00:aa:bb:01"})
         );
-        assert_eq!(
-            serde_json::to_value(Network::Bridge {
-                network: "lab".into(),
-                bridge: "vbr0".into(),
-                mac: "52:54:00:aa:bb:cc".into(),
-            })
-            .unwrap(),
-            serde_json::json!({
-                "mode":"bridge","network":"lab","bridge":"vbr0","mac":"52:54:00:aa:bb:cc"
-            })
-        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// A disk request is refused before it reaches the manager when its
-    /// identifier or format is not one QEMU could be given; an unknown VM is a
-    /// 404, and removal of an unknown disk likewise.
+    /// A disk request is refused before it reaches the manager when its format
+    /// is not one QEMU could be given; an unknown VM is a 404, and removal of
+    /// an unknown disk likewise.
     #[tokio::test]
-    async fn a_disk_request_validates_its_identifier_and_format() {
+    async fn a_disk_request_validates_its_format() {
         let dir = temp("disk");
-        let disk = disk(&dir, "extra");
-        let vm = "550e8400-e29b-41d4-a716-446655440000";
-        let path = format!("/qemu/vms/{vm}/disks");
-        let body = |id: &str, format: &str| {
-            serde_json::json!({"id": id, "path": disk, "format": format}).to_string()
-        };
+        let extra = disk(&dir, "extra");
+        let path = format!("/qemu/vms/{VM}/disks");
+        let body = |format: &str| serde_json::json!({"path": extra, "format": format}).to_string();
         let router = app(&dir);
-        let (status, b) = call(router.clone(), "POST", &path, &body("data", "qcow3")).await;
+        let (status, b) = call(router.clone(), "POST", &path, &body("qcow3")).await;
         assert_eq!(status, 400, "{b}");
-        let (status, b) = call(router.clone(), "POST", &path, &body("disk0", "qcow2")).await;
-        assert_eq!(status, 400, "{b}");
-        let (status, b) = call(router.clone(), "POST", &path, &body("data", "qcow2")).await;
+        let (status, b) = call(router.clone(), "POST", &path, &body("qcow2")).await;
         assert_eq!(status, 404, "{b}: no VM is defined");
-        let (status, b) = call(router, "DELETE", &format!("/qemu/vms/{vm}/disks/data"), "").await;
+        let (status, b) = call(router, "DELETE", &format!("/qemu/vms/{VM}/disks/vdb"), "").await;
         assert_eq!(status, 404, "{b}");
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -13,7 +13,7 @@ token_path = "/etc/virt-man-daemon/token"
 
 # Directory for the self-signed TLS certificate/key (created on first run).
 cert_dir = "/etc/virt-man-daemon/certs"
-qemu_state_root = "/var/lib/libvirt-daemon"
+qemu_state_root = "/var/lib/virt-man-daemon/qemu"
 data_dir = "/var/lib/virt-man-daemon"
 
 # Optional: serve an externally-provided certificate instead of the

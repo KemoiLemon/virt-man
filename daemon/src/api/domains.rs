@@ -1,18 +1,32 @@
+//! `/domains`: VMs run by the direct-QEMU manager. The wire shapes are the
+//! ones the SPA and the web server have always read, so the frontend did not
+//! change when the backend stopped being libvirt.
+//!
+//! The identity is the manager's UUID, which is `<name>`, `<uuid>` and the URL.
+//! The user's display name is `<title>`; routes accept either, because old
+//! links and the web server's records may still name a guest by its title.
+
 use axum::Json;
 use axum::Router;
-use axum::extract::{Extension, Path, Query};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use virt::domain::Domain;
 
 use super::ApiError;
 use crate::disks;
 use crate::ipam::server::Ipam;
-use crate::libvirt::{domain_state_name, parse_graphics, with_conn};
 use crate::pools::Pools;
+use crate::qemu::{Manager, State as GuestState, VmConfig};
 
-pub fn routes() -> Router {
+#[derive(Clone)]
+struct VmState {
+    manager: Manager,
+    pools: Pools,
+    ipam: Ipam,
+}
+
+pub fn routes(manager: Manager, pools: Pools, ipam: Ipam) -> Router {
     Router::new()
         .route("/domains", get(list).post(create))
         .route("/domains/{name}", get(get_one).delete(delete))
@@ -27,108 +41,143 @@ pub fn routes() -> Router {
         .route("/domains/{name}/destroy", post(destroy))
         .route("/domains/{name}/reset", post(reset))
         .route("/domains/{name}/rename", post(rename))
+        .with_state(VmState {
+            manager,
+            pools,
+            ipam,
+        })
 }
 
-async fn list() -> Result<Json<Value>, ApiError> {
-    let v = with_conn(|c| {
-        let doms = c.list_all_domains(0)?;
-        let mut arr = Vec::with_capacity(doms.len());
-        for d in &doms {
-            arr.push(domain_summary(d));
-        }
-        Ok(json!(arr))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+fn err(e: String) -> ApiError {
+    if e == "unknown QEMU VM" {
+        ApiError::not_found(e)
+    } else {
+        ApiError::conflict(e)
+    }
 }
 
-fn domain_summary(d: &Domain) -> Value {
-    let state = d
-        .get_state()
-        .map(|(s, _)| domain_state_name(s))
-        .unwrap_or("unknown");
-    let info = d.get_info().ok();
-    // Display title: <title> metadata, if the guest set one.
-    let title = d
-        .get_xml_desc(0)
-        .ok()
-        .and_then(|x| crate::libvirt::title_of(&x));
+/// A guest by its id (UUID) or by its display title. The SPA uses the id;
+/// titles are for old links and the web server's name-keyed records. An
+/// ambiguous title resolves to nothing rather than the wrong guest.
+fn resolve(manager: &Manager, key: &str) -> Result<VmConfig, ApiError> {
+    let all = manager.list().map_err(ApiError::internal)?;
+    if let Some(cfg) = all.iter().find(|c| c.id == key) {
+        return Ok(cfg.clone());
+    }
+    let mut matches = all
+        .into_iter()
+        .filter(|c| !c.title.is_empty() && c.title == key);
+    match (matches.next(), matches.next()) {
+        (Some(cfg), None) => Ok(cfg),
+        _ => Err(ApiError::not_found(format!("no VM '{key}'"))),
+    }
+}
+
+fn summary(cfg: &VmConfig, state: &str) -> Value {
+    // The SPA uses vCPUs and memory on the dashboard cards; a definition that
+    // cannot be parsed is still listed rather than vanishing from the tree.
+    let d = crate::domainxml::parse(&cfg.xml).ok();
     json!({
-        "name": d.get_name().unwrap_or_default(),
-        "uuid": d.get_uuid_string().unwrap_or_default(),
-        "title": title,
-        "id": d.get_id().unwrap_or(0),
+        "name": cfg.id,
+        "uuid": cfg.id,
+        "title": (!cfg.title.is_empty()).then(|| cfg.title.clone()),
+        // libvirt's runtime id; a direct launch has no equivalent, and the UI
+        // only uses it as an opaque discriminator.
+        "id": 0,
         "state": state,
-        "active": d.is_active().unwrap_or(false),
-        "persistent": d.is_persistent().unwrap_or(false),
-        "vcpus": info.as_ref().map(|i| i.nr_virt_cpu).unwrap_or(0),
-        "memory_mb": info.as_ref().map(|i| i.memory / 1024).unwrap_or(0),
+        "active": matches!(state, "running" | "paused"),
+        "persistent": true,
+        "vcpus": d.as_ref().map(|d| d.vcpus).unwrap_or(0),
+        "memory_mb": d.as_ref().map(|d| d.memory_mib).unwrap_or(0),
     })
 }
 
-async fn get_one(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        Ok(json!({
-            "name": d.get_name().unwrap_or_default(),
-            "uuid": d.get_uuid_string().unwrap_or_default(),
-            "id": d.get_id().unwrap_or(0),
-            "state": d.get_state().map(|(s, _)| domain_state_name(s)).unwrap_or("unknown"),
-            "active": d.is_active().unwrap_or(false),
-            "persistent": d.is_persistent().unwrap_or(false),
-        }))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn list(State(s): State<VmState>) -> Result<Json<Value>, ApiError> {
+    let mut arr = Vec::new();
+    for cfg in s.manager.list().map_err(ApiError::internal)? {
+        let state = s.manager.state(&cfg.id).map_err(err)?;
+        arr.push(summary(&cfg, state.as_str()));
+    }
+    Ok(Json(json!(arr)))
 }
 
-async fn get_xml(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        Ok(json!({"name": d.get_name().unwrap_or_default(), "xml": d.get_xml_desc(0)?}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn get_one(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    let state = s.manager.state(&cfg.id).map_err(err)?;
+    Ok(Json(summary(&cfg, state.as_str())))
 }
 
-async fn put_xml(Path(name): Path<String>, body: String) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        // Resolve OVMF paths the forms wrote for another distribution to ones
-        // that exist here, or a Debian host refuses a guest the Arch-flavoured
-        // form produced (and the reverse).
-        let _ = Domain::define_xml(c, &crate::firmware::resolve(&body))?;
-        Ok(json!({"name": name, "defined": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn get_xml(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    let xml = s.manager.xml(&cfg.id).map_err(err)?;
+    Ok(Json(json!({"name": cfg.id, "xml": xml})))
+}
+
+/// The SPA's options form rewrites `<name>` to the display name it typed. The
+/// identity is the UUID, so a display name is put back to the id (the display
+/// name is `<title>`); a different UUID is another guest and is refused.
+fn pin_name(xml: &str, id: &str) -> Result<String, String> {
+    let Some(open) = xml.find("<name>") else {
+        return Ok(xml.to_string());
+    };
+    let close = xml[open..]
+        .find("</name>")
+        .map(|i| i + open)
+        .ok_or("the definition has an unterminated <name>")?;
+    let value = xml[open + 6..close].trim();
+    if value.is_empty() || value == id {
+        return Ok(xml.to_string());
+    }
+    if uuid::Uuid::parse_str(value).is_ok_and(|u| u.hyphenated().to_string() == value) {
+        return Err(format!(
+            "<name> '{value}' does not match this VM's id '{id}'"
+        ));
+    }
+    let mut out = String::with_capacity(xml.len());
+    out.push_str(&xml[..open + 6]);
+    out.push_str(id);
+    out.push_str(&xml[close..]);
+    Ok(out)
+}
+
+async fn put_xml(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+    body: String,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    let xml = crate::firmware::resolve(&body);
+    let xml = pin_name(&xml, &cfg.id).map_err(ApiError::bad_request)?;
+    // A running guest keeps its live devices; the stored definition is what
+    // the next start uses. Updating it never restarts the process.
+    s.manager
+        .update_xml(&cfg.id, &xml)
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({"name": cfg.id, "defined": true})))
 }
 
 async fn create(
+    State(s): State<VmState>,
     Query(q): Query<HashMap<String, String>>,
     body: String,
 ) -> Result<Json<Value>, ApiError> {
     let start = q.get("start").map(|v| v == "true").unwrap_or(true);
-    let v = with_conn(move |c| {
-        let d = Domain::define_xml(c, &crate::firmware::resolve(&body))?;
-        let name = d.get_name().unwrap_or_default();
-        let started = if start {
-            d.create().map(|_| true).unwrap_or(false)
-        } else {
-            false
-        };
-        Ok(json!({"name": name, "started": started}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+    let xml = crate::firmware::resolve(&body);
+    let cfg = s.manager.define(&xml).map_err(err)?;
+    if start {
+        s.manager.start(&cfg.id).map_err(err)?;
+    }
+    Ok(Json(json!({"name": cfg.id, "started": start})))
 }
 
 async fn delete(
-    Extension(pools): Extension<Pools>,
+    State(s): State<VmState>,
     Path(name): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -136,315 +185,211 @@ async fn delete(
         .get("remove_storage")
         .map(|v| v == "true")
         .unwrap_or(false);
-    // Stop a running guest before removing it. Undefining a live domain leaves
-    // it running and transient -- an orphan with no definition to manage -- so
-    // a delete asks the guest to shut down, waits (bounded), then forces it off
-    // and undefines. A delete therefore always ends with the guest gone.
-    let stopped = crate::libvirt::stop_guest(&name, std::time::Duration::from_secs(30))
-        .await
-        .map_err(ApiError::internal)?;
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        let xml = d.get_xml_desc(0)?;
-        // Decide the cleanup BEFORE undefining: the disk list comes from this
-        // definition, and the in-use check must still be able to see every
-        // other guest. Only the guest's own disks are candidates — an attached
-        // ISO, a read-only disk, or anything another guest references is kept.
-        let plan = if remove_storage {
-            disks::plan_cleanup_connected(
-                &pools,
-                &xml,
-                &disks::sources_used_elsewhere(c, &pools, Some(&name)),
-            )
-        } else {
-            disks::Cleanup::default()
-        };
-        let flags = virt::sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
-            | virt::sys::VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
-            | virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM;
-        d.undefine_flags(flags)?;
-
-        let mut removed = Vec::new();
-        let mut failed = Vec::new();
-        for src in &plan.removable {
-            // Best effort: only a file inside one of our pools is removed, so
-            // a definition naming a host path (an ISO elsewhere, /etc/shadow)
-            // can never make a guest delete reach it.
-            let outcome: Result<(), String> = match src {
-                disks::DiskSource::Path(path) => pools
-                    .owned_file(path)
-                    .ok_or_else(|| "not a file in a storage pool".to_string())
-                    .and_then(|p| std::fs::remove_file(p).map_err(|e| e.to_string())),
-                disks::DiskSource::Volume { pool, volume } => pools
-                    .volume_path(pool, volume)
-                    .ok_or_else(|| format!("no volume '{volume}' in pool '{pool}'"))
-                    .and_then(|p| std::fs::remove_file(p).map_err(|e| e.to_string())),
-            };
-            match outcome {
-                Ok(()) => removed.push(src.describe()),
-                Err(e) => failed.push(json!({"disk": src.describe(), "error": e})),
-            }
-        }
-        Ok(json!({
-            "name": name,
-            "undefined": true,
-            // Whether the guest had to be stopped first, so the UI can say so.
-            "stopped": stopped,
-            "storage_removed": remove_storage,
-            // What went, what was deliberately kept and why, and what could
-            // not be removed — so the UI can tell the whole truth.
-            "removed": removed,
-            "kept": plan.kept.iter()
-                .map(|(disk, reason)| json!({"disk": disk, "reason": reason.as_str()}))
-                .collect::<Vec<_>>(),
-            "failed": failed,
-        }))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
-}
-
-async fn get_state(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        let (state, reason) = d.get_state()?;
-        Ok(json!({"name": d.get_name().unwrap_or_default(), "state": domain_state_name(state), "reason": reason}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
-}
-
-/// Point-in-time CPU/memory sample for one domain, plus the host node info
-/// the caller needs to turn `cpu_time` into a percentage.
-///
-/// `cpu_time` is a monotonic nanosecond counter, so a single reading cannot
-/// express "CPU %" — the client keeps the previous sample and divides the
-/// delta by elapsed wall time and the vCPU count.
-async fn get_stats(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        let info = d.get_info()?;
-        let node = c.get_node_info()?;
-        // Balloon stats are only available for running guests with a working
-        // agent/balloon driver; absence is normal, so never fail on it.
-        let mut rss_kib: Option<u64> = None;
-        let mut usable_kib: Option<u64> = None;
-        if let Ok(stats) = d.memory_stats(0) {
-            for s in stats {
-                match s.tag {
-                    // VIR_DOMAIN_MEMORY_STAT_RSS
-                    7 => rss_kib = Some(s.val),
-                    // VIR_DOMAIN_MEMORY_STAT_USABLE
-                    8 => usable_kib = Some(s.val),
-                    _ => {}
-                }
-            }
-        }
-        Ok(json!({
-            "name": d.get_name().unwrap_or_default(),
-            "state": domain_state_name(info.state),
-            "cpu_time_ns": info.cpu_time,
-            "vcpus": info.nr_virt_cpu,
-            "memory_kib": info.memory,
-            "max_memory_kib": info.max_mem,
-            "rss_kib": rss_kib,
-            "usable_kib": usable_kib,
-            "host": {
-                "cpus": node.cpus,
-                "memory_kib": node.memory,
-                "mhz": node.mhz,
-                "model": node.model,
-            },
-            "sampled_at_ms": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-        }))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
-}
-
-/// Parse one `<interface>…</interface>` fragment's target dev, MAC and model.
-/// These are child elements, so reading them off the opening tag (as the old
-/// handler did) returned None for everything but the network name.
-pub(super) fn interface_info(frag: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let child = |tag: &str, name: &str| -> Option<String> {
-        let open = frag.find(&format!("<{tag}"))?;
-        let tag_frag = &frag[open..];
-        let tag_end = tag_frag.find('>')?;
-        let t = &tag_frag[..=tag_end];
-        let mut from = 0;
-        while let Some(rel) = t[from..].find(name) {
-            let j = from + rel;
-            from = j + name.len();
-            let r = t[from..].trim_start();
-            let Some(r) = r.strip_prefix('=') else {
-                continue;
-            };
-            let r = r.trim_start();
-            let q = r.chars().next().unwrap_or(' ');
-            if q != '\'' && q != '"' {
-                continue;
-            }
-            let inner = &r[q.len_utf8()..];
-            if let Some(k) = inner.find(q) {
-                return Some(inner[..k].to_string());
-            }
-        }
-        None
+    let cfg = resolve(&s.manager, &name)?;
+    let xml = s.manager.xml(&cfg.id).map_err(err)?;
+    // Decide the cleanup from the stored definition and the other guests'
+    // definitions before anything is removed. Only the guest's own disks are
+    // candidates: an attached ISO, a read-only disk, or anything another guest
+    // references is kept.
+    let plan = if remove_storage {
+        let guests = disks::guest_definitions(&s.manager);
+        disks::plan_cleanup_connected(
+            &s.pools,
+            &xml,
+            &disks::sources_used_elsewhere(&guests, &s.pools, Some(&cfg.id)),
+        )
+    } else {
+        disks::Cleanup::default()
     };
-    (
-        child("target", "dev"),
-        child("mac", "address"),
-        child("model", "type"),
-    )
+
+    // A delete always ends with the guest gone, not orphaned: ask it to shut
+    // down, wait (bounded), then force it off if it does not.
+    let running = match s.manager.state(&cfg.id).map_err(err)? {
+        GuestState::Running => Some(false),
+        GuestState::Paused => Some(true),
+        _ => None,
+    };
+    let stopped = if let Some(force) = running {
+        if force {
+            s.manager.force_stop(&cfg.id).map_err(err)?;
+        } else {
+            s.manager
+                .powerdown(&cfg.id, false)
+                .or_else(|_| s.manager.force_stop(&cfg.id))
+                .map_err(err)?;
+        }
+        true
+    } else {
+        false
+    };
+
+    // Removes metadata, the QMP/NVRAM runtime directory and the taps. Never a
+    // disk file: that is the cleanup plan's business, below.
+    s.manager.delete(&cfg.id).map_err(err)?;
+
+    let mut removed = Vec::new();
+    let mut failed = Vec::new();
+    for src in &plan.removable {
+        // Best effort: only a file inside one of our pools is removed, so a
+        // definition naming a host path (an ISO elsewhere, /etc/shadow) can
+        // never make a guest delete reach it.
+        let outcome: Result<(), String> = match src {
+            disks::DiskSource::Path(path) => s
+                .pools
+                .owned_file(path)
+                .ok_or_else(|| "not a file in a storage pool".to_string())
+                .and_then(|p| std::fs::remove_file(p).map_err(|e| e.to_string())),
+            disks::DiskSource::Volume { pool, volume } => s
+                .pools
+                .volume_path(pool, volume)
+                .ok_or_else(|| format!("no volume '{volume}' in pool '{pool}'"))
+                .and_then(|p| std::fs::remove_file(p).map_err(|e| e.to_string())),
+        };
+        match outcome {
+            Ok(()) => removed.push(src.describe()),
+            Err(e) => failed.push(json!({"disk": src.describe(), "error": e})),
+        }
+    }
+    Ok(Json(json!({
+        "name": cfg.id,
+        "undefined": true,
+        // Whether the guest had to be stopped first, so the UI can say so.
+        "stopped": stopped,
+        "storage_removed": remove_storage,
+        // What went, what was deliberately kept and why, and what could not be
+        // removed — so the UI can tell the whole truth.
+        "removed": removed,
+        "kept": plan.kept.iter()
+            .map(|(disk, reason)| json!({"disk": disk, "reason": reason.as_str()}))
+            .collect::<Vec<_>>(),
+        "failed": failed,
+    })))
 }
 
-/// Point-in-time per-interface byte counters, so the client can graph
-/// tx/rx rates. `interface_stats` needs the guest's `target dev` name (not
-/// the MAC), which is read from the domain XML first.
-/// The `<source ...>` tag of an interface block, if it has one.
-fn source_tag(frag: &str) -> Option<&str> {
-    let s = &frag[frag.find("<source")?..];
-    Some(&s[..s.find('>')?])
+async fn get_state(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    let state = s.manager.state(&cfg.id).map_err(err)?;
+    // libvirt's "reason" is not modelled; the SPA only displays the state.
+    Ok(Json(
+        json!({"name": cfg.id, "state": state.as_str(), "reason": 0}),
+    ))
 }
 
-/// `<source network='...'/>` of an interface block, if it is on a libvirt
-/// network. Only a definition written before networks became our own has one.
-fn source_network(frag: &str) -> Option<String> {
-    disks::attr(source_tag(frag)?, "network").map(str::to_string)
-}
-
-/// `<source bridge='...'/>` of an interface block: the bridge the guest is
-/// plugged into, which is how a network is attached now.
-fn source_bridge(frag: &str) -> Option<String> {
-    disks::attr(source_tag(frag)?, "bridge").map(str::to_string)
+/// Point-in-time CPU/memory sample for one guest, plus the host node info the
+/// caller needs to turn `cpu_time_ns` into a percentage.
+async fn get_stats(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    let stats = s.manager.stats(&cfg.id).map_err(err)?;
+    let (cpus, memory_kib, mhz, model) = super::host::node_info();
+    Ok(Json(json!({
+        "name": cfg.id,
+        "state": stats.state,
+        "cpu_time_ns": stats.cpu_time_ns,
+        "vcpus": stats.vcpus,
+        "memory_kib": stats.memory_kib,
+        "max_memory_kib": stats.max_memory_kib,
+        "rss_kib": stats.rss_kib,
+        "usable_kib": stats.usable_kib,
+        "host": {
+            "cpus": cpus,
+            "memory_kib": memory_kib,
+            "mhz": mhz,
+            "model": model,
+        },
+        "sampled_at_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    })))
 }
 
 async fn get_interfaces(
-    Extension(ipam): Extension<Ipam>,
+    State(s): State<VmState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        // Live XML: a running guest carries its `target dev` (e.g. vnet0),
-        // which interface_stats needs; inactive XML omits it, and a shut-off
-        // guest has no counters anyway.
-        let xml = d.get_xml_desc(0)?;
-        let mut out = Vec::new();
-        let mut rest = xml.as_str();
-        while let Some(i) = rest.find("<interface") {
-            let block = &rest[i..];
-            let Some(end) = block.find("</interface>") else {
-                break;
-            };
-            let b = &block[..end];
-            let (dev, mac, model) = interface_info(b);
-            // The network key, not the bridge: the VM's Network tab and the
-            // IPAM table are keyed by it. A bridge nothing here defines is an
-            // operator's own, and has no network key to report.
-            let open = &b[..b.find('>').map_or(b.len(), |e| e + 1)];
-            let network = if disks::attr(open, "type") == Some("bridge") {
-                source_bridge(b).and_then(|br| ipam.network_for_bridge(&br))
-            } else {
-                source_network(b)
-            };
-            let (inbound, outbound) = super::nics::bandwidth_of(b);
-            let (rx_bytes, tx_bytes) = match dev.as_deref() {
-                Some(target) => d
-                    .interface_stats(target)
-                    .map(|s| (s.rx_bytes.max(0) as u64, s.tx_bytes.max(0) as u64))
-                    .unwrap_or((0, 0)),
-                None => (0, 0),
-            };
-            out.push(json!({
-                "dev": dev,
-                "mac": mac,
-                "model": model,
-                "network": network,
-                // Limits as the guest sees them: inbound is its RX.
-                "rx_mbps": inbound.map(super::nics::kib_to_mbps),
-                "tx_mbps": outbound.map(super::nics::kib_to_mbps),
-                "rx_bytes": rx_bytes,
-                "tx_bytes": tx_bytes,
-            }));
-            rest = &block[end + 12..];
-        }
-        Ok(json!({ "name": d.get_name().unwrap_or_default(), "interfaces": out }))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+    let cfg = resolve(&s.manager, &name)?;
+    let mut out = Vec::new();
+    for i in s.manager.interfaces(&cfg.id).map_err(err)? {
+        // The API is keyed by network, not by the bridge the definition names.
+        // A bridge nothing here defines is an operator's own, and has no key;
+        // a user-mode NIC has no host interface at all.
+        let network = i
+            .network
+            .as_deref()
+            .and_then(|bridge| s.ipam.network_for_bridge(bridge));
+        out.push(json!({
+            "dev": i.dev,
+            "mac": i.mac,
+            "model": i.model,
+            "network": network,
+            // Limits as the guest sees them: inbound is its RX.
+            "rx_mbps": i.rx_kib.map(super::nics::kib_to_mbps),
+            "tx_mbps": i.tx_kib.map(super::nics::kib_to_mbps),
+            "rx_bytes": i.rx_bytes,
+            "tx_bytes": i.tx_bytes,
+        }));
+    }
+    Ok(Json(json!({ "name": cfg.id, "interfaces": out })))
 }
 
-async fn get_graphics(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        let xml = d.get_xml_desc(0)?;
-        Ok(json!({"name": d.get_name().unwrap_or_default(), "graphics": parse_graphics(&xml)}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn get_graphics(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    let graphics = s.manager.graphics(&cfg.id).map_err(err)?;
+    Ok(Json(json!({"name": cfg.id, "graphics": graphics})))
 }
 
-async fn start(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        d.create()?;
-        Ok(json!({"name": name, "started": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn start(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    s.manager.start(&cfg.id).map_err(err)?;
+    Ok(Json(json!({"name": cfg.id, "started": true})))
 }
 
-async fn shutdown(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        d.shutdown()?;
-        Ok(json!({"name": name, "shutdown": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn shutdown(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    s.manager.powerdown(&cfg.id, false).map_err(err)?;
+    Ok(Json(json!({"name": cfg.id, "shutdown": true})))
 }
 
-async fn reboot(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        d.reboot(0)?;
-        Ok(json!({"name": name, "rebooted": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn reboot(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    s.manager.reboot(&cfg.id).map_err(err)?;
+    Ok(Json(json!({"name": cfg.id, "rebooted": true})))
 }
 
-async fn destroy(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        d.destroy()?;
-        Ok(json!({"name": name, "destroyed": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn destroy(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    s.manager.force_stop(&cfg.id).map_err(err)?;
+    Ok(Json(json!({"name": cfg.id, "destroyed": true})))
 }
 
-async fn reset(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        d.reset()?;
-        Ok(json!({"name": name, "reset": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+async fn reset(
+    State(s): State<VmState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = resolve(&s.manager, &name)?;
+    s.manager.reset(&cfg.id).map_err(err)?;
+    Ok(Json(json!({"name": cfg.id, "reset": true})))
 }
 
 #[derive(serde::Deserialize)]
@@ -452,256 +397,343 @@ struct RenameReq {
     name: String,
 }
 
-/// Rename a domain. libvirt has no rename call, so this swaps the persistent
-/// definition: undefine the old name and define the same XML under a new
-/// `<name>`, keeping the UUID (and therefore disks, MACs and snapshot
-/// metadata) intact. The guest must be shut off — a running domain's
-/// definition is tied to the running process and cannot be renamed.
+/// Rename the display name. The identity — the UUID, the URL, the MACs and the
+/// definition's `<name>` — never changes, so a rename cannot orphan disks,
+/// snapshots or the web server's records. Shut off only, as before: a running
+/// guest's page would otherwise disagree with the name it is managed by.
 async fn rename(
+    State(s): State<VmState>,
     Path(name): Path<String>,
     Json(req): Json<RenameReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let new_name = req.name.trim().to_string();
-    let v = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &name)?;
-        if d.get_state()?.0 != virt::sys::VIR_DOMAIN_SHUTOFF {
-            return Err(format!("rename requires '{name}' to be shut off").into());
-        }
-        if new_name.is_empty() {
-            return Err("new name is empty".to_string().into());
-        }
-        if new_name == name {
-            // Nothing to do; report success so the caller can treat rename as
-            // idempotent rather than special-casing a same-name request.
-            return Ok(json!({"name": name, "renamed": false}));
-        }
-        // Validate before undefining: a bad name must not cost the domain.
-        if !new_name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-        {
-            return Err("name may only contain letters, digits, '-' '_' or '.'"
-                .to_string()
-                .into());
-        }
-        if Domain::lookup_by_name(c, &new_name).is_ok() {
-            return Err(format!("a domain named '{new_name}' already exists").into());
-        }
-
-        // libvirt's own rename, not undefine + define. Undefining a UEFI guest
-        // with no flags is refused outright ("Cannot undefine domain with
-        // NVRAM/varstore", measured), so the old way could not rename any UEFI
-        // guest -- every guest the forms make. virDomainRename keeps the UUID,
-        // the variable store and everything else, in one step, and fails
-        // without having changed anything.
-        d.rename(&new_name, 0)?;
-        Ok(json!({"name": new_name, "renamed": true}))
-    })
-    .await
-    .map_err(ApiError::internal)?;
-    Ok(Json(v))
+    let cfg = resolve(&s.manager, &name)?;
+    let new_title = req.name.trim().to_string();
+    if new_title.is_empty() {
+        return Err(ApiError::bad_request("new name is empty"));
+    }
+    if new_title == cfg.title {
+        // Nothing to do; report success so the caller can treat rename as
+        // idempotent rather than special-casing a same-name request.
+        return Ok(Json(json!({"name": cfg.id, "renamed": false})));
+    }
+    if s.manager.state(&cfg.id).map_err(err)? != GuestState::Stopped {
+        return Err(ApiError::conflict(format!(
+            "rename requires '{name}' to be shut off"
+        )));
+    }
+    s.manager
+        .set_title(&cfg.id, &new_title)
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({"name": cfg.id, "renamed": true})))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
 
-    /// Renaming a UEFI guest keeps its identity and its variable store. The
-    /// old undefine + define could not: libvirt refuses to undefine a guest
-    /// with a varstore unless told what to do with it, so it renamed no UEFI
-    /// guest at all. Real libvirt, one throwaway guest that is never started.
-    /// `sudo -E cargo test --bins -- --ignored renaming_a_uefi`
-    #[tokio::test]
-    #[ignore = "needs root and a reachable qemu:///system"]
-    async fn renaming_a_uefi_guest_keeps_its_uuid_and_varstore() {
-        const NV: &str = "/var/lib/libvirt/qemu/nvram/renameprobe_VARS.fd";
-        let xml = format!(
-            "<domain type='kvm'><name>renameprobe</name><memory unit='KiB'>131072</memory><vcpu>1</vcpu>\
-             <os><type arch='x86_64' machine='q35'>hvm</type>\
-             <loader readonly='yes' type='pflash' format='raw'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>\
-             <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd' format='raw'>{NV}</nvram></os>\
-             <features><acpi/></features><devices/></domain>"
-        );
-        let uuid = with_conn(move |c| Ok(Domain::define_xml(c, &xml)?.get_uuid_string()?))
-            .await
-            .expect("define");
-        std::fs::write(NV, b"probe-vars").expect("varstore");
+    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-        let res = rename(
-            Path("renameprobe".into()),
-            Json(RenameReq {
-                name: "renameprobe-2".into(),
-            }),
-        )
-        .await;
-        let u2 = uuid.clone();
-        let after = with_conn(move |c| {
-            let d = crate::libvirt::domain(c, &u2)?;
-            Ok((d.get_name()?, d.get_xml_desc(0)?))
-        })
-        .await;
-        let vars = std::fs::read(NV).ok();
-        let u3 = uuid.clone();
-        let _ = with_conn(move |c| {
-            crate::libvirt::domain(c, &u3)?.undefine_flags(virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM)?;
-            Ok(())
-        })
-        .await;
-
-        assert!(
-            res.is_ok(),
-            "rename refused: {:?}",
-            res.err().map(|e| e.message)
-        );
-        let (name, xml) = after.expect("found by uuid after the rename");
-        assert_eq!(name, "renameprobe-2", "renamed, same UUID");
-        assert!(xml.contains(NV), "the varstore is still attached");
-        assert_eq!(
-            vars.as_deref(),
-            Some(&b"probe-vars"[..]),
-            "and its contents kept"
-        );
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vm-domains-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    #[test]
-    fn interface_info_reads_child_elements_not_tag_attributes() {
-        let frag = "<interface type='network'>\n      <mac address='52:54:00:12:34:56'/>\n      <source network='internet'/>\n      <model type='virtio'/>\n      <target dev='vnet0'/>\n    </interface>";
-        assert_eq!(
-            interface_info(frag),
-            (
-                Some("vnet0".into()),
-                Some("52:54:00:12:34:56".into()),
-                Some("virtio".into()),
+    struct Fixture {
+        dir: std::path::PathBuf,
+        manager: Manager,
+        pools: Pools,
+        ipam: Ipam,
+        root: std::path::PathBuf,
+    }
+
+    impl Fixture {
+        fn new(tag: &str) -> Self {
+            let dir = scratch(tag);
+            let manager = Manager::with_qemu(&dir, dir.join("state"), "/nonexistent/qemu").unwrap();
+            let pools = Pools::load(dir.join("pools.json")).unwrap();
+            let root = dir.join("images");
+            std::fs::create_dir_all(&root).unwrap();
+            {
+                let mut s = pools.lock();
+                s.pools.insert(
+                    "3d9f1e2a-7b6c-4d5e-9f8a-1b2c3d4e5f60".into(),
+                    crate::pools::Pool {
+                        title: "test".into(),
+                        path: root.clone(),
+                        autostart: true,
+                        active: true,
+                    },
+                );
+                pools.save(&s).unwrap();
+            }
+            Self {
+                ipam: Ipam::load(dir.join("networks.json"), dir.clone()).unwrap(),
+                dir,
+                manager,
+                pools,
+                root,
+            }
+        }
+
+        fn disk(&self, name: &str) -> std::path::PathBuf {
+            let path = self.root.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            path
+        }
+
+        fn xml(&self, disk: &std::path::Path) -> String {
+            format!(
+                r#"<domain type="kvm">
+  <name>{ID}</name>
+  <uuid>{ID}</uuid>
+  <title>web</title>
+  <memory unit="KiB">524288</memory>
+  <vcpu>2</vcpu>
+  <os><type arch="x86_64" machine="q35">hvm</type><boot dev="hd"/></os>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="raw"/>
+      <source file="{}"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <interface type="bridge">
+      <source bridge="vbr5b92a1a54f00"/>
+      <model type="virtio"/>
+    </interface>
+    <graphics type="vnc" port="5900" listen="127.0.0.1"/>
+  </devices>
+</domain>"#,
+                disk.display()
             )
-        );
-        // A shut-off guest's inactive XML has no <target dev>.
-        let no_target = "<interface type='network'>\n      <mac address='52:54:00:12:34:56'/>\n      <model type='virtio'/>\n    </interface>";
-        assert_eq!(interface_info(no_target).0, None);
+        }
+
+        fn app(&self) -> Router {
+            routes(self.manager.clone(), self.pools.clone(), self.ipam.clone())
+        }
+
+        async fn call(&self, method: &str, path: &str, body: &str) -> (u16, Value) {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap();
+            let r = self.app().oneshot(req).await.unwrap();
+            let status = r.status().as_u16();
+            let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice(&body).unwrap_or_default())
+        }
     }
 
-    #[test]
-    fn an_interfaces_source_is_read_for_both_attachment_shapes() {
-        // What this daemon writes: the network's bridge.
-        let bridged =
-            "<interface type='bridge'>\n      <source bridge='vbr0123456789ab'/>\n    </interface>";
-        assert_eq!(source_bridge(bridged).as_deref(), Some("vbr0123456789ab"));
-        assert_eq!(source_network(bridged), None, "a bridge is not a network");
-        // An older definition still names a libvirt network.
-        let networked =
-            "<interface type='network'>\n      <source network='lab'/>\n    </interface>";
-        assert_eq!(source_network(networked).as_deref(), Some("lab"));
-        assert_eq!(source_bridge(networked), None);
-        // libvirt adds the resolved bridge to a running network NIC's live XML;
-        // it is informational, and the network is still what is read.
-        let live = "<interface type='network'><source network='lab' bridge='virbr0'/></interface>";
-        assert_eq!(source_network(live).as_deref(), Some("lab"));
-        // A NIC with no source, or no interface at all, reports neither.
-        assert_eq!(source_network("<interface type='bridge'/>"), None);
-        assert_eq!(source_bridge("<interface type='bridge'/>"), None);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
-    /// Deleting a *running* guest stops it first.
-    ///
-    /// Undefining a live domain leaves it running and transient -- an orphan
-    /// with no definition to manage it by -- which is what this guards against.
-    /// A tiny direct-kernel guest boots and is deleted while active; the test
-    /// checks it was reported `stopped`, and that neither its definition nor a
-    /// running domain survives. Real libvirt; never leaves anything behind.
-    /// `sudo -E cargo test --bins -- --ignored deleting_a_running`
+    /// The wire shape the SPA reads, through the real routes. No QEMU: the
+    /// guest is defined shut off and never started.
     #[tokio::test]
-    #[ignore = "needs root and a reachable qemu:///system"]
-    async fn deleting_a_running_guest_stops_it_first() {
-        use std::collections::HashMap;
-        // A guest that cannot start without a bootable kernel is no use here, so
-        // use the host kernel. If there is none, skip rather than fail.
-        let kernel = [
-            "/boot/vmlinuz-linux",
-            "/boot/vmlinuz",
-            "/boot/vmlinuz-linux-lts",
-        ]
-        .into_iter()
-        .find(|p| std::path::Path::new(p).exists());
-        let Some(kernel) = kernel else {
-            eprintln!("skipping: no /boot kernel to boot the probe guest from");
-            return;
-        };
-        let xml = format!(
-            "<domain type='kvm'><name>delproberun</name><memory unit='KiB'>262144</memory><vcpu>1</vcpu>\
-             <os><type arch='x86_64' machine='q35'>hvm</type>\
-             <kernel>{kernel}</kernel><cmdline>console=ttyS0 quiet</cmdline></os>\
-             <features><acpi/></features>\
-             <devices><serial type='pty'><target port='0'/></serial></devices></domain>"
-        );
-        with_conn({
-            let xml = xml.clone();
-            move |c| {
-                // Clean up any leftover from an interrupted run.
-                if let Ok(d) = crate::libvirt::domain(c, "delproberun") {
-                    let _ = d.destroy();
-                    let _ = d.undefine_flags(
-                        virt::sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
-                            | virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM,
-                    );
-                }
-                Domain::define_xml(c, &xml)?;
-                Ok(())
-            }
-        })
-        .await
-        .expect("define probe");
-        with_conn(|c| {
-            crate::libvirt::domain(c, "delproberun")?.create()?;
-            Ok(())
-        })
-        .await
-        .expect("start probe");
+    async fn a_defined_guest_reads_back_in_the_existing_wire_shape() {
+        let f = Fixture::new("wire");
+        let disk = f.disk("a.raw");
+        let (status, body) = f.call("POST", "/domains?start=false", &f.xml(&disk)).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["name"], ID);
+        assert_eq!(body["started"], false);
 
-        // Delete it while it is running. The handler must stop it first.
-        let scratch = std::env::temp_dir().join(format!("delprobe-pools-{}", std::process::id()));
-        let pools = crate::pools::Pools::load(scratch.join("pools.json")).expect("pools store");
-        let res = match delete(
-            Extension(pools),
-            Path("delproberun".into()),
-            Query(HashMap::new()),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // Clean up before failing so a broken run leaves nothing.
-                let _ = with_conn(|c| {
-                    if let Ok(d) = crate::libvirt::domain(c, "delproberun") {
-                        let _ = d.destroy();
-                        let _ = d.undefine_flags(
-                            virt::sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
-                                | virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM,
-                        );
-                    }
-                    Ok(())
-                })
-                .await;
-                panic!("delete refused: {}", e.message);
-            }
-        };
-        let stopped = res.0["stopped"].as_bool().unwrap_or(false);
-        let undefined = res.0["undefined"].as_bool().unwrap_or(false);
+        let (status, body) = f.call("GET", "/domains", "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body[0]["name"], ID, "the manager id is the name");
+        assert_eq!(body[0]["uuid"], ID);
+        assert_eq!(body[0]["title"], "web");
+        assert_eq!(body[0]["state"], "stopped");
+        assert_eq!(body[0]["active"], false);
+        assert_eq!(body[0]["persistent"], true);
+        assert_eq!(body[0]["vcpus"], 2);
+        assert_eq!(body[0]["memory_mb"], 512);
 
-        // After the delete: the domain must be gone, not left running.
-        let survives = with_conn(|c| {
-            Ok(match crate::libvirt::domain(c, "delproberun") {
-                Ok(d) => (true, d.is_active().unwrap_or(false)),
-                Err(_) => (false, false),
-            })
-        })
-        .await
-        .expect("probe after delete");
+        let (status, body) = f.call("GET", &format!("/domains/{ID}"), "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["state"], "stopped");
 
-        assert!(stopped, "the delete reported stopping the running guest");
-        assert!(undefined, "the delete undefined the guest");
+        // A title link reaches the same guest, as old links do.
+        let (status, by_title) = f.call("GET", "/domains/web", "").await;
+        assert_eq!(status, 200, "{by_title}");
+        assert_eq!(by_title["name"], ID);
+
+        let (status, body) = f.call("GET", &format!("/domains/{ID}/xml"), "").await;
+        assert_eq!(status, 200, "{body}");
         assert!(
-            !survives.0,
-            "no definition survives a running guest's delete"
+            body["xml"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("<name>{ID}</name>"))
         );
-        assert!(!survives.1, "and no running domain is left behind");
+
+        let (status, body) = f.call("GET", &format!("/domains/{ID}/state"), "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["state"], "stopped");
+        assert_eq!(body["reason"], 0);
+
+        let (status, body) = f.call("GET", &format!("/domains/{ID}/stats"), "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["state"], "stopped");
+        assert_eq!(body["cpu_time_ns"], 0);
+        assert_eq!(body["vcpus"], 2);
+        assert_eq!(body["memory_kib"], 524288);
+        assert!(body["host"]["cpus"].as_u64().unwrap() > 0);
+
+        let (status, body) = f
+            .call("GET", &format!("/domains/{ID}/interfaces"), "")
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["interfaces"][0]["mac"],
+            crate::qemu::stable_mac(ID, "net0")
+        );
+        assert_eq!(body["interfaces"][0]["model"], "virtio");
+        assert_eq!(body["interfaces"][0]["dev"], Value::Null);
+
+        let (status, body) = f.call("GET", &format!("/domains/{ID}/graphics"), "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["graphics"],
+            json!({"kind": "vnc", "host": "127.0.0.1", "port": 5900})
+        );
+    }
+
+    /// An edit changes the stored definition and nothing else; the display
+    /// title survives an edit that does not mention it, and a form that writes
+    /// the display name into `<name>` still targets the same UUID.
+    #[tokio::test]
+    async fn an_xml_edit_updates_the_definition_and_keeps_the_identity() {
+        let f = Fixture::new("edit");
+        let disk = f.disk("a.raw");
+        f.call("POST", "/domains?start=false", &f.xml(&disk)).await;
+
+        let edited = f
+            .xml(&disk)
+            .replace("<vcpu>2</vcpu>", "<vcpu>4</vcpu>")
+            .replace("<title>web</title>", "")
+            .replace(&format!("<name>{ID}</name>"), "<name>web</name>");
+        let (status, body) = f.call("PUT", &format!("/domains/{ID}/xml"), &edited).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["name"], ID);
+
+        let xml = f.manager.xml(ID).unwrap();
+        assert!(xml.contains("<vcpu>4</vcpu>"), "{xml}");
+        assert!(
+            xml.contains("<title>web</title>"),
+            "the title survives: {xml}"
+        );
+        assert!(xml.contains(&format!("<name>{ID}</name>")), "{xml}");
+
+        // A different UUID is another guest, not a display name.
+        let other = edited.replace(ID, "550e8400-e29b-41d4-a716-446655440001");
+        let (status, _) = f.call("PUT", &format!("/domains/{ID}/xml"), &other).await;
+        assert_eq!(status, 400, "a different identity is refused");
+    }
+
+    /// A rename moves the title and nothing else, and is refused while the
+    /// guest runs.
+    #[tokio::test]
+    async fn a_rename_keeps_the_id_and_requires_a_stopped_guest() {
+        let f = Fixture::new("rename");
+        let disk = f.disk("a.raw");
+        f.call("POST", "/domains?start=false", &f.xml(&disk)).await;
+
+        let (status, body) = f
+            .call("POST", &format!("/domains/{ID}/rename"), r#"{"name":"db"}"#)
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, json!({"name": ID, "renamed": true}));
+        assert_eq!(f.manager.list().unwrap()[0].title, "db");
+        assert!(
+            f.manager
+                .xml(ID)
+                .unwrap()
+                .contains(&format!("<name>{ID}</name>"))
+        );
+
+        let (status, body) = f
+            .call("POST", &format!("/domains/{ID}/rename"), r#"{"name":"db"}"#)
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["renamed"], false, "a same-name rename is idempotent");
+
+        let (status, _) = f
+            .call(
+                "POST",
+                &format!("/domains/{ID}/rename"),
+                r#"{"name":"a/b"}"#,
+            )
+            .await;
+        assert_eq!(status, 400, "a name with a slash is not a display name");
+    }
+
+    /// A delete removes the guest, its runtime and a disk this daemon's pools
+    /// own — and never a file outside them.
+    #[tokio::test]
+    async fn a_delete_removes_pool_storage_but_not_a_host_file() {
+        let f = Fixture::new("delete");
+        let ours = f.disk("own.raw");
+        f.call("POST", "/domains?start=false", &f.xml(&ours)).await;
+
+        let (status, body) = f
+            .call("DELETE", &format!("/domains/{ID}?remove_storage=true"), "")
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["undefined"], true);
+        assert_eq!(body["stopped"], false);
+        assert_eq!(body["removed"], json!([ours.to_string_lossy()]));
+        assert!(!ours.exists(), "the guest's own disk is gone");
+        assert!(f.manager.list().unwrap().is_empty());
+
+        // A definition pointing outside the pools is deleted, but its file is
+        // not: the safety rule is the pool root, not the XML.
+        let outside = f.dir.join("host-file.raw");
+        std::fs::write(&outside, b"x").unwrap();
+        f.call("POST", "/domains?start=false", &f.xml(&outside))
+            .await;
+        let (status, body) = f
+            .call("DELETE", &format!("/domains/{ID}?remove_storage=true"), "")
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["removed"], json!([]));
+        assert_eq!(body["failed"].as_array().unwrap().len(), 1);
+        assert!(
+            outside.exists(),
+            "a host file is never removed by a VM delete"
+        );
+    }
+
+    /// The runtime directory (QMP socket, NVRAM) goes with the guest, because
+    /// it lives under the manager's state root, not in a pool.
+    #[tokio::test]
+    async fn a_delete_removes_the_runtime_directory() {
+        let f = Fixture::new("runtime");
+        let disk = f.disk("a.raw");
+        f.call("POST", "/domains?start=false", &f.xml(&disk)).await;
+        let runtime = f.dir.join("state").join(ID);
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("nvram.fd"), b"vars").unwrap();
+
+        let (status, body) = f.call("DELETE", &format!("/domains/{ID}"), "").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(!runtime.exists(), "the runtime and NVRAM are gone");
+        assert!(disk.exists(), "without remove_storage the disk stays");
     }
 }

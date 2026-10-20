@@ -1,11 +1,10 @@
-//! Storage pools, owned by this daemon instead of libvirt.
+//! Storage pools, owned by this daemon.
 //!
 //! A pool is a directory on the host plus a little metadata: its display name,
-//! whether it autostarts, and whether it is active. There is no libvirt storage
-//! driver involved — libvirt had no way to see a file that arrived any other
-//! way (aria2, `cp`, a Nextcloud sync), and its volume list and space figures
-//! stayed stale until something refreshed. A directory scan is both cheaper
-//! and always true.
+//! whether it autostarts, and whether it is active. There is no storage driver
+//! involved — a cached volume list and space figures stayed stale until
+//! something refreshed them, while a directory scan is both cheaper and always
+//! true, so a file that arrived by `cp`, aria2 or a sync is visible at once.
 //!
 //! The store at `<data_dir>/pools.json` is the source of truth. Keys are the
 //! UUIDs the web UI addresses resources by; the file is written atomically and
@@ -44,8 +43,8 @@ pub struct Store {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pool {
-    /// Display name. A pool has no libvirt definition to keep a `<title>` in,
-    /// so it lives here.
+    /// Display name. A pool has no definition of its own to keep a `<title>`
+    /// in, so it lives here.
     #[serde(default)]
     pub title: String,
     /// Canonical host directory. Every volume is a file directly inside it.

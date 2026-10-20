@@ -200,8 +200,7 @@ pub fn merge(old: &Net, mut new: Net) -> Result<Net, String> {
 }
 
 /// XML text and attribute escaping. One function for both: a value that is
-/// safe in an attribute is safe in text, and dnsmasq and libvirt never see it
-/// either way.
+/// safe in an attribute is safe in text, and dnsmasq never sees it either way.
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

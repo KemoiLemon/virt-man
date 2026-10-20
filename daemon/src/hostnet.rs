@@ -1,9 +1,9 @@
 //! The host side of a network the daemon owns.
 //!
-//! These networks do not exist in libvirt: the daemon creates the bridge,
-//! gives it the gateway address, runs dnsmasq on it for DHCP and DNS, and
-//! enforces NAT and forwarding itself. libvirt must not define them — two
-//! owners of one bridge fight over its address and its dnsmasq.
+//! The daemon creates the bridge, gives it the gateway address, runs dnsmasq
+//! on it for DHCP and DNS, and enforces NAT and forwarding itself. Nothing
+//! else may define the same bridge — two owners of one bridge fight over its
+//! address and its dnsmasq.
 //!
 //! `Mode::Bridge` is the exception: it borrows a bridge the operator made, so
 //! here we only check it is really a bridge, never create or delete it.
@@ -58,8 +58,8 @@ pub(crate) fn fnv1a(s: &str) -> u64 {
 }
 
 /// The bridge this network uses: ours for a managed network, the operator's
-/// for a bridge network. A managed network's imported libvirt bridge
-/// (`virbrN`) is deliberately ignored — that bridge belongs to libvirt.
+/// for a bridge network. A managed network's imported bridge (`virbrN`) is
+/// deliberately ignored — that bridge is not ours.
 pub fn bridge_for(net: &Net, id: &str) -> String {
     if net.mode == Mode::Bridge {
         net.bridge.clone()
@@ -334,8 +334,8 @@ pub async fn reattach_ports(net: &Net, id: &str, ports: &[String]) -> Result<(),
 /// Enable IPv4 forwarding on the host. This belongs to ruleset application,
 /// after the NAT rules exist — a bare bridge is not a reason to forward
 /// everything. It only ever turns forwarding on: the sysctl is host-wide and
-/// shared with libvirt's LXC driver, Docker and every other service on the
-/// host, so writing 0 here would break them silently. Nothing clears it.
+/// shared with Docker and every other service on the host, so writing 0 here
+/// would break them silently. Nothing clears it.
 pub fn enable_ip_forward() -> Result<(), String> {
     std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
         .map_err(|e| format!("enable ip_forward: {e}"))

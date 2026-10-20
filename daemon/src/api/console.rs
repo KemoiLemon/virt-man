@@ -10,7 +10,7 @@
 //! in virt-viewer instead.
 
 use axum::Router;
-use axum::extract::{Json as ExtractJson, Path};
+use axum::extract::{Json as ExtractJson, Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -19,14 +19,14 @@ use serde_json::json;
 use std::time::Duration;
 
 use super::ApiError;
-use crate::libvirt::{Graphics, parse_all_graphics, parse_graphics, with_conn};
+use crate::qemu::{GraphicsInfo, Manager, State as VmState};
 
 /// How long `frame` waits for new pixels before returning empty. Long enough
 /// that an idle guest costs almost nothing, short enough that the caller can
 /// notice a dropped session and re-arm.
 const FRAME_WAIT: Duration = Duration::from_secs(20);
 
-pub fn routes() -> Router {
+pub fn routes(manager: Manager) -> Router {
     Router::new()
         .route("/domains/{name}/console/connect", post(connect))
         .route("/domains/{name}/console/frame", get(frame))
@@ -36,27 +36,35 @@ pub fn routes() -> Router {
         .route("/domains/{name}/console/disconnect", post(disconnect))
         .route("/domains/{name}/console/status", get(status))
         .route("/domains/{name}/console/vv", get(vv_file))
+        .with_state(manager)
 }
 
-/// Look up where a domain's graphics server is listening.
-async fn graphics_of(name: &str) -> Result<Graphics, ApiError> {
-    let n = name.to_string();
-    with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &n)?;
-        let xml = d.get_xml_desc(0)?;
-        Ok(parse_graphics(&xml))
-    })
-    .await
-    .map_err(ApiError::bad_request)?
-    .ok_or_else(|| ApiError::not_found("domain has no graphics device"))
+fn map_err(e: String) -> ApiError {
+    if e.contains("unknown QEMU") {
+        ApiError::not_found(e)
+    } else {
+        ApiError::bad_request(e)
+    }
+}
+
+/// Look up where a domain's graphics server is listening. The definition is the
+/// QEMU manager's; VNC listens on loopback as the form writes it.
+async fn graphics_of(manager: &Manager, name: &str) -> Result<GraphicsInfo, ApiError> {
+    manager
+        .graphics(name)
+        .map_err(map_err)?
+        .ok_or_else(|| ApiError::not_found("domain has no graphics device"))
 }
 
 /// Attach to the guest's VNC server, reusing a live session when there is one.
 ///
 /// Returns the guest resolution so the viewer can size its canvas before the
 /// first frame lands.
-async fn connect(Path(name): Path<String>) -> Result<Response, ApiError> {
-    let g = graphics_of(&name).await?;
+async fn connect(
+    State(manager): State<Manager>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    let g = graphics_of(&manager, &name).await?;
     if g.kind != "vnc" {
         return Err(ApiError::bad_request(format!(
             "{} consoles are not supported natively; open the virt-viewer file instead",
@@ -262,21 +270,22 @@ struct VvQuery {
 /// listener never leaves loopback, and once the minute is up no new connection
 /// is accepted.
 async fn vv_file(
+    State(manager): State<Manager>,
     Path(name): Path<String>,
     axum::extract::Query(q): axum::extract::Query<VvQuery>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
-    let n = name.clone();
-    let all = with_conn(move |c| {
-        let d = crate::libvirt::domain(c, &n)?;
-        if !d.is_active().unwrap_or(false) {
-            return Err("the guest is not running".to_string().into());
-        }
-        let xml = d.get_xml_desc(0)?;
-        Ok(parse_all_graphics(&xml))
-    })
-    .await
-    .map_err(ApiError::bad_request)?;
+    if !matches!(
+        manager.state(&name).map_err(map_err)?,
+        VmState::Running | VmState::Paused
+    ) {
+        return Err(ApiError::bad_request("the guest is not running"));
+    }
+    let all: Vec<GraphicsInfo> = manager
+        .graphics(&name)
+        .map_err(map_err)?
+        .into_iter()
+        .collect();
     let g = pick_graphics(&all, q.kind.as_deref())
         .ok_or_else(|| ApiError::not_found("the guest has no such graphics device"))?;
 
@@ -310,13 +319,13 @@ async fn vv_file(
                 "attachment; filename=\"console.vv\"",
             ),
         ],
-        vv_body(&g.kind, &host, port, &name),
+        vv_body(g.kind, &host, port, &name),
     )
         .into_response())
 }
 
 /// The display to hand out: the one asked for, else SPICE, else the first.
-fn pick_graphics(all: &[Graphics], kind: Option<&str>) -> Option<Graphics> {
+fn pick_graphics(all: &[GraphicsInfo], kind: Option<&str>) -> Option<GraphicsInfo> {
     match kind {
         Some(k) => all.iter().find(|g| g.kind == k),
         None => all
@@ -415,15 +424,54 @@ async fn relay_once(
 #[cfg(test)]
 mod tests {
     use super::{host_of, pick_graphics, relay_once, same_ip, vv_body};
-    use crate::libvirt::Graphics;
+    use crate::qemu::GraphicsInfo;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn g(kind: &str, port: u16) -> Graphics {
-        Graphics {
-            kind: kind.into(),
+    fn g(kind: &'static str, port: u16) -> GraphicsInfo {
+        GraphicsInfo {
+            kind,
             host: "127.0.0.1".into(),
             port,
         }
+    }
+
+    /// The console endpoint reads the display from the manager's definition:
+    /// the VNC host and port the launch argv uses, and no graphics is an error.
+    #[tokio::test]
+    async fn graphics_come_from_the_stored_definition() {
+        const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let dir = std::env::temp_dir().join(format!("console-gfx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk = dir.join("disk.raw");
+        std::fs::write(&disk, b"x").unwrap();
+        let manager =
+            crate::qemu::Manager::with_qemu(dir.join("data"), dir.join("state"), "/none").unwrap();
+        let xml = format!(
+            r#"<domain type="kvm"><name>{ID}</name><uuid>{ID}</uuid>
+            <memory unit="KiB">65536</memory><vcpu>1</vcpu>
+            <os><type arch="x86_64" machine="q35">hvm</type></os>
+            <devices>
+              <disk type="file"><driver name="qemu" type="raw"/><source file="{}"/><target dev="vda" bus="virtio"/></disk>
+              <graphics type="vnc" port="5907" listen="127.0.0.1"/>
+            </devices></domain>"#,
+            disk.display()
+        );
+        manager.define(&xml).unwrap();
+        let g = super::graphics_of(&manager, ID)
+            .await
+            .ok()
+            .expect("the definition names a VNC display");
+        assert_eq!(
+            (g.kind, g.host.as_str(), g.port),
+            ("vnc", "127.0.0.1", 5907)
+        );
+        assert!(
+            super::graphics_of(&manager, "550e8400-e29b-41d4-a716-446655440001")
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

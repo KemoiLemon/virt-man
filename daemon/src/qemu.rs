@@ -1,7 +1,11 @@
-//! Isolated direct-QEMU process manager; intentionally separate from libvirt.
+//! Isolated direct-QEMU process manager: one QEMU process per VM.
+//!
+//! A guest's hardware is the domain XML the SPA writes (`domainxml`), stored as
+//! the durable definition. The launch argv, every hotplug path and the taps are
+//! derived from it; there is no second copy of the devices here.
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::{
@@ -15,9 +19,14 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::domainxml::{
+    self, BootDev, Cpu, Disk, DiskBus, DiskDevice, Firmware, Graphics, Hostdev, IfaceKind,
+    IfaceModel, Interface, SerialKind, Video, VideoModel,
+};
 use crate::hostnet::SYS_NET;
+
+pub use crate::domainxml::DiskFormat;
 pub use crate::hostnet::is_bridge;
-pub use crate::qemu_network::HostForward;
 
 #[derive(Clone, Debug)]
 pub struct Manager {
@@ -27,166 +36,21 @@ pub struct Manager {
     lock: std::sync::Arc<Mutex<()>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum Network {
-    /// QEMU's own user-mode NAT: no host interface, no address from the store.
-    User {
-        #[serde(default)]
-        hostfwd: Vec<HostForward>,
-    },
-    /// A host tap plugged into a stored network's bridge.
-    Bridge {
-        /// The stored network key the NIC is on, for the address reservation.
-        network: String,
-        bridge: String,
-        mac: String,
-    },
-}
-
-/// The first release wrote user-mode networking as a bare block
-/// (`{"hostfwd":[...]}`), before a NIC could be on a bridge. That shape must
-/// still load, or a daemon upgrade would refuse the file it finds.
-impl<'de> Deserialize<'de> for Network {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(tag = "mode", rename_all = "snake_case")]
-        enum Tagged {
-            User {
-                #[serde(default)]
-                hostfwd: Vec<HostForward>,
-            },
-            Bridge {
-                network: String,
-                bridge: String,
-                mac: String,
-            },
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct LegacyUser {
-            #[serde(default)]
-            hostfwd: Vec<HostForward>,
-        }
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Tagged(Tagged),
-            // `deny_unknown_fields` keeps a malformed tagged value from
-            // silently becoming user-mode NAT.
-            LegacyUser(LegacyUser),
-        }
-        Ok(match Repr::deserialize(d)? {
-            Repr::Tagged(Tagged::User { hostfwd }) | Repr::LegacyUser(LegacyUser { hostfwd }) => {
-                Network::User { hostfwd }
-            }
-            Repr::Tagged(Tagged::Bridge {
-                network,
-                bridge,
-                mac,
-            }) => Network::Bridge {
-                network,
-                bridge,
-                mac,
-            },
-        })
-    }
-}
-
-impl Default for Network {
-    fn default() -> Self {
-        Self::User { hostfwd: vec![] }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Nic {
-    /// QEMU device id; the primary NIC is "net0", extras are user-supplied.
-    pub id: String,
-    pub network: Network,
-}
-
-/// The first release stored an extra NIC as a bare device id. Both that shape
-/// and the object form must load.
-impl<'de> Deserialize<'de> for Nic {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Id(String),
-            Full {
-                id: String,
-                #[serde(default)]
-                network: Network,
-            },
-        }
-        Ok(match Repr::deserialize(d)? {
-            Repr::Id(id) => Nic {
-                id,
-                network: Network::default(),
-            },
-            Repr::Full { id, network } => Nic { id, network },
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiskFormat {
-    #[default]
-    Raw,
-    Qcow2,
-}
-
-impl DiskFormat {
-    /// The QEMU driver name, which is also the wire spelling of the format.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Raw => "raw",
-            Self::Qcow2 => "qcow2",
-        }
-    }
-}
-
-/// An extra disk, hot-added through QMP. The primary `VmConfig::disk` predates
-/// this and keeps its `-drive ... if=virtio` launch shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Disk {
-    /// QEMU device id; names the block nodes `file-<id>`/`drive-<id>` too.
-    pub id: String,
-    pub path: PathBuf,
-    #[serde(default)]
-    pub format: DiskFormat,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VmConfig {
     pub id: String,
     /// What the user calls it: the IPAM name (DNS/DHCP) and what `list` shows.
     #[serde(default)]
     pub title: String,
-    pub disk: PathBuf,
-    pub memory_mib: u32,
-    pub vcpus: u16,
+    /// Start this guest when the daemon starts. Persisted; the daemon does not
+    /// start guests yet.
     #[serde(default)]
-    pub network: Network,
-    /// Explicit inbound host-forward allowlist; empty means deny all inbound.
-    #[serde(default)]
-    pub firewall: crate::qemu_network::InboundPolicy,
-    #[serde(default)]
-    pub extra_nics: Vec<Nic>,
-    #[serde(default)]
-    pub extra_disks: Vec<Disk>,
+    pub autostart: bool,
+    /// The SPA's libvirt-shaped domain XML, exactly as `domainxml` renders it.
+    pub xml: String,
 }
 
 impl VmConfig {
-    /// The primary NIC, then every extra one, as (id, network). One path for
-    /// the launch argv, the host taps and the address reservations.
-    pub fn nics(&self) -> impl Iterator<Item = (&str, &Network)> {
-        std::iter::once(("net0", &self.network))
-            .chain(self.extra_nics.iter().map(|n| (n.id.as_str(), &n.network)))
-    }
-
     /// The name the store and DNS use: the title, else the id.
     pub fn name(&self) -> &str {
         if self.title.is_empty() {
@@ -200,8 +64,11 @@ impl VmConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Record {
     config: VmConfig,
+    /// The host taps of the current run. Kept here rather than re-derived from
+    /// the definition: a hotplug or an XML edit can drop a NIC while QEMU still
+    /// holds its tap, and only this list knows to remove it at stop.
     #[serde(default)]
-    disk_size: u64,
+    taps: Vec<String>,
     pid: Option<u32>,
     start_ticks: Option<u64>,
 }
@@ -212,6 +79,55 @@ pub enum State {
     Running,
     Paused,
     Unknown,
+}
+
+impl State {
+    /// The wire spelling the SPA and the web server already read.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A point-in-time sample of one guest, shaped like the libvirt `get_info`
+/// answer the SPA's summary reads.
+#[derive(Clone, Debug, Serialize)]
+pub struct Stats {
+    pub state: &'static str,
+    pub cpu_time_ns: u64,
+    pub vcpus: u16,
+    pub memory_kib: u64,
+    pub max_memory_kib: u64,
+    pub rss_kib: Option<u64>,
+    pub usable_kib: Option<u64>,
+}
+
+/// One NIC as the Network tab and the summary read it. `network` is the bridge
+/// the definition names; the API maps it to the stored network key, because
+/// only the IPAM store knows which network owns a bridge.
+#[derive(Clone, Debug, Serialize)]
+pub struct InterfaceStats {
+    pub dev: Option<String>,
+    pub mac: Option<String>,
+    pub model: &'static str,
+    pub network: Option<String>,
+    /// Rate limits from `<bandwidth>`, in KiB/s (`average`).
+    pub rx_kib: Option<u64>,
+    pub tx_kib: Option<u64>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// The guest's display server, in the shape `parse_graphics` returned.
+#[derive(Clone, Debug, Serialize)]
+pub struct GraphicsInfo {
+    pub kind: &'static str,
+    pub host: String,
+    pub port: u16,
 }
 
 impl Manager {
@@ -265,20 +181,26 @@ impl Manager {
     }
     /// Forget a dead record's process identity and remove its NIC taps. The
     /// process identity is pid + start ticks + executable, so a reused pid is
-    /// not mistaken for the guest. Returns whether there was an identity to
+    /// not mistaken for the guest. Returns whether there was anything to
     /// forget: the sweep runs every pass and must not rewrite the file when
     /// nothing changed.
     fn clear_dead(&self, rec: &mut Record) -> bool {
         if self.identity(rec) {
             return false;
         }
+        // The guest is gone, so nothing can use its TPM any more. A live
+        // guest's swtpm is never touched (the early return above).
+        if let Err(e) = stop_swtpm(&self.vm_dir(&rec.config.id)) {
+            tracing::warn!("qemu: stopping swtpm for {}: {e}", rec.config.id);
+        }
         let had_identity = rec.pid.is_some() || rec.start_ticks.is_some();
+        let taps = std::mem::take(&mut rec.taps);
         // Taps are removed even when the identity was cleared by an earlier
         // pass: a guest that powered itself off can leave one at any time.
-        delete_nic_taps(&rec.config);
+        cleanup_taps(&taps);
         rec.pid = None;
         rec.start_ticks = None;
-        had_identity
+        had_identity || !taps.is_empty()
     }
     fn records(&self) -> PathBuf {
         self.data_dir.join("qemu-vms.json")
@@ -324,99 +246,149 @@ impl Manager {
     fn valid_id(id: &str) -> bool {
         Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
     }
-    pub fn define(&self, config: VmConfig) -> Result<(), String> {
+
+    /// Store a new definition. The XML is validated and normalized first: the
+    /// firmware paths are resolved for this host, every disk is named by its
+    /// canonical path, and a NIC without a MAC is given one, so two daemon
+    /// starts and the DHCP reservation agree about it.
+    pub fn define(&self, xml: &str) -> Result<VmConfig, String> {
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
-        if !Self::valid_id(&config.id) {
-            return Err("invalid VM id".into());
-        }
-        if config.memory_mib == 0 || config.vcpus == 0 {
-            return Err("memory and vCPU count must be positive".into());
-        }
-        if !config.disk.is_absolute() {
-            return Err("disk must be an existing absolute file path".into());
-        }
-        let link_meta =
-            fs::symlink_metadata(&config.disk).map_err(|e| format!("inspect disk: {e}"))?;
-        if !link_meta.file_type().is_file() {
-            return Err("disk must be a regular file, not a symlink".into());
-        }
-        if config.memory_mib > 1_048_576
-            || config.vcpus > 256
-            || link_meta.len() > 16 * 1024 * 1024 * 1024 * 1024
-        {
-            return Err("memory or vCPU count exceeds the supported limit".into());
-        }
-        let canonical_disk =
-            fs::canonicalize(&config.disk).map_err(|e| format!("canonicalize disk: {e}"))?;
-        let disk_meta = fs::metadata(&canonical_disk).map_err(|e| e.to_string())?;
-        if !disk_meta.is_file() || disk_meta.len() == 0 {
-            return Err("disk must be a non-empty regular file".into());
-        }
-        let mut config = config;
-        config.disk = canonical_disk;
-        // QEMU's argv is UTF-8 text: refuse a primary path it cannot spell now,
-        // rather than defining a VM that can never start.
-        escape_drive_path(&config.disk)?;
-        let mut all = self.read()?;
-        if all.contains_key(&config.id) {
+        let all = self.read()?;
+        let d = self.prepare(xml, &all, None)?;
+        if all.contains_key(&d.id) {
             return Err("VM already exists".into());
         }
+        let config = VmConfig {
+            id: d.id.clone(),
+            title: d.title.clone(),
+            autostart: false,
+            xml: domainxml::render(&d),
+        };
+        let mut all = all;
         all.insert(
-            config.id.clone(),
+            d.id.clone(),
             Record {
-                config,
-                disk_size: disk_meta.len(),
+                config: config.clone(),
+                taps: vec![],
                 pid: None,
                 start_ticks: None,
             },
         );
-        self.save(&all)
+        self.save(&all)?;
+        Ok(config)
     }
-    pub fn set_network(&self, id: &str, network: Network) -> Result<(), String> {
+
+    /// Fold an edited definition into the stored one. The identity (name, UUID,
+    /// title when omitted) survives; autostart and the process identity do too.
+    pub fn update_xml(&self, id: &str, xml: &str) -> Result<(), String> {
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         let mut all = self.read()?;
-        let rec = all.get(id).ok_or("unknown QEMU VM")?;
-        if self.identity(rec) {
-            return Err("VM must be stopped to change networking".into());
-        }
-        // hostfwd is policy, never an independent networking knob.
-        let hostfwd = rec.config.firewall.hostfwd.clone();
-        let old = rec.config.network.clone();
-        let network = match network {
-            Network::User { .. } => Network::User { hostfwd },
-            Network::Bridge {
-                network,
-                bridge,
-                mac,
-            } => {
-                if network.is_empty() {
-                    return Err("a bridge NIC must name its network".into());
-                }
-                // The bridge need not exist yet: a NIC may be configured before
-                // its network is started. `start` verifies it via `ensure_tap`.
-                Network::Bridge {
-                    network,
-                    bridge,
-                    mac: mac_for(&all, id, "net0", &mac)?,
-                }
-            }
-        };
-        // The primary tap's name is derived from the VM and interface, so a
-        // switch to another network (or to user mode) must drop the old one or
-        // the next start would find it on the wrong bridge.
-        if matches!(old, Network::Bridge { .. }) {
-            delete_nic_tap(id, "net0");
-        }
-        all.get_mut(id).unwrap().config.network = network;
+        let old = all.get(id).ok_or("unknown QEMU VM")?.config.xml.clone();
+        let d = self.prepare(xml, &all, Some(&old))?;
+        let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
+        rec.config.title = d.title.clone();
+        rec.config.xml = domainxml::render(&d);
         self.save(&all)
     }
 
-    /// Point one stored bridge NIC at the bridge its network has now. Called
-    /// before a start, because a network's mode edit or re-create changes the
-    /// derived bridge and a cached one would attach the tap to the old network.
-    /// Stopped only: a live guest's tap is still on the old bridge.
-    pub fn rebind_bridge(&self, id: &str, nic_id: &str, bridge: &str) -> Result<(), String> {
-        if !crate::hostnet::valid_name(bridge) {
+    pub fn xml(&self, id: &str) -> Result<String, String> {
+        self.read()?
+            .remove(id)
+            .map(|r| r.config.xml)
+            .ok_or_else(|| "unknown QEMU VM".into())
+    }
+
+    /// Change the display name. The identity — `<name>`, `<uuid>` and therefore
+    /// the URL, the MACs and the taps — is untouched: only `<title>` and the
+    /// stored title move, so a rename never re-defines a guest.
+    pub fn set_title(&self, id: &str, title: &str) -> Result<String, String> {
+        let title = display_title(title)?;
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
+        let mut d = domainxml::parse(&rec.config.xml)?;
+        d.title = title.clone();
+        rec.config.title = title.clone();
+        rec.config.xml = domainxml::render(&d);
+        self.save(&all)?;
+        Ok(title)
+    }
+
+    #[allow(dead_code)] // no autostart UI route yet; the field is persisted and listed
+    pub fn autostart(&self, id: &str) -> bool {
+        self.read()
+            .ok()
+            .and_then(|all| all.get(id).map(|r| r.config.autostart))
+            .unwrap_or(false)
+    }
+
+    #[allow(dead_code)] // no autostart UI route yet; the field is persisted and listed
+    pub fn set_autostart(&self, id: &str, on: bool) -> Result<(), String> {
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
+        if rec.config.autostart == on {
+            return Ok(());
+        }
+        rec.config.autostart = on;
+        self.save(&all)
+    }
+
+    /// Read a definition for storage: parse (or merge), give missing NICs a
+    /// MAC, canonicalize every disk and refuse a file another guest holds.
+    fn prepare(
+        &self,
+        xml: &str,
+        all: &BTreeMap<String, Record>,
+        old: Option<&str>,
+    ) -> Result<domainxml::Domain, String> {
+        let xml = crate::firmware::resolve(xml);
+        let mut d = match old {
+            Some(old) => domainxml::merge(old, &xml)?,
+            None => domainxml::parse(&xml)?,
+        };
+        if let (Firmware::Uefi, Some(_)) = (d.firmware, d.nvram.as_ref()) {
+            // The editor writes libvirt's variable-store path. This backend
+            // keeps the guest's own beside its QMP socket.
+            d.nvram = Some(self.vm_dir(&d.id).join("nvram.fd"));
+        }
+        let used = used_macs(all, &d.id);
+        for (i, iface) in d.interfaces.iter_mut().enumerate() {
+            if iface.mac.is_none() {
+                iface.mac = Some(mac_for(&used, &d.id, &format!("net{i}"), "")?);
+            }
+        }
+        let attached = attached_files(all, Some(&d.id));
+        let mut seen = BTreeSet::new();
+        for disk in &mut d.disks {
+            let Some(source) = &disk.source else {
+                continue;
+            };
+            let canonical = check_disk_file(source)?;
+            if attached.contains(&canonical) {
+                return Err(format!(
+                    "disk {} is already attached to a VM",
+                    canonical.display()
+                ));
+            }
+            if !seen.insert(canonical.clone()) {
+                return Err(format!(
+                    "the same file is attached twice: {}",
+                    canonical.display()
+                ));
+            }
+            disk.source = Some(canonical);
+        }
+        Ok(d)
+    }
+
+    /// Point one stored NIC at another bridge (or make it user-mode). Stopped
+    /// only: a live guest's tap is still on the old bridge.
+    pub fn set_nic_bridge(&self, id: &str, mac: &str, bridge: Option<&str>) -> Result<(), String> {
+        let mac = domainxml::normalize_mac(mac)?;
+        if let Some(bridge) = bridge
+            && !crate::hostnet::valid_name(bridge)
+        {
             return Err("invalid bridge name".into());
         }
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
@@ -425,79 +397,84 @@ impl Manager {
         if self.identity(rec) {
             return Err("VM must be stopped to change networking".into());
         }
-        match nic_network_mut(&mut rec.config, nic_id) {
-            Some(Network::Bridge { bridge: b, .. }) => *b = bridge.to_string(),
-            Some(Network::User { .. }) => return Err("NIC is not on a bridge network".into()),
-            None => return Err("unknown QEMU NIC".into()),
+        let mut d = domainxml::parse(&rec.config.xml)?;
+        let iface = d
+            .interfaces
+            .iter_mut()
+            .find(|i| i.mac.as_deref() == Some(mac.as_str()))
+            .ok_or("unknown QEMU NIC")?;
+        // The tap's name is derived from the MAC, so it stays the same; but a
+        // tap left on the old bridge must not make the next start fail, and
+        // `ensure_tap` refuses to move one that another bridge owns.
+        if matches!(iface.kind, IfaceKind::Bridge(_)) {
+            delete_nic_tap(id, &mac);
         }
+        iface.kind = match bridge {
+            Some(b) => IfaceKind::Bridge(b.to_string()),
+            None => IfaceKind::User,
+        };
+        rec.config.xml = domainxml::render(&d);
         self.save(&all)
     }
 
-    pub fn set_firewall(
-        &self,
-        id: &str,
-        firewall: crate::qemu_network::InboundPolicy,
-    ) -> Result<(), String> {
-        firewall.validate()?;
-        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
-        let mut all = self.read()?;
-        let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
-        if self.identity(rec) {
-            return Err("VM must be stopped to change firewall policy".into());
-        }
-        rec.config.firewall = firewall.clone();
-        // hostfwd only exists on a user-mode NIC; a bridge NIC keeps none.
-        if let Network::User { hostfwd } = &mut rec.config.network {
-            *hostfwd = firewall.hostfwd;
-        }
-        self.save(&all)
-    }
-    pub fn add_nic(&self, id: &str, device_id: &str, network: Network) -> Result<(), String> {
-        validate_new_nic_id(device_id)?;
-        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
-        let mut all = self.read()?;
-        {
-            let rec = all.get(id).ok_or("unknown QEMU VM")?;
-            if device_id_taken(&rec.config, device_id) {
-                return Err("device identifier already exists".into());
-            }
-        }
-        let network = match network {
-            // hostfwd belongs to the primary NIC's firewall policy only, so an
-            // extra user-mode NIC never carries one.
-            Network::User { .. } => Network::User { hostfwd: vec![] },
-            Network::Bridge {
-                network,
-                bridge,
-                mac,
-            } => {
-                if network.is_empty() {
-                    return Err("a bridge NIC must name its network".into());
-                }
-                // The bridge need not exist yet; `start`/this call's live path
-                // verifies it via `ensure_tap`.
-                Network::Bridge {
-                    network,
-                    bridge,
-                    mac: mac_for(&all, id, device_id, &mac)?,
-                }
-            }
+    /// Attach a NIC. Its MAC (and therefore its tap and QMP ids) is generated
+    /// here — or taken from `mac`, when the caller set one — and returned; the
+    /// interface is appended to the definition.
+    pub fn add_nic(&self, id: &str, bridge: Option<&str>, mac: &str) -> Result<String, String> {
+        let mac = mac.trim();
+        let mut iface = Interface {
+            kind: bridge
+                .map(|b| IfaceKind::Bridge(b.to_string()))
+                .unwrap_or(IfaceKind::User),
+            model: IfaceModel::Virtio,
+            mac: (!mac.is_empty()).then(|| mac.to_string()),
+            bandwidth: Default::default(),
         };
-        let live = self.identity(all.get(id).ok_or("unknown QEMU VM")?);
-        let net_id = netdev_id(device_id);
+        self.attach_nic(id, &mut iface).map(|(mac, _)| mac)
+    }
+
+    /// Attach a NIC from an `<interface>` element (the edit form's XML), so the
+    /// caller's model and MAC are what the definition gets. Returns the chosen
+    /// MAC and whether the device went into a running guest.
+    pub fn add_nic_xml(&self, id: &str, xml: &str) -> Result<(String, bool), String> {
+        let mut iface = domainxml::parse_interface_xml(xml)?;
+        self.attach_nic(id, &mut iface)
+    }
+
+    fn attach_nic(&self, id: &str, iface: &mut Interface) -> Result<(String, bool), String> {
+        if let IfaceKind::Bridge(bridge) = &iface.kind
+            && !crate::hostnet::valid_name(bridge)
+        {
+            return Err("invalid bridge name".into());
+        }
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let rec = all.get(id).ok_or("unknown QEMU VM")?;
+        let mut d = domainxml::parse(&rec.config.xml)?;
+        let used = used_macs(&all, id);
+        let mac = mac_for(
+            &used,
+            id,
+            &format!("net{}", d.interfaces.len()),
+            iface.mac.as_deref().unwrap_or(""),
+        )?;
+        iface.mac = Some(mac.clone());
+        let live = self.identity(rec);
+        let netdev = netdev_id(&mac);
+        let device = nic_device_id(&mac);
         let mut tap = None;
         if live {
             let sock = self.vm_dir(id).join("qmp.sock");
-            let add = match &network {
-                Network::User { .. } => serde_json::json!({"type":"user", "id":net_id}),
-                Network::Bridge { bridge, .. } => {
-                    let name = tap_name(id, device_id);
+            let add = match &iface.kind {
+                IfaceKind::User => serde_json::json!({"type":"user", "id":netdev}),
+                IfaceKind::Bridge(bridge) => {
+                    let name = tap_name(id, &mac);
                     // Before QMP: a device whose host tap is missing must never
                     // be published to the guest.
                     ensure_tap(&name, bridge)?;
                     tap = Some(name.clone());
                     serde_json::json!({
-                        "type":"tap", "id":net_id, "ifname":name,
+                        "type":"tap", "id":netdev, "ifname":name,
                         "script":"no", "downscript":"no"
                     })
                 }
@@ -508,105 +485,153 @@ impl Manager {
                 }
                 return Err(e);
             }
-            let device = match &network {
-                Network::Bridge { mac, .. } => serde_json::json!({
-                    "driver":"virtio-net-pci", "id":device_id, "netdev":net_id, "mac":mac
-                }),
-                Network::User { .. } => serde_json::json!({
-                    "driver":"virtio-net-pci", "id":device_id, "netdev":net_id
-                }),
-            };
+            let device = serde_json::json!({
+                "driver": iface.model.driver(), "id":device, "netdev":netdev, "mac":mac
+            });
             if let Err(e) = qmp_execute(&sock, "device_add", device) {
-                let _ = qmp_execute(&sock, "netdev_del", serde_json::json!({"id":net_id}));
+                let _ = qmp_execute(&sock, "netdev_del", serde_json::json!({"id":netdev}));
                 if let Some(tap) = &tap {
                     cleanup_taps(std::slice::from_ref(tap));
                 }
                 return Err(e);
             }
         }
-        all.get_mut(id).unwrap().config.extra_nics.push(Nic {
-            id: device_id.to_owned(),
-            network,
-        });
+        d.interfaces.push(iface.clone());
+        let rec = all.get_mut(id).unwrap();
+        rec.config.xml = domainxml::render(&d);
+        if let Some(t) = &tap {
+            rec.taps.push(t.clone());
+        }
         if let Err(e) = self.save(&all) {
             if live {
                 let sock = self.vm_dir(id).join("qmp.sock");
-                let _ = qmp_execute(&sock, "device_del", serde_json::json!({"id":device_id}));
-                let _ = qmp_execute(&sock, "netdev_del", serde_json::json!({"id":net_id}));
-                // QEMU still holds the device until the asynchronous
-                // `device_del` completes; deleting its tap here would pull the
-                // backing out from under the guest. The tap name is derived,
-                // so stop/reconcile removes it.
+                let _ = qmp_execute(&sock, "device_del", serde_json::json!({"id":device}));
+                let _ = qmp_execute(&sock, "netdev_del", serde_json::json!({"id":netdev}));
+                // QEMU may hold the device until the asynchronous `device_del`
+                // completes, so the tap is not deleted here. The definition did
+                // not persist either, so record the tap separately; otherwise
+                // nothing would ever remove it.
+                if let Some(tap) = &tap
+                    && let Ok(mut old) = self.read()
+                {
+                    if let Some(rec) = old.get_mut(id) {
+                        rec.taps.push(tap.clone());
+                    }
+                    let _ = self.save(&old);
+                }
             }
             return Err(format!("live NIC added but persistence failed: {e}"));
         }
-        Ok(())
+        Ok((mac, live))
     }
-    pub fn remove_nic(&self, id: &str, device_id: &str) -> Result<bool, String> {
-        validate_device_id(device_id)?;
+
+    /// Detach the NIC with this MAC. A live guest's `device_del` is a request,
+    /// so the caller is told it is pending; the tap itself is removed when the
+    /// guest stops, because QEMU may still hold it.
+    pub fn remove_nic(&self, id: &str, mac: &str) -> Result<bool, String> {
+        let mac = domainxml::normalize_mac(mac)?;
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         let mut all = self.read()?;
         let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
-        if !rec.config.extra_nics.iter().any(|n| n.id == device_id) {
+        let mut d = domainxml::parse(&rec.config.xml)?;
+        let Some(index) = d
+            .interfaces
+            .iter()
+            .position(|i| i.mac.as_deref() == Some(mac.as_str()))
+        else {
             return Err("unknown QEMU NIC".into());
-        }
-        if self.identity(rec) {
+        };
+        let live = self.identity(rec);
+        if live {
             let sock = self.vm_dir(id).join("qmp.sock");
-            qmp_execute(&sock, "device_del", serde_json::json!({"id":device_id}))?;
-            // QMP device_del completes asynchronously; keep durable metadata until an
-            // authoritative DEVICE_DELETED event can be observed. Never infer from
-            // query-pci's human-oriented topology dump.
-            // The tap is left alone for the same reason: QEMU still holds the
-            // device, and deleting its backing would break the guest. Its name is
-            // derived from the VM and interface, so stop/reconcile removes it.
-            return Ok(true);
+            qmp_execute(
+                &sock,
+                "device_del",
+                serde_json::json!({"id": nic_device_id(&mac)}),
+            )?;
+            // QMP `device_del` completes asynchronously; the tap stays in the
+            // record so stop/sweep removes it once QEMU has let go.
+        } else {
+            delete_nic_tap(id, &mac);
         }
-        if let Some(nic) = rec.config.extra_nics.iter().find(|n| n.id == device_id)
-            && matches!(nic.network, Network::Bridge { .. })
-        {
-            delete_nic_tap(id, device_id);
-        }
-        rec.config.extra_nics.retain(|n| n.id != device_id);
+        d.interfaces.remove(index);
+        rec.config.xml = domainxml::render(&d);
         self.save(&all)?;
-        Ok(false)
+        Ok(live)
     }
+
+    /// Set one NIC's `<bandwidth>` in the stored definition. Returns the tap to
+    /// shape when the guest is running and the NIC is on a bridge: `tc` is the
+    /// kernel side, so only the caller with the host commands applies it. A
+    /// stopped (or user-mode) NIC keeps the definition and nothing else.
+    pub fn set_nic_bandwidth(
+        &self,
+        id: &str,
+        mac: &str,
+        rx_kib: Option<u64>,
+        tx_kib: Option<u64>,
+    ) -> Result<Option<String>, String> {
+        let mac = domainxml::normalize_mac(mac)?;
+        let rate = |kib: Option<u64>| {
+            kib.filter(|k| *k > 0)
+                .map(|average| crate::domainxml::Rate {
+                    average: Some(average),
+                    ..Default::default()
+                })
+        };
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        let mut all = self.read()?;
+        let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
+        let mut d = domainxml::parse(&rec.config.xml)?;
+        let iface = d
+            .interfaces
+            .iter_mut()
+            .find(|i| i.mac.as_deref() == Some(mac.as_str()))
+            .ok_or("unknown QEMU NIC")?;
+        iface.bandwidth = crate::domainxml::Bandwidth {
+            inbound: rate(rx_kib),
+            outbound: rate(tx_kib),
+        };
+        let bridged = matches!(&iface.kind, IfaceKind::Bridge(_));
+        let live = self.identity(rec);
+        rec.config.xml = domainxml::render(&d);
+        self.save(&all)?;
+        Ok((live && bridged).then(|| tap_name(id, &mac)))
+    }
+
     /// Attach a disk to a stopped guest by persisting it, or to a running one by
-    /// adding its block nodes and device through QMP first. The device is a
-    /// `virtio-blk-pci` over an explicit file → format node chain, so a live
-    /// guest can have exactly what the next launch will build.
+    /// adding its block nodes and device through QMP first. The target device
+    /// name (`vdb`) is derived from the definition and returned.
     pub fn add_disk(
         &self,
         id: &str,
-        disk_id: &str,
         path: &Path,
         format: DiskFormat,
-    ) -> Result<PathBuf, String> {
-        validate_new_disk_id(disk_id)?;
+    ) -> Result<(String, PathBuf), String> {
         let path = check_disk_file(path)?;
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         let mut all = self.read()?;
         let rec = all.get(id).ok_or("unknown QEMU VM")?;
-        if device_id_taken(&rec.config, disk_id) {
-            return Err("device identifier already exists".into());
-        }
+        let mut d = domainxml::parse(&rec.config.xml)?;
         // One file backs one device: the same image attached twice is written
         // by two guests and corrupts both.
-        if all.values().any(|rec| {
-            rec.config.disk == path || rec.config.extra_disks.iter().any(|d| d.path == path)
-        }) {
+        if attached_files(&all, Some(id)).contains(&path)
+            || d.disks.iter().any(|x| x.source.as_deref() == Some(&path))
+        {
             return Err("disk path is already attached to a VM".into());
         }
+        let target = next_disk_target(&d)?;
         let live = self.identity(rec);
-        let file_node = format!("file-{disk_id}");
-        let drive_node = format!("drive-{disk_id}");
         let sock = self.vm_dir(id).join("qmp.sock");
         if live {
-            let filename = path.to_str().ok_or("disk path is not valid UTF-8")?;
+            let file_node = format!("file-{target}");
+            let drive_node = format!("drive-{target}");
             qmp_execute(
                 &sock,
                 "blockdev-add",
                 serde_json::json!({
-                    "driver":"file", "filename":filename, "node-name":&file_node
+                    "driver":"file", "filename":path.to_str().ok_or("disk path is not valid UTF-8")?,
+                    "node-name":&file_node
                 }),
             )?;
             if let Err(e) = qmp_execute(
@@ -627,7 +652,7 @@ impl Manager {
                 &sock,
                 "device_add",
                 serde_json::json!({
-                    "driver":"virtio-blk-pci", "id":disk_id, "drive":&drive_node
+                    "driver":"virtio-blk-pci", "id":&target, "drive":&drive_node
                 }),
             ) {
                 let _ = qmp_execute(
@@ -643,65 +668,68 @@ impl Manager {
                 return Err(e);
             }
         }
-        all.get_mut(id).unwrap().config.extra_disks.push(Disk {
-            id: disk_id.to_owned(),
-            path: path.clone(),
+        d.disks.push(Disk {
+            device: DiskDevice::Disk,
+            bus: DiskBus::Virtio,
             format,
+            target: target.clone(),
+            source: Some(path.clone()),
+            readonly: false,
         });
+        all.get_mut(id).unwrap().config.xml = domainxml::render(&d);
         if let Err(e) = self.save(&all) {
             if live {
                 // The device still references the node until the asynchronous
                 // `device_del` completes, so a `blockdev-del` may be refused;
                 // the guest keeps the disk rather than having it pulled away.
-                let _ = qmp_execute(&sock, "device_del", serde_json::json!({"id":disk_id}));
+                let _ = qmp_execute(&sock, "device_del", serde_json::json!({"id":&target}));
                 let _ = qmp_execute(
                     &sock,
                     "blockdev-del",
-                    serde_json::json!({"node-name":&drive_node}),
+                    serde_json::json!({"node-name":format!("drive-{target}")}),
                 );
                 let _ = qmp_execute(
                     &sock,
                     "blockdev-del",
-                    serde_json::json!({"node-name":&file_node}),
+                    serde_json::json!({"node-name":format!("file-{target}")}),
                 );
             }
-            return Err(format!("live disk added but persistence failed: {e}"));
+            return Err(format!("disk added but persistence failed: {e}"));
         }
-        Ok(path)
+        Ok((target, path))
     }
-    /// Detach a disk. A live guest's `device_del` is a request, so its metadata
-    /// stays until the guest acknowledges it — the same rule as a NIC. The file
-    /// is never deleted: it holds the guest's data, not the device's identity.
-    pub fn remove_disk(&self, id: &str, disk_id: &str) -> Result<bool, String> {
-        validate_device_id(disk_id)?;
+
+    /// Detach the disk whose `<target dev>` is `target`. A live guest's
+    /// `device_del` is a request, so `pending` reports it. The file is never
+    /// deleted: it holds the guest's data, not the device's identity.
+    pub fn remove_disk(&self, id: &str, target: &str) -> Result<bool, String> {
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         let mut all = self.read()?;
         let rec = all.get_mut(id).ok_or("unknown QEMU VM")?;
-        let Some(index) = rec.config.extra_disks.iter().position(|d| d.id == disk_id) else {
+        let mut d = domainxml::parse(&rec.config.xml)?;
+        let Some(index) = d.disks.iter().position(|x| x.target == target) else {
             return Err("unknown QEMU disk".into());
         };
         let live = self.identity(rec);
         if live {
             let sock = self.vm_dir(id).join("qmp.sock");
-            qmp_execute(&sock, "device_del", serde_json::json!({"id": disk_id}))?;
-            // QMP `device_del` completes asynchronously: the device may stay
-            // attached until the guest acknowledges it or the VM stops, which
-            // is what `pending` reports. Removing it from the stored config now
-            // is what keeps it from coming back at the next start, and makes a
-            // repeated DELETE an honest "unknown disk" instead of a QMP error.
+            qmp_execute(&sock, "device_del", serde_json::json!({"id": target}))?;
         }
-        rec.config.extra_disks.remove(index);
+        d.disks.remove(index);
+        rec.config.xml = domainxml::render(&d);
         // A failed save keeps the old file: the caller sees the error and the
         // disk is still in the definition (it may be live until the VM stops).
         self.save(&all)?;
         Ok(live)
     }
+
     pub fn list(&self) -> Result<Vec<VmConfig>, String> {
         Ok(self.read()?.into_values().map(|r| r.config).collect())
     }
     fn vm_dir(&self, id: &str) -> PathBuf {
         self.state_root.join(id)
     }
+
     pub fn start(&self, id: &str) -> Result<(), String> {
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         if !Self::valid_id(id) {
@@ -714,66 +742,64 @@ impl Manager {
         if self.identity(all.get(id).unwrap()) {
             return Err("VM already running".into());
         }
-        let mut config = all.get(id).unwrap().config.clone();
-        let link_meta =
-            fs::symlink_metadata(&config.disk).map_err(|e| format!("inspect disk: {e}"))?;
-        if !link_meta.file_type().is_file() {
-            return Err("disk must remain a regular file, not a symlink".into());
-        }
-        let disk = fs::canonicalize(&config.disk).map_err(|e| format!("canonicalize disk: {e}"))?;
-        if disk != config.disk {
-            return Err("disk path changed since VM definition".into());
-        }
-        let original = fs::metadata(&disk).map_err(|e| e.to_string())?;
-        if !original.is_file() {
-            return Err("disk must be a regular file".into());
-        }
-        if original.len() == 0 || original.len() != all.get(id).unwrap().disk_size {
-            return Err("disk is empty or its size changed since VM definition".into());
-        }
-        // An extra disk was validated when it was added; re-check the stored
-        // path now, or a symlink swapped in since would be followed by QEMU.
-        for extra in &config.extra_disks {
-            if check_disk_file(&extra.path)? != extra.path {
+        let config = all.get(id).unwrap().config.clone();
+        let d = domainxml::parse(&config.xml)?;
+        // A disk was validated when it was defined; re-check the stored path
+        // now, or a symlink swapped in since would be followed by QEMU.
+        for disk in &d.disks {
+            let Some(source) = &disk.source else {
+                continue;
+            };
+            if check_disk_file(source)? != *source {
                 return Err(format!(
-                    "disk '{}' changed since it was added; re-add it",
-                    extra.id
+                    "disk '{}' changed since it was defined; re-add it",
+                    disk.target
                 ));
             }
         }
         let dir = self.vm_dir(id);
         private_dir(&self.state_root)?;
         private_dir(&dir)?;
+        prepare_nvram(&d)?;
         let sock = dir.join("qmp.sock");
         if sock.as_os_str().len() > 100 {
             return Err("QMP socket path exceeds Unix socket limit".into());
         }
-        private_dir(&self.state_root)?;
-        private_dir(&dir)?;
         let _ = fs::remove_file(&sock);
-        // hostfwd is policy: the firewall allowlist decides it, not the NIC's
-        // stored network object (which is `User` when the guest is on NAT).
-        let hostfwd = config.firewall.hostfwd.clone();
-        if let Network::User { hostfwd: h } = &mut config.network {
-            *h = hostfwd;
+        // Build the argv before starting swtpm: a definition QEMU would refuse
+        // must not leave a TPM emulator running with no guest.
+        let argv = self.argv(id, &d)?;
+        let tpm = d.tpm.is_some();
+        if tpm {
+            // The TPM is a sibling process of QEMU: it must be up before QEMU
+            // connects to its control socket, and stopped with the guest.
+            self.ensure_swtpm(&d, &dir)?;
         }
-        let argv = self.args(&config)?;
-        // Taps first: a bridge NIC whose host interface is missing must fail the
+        // Taps next: a bridge NIC whose host interface is missing must fail the
         // start, not hand QEMU a device with nowhere to send packets.
         let mut created: Vec<String> = Vec::new();
-        for (nic_id, network) in config.nics() {
-            let Network::Bridge { bridge, .. } = network else {
+        let mut taps: Vec<String> = Vec::new();
+        for iface in &d.interfaces {
+            let IfaceKind::Bridge(bridge) = &iface.kind else {
                 continue;
             };
-            let tap = tap_name(&config.id, nic_id);
+            let mac = iface
+                .mac
+                .as_deref()
+                .ok_or("a bridge NIC has no MAC address")?;
+            let tap = tap_name(id, mac);
             let existed = Path::new(SYS_NET).join(&tap).exists();
             if let Err(e) = ensure_tap(&tap, bridge) {
+                if tpm {
+                    let _ = stop_swtpm(&dir);
+                }
                 cleanup_taps(&created);
                 return Err(e);
             }
             if !existed {
-                created.push(tap);
+                created.push(tap.clone());
             }
+            taps.push(tap);
         }
         let mut child = match Command::new(&self.qemu)
             .args(&argv)
@@ -784,6 +810,9 @@ impl Manager {
         {
             Ok(child) => child,
             Err(e) => {
+                if tpm {
+                    let _ = stop_swtpm(&dir);
+                }
                 cleanup_taps(&created);
                 return Err(format!("launch QEMU: {e}"));
             }
@@ -794,6 +823,9 @@ impl Manager {
         {
             let _ = child.kill();
             let _ = child.wait();
+            if tpm {
+                let _ = stop_swtpm(&dir);
+            }
             cleanup_taps(&created);
             return Err("QEMU executable identity mismatch".into());
         }
@@ -802,6 +834,9 @@ impl Manager {
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if tpm {
+                    let _ = stop_swtpm(&dir);
+                }
                 cleanup_taps(&created);
                 return Err("QEMU exited before process identity was recorded".into());
             }
@@ -810,10 +845,14 @@ impl Manager {
             let rec = all.get_mut(id).unwrap();
             rec.pid = Some(pid);
             rec.start_ticks = Some(ticks);
+            rec.taps = taps;
         }
         if let Err(e) = self.save(&all) {
             let _ = child.kill();
             let _ = child.wait();
+            if tpm {
+                let _ = stop_swtpm(&dir);
+            }
             cleanup_taps(&created);
             return Err(e);
         }
@@ -821,74 +860,377 @@ impl Manager {
         if !self.identity(all.get(id).unwrap()) || qmp(&sock, "query-status").is_err() {
             let _ = child.kill();
             let _ = child.wait();
+            if tpm {
+                let _ = stop_swtpm(&dir);
+            }
             cleanup_taps(&created);
             let rec = all.get_mut(id).unwrap();
             rec.pid = None;
             rec.start_ticks = None;
+            // The taps stay recorded with no process: the next sweep removes
+            // them, including one a previous run left behind and this start
+            // reused (which `created` does not name).
             let _ = self.save(&all);
             return Err("QEMU failed readiness check".into());
         }
         drop(child);
         Ok(())
     }
-    /// The QEMU launch argv: pure, so the device shape can be asserted without
-    /// a QEMU or root. The taps it names are created by the caller.
-    fn args(&self, config: &VmConfig) -> Result<Vec<String>, String> {
-        let sock = self.vm_dir(&config.id).join("qmp.sock");
-        let mut args: Vec<String> = vec![
-            "-name".into(),
-            config.id.clone(),
-            "-m".into(),
-            config.memory_mib.to_string(),
-            "-smp".into(),
-            config.vcpus.to_string(),
-            "-drive".into(),
-            format!("file={},if=virtio", escape_drive_path(&config.disk)?),
-            "-qmp".into(),
-            format!("unix:{},server=on,wait=off", sock.display()),
-            "-display".into(),
-            "none".into(),
-        ];
-        for (nic_id, network) in config.nics() {
-            let netdev = netdev_id(nic_id);
-            // The primary NIC has no device id (QEMU invents one); an extra
-            // NIC is addressed by QMP by the user's id.
-            let id = if nic_id == "net0" {
-                String::new()
-            } else {
-                format!("id={nic_id},")
-            };
-            let (netdev_arg, device) = match network {
-                Network::User { hostfwd } => {
-                    // hostfwd is the primary NIC's firewall policy; an extra
-                    // NIC has none, or it would open ports the policy never saw.
-                    let hostfwd = if nic_id == "net0" {
-                        hostfwd.clone()
-                    } else {
-                        Vec::new()
-                    };
-                    let user = crate::qemu_network::UserNetwork { hostfwd };
-                    (
-                        user.qemu_netdev_for(&netdev)?,
-                        format!("virtio-net-pci,{id}netdev={netdev}"),
-                    )
-                }
-                Network::Bridge { mac, .. } => {
-                    if mac.is_empty() {
-                        return Err(format!("NIC '{nic_id}' has no MAC address"));
-                    }
-                    let tap = tap_name(&config.id, nic_id);
-                    (
-                        format!("tap,id={netdev},ifname={tap},script=no,downscript=no"),
-                        format!("virtio-net-pci,{id}netdev={netdev},mac={mac}"),
-                    )
-                }
-            };
-            args.extend(["-netdev".into(), netdev_arg, "-device".into(), device]);
+
+    /// The QEMU launch argv for a stored guest: pure apart from reading the
+    /// record and checking that a TPM's swtpm socket exists, so the device
+    /// shape is asserted without QEMU or root. Taps are created by `start`.
+    /// Test-only: `start` builds the argv before it starts swtpm.
+    #[cfg(test)]
+    pub fn args(&self, id: &str) -> Result<Vec<String>, String> {
+        let record = self.read()?.remove(id).ok_or("unknown QEMU VM")?;
+        let d = domainxml::parse(&record.config.xml)?;
+        let args = self.argv(&record.config.id, &d)?;
+        if d.tpm.is_some() {
+            let ctrl = self.vm_dir(&record.config.id).join("swtpm.sock");
+            // QEMU's tpm emulator backend is a chardev into swtpm's control
+            // socket; without a running swtpm the chardev would point at
+            // nothing and the guest would fail at start with a QEMU error that
+            // names neither swtpm nor the definition.
+            if !is_socket(&ctrl) {
+                return Err(format!(
+                    "TPM needs a running swtpm: no control socket at {}",
+                    ctrl.display()
+                ));
+            }
         }
-        args.extend(disk_args(config)?);
         Ok(args)
     }
+
+    /// Start the guest's swtpm before QEMU, unless it is already up. State is
+    /// per guest, so a live socket from an earlier run (a daemon restart) is
+    /// reused rather than replaced.
+    fn ensure_swtpm(&self, d: &domainxml::Domain, dir: &Path) -> Result<(), String> {
+        let Some(tpm) = &d.tpm else {
+            return Ok(());
+        };
+        let sock = dir.join("swtpm.sock");
+        let pid_file = dir.join("swtpm.pid");
+        let state = dir.join("tpm");
+        if socket_live(&sock) {
+            return Ok(());
+        }
+        // A pid file whose socket never came up, or a stale socket file, must
+        // not make the new swtpm fail to bind.
+        stop_swtpm(dir).map_err(|e| format!("restart swtpm: {e}"))?;
+        private_dir(&state)?;
+        let argv = swtpm_argv(&tpm.version, &state, &sock, &pid_file)?;
+        // stderr is a file rather than a pipe: swtpm daemonizes and may keep
+        // the descriptor open, which would make `.output()` wait on it.
+        let log = dir.join("swtpm.log");
+        let err = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&log)
+            .map_err(|e| format!("prepare swtpm log: {e}"))?;
+        let status = Command::new(SWTPM)
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(err))
+            .status();
+        let detail = || {
+            fs::read_to_string(&log)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                let msg = detail();
+                let _ = stop_swtpm(dir);
+                let _ = fs::remove_file(&log);
+                return Err(if msg.is_empty() {
+                    format!("start swtpm: {s}")
+                } else {
+                    format!("start swtpm: {msg}")
+                });
+            }
+            Err(e) => {
+                let _ = stop_swtpm(dir);
+                let _ = fs::remove_file(&log);
+                return Err(format!("start swtpm: {e}"));
+            }
+        }
+        if !wait_socket(&sock, Duration::from_secs(2)) {
+            let msg = detail();
+            let _ = stop_swtpm(dir);
+            let _ = fs::remove_file(&log);
+            return Err(format!(
+                "start swtpm: {}",
+                if msg.is_empty() {
+                    "no control socket appeared".to_string()
+                } else {
+                    msg
+                }
+            ));
+        }
+        let _ = fs::remove_file(&log);
+        Ok(())
+    }
+
+    fn argv(&self, id: &str, d: &domainxml::Domain) -> Result<Vec<String>, String> {
+        let dir = self.vm_dir(id);
+        let mut machine = d.machine.clone();
+        if d.domain_type == "kvm" && !machine.contains("accel=") {
+            machine.push_str(",accel=kvm");
+        }
+        let cpu = match &d.cpu {
+            Cpu::Host => "host".to_string(),
+            Cpu::Max => "max".to_string(),
+            Cpu::Model(model) => model.clone(),
+        };
+        let mut args: Vec<String> = vec![
+            "-name".into(),
+            id.to_string(),
+            "-machine".into(),
+            machine,
+            "-cpu".into(),
+            cpu,
+            "-smp".into(),
+            d.vcpus.to_string(),
+            "-m".into(),
+            d.memory_mib.to_string(),
+        ];
+        if !d.boot.is_empty() {
+            let order: String = d
+                .boot
+                .iter()
+                .map(|b| match b {
+                    // QEMU's letters: c hard disk, d CD-ROM, n network, a floppy.
+                    BootDev::Hd => 'c',
+                    BootDev::Cdrom => 'd',
+                    BootDev::Network => 'n',
+                    BootDev::Floppy => 'a',
+                })
+                .collect();
+            args.extend(["-boot".into(), format!("order={order}")]);
+        }
+        if d.firmware == Firmware::Uefi
+            && let Some(loader) = &d.loader
+        {
+            args.extend([
+                "-drive".into(),
+                format!(
+                    "if=pflash,format=raw,readonly=on,file={}",
+                    escape_drive_path(loader)?
+                ),
+            ]);
+        }
+        if d.firmware == Firmware::Uefi
+            && let Some(nvram) = &d.nvram
+        {
+            args.extend([
+                "-drive".into(),
+                format!("if=pflash,format=raw,file={}", escape_drive_path(nvram)?),
+            ]);
+        }
+        if d.disks.iter().any(|x| x.bus == DiskBus::Scsi) {
+            args.extend(["-device".into(), "virtio-scsi-pci,id=scsi0".into()]);
+        }
+        let mut sata = 0usize;
+        for disk in &d.disks {
+            let target = &disk.target;
+            if let Some(source) = &disk.source {
+                args.extend([
+                    "-blockdev".into(),
+                    format!(
+                        "driver=file,filename={},node-name=file-{target}",
+                        escape_blockdev_path(source)?
+                    ),
+                ]);
+                args.extend([
+                    "-blockdev".into(),
+                    format!(
+                        "driver={},file=file-{target},node-name=drive-{target}{}",
+                        disk.format.as_str(),
+                        if disk.readonly { ",read-only=on" } else { "" }
+                    ),
+                ]);
+            }
+            let drive = if disk.source.is_some() {
+                format!(",drive=drive-{target}")
+            } else {
+                String::new()
+            };
+            let device = match disk.bus {
+                DiskBus::Virtio => format!("virtio-blk-pci,id={target}{drive}"),
+                DiskBus::Sata => {
+                    if sata >= 6 {
+                        return Err("a guest can have at most six sata devices".into());
+                    }
+                    let bus = sata;
+                    sata += 1;
+                    let driver = match disk.device {
+                        DiskDevice::Disk => "ide-hd",
+                        DiskDevice::Cdrom => "ide-cd",
+                    };
+                    format!("{driver},id={target},bus=ide.{bus}{drive}")
+                }
+                DiskBus::Scsi => {
+                    let driver = match disk.device {
+                        DiskDevice::Disk => "scsi-hd",
+                        DiskDevice::Cdrom => "scsi-cd",
+                    };
+                    format!("{driver},id={target},bus=scsi0.0{drive}")
+                }
+            };
+            args.extend(["-device".into(), device]);
+        }
+        for iface in &d.interfaces {
+            // `<bandwidth>` is carried in the definition; `api::nics` installs
+            // the `tc` shaping from it when a limit changes on a running guest.
+            let mac = iface
+                .mac
+                .as_deref()
+                .ok_or("a NIC has no MAC address; re-define the guest")?;
+            let netdev = netdev_id(mac);
+            let device = nic_device_id(mac);
+            let netdev_arg = match &iface.kind {
+                IfaceKind::User => format!("user,id={netdev}"),
+                IfaceKind::Bridge(bridge) => {
+                    if !crate::hostnet::valid_name(bridge) {
+                        return Err(format!("'{bridge}' is not a usable bridge name"));
+                    }
+                    format!(
+                        "tap,id={netdev},ifname={},script=no,downscript=no",
+                        tap_name(id, mac)
+                    )
+                }
+            };
+            args.extend([
+                "-netdev".into(),
+                netdev_arg,
+                "-device".into(),
+                format!(
+                    "{},id={device},netdev={netdev},mac={mac}",
+                    iface.model.driver()
+                ),
+            ]);
+        }
+        let mut gl_video = false;
+        if let Some(video) = &d.video {
+            gl_video = video.model == VideoModel::Virtio && video.accel3d;
+            if let Some(device) = video_device(video)? {
+                args.extend(["-device".into(), device]);
+            }
+        }
+        match &d.graphics {
+            Some(Graphics::Vnc { listen, port }) => {
+                // QEMU names a VNC display by number, and the TCP port is
+                // 5900 + number; the definition carries the port.
+                let display = port.checked_sub(5900).ok_or_else(|| {
+                    format!("VNC port {port} has no display number; use 5900 or above")
+                })?;
+                args.extend(["-vnc".into(), format!("{listen}:{display}")]);
+            }
+            Some(Graphics::Spice { listen, port }) => {
+                args.extend([
+                    "-spice".into(),
+                    format!("port={port},addr={listen},disable-ticketing=on"),
+                ]);
+            }
+            None => {
+                // A -gl device needs a GL-capable display of its own; with no
+                // remote display, egl-headless is the one that can back it. It
+                // needs a working host GL stack, which the start reported.
+                args.extend([
+                    "-display".into(),
+                    if gl_video { "egl-headless" } else { "none" }.into(),
+                ]);
+            }
+        }
+        let usb = d
+            .hostdevs
+            .iter()
+            .filter(|h| matches!(h, Hostdev::Usb { .. }))
+            .count();
+        if usb > 0 {
+            args.extend(["-device".into(), "qemu-xhci,id=xhci".into()]);
+        }
+        for hostdev in &d.hostdevs {
+            match hostdev {
+                Hostdev::Usb { vendor, product } => args.extend([
+                    "-device".into(),
+                    format!(
+                        "usb-host,bus=xhci.0,vendorid=0x{vendor:04x},productid=0x{product:04x}"
+                    ),
+                ]),
+                Hostdev::Pci {
+                    domain,
+                    bus,
+                    slot,
+                    function,
+                } => args.extend([
+                    "-device".into(),
+                    format!("vfio-pci,host={domain:04x}:{bus:02x}:{slot:02x}.{function:x}"),
+                ]),
+            }
+        }
+        if let Some(rng) = &d.rng {
+            args.extend([
+                "-object".into(),
+                format!("rng-random,id=rng0,filename={}", escape_blockdev_path(rng)?),
+                "-device".into(),
+                "virtio-rng-pci,rng=rng0".into(),
+            ]);
+        }
+        if d.memballoon {
+            args.extend(["-device".into(), "virtio-balloon-pci".into()]);
+        }
+        if d.guest_agent {
+            args.extend([
+                "-device".into(),
+                "virtio-serial-pci,id=virtio-serial0".into(),
+                "-chardev".into(),
+                format!(
+                    "socket,id=qga0,path={},server=on,wait=off",
+                    escape_blockdev_path(&dir.join("qga.sock"))?
+                ),
+                "-device".into(),
+                "virtserialport,bus=virtio-serial0.0,chardev=qga0,id=qga0,name=org.qemu.guest_agent.0"
+                    .into(),
+            ]);
+        }
+        if d.tpm.is_some() {
+            let ctrl = dir.join("swtpm.sock");
+            args.extend([
+                "-chardev".into(),
+                format!("socket,id=chrtpm,path={}", escape_blockdev_path(&ctrl)?),
+                "-tpmdev".into(),
+                "emulator,id=tpm0,chardev=chrtpm".into(),
+                "-device".into(),
+                "tpm-crb,tpmdev=tpm0".into(),
+            ]);
+        }
+        if let Some(watchdog) = &d.watchdog {
+            args.extend([
+                "-watchdog-action".into(),
+                watchdog.action.clone(),
+                "-device".into(),
+                watchdog.model.clone(),
+            ]);
+        }
+        match d.serial {
+            Some(SerialKind::Pty) => args.extend(["-serial".into(), "pty".into()]),
+            Some(SerialKind::Null) => args.extend(["-serial".into(), "none".into()]),
+            None => {}
+        }
+        args.extend([
+            "-qmp".into(),
+            format!("unix:{},server=on,wait=off", dir.join("qmp.sock").display()),
+        ]);
+        Ok(args)
+    }
+
     fn identity(&self, r: &Record) -> bool {
         r.pid
             .zip(r.start_ticks)
@@ -924,6 +1266,139 @@ impl Manager {
             Err(_) => Ok(State::Unknown),
         }
     }
+    /// QEMU's own reset, which both the guest's reboot request and the UI's
+    /// reset button use: a direct launch has no ACPI reboot event separate
+    /// from `system_reset`.
+    pub fn reboot(&self, id: &str) -> Result<(), String> {
+        self.qmp_reset(id)
+    }
+
+    pub fn reset(&self, id: &str) -> Result<(), String> {
+        self.qmp_reset(id)
+    }
+
+    fn qmp_reset(&self, id: &str) -> Result<(), String> {
+        let rec = self.read()?.remove(id).ok_or("unknown QEMU VM")?;
+        if !self.identity(&rec) {
+            return Err("VM is not running".into());
+        }
+        qmp_execute(
+            &self.vm_dir(id).join("qmp.sock"),
+            "system_reset",
+            serde_json::json!({}),
+        )
+        .map(|_| ())
+    }
+
+    /// CPU time and RSS from `/proc`, plus the configured size, so the summary
+    /// charts keep the shape they had under libvirt. A stopped guest has no
+    /// process: its counters read zero and only the definition's size is real.
+    pub fn stats(&self, id: &str) -> Result<Stats, String> {
+        let rec = self.read()?.remove(id).ok_or("unknown QEMU VM")?;
+        let d = domainxml::parse(&rec.config.xml)?;
+        let state = self.state(id)?;
+        let live = matches!(state, State::Running | State::Paused) && self.identity(&rec);
+        let (cpu_time_ns, rss_kib) = match (live, rec.pid) {
+            (true, Some(pid)) => (
+                process_cpu_ns(pid).unwrap_or(0),
+                process_rss_kib(pid).or(Some(0)),
+            ),
+            _ => (0, Some(0)),
+        };
+        let memory_kib = u64::from(d.memory_mib) * 1024;
+        Ok(Stats {
+            state: state.as_str(),
+            cpu_time_ns,
+            vcpus: d.vcpus,
+            memory_kib,
+            max_memory_kib: memory_kib,
+            rss_kib,
+            // A direct launch has no balloon driver to report guest-usable
+            // memory; the summary falls back to RSS, as it does when libvirt
+            // reports none.
+            usable_kib: None,
+        })
+    }
+
+    /// One row per NIC in the definition. The host-side name is the derived
+    /// tap, so a stopped guest reports none; counters come from that tap's
+    /// sysfs statistics and are only meaningful while the process runs.
+    pub fn interfaces(&self, id: &str) -> Result<Vec<InterfaceStats>, String> {
+        let rec = self.read()?.remove(id).ok_or("unknown QEMU VM")?;
+        let d = domainxml::parse(&rec.config.xml)?;
+        let live = self.identity(&rec);
+        let mut out = Vec::new();
+        for iface in &d.interfaces {
+            let mac = iface.mac.clone();
+            let (dev, network) = match &iface.kind {
+                IfaceKind::Bridge(bridge) => (
+                    mac.as_deref().filter(|_| live).map(|mac| tap_name(id, mac)),
+                    Some(bridge.clone()),
+                ),
+                IfaceKind::User => (None, None),
+            };
+            let (rx_bytes, tx_bytes) = match &dev {
+                Some(tap) => (net_counter(tap, "rx_bytes"), net_counter(tap, "tx_bytes")),
+                None => (0, 0),
+            };
+            out.push(InterfaceStats {
+                dev,
+                mac,
+                model: iface.model.as_str(),
+                network,
+                rx_kib: iface.bandwidth.inbound.as_ref().and_then(|r| r.average),
+                tx_kib: iface.bandwidth.outbound.as_ref().and_then(|r| r.average),
+                rx_bytes,
+                tx_bytes,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Per-disk bytes moved, keyed by the target dev (`vda`). A stopped guest
+    /// has no QMP socket, so every disk reads zero; the collector keeps the
+    /// zero as a real sample rather than treating it as a missing device.
+    pub fn block_stats(&self, id: &str) -> Result<BTreeMap<String, (u64, u64)>, String> {
+        let rec = self.read()?.remove(id).ok_or("unknown QEMU VM")?;
+        if !self.identity(&rec) {
+            return Ok(BTreeMap::new());
+        }
+        let raw = qmp(&self.vm_dir(id).join("qmp.sock"), "query-blockstats")?;
+        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let mut out = BTreeMap::new();
+        for block in v.as_array().into_iter().flatten() {
+            let Some(dev) = block.get("device").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(stats) = block.get("stats") else {
+                continue;
+            };
+            let num = |name: &str| {
+                stats
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            out.insert(dev.to_string(), (num("rd_bytes"), num("wr_bytes")));
+        }
+        Ok(out)
+    }
+
+    pub fn graphics(&self, id: &str) -> Result<Option<GraphicsInfo>, String> {
+        Ok(domainxml::parse(&self.xml(id)?)?.graphics.map(|g| match g {
+            Graphics::Vnc { listen, port } => GraphicsInfo {
+                kind: "vnc",
+                host: listen,
+                port,
+            },
+            Graphics::Spice { listen, port } => GraphicsInfo {
+                kind: "spice",
+                host: listen,
+                port,
+            },
+        }))
+    }
+
     pub fn powerdown(&self, id: &str, force: bool) -> Result<(), String> {
         if !Self::valid_id(id) {
             return Err("invalid VM id".into());
@@ -963,13 +1438,16 @@ impl Manager {
         {
             rec.pid = None;
             rec.start_ticks = None;
-            stopped = Some(rec.config.clone());
+            stopped = Some(std::mem::take(&mut rec.taps));
         }
-        if let Some(config) = stopped {
+        if let Some(taps) = stopped {
             self.save(&all)?;
             // Inside the lock: a start cannot create the same tap until this
             // cleanup is done.
-            delete_nic_taps(&config);
+            cleanup_taps(&taps);
+            if let Err(e) = stop_swtpm(&self.vm_dir(id)) {
+                tracing::warn!("qemu: stopping swtpm for {id}: {e}");
+            }
         }
         drop(guard);
         Ok(())
@@ -1004,11 +1482,14 @@ impl Manager {
         {
             rec.pid = None;
             rec.start_ticks = None;
-            stopped = Some(rec.config.clone());
+            stopped = Some(std::mem::take(&mut rec.taps));
         }
-        if let Some(config) = stopped {
+        if let Some(taps) = stopped {
             self.save(&all)?;
-            delete_nic_taps(&config);
+            cleanup_taps(&taps);
+            if let Err(e) = stop_swtpm(&self.vm_dir(id)) {
+                tracing::warn!("qemu: stopping swtpm for {id}: {e}");
+            }
         }
         drop(guard);
         Ok(())
@@ -1026,7 +1507,10 @@ impl Manager {
         if self.identity(r) {
             return Err("VM is running; stop it before deletion".into());
         }
-        delete_nic_taps(&r.config);
+        cleanup_taps(&r.taps);
+        // Stop the TPM emulator before its state directory is removed. A pid
+        // that is not a swtpm for this guest is never signalled.
+        stop_swtpm(&self.vm_dir(id)).map_err(|e| format!("stop the guest's swtpm: {e}"))?;
         let runtime = self.vm_dir(id);
         let staged = runtime.with_extension("deleting");
         if runtime.exists() {
@@ -1053,6 +1537,56 @@ fn process_ticks(pid: u32) -> Option<u64> {
     let tail = s.rsplit_once(") ")?.1;
     tail.split_whitespace().nth(19)?.parse().ok()
 }
+fn clock_ticks() -> u64 {
+    static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TICKS.get_or_init(|| {
+        let n = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if n > 0 { n as u64 } else { 100 }
+    })
+}
+fn process_cpu_ns(pid: u32) -> Option<u64> {
+    let s = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = s.rsplit_once(") ")?.1;
+    let mut f = tail.split_whitespace();
+    // The fields after the command: state is 3, so utime (14) is index 11 and
+    // stime (15) index 12.
+    let utime: u64 = f.nth(11)?.parse().ok()?;
+    let stime: u64 = f.next()?.parse().ok()?;
+    Some((utime + stime).saturating_mul(1_000_000_000 / clock_ticks()))
+}
+fn process_rss_kib(pid: u32) -> Option<u64> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        (k == "VmRSS").then(|| v.split_whitespace().next()?.parse().ok())?
+    })
+}
+fn net_counter(iface: &str, which: &str) -> u64 {
+    fs::read_to_string(
+        Path::new(SYS_NET)
+            .join(iface)
+            .join("statistics")
+            .join(which),
+    )
+    .ok()
+    .and_then(|s| s.trim().parse().ok())
+    .unwrap_or(0)
+}
+/// A display name: trimmed, non-empty, no control characters and no `/`, so it
+/// still fits one URL segment now that a title is also a link target.
+fn display_title(title: &str) -> Result<String, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("new name is empty".into());
+    }
+    if title.chars().count() > 128 {
+        return Err("name is longer than 128 characters".into());
+    }
+    if title.contains('/') || title.chars().any(char::is_control) {
+        return Err("name cannot contain '/' or control characters".into());
+    }
+    Ok(title.to_string())
+}
 fn process_exe_matches(pid: u32, executable: &Path) -> bool {
     fs::canonicalize(format!("/proc/{pid}/exe")).ok() == fs::canonicalize(executable).ok()
 }
@@ -1067,19 +1601,169 @@ fn wait_exit(pid: u32, ticks: u64, secs: u64) -> bool {
     true
 }
 
+const SWTPM: &str = "/usr/bin/swtpm";
+
+/// The argv for a guest's TPM emulator. `--tpm2` is the only switch between a
+/// 1.2 and a 2.0 TPM; everything else is per-guest state.
+fn swtpm_argv(
+    version: &str,
+    state: &Path,
+    sock: &Path,
+    pid_file: &Path,
+) -> Result<Vec<String>, String> {
+    let path = |p: &Path| {
+        p.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("TPM path is not valid UTF-8: {}", p.display()))
+    };
+    let mut args = vec!["socket".to_string()];
+    if version != "1.2" {
+        args.push("--tpm2".into());
+    }
+    args.extend([
+        "--tpmstate".into(),
+        format!("dir={}", path(state)?),
+        "--ctrl".into(),
+        format!("type=unixio,path={}", path(sock)?),
+        "--daemon".into(),
+        "--pid".into(),
+        format!("file={}", path(pid_file)?),
+    ]);
+    Ok(args)
+}
+
+/// Whether a `/proc/<pid>/cmdline` is the swtpm for *this* guest. Both the
+/// state directory and the control socket must be named: the pid file alone is
+/// not enough to kill a process, since a pid can be reused.
+fn swtpm_cmdline_is_ours(cmdline: &[u8], state: &Path, sock: &Path) -> bool {
+    let exe = std::str::from_utf8(cmdline.split(|b| *b == 0).next().unwrap_or(&[]))
+        .ok()
+        .and_then(|s| {
+            Path::new(s)
+                .file_name()
+                .map(|n| n == std::ffi::OsStr::new("swtpm"))
+        })
+        .unwrap_or(false);
+    if !exe {
+        return false;
+    }
+    let state_arg = format!("dir={}", state.display());
+    let sock_arg = format!("path={}", sock.display());
+    let mut has_state = false;
+    let mut has_sock = false;
+    for arg in cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()) {
+        if arg == state_arg.as_bytes() {
+            has_state = true;
+        }
+        // `--ctrl` carries a comma-separated type=...,path=... value.
+        if arg
+            .split(|b| *b == b',')
+            .any(|part| part == sock_arg.as_bytes())
+        {
+            has_sock = true;
+        }
+    }
+    has_state && has_sock
+}
+
+fn read_pid_file(path: &Path) -> Option<u32> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn is_socket(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket())
+}
+
+/// A socket with a listener behind it. A stale socket file from a crashed
+/// swtpm accepts no connection and is replaced.
+fn socket_live(path: &Path) -> bool {
+    is_socket(path) && UnixStream::connect(path).is_ok()
+}
+
+fn wait_socket(path: &Path, timeout: Duration) -> bool {
+    let until = Instant::now() + timeout;
+    loop {
+        if socket_live(path) {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Stop a guest's swtpm and remove its pid/socket. Never signals a pid that is
+/// not a swtpm naming this guest's state and socket.
+fn stop_swtpm(runtime: &Path) -> Result<(), String> {
+    let sock = runtime.join("swtpm.sock");
+    let pid_file = runtime.join("swtpm.pid");
+    let state = runtime.join("tpm");
+    let Some(pid) = read_pid_file(&pid_file) else {
+        if !socket_live(&sock) {
+            let _ = fs::remove_file(&sock);
+        }
+        return Ok(());
+    };
+    // Capture the start time before checking the cmdline: the same pid could
+    // otherwise be reused between the check and the signal.
+    let Some(ticks) = process_ticks(pid) else {
+        let _ = fs::remove_file(&pid_file);
+        if !socket_live(&sock) {
+            let _ = fs::remove_file(&sock);
+        }
+        return Ok(());
+    };
+    let ours = fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .is_some_and(|cmdline| swtpm_cmdline_is_ours(&cmdline, &state, &sock))
+        && process_ticks(pid) == Some(ticks);
+    if !ours {
+        // A stale pid file (or a reused pid) is removed, but the process is
+        // left alone: it is not our TPM emulator.
+        let _ = fs::remove_file(&pid_file);
+        if !socket_live(&sock) {
+            let _ = fs::remove_file(&sock);
+        }
+        return Ok(());
+    }
+    if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::ESRCH) {
+            return Err(format!("stop swtpm {pid}: {e}"));
+        }
+    }
+    if !wait_exit(pid, ticks, 5) {
+        if process_ticks(pid) == Some(ticks)
+            && unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0
+        {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                return Err(format!("kill swtpm {pid}: {e}"));
+            }
+        }
+        if !wait_exit(pid, ticks, 5) {
+            return Err(format!("swtpm {pid} did not exit"));
+        }
+    }
+    let _ = fs::remove_file(&pid_file);
+    let _ = fs::remove_file(&sock);
+    Ok(())
+}
+
 /// A deterministic MAC for one VM interface: QEMU's `52:54:00` prefix (unicast
-/// and locally administered) plus 24 bits of a hash of the VM and interface.
+/// and locally administered) plus 24 bits of a hash of the VM and the slot.
 /// Stable across restarts and identical for every caller, so the address
 /// reservation, the DHCP host entry and QEMU itself all name the same NIC.
-pub fn stable_mac(id: &str, nic_id: &str) -> String {
-    stable_mac_salted(id, nic_id, 0)
+pub fn stable_mac(id: &str, slot: &str) -> String {
+    stable_mac_salted(id, slot, 0)
 }
 
 /// The base with a salt mixed in, used when the deterministic MAC is already
 /// taken. Only 24 bits are available, so a collision is re-derived rather than
 /// handed to dnsmasq as a second guest's address.
-fn stable_mac_salted(id: &str, nic_id: &str, salt: u32) -> String {
-    let mut h = crate::hostnet::fnv1a(&format!("{id}/{nic_id}"));
+fn stable_mac_salted(id: &str, slot: &str, salt: u32) -> String {
+    let mut h = crate::hostnet::fnv1a(&format!("{id}/{slot}"));
     if salt != 0 {
         h = h.wrapping_add(u64::from(salt).wrapping_mul(0x9e37_79b9_7f4a_7c15));
     }
@@ -1091,74 +1775,35 @@ fn stable_mac_salted(id: &str, nic_id: &str, salt: u32) -> String {
     )
 }
 
-/// The host tap for one VM interface: `tap` + 10 hex, 13 characters. Derived,
-/// never stored, so a restart finds the same interface again.
-pub fn tap_name(id: &str, nic_id: &str) -> String {
-    let h = crate::hostnet::fnv1a(&format!("tap/{id}/{nic_id}"));
+/// The host tap for one VM interface: `tap` + 10 hex, 13 characters. Derived
+/// from the MAC — the NIC's identity in the definition — so removing another
+/// interface never renames it. Never stored, so a restart finds it again.
+pub fn tap_name(id: &str, mac: &str) -> String {
+    let h = crate::hostnet::fnv1a(&format!("tap/{id}/{mac}"));
     format!("tap{:010x}", h & 0xff_ffff_ffff)
 }
 
-fn netdev_id(nic_id: &str) -> String {
-    if nic_id == "net0" {
-        "net0".into()
-    } else {
-        format!("net-{nic_id}")
-    }
+/// The QMP netdev id of a NIC, distinct from its device id (QEMU allows both
+/// but keeping them apart avoids depending on that).
+fn netdev_id(mac: &str) -> String {
+    format!("nd{}", mac.replace(':', ""))
 }
 
-/// A new extra NIC's identifier: a token QEMU and `ip` both accept, and never
-/// the primary NIC's reserved `net0` slot.
-fn validate_new_nic_id(id: &str) -> Result<(), String> {
-    if id == "net0" {
-        return Err("'net0' is the primary NIC's identifier and cannot be reused".into());
-    }
-    // QEMU device ids are one namespace, and `disk0` is the primary disk's
-    // reserved slot: a NIC may use neither.
-    if id == "disk0" {
-        return Err("'disk0' is the primary disk's identifier and cannot be reused".into());
-    }
-    if id.is_empty()
-        || id.len() > 20
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err(
-            "a NIC identifier is up to 20 characters of lowercase letters, digits and '-'".into(),
-        );
-    }
-    Ok(())
+/// The QMP device id of a NIC: derived from its MAC, so it survives another
+/// interface being removed (positions do not).
+fn nic_device_id(mac: &str) -> String {
+    format!("net{}", mac.replace(':', ""))
 }
 
-/// A new extra disk's identifier: a token QEMU and QMP both accept, and never
-/// the primary disk's reserved `disk0` slot (it has no QMP device id).
-pub fn validate_new_disk_id(id: &str) -> Result<(), String> {
-    if id == "disk0" {
-        return Err("'disk0' is the primary disk's identifier and cannot be reused".into());
+/// The QMP device id of the target dev a new disk would get.
+fn next_disk_target(d: &domainxml::Domain) -> Result<String, String> {
+    for letter in b'a'..=b'z' {
+        let target = format!("vd{}", letter as char);
+        if !d.disks.iter().any(|x| x.target == target) {
+            return Ok(target);
+        }
     }
-    // QEMU device ids are one namespace, and `net0` is the primary NIC's
-    // reserved slot: a disk may use neither.
-    if id == "net0" {
-        return Err("'net0' is the primary NIC's identifier and cannot be reused".into());
-    }
-    if id.is_empty()
-        || id.len() > 20
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err(
-            "a disk identifier is up to 20 characters of lowercase letters, digits and '-'".into(),
-        );
-    }
-    Ok(())
-}
-
-/// QEMU device ids are one namespace across device classes: a disk and a NIC
-/// cannot share one, or the second `device_add` and the launch argv collide.
-fn device_id_taken(config: &VmConfig, device_id: &str) -> bool {
-    config.extra_nics.iter().any(|n| n.id == device_id)
-        || config.extra_disks.iter().any(|d| d.id == device_id)
+    Err("no free virtio disk name is left (vda-vdz)".into())
 }
 
 /// A disk file, canonicalised. A symlink is refused rather than followed: the
@@ -1183,89 +1828,166 @@ fn check_disk_file(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// Copy the UEFI variable-store template into the guest's runtime directory on
+/// the first start. QEMU cannot create a variable store from a template; only
+/// this daemon knows to.
+fn prepare_nvram(d: &domainxml::Domain) -> Result<(), String> {
+    let (Some(nvram), Some(template)) = (&d.nvram, &d.nvram_template) else {
+        return Ok(());
+    };
+    if nvram.exists() {
+        return Ok(());
+    }
+    if !template.is_file() {
+        return Err(format!(
+            "the UEFI NVRAM template {} does not exist on this host",
+            template.display()
+        ));
+    }
+    if let Some(parent) = nvram.parent() {
+        private_dir(parent)?;
+    }
+    fs::copy(template, nvram)
+        .and_then(|_| fs::set_permissions(nvram, fs::Permissions::from_mode(0o600)))
+        .map_err(|e| format!("copy the UEFI NVRAM template: {e}"))
+}
+
+/// The QEMU device for the one `<video>` adapter, with only the options its
+/// model accepts.
+fn video_device(v: &Video) -> Result<Option<String>, String> {
+    let base = match v.model {
+        VideoModel::None => return Ok(None),
+        VideoModel::Vga => "VGA",
+        VideoModel::Cirrus => "cirrus-vga",
+        VideoModel::Vmware => "vmware-svga",
+        VideoModel::Bochs => "bochs-display",
+        VideoModel::Ramfb => "ramfb",
+        VideoModel::Qxl => "qxl-vga",
+        VideoModel::Virtio => match v.device.as_deref().unwrap_or("virtio-vga") {
+            "virtio-vga" => "virtio-vga",
+            "virtio-vga-gl" => "virtio-vga-gl",
+            "virtio-gpu" => "virtio-gpu-pci",
+            "virtio-gpu-gl" => "virtio-gpu-gl-pci",
+            other => return Err(format!("virtio video device '{other}' is not supported")),
+        },
+    };
+    let mut s = base.to_string();
+    match v.model {
+        VideoModel::Qxl => {
+            if let Some(ram) = v.ram_kib {
+                s.push_str(&format!(",ram_size={}", u64::from(ram) * 1024));
+            }
+            if let Some(vram) = v.vram_kib {
+                s.push_str(&format!(",vram_size={}", u64::from(vram) * 1024));
+            }
+            if let Some(vgamem) = v.vgamem_kib {
+                s.push_str(&format!(",vgamem_mb={}", vgamem.div_ceil(1024).max(1)));
+            }
+            if let Some(vram64) = v.vram64_kib {
+                s.push_str(&format!(",vram64_size_mb={}", vram64.div_ceil(1024).max(1)));
+            }
+            if let Some(heads) = v.heads {
+                s.push_str(&format!(",max_outputs={heads}"));
+            }
+        }
+        VideoModel::Virtio => {
+            if let Some(blob) = v.blob {
+                s.push_str(if blob { ",blob=on" } else { ",blob=off" });
+            }
+            if let Some(heads) = v.heads {
+                s.push_str(&format!(",max_outputs={heads}"));
+            }
+        }
+        VideoModel::Bochs => {
+            if let Some(vram) = v.vram_kib {
+                s.push_str(&format!(",vgamem={}", u64::from(vram) * 1024));
+            }
+        }
+        VideoModel::Vga | VideoModel::Cirrus | VideoModel::Vmware => {
+            // libvirt's `vram` is the framebuffer size; QEMU spells it
+            // `vgamem_mb` for the VGA family.
+            if let Some(vram) = v.vram_kib {
+                s.push_str(&format!(",vgamem_mb={}", vram.div_ceil(1024).max(1)));
+            }
+        }
+        _ => {}
+    }
+    if let Some(edid) = v.edid {
+        s.push_str(if edid { ",edid=on" } else { ",edid=off" });
+    }
+    Ok(Some(s))
+}
+
 /// A bridge NIC's MAC, generated or validated. A user-supplied MAC in canonical
 /// form is used as given (it is how a guest keeps its address across metadata
 /// rewrites), but it must be unicast, not all-zero, and free in this manager.
-fn mac_for(
-    all: &BTreeMap<String, Record>,
-    id: &str,
-    nic_id: &str,
-    mac: &str,
-) -> Result<String, String> {
-    let used = used_macs(all, id, nic_id);
+fn mac_for(used: &BTreeSet<String>, id: &str, slot: &str, mac: &str) -> Result<String, String> {
     if mac.trim().is_empty() {
         // The deterministic base first; only if another NIC already holds it
         // does a salted re-derivation run (24 bits is small but not zero).
-        let base = stable_mac(id, nic_id);
+        let base = stable_mac(id, slot);
         if !used.contains(&base) {
             return Ok(base);
         }
         for salt in 1..=1024 {
-            let candidate = stable_mac_salted(id, nic_id, salt);
+            let candidate = stable_mac_salted(id, slot, salt);
             if !used.contains(&candidate) {
                 return Ok(candidate);
             }
         }
         return Err("cannot derive a free MAC address".into());
     }
-    let m = crate::ipam::store::normalize_mac(mac)
-        .ok_or_else(|| format!("'{mac}' is not a MAC address"))?;
-    let first = u8::from_str_radix(&m[..2], 16).map_err(|e| e.to_string())?;
-    if first & 1 == 1 {
-        return Err(format!("'{mac}' is a multicast address"));
-    }
-    if m == "00:00:00:00:00:00" {
-        return Err("'00:00:00:00:00:00' is the all-zero address".into());
-    }
+    let m = domainxml::normalize_mac(mac)?;
     if used.contains(&m) {
         return Err(format!("MAC address {m} is already used by another NIC"));
     }
     Ok(m)
 }
 
-/// The MACs this manager's other NICs already have. The slot being assigned is
-/// excluded, so re-setting a stored MAC is not a collision with itself. One MAC
-/// belongs to one NIC: dnsmasq's reservation and the firewall's rules are keyed
-/// by it.
-fn used_macs(
-    all: &BTreeMap<String, Record>,
-    id: &str,
-    nic_id: &str,
-) -> std::collections::BTreeSet<String> {
-    let mut used = std::collections::BTreeSet::new();
+/// The MACs this manager's other NICs already hold. The VM being edited is
+/// excluded: its definition is about to be replaced, and duplicates inside one
+/// definition are refused by `domainxml`.
+fn used_macs(all: &BTreeMap<String, Record>, exclude: &str) -> BTreeSet<String> {
+    let mut used = BTreeSet::new();
     for (vm, rec) in all {
-        for (nic, network) in rec.config.nics() {
-            if vm == id && nic == nic_id {
-                continue;
-            }
-            if let Network::Bridge { mac, .. } = network
-                && !mac.is_empty()
-            {
-                used.insert(mac.clone());
+        if vm == exclude {
+            continue;
+        }
+        if let Ok(d) = domainxml::parse(&rec.config.xml) {
+            for iface in d.interfaces {
+                if let Some(mac) = iface.mac {
+                    used.insert(mac);
+                }
             }
         }
     }
     used
 }
 
-/// The stored network of one NIC, primary (`net0`) or extra.
-fn nic_network_mut<'a>(config: &'a mut VmConfig, nic_id: &str) -> Option<&'a mut Network> {
-    if nic_id == "net0" {
-        return Some(&mut config.network);
+/// Every disk file another guest already holds, canonicalised.
+fn attached_files(all: &BTreeMap<String, Record>, exclude: Option<&str>) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    for (vm, rec) in all {
+        if Some(vm.as_str()) == exclude {
+            continue;
+        }
+        if let Ok(d) = domainxml::parse(&rec.config.xml) {
+            for disk in d.disks {
+                if let Some(source) = disk.source {
+                    out.insert(source);
+                }
+            }
+        }
     }
-    config
-        .extra_nics
-        .iter_mut()
-        .find(|n| n.id == nic_id)
-        .map(|n| &mut n.network)
+    out
 }
 
 fn interface_exists(name: &str) -> bool {
     crate::hostnet::valid_name(name) && Path::new(SYS_NET).join(name).exists()
 }
 
-/// The interface is a tun/tap. Anything else (a bridge, a physical NIC, a
-/// veth) is never deleted or enslaved by these helpers.
+/// The interface is a tun/tap. Anything else (a bridge, a physical NIC, a veth)
+/// is never deleted or enslaved by these helpers.
 fn is_tap(name: &str) -> bool {
     crate::hostnet::valid_name(name) && Path::new(SYS_NET).join(name).join("tun_flags").exists()
 }
@@ -1348,47 +2070,8 @@ fn cleanup_taps(taps: &[String]) {
     }
 }
 
-fn delete_nic_tap(id: &str, nic_id: &str) {
-    cleanup_taps(&[tap_name(id, nic_id)]);
-}
-
-/// Remove every tap a config's bridge NICs own. User-mode NICs have none.
-fn delete_nic_taps(config: &VmConfig) {
-    let taps: Vec<String> = config
-        .nics()
-        .filter(|(_, n)| matches!(n, Network::Bridge { .. }))
-        .map(|(nic, _)| tap_name(&config.id, nic))
-        .collect();
-    cleanup_taps(&taps);
-}
-/// The launch argv for every extra disk. Each is an explicit file → format node
-/// pair plus a device, the same shape `add_disk` builds through QMP, so a live
-/// guest and the next launch name the same block nodes.
-fn disk_args(config: &VmConfig) -> Result<Vec<String>, String> {
-    let mut args = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for disk in &config.extra_disks {
-        if !seen.insert(disk.id.as_str()) {
-            return Err(format!("duplicate disk identifier '{}'", disk.id));
-        }
-        let file = format!("file-{}", disk.id);
-        let drive = format!("drive-{}", disk.id);
-        args.extend([
-            "-blockdev".into(),
-            format!(
-                "driver=file,filename={},node-name={file}",
-                escape_blockdev_path(&disk.path)?
-            ),
-            "-blockdev".into(),
-            format!(
-                "driver={},file={file},node-name={drive}",
-                disk.format.as_str()
-            ),
-            "-device".into(),
-            format!("virtio-blk-pci,id={},drive={drive}", disk.id),
-        ]);
-    }
-    Ok(args)
+fn delete_nic_tap(id: &str, mac: &str) {
+    cleanup_taps(&[tap_name(id, mac)]);
 }
 
 /// A `-blockdev` value: QEMU's option parser separates on commas and escapes a
@@ -1420,17 +2103,6 @@ fn signal_verified(r: &Record, sig: i32) -> Result<(), String> {
 }
 fn qmp(path: &Path, command: &str) -> Result<String, String> {
     qmp_execute(path, command, serde_json::json!({}))
-}
-fn validate_device_id(id: &str) -> Result<(), String> {
-    if id.is_empty()
-        || id.len() > 31
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
-    {
-        return Err("invalid QEMU device identifier".into());
-    }
-    Ok(())
 }
 fn qmp_execute(path: &Path, command: &str, args: serde_json::Value) -> Result<String, String> {
     let mut s = None;
@@ -1501,6 +2173,76 @@ fn qmp_command(
 mod tests {
     use super::*;
 
+    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const ID2: &str = "550e8400-e29b-41d4-a716-446655440001";
+
+    fn manager(tag: &str) -> (Manager, PathBuf) {
+        // Short: a per-VM svtpm control socket must fit a Unix socket path.
+        let root = std::env::temp_dir().join(format!("vmq-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manager = Manager {
+            data_dir: root.clone(),
+            state_root: root.join("state"),
+            qemu: PathBuf::from("qemu"),
+            lock: Default::default(),
+        };
+        (manager, root)
+    }
+
+    fn disk(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(name);
+        fs::write(&path, b"x").unwrap();
+        path
+    }
+
+    /// A SPA-shaped definition: one virtio disk, a bridge NIC and a VNC
+    /// display. `extra` is inserted inside `<devices>`.
+    fn spa(id: &str, disk: &Path, extra: &str) -> String {
+        format!(
+            r#"<domain type="kvm">
+  <name>{id}</name>
+  <uuid>{id}</uuid>
+  <title>web</title>
+  <memory unit="KiB">524288</memory>
+  <vcpu>2</vcpu>
+  <os>
+    <type arch="x86_64" machine="q35">hvm</type>
+    <boot dev="hd"/>
+  </os>
+  <features><acpi/><apic/></features>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="{}"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <interface type="bridge">
+      <source bridge="vbr5b92a1a54f00"/>
+      <model type="virtio"/>
+    </interface>
+    <graphics type="vnc" port="5900" autoport="yes" listen="127.0.0.1"/>
+    <serial type="pty"><target port="0"/></serial>
+    <console type="pty"><target type="serial" port="0"/></console>
+    {extra}
+  </devices>
+</domain>"#,
+            disk.display()
+        )
+    }
+
+    /// The values given to one argv flag, in order.
+    fn values(args: &[String], flag: &str) -> Vec<String> {
+        args.windows(2)
+            .filter(|w| w[0] == flag)
+            .map(|w| w[1].clone())
+            .collect()
+    }
+
+    fn one(args: &[String], flag: &str) -> String {
+        values(args, flag).remove(0)
+    }
+
     #[test]
     fn qemu_ids_must_be_canonical_uuids() {
         assert!(Manager::valid_id("550e8400-e29b-41d4-a716-446655440000"));
@@ -1511,27 +2253,15 @@ mod tests {
 
     #[test]
     fn metadata_rejects_key_id_disagreement() {
-        let root = std::env::temp_dir().join(format!("virt-man-qemu-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let manager = Manager {
-            data_dir: root.clone(),
-            state_root: root.join("state"),
-            qemu: PathBuf::from("qemu"),
-            lock: Default::default(),
-        };
+        let (manager, root) = manager("meta");
         let record = Record {
             config: VmConfig {
                 id: "another-id".into(),
                 title: String::new(),
-                disk: PathBuf::from("/disk"),
-                memory_mib: 1,
-                vcpus: 1,
-                network: Default::default(),
-                firewall: Default::default(),
-                extra_nics: vec![],
-                extra_disks: vec![],
+                autostart: false,
+                xml: String::new(),
             },
-            disk_size: 0,
+            taps: vec![],
             pid: None,
             start_ticks: None,
         };
@@ -1544,46 +2274,752 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn manager(tag: &str) -> (Manager, PathBuf) {
-        let root = std::env::temp_dir().join(format!("virt-man-qemu-{tag}-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let manager = Manager {
-            data_dir: root.clone(),
-            state_root: root.join("state"),
-            qemu: PathBuf::from("qemu"),
-            lock: Default::default(),
+    #[test]
+    fn define_stores_the_normalized_xml_and_lists_it() {
+        let (manager, root) = manager("define");
+        let primary = disk(&root, "disk.qcow2");
+        let stored = manager.define(&spa(ID, &primary, "")).unwrap();
+        assert_eq!((stored.id.as_str(), stored.title.as_str()), (ID, "web"));
+        assert!(!stored.autostart);
+        let xml = manager.xml(ID).unwrap();
+        assert!(xml.contains(&format!("<name>{ID}</name>")), "{xml}");
+        assert!(
+            xml.contains(&format!(
+                "<source file=\"{}\"/>",
+                fs::canonicalize(&primary).unwrap().display()
+            )),
+            "the disk is stored by its canonical path:\n{xml}"
+        );
+        let nic = domainxml::bridges(&xml).unwrap().remove(0);
+        assert_eq!(
+            nic.mac,
+            stable_mac(ID, "net0"),
+            "a NIC without a MAC is given the deterministic one"
+        );
+        assert_eq!(manager.list().unwrap().len(), 1);
+        assert_eq!(
+            manager.define(&spa(ID, &primary, "")).unwrap_err(),
+            "VM already exists"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn define_rejects_a_bad_disk_or_a_second_guest_holding_it() {
+        let (manager, root) = manager("diskcheck");
+        let primary = disk(&root, "a.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let other = disk(&root, "b.raw");
+        let e = manager.define(&spa(ID2, &other, "")).is_ok();
+        assert!(e, "a different file is fine");
+        // A second VM on the same file is refused.
+        manager.delete(ID2).unwrap();
+        manager.define(&spa(ID2, &other, "")).unwrap();
+        assert!(
+            manager
+                .define(&spa("550e8400-e29b-41d4-a716-446655440002", &other, ""))
+                .unwrap_err()
+                .contains("already attached")
+        );
+        // A relative path and a directory are not disks.
+        assert!(
+            manager
+                .define(&spa(ID2, Path::new("relative.raw"), ""))
+                .is_err()
+        );
+        assert!(manager.define(&spa(ID2, &root, "")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_xml_keeps_the_identity_and_autostart() {
+        let (manager, root) = manager("update");
+        let primary = disk(&root, "disk.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let edited = spa(ID, &primary, "")
+            .replace("<vcpu>2</vcpu>", "<vcpu>4</vcpu>")
+            .replace("<title>web</title>", "");
+        manager.update_xml(ID, &edited).unwrap();
+        let xml = manager.xml(ID).unwrap();
+        assert!(xml.contains("<vcpu>4</vcpu>"), "{xml}");
+        assert!(xml.contains("<title>web</title>"), "{xml}");
+        assert_eq!(
+            manager
+                .update_xml(ID, &edited.replace(ID, ID2))
+                .unwrap_err(),
+            format!(
+                "the <name> cannot change from '{ID}' to '{ID2}'; the display name is the <title>"
+            )
+        );
+        assert!(manager.update_xml(ID2, &edited).is_err(), "unknown VM");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_title_and_autostart_are_persisted_without_touching_the_identity() {
+        let (manager, root) = manager("title");
+        let primary = disk(&root, "disk.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        assert_eq!(manager.set_title(ID, "  db  ").unwrap(), "db");
+        assert_eq!(manager.list().unwrap()[0].title, "db");
+        assert!(manager.xml(ID).unwrap().contains("<title>db</title>"));
+        assert!(manager.set_title(ID, "").is_err(), "empty");
+        assert!(manager.set_title(ID, "a/b").is_err(), "not a URL segment");
+
+        assert!(!manager.autostart(ID));
+        manager.set_autostart(ID, true).unwrap();
+        assert!(manager.autostart(ID));
+        // A later edit keeps it.
+        manager
+            .update_xml(ID, &manager.xml(ID).unwrap().replace(">2<", ">4<"))
+            .unwrap();
+        assert!(manager.autostart(ID));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_stats_of_a_stopped_guest_come_from_its_definition() {
+        let (manager, root) = manager("stats");
+        let primary = disk(&root, "disk.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let s = manager.stats(ID).unwrap();
+        assert_eq!(s.state, "stopped");
+        assert_eq!(
+            (s.vcpus, s.memory_kib, s.max_memory_kib),
+            (2, 512 * 1024, 512 * 1024)
+        );
+        assert_eq!(s.cpu_time_ns, 0, "no process, no CPU time");
+        assert_eq!(s.rss_kib, Some(0));
+        assert!(manager.stats(ID2).is_err(), "unknown VM");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A bridge NIC is named by its derived tap and carries its rate limit; a
+    /// user-mode NIC has no host interface. Nothing is read from sysfs for a
+    /// stopped guest, so no root and no interfaces are needed.
+    #[test]
+    fn interfaces_report_the_tap_bridge_and_bandwidth() {
+        let (manager, root) = manager("ifaces");
+        let primary = disk(&root, "disk.raw");
+        let xml = spa(ID, &primary, "").replace(
+            "<model type=\"virtio\"/>\n    </interface>",
+            "<model type=\"virtio\"/>\n      <bandwidth><inbound average=\"1250\"/><outbound average=\"2500\"/></bandwidth>\n    </interface>",
+        );
+        manager.define(&xml).unwrap();
+        manager.add_nic(ID, None, "").unwrap();
+        let nics = manager.interfaces(ID).unwrap();
+        let mac = stable_mac(ID, "net0");
+        assert_eq!(nics.len(), 2);
+        assert_eq!(nics[0].mac.as_deref(), Some(mac.as_str()));
+        assert_eq!(nics[0].model, "virtio");
+        assert_eq!(nics[0].network.as_deref(), Some("vbr5b92a1a54f00"));
+        assert_eq!((nics[0].rx_kib, nics[0].tx_kib), (Some(1250), Some(2500)));
+        assert_eq!(nics[0].dev, None, "a stopped guest has no tap");
+        assert_eq!((nics[0].rx_bytes, nics[0].tx_bytes), (0, 0));
+        assert_eq!(nics[1].network, None, "user-mode has no bridge");
+        assert_eq!(nics[1].dev, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn graphics_are_read_from_the_definition() {
+        let (manager, root) = manager("graphics");
+        let primary = disk(&root, "disk.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let g = manager.graphics(ID).unwrap().unwrap();
+        assert_eq!(
+            (g.kind, g.host.as_str(), g.port),
+            ("vnc", "127.0.0.1", 5900)
+        );
+        manager
+            .update_xml(
+                ID,
+                &manager.xml(ID).unwrap().replace(
+                    "<graphics type=\"vnc\" port=\"5900\" autoport=\"yes\" listen=\"127.0.0.1\"/>",
+                    "<graphics type=\"spice\" port=\"5901\" autoport=\"yes\" listen=\"0.0.0.0\"/>",
+                ),
+            )
+            .unwrap();
+        let g = manager.graphics(ID).unwrap().unwrap();
+        assert_eq!(
+            (g.kind, g.host.as_str(), g.port),
+            ("spice", "0.0.0.0", 5901)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Delete removes the runtime (QMP socket, NVRAM) and keeps every disk.
+    #[test]
+    fn a_delete_removes_runtime_files_but_never_a_disk() {
+        let (manager, root) = manager("delete");
+        let primary = disk(&root, "disk.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let runtime = manager.state_root.join(ID);
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(runtime.join("nvram.fd"), b"vars").unwrap();
+        manager.delete(ID).unwrap();
+        assert!(!runtime.exists(), "the runtime directory is gone");
+        assert!(primary.exists(), "the disk file is not");
+        assert!(manager.list().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every NIC goes through one argv builder: user-mode NAT, a bridge NIC
+    /// names the deterministic tap and MAC, and the model is honoured.
+    #[test]
+    fn the_argv_builds_one_netdev_and_device_per_nic() {
+        let (manager, root) = manager("argv");
+        let primary = disk(&root, "disk.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let args = manager.args(ID).unwrap();
+        let mac = stable_mac(ID, "net0");
+        let netdev = netdev_id(&mac);
+        assert_eq!(
+            values(&args, "-netdev"),
+            [format!(
+                "tap,id={netdev},ifname={},script=no,downscript=no",
+                tap_name(ID, &mac)
+            )]
+        );
+        assert_eq!(
+            values(&args, "-device")
+                .into_iter()
+                .filter(|d| d.starts_with("virtio-net-pci"))
+                .collect::<Vec<_>>(),
+            [format!(
+                "virtio-net-pci,id={},netdev={netdev},mac={mac}",
+                nic_device_id(&mac)
+            )]
+        );
+
+        manager.add_nic(ID, None, "").unwrap();
+        manager.add_nic(ID, Some("vbr5b92a1a54f00"), "").unwrap();
+        let args = manager.args(ID).unwrap();
+        let nics: Vec<String> = values(&args, "-device")
+            .into_iter()
+            .filter(|d| d.contains("-net-pci"))
+            .collect();
+        assert_eq!(nics.len(), 3);
+        assert!(nics[1].starts_with("virtio-net-pci,"));
+        assert_eq!(
+            values(&args, "-netdev")[1],
+            format!("user,id={}", netdev_id(&stable_mac(ID, "net1")))
+        );
+        let xml = manager.xml(ID).unwrap();
+        assert!(xml.contains("<interface type=\"user\">"), "{xml}");
+        assert!(
+            xml.contains(&format!("<mac address=\"{}\"/>", stable_mac(ID, "net1"))),
+            "{xml}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The full hardware editor reaches the argv: firmware, disk buses, display,
+    /// video, hostdevs, rng, balloon, channel, tpm and watchdog.
+    #[test]
+    fn the_argv_maps_the_hardware_editor() {
+        let (manager, root) = manager("hw");
+        let primary = disk(&root, "disk.qcow2");
+        let iso = disk(&root, "debian.iso");
+        let extra = format!(
+            r#"<disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="{}"/>
+      <target dev="sda" bus="sata"/>
+      <readonly/>
+    </disk>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="raw"/>
+      <source file="{}"/>
+      <target dev="sdb" bus="sata"/>
+    </disk>
+    <interface type="user"><model type="e1000e"/></interface>
+    <video><model type="qxl" ram="65536" vgamem="16384" heads="2"/></video>
+    <hostdev mode="subsystem" type="pci" managed="yes">
+      <source><address domain="0x0000" bus="0x01" slot="0x00" function="0x0"/></source>
+    </hostdev>
+    <hostdev mode="subsystem" type="usb" managed="yes">
+      <source><vendor id="0x1234"/><product id="0x5678"/></source>
+    </hostdev>
+    <rng model="virtio"><backend model="random">/dev/urandom</backend></rng>
+    <memballoon model="virtio"/>
+    <channel type="unix"><target type="virtio" name="org.qemu.guest_agent.0"/></channel>
+    <watchdog model="i6300esb" action="poweroff"/>"#,
+            iso.display(),
+            disk(&root, "data.raw").display()
+        );
+        let xml = spa(ID, &primary, &extra).replace(
+            "<boot dev=\"hd\"/>",
+            "<loader readonly=\"yes\" type=\"pflash\" format=\"raw\">/opt/fw/OVMF_CODE.fd</loader>\n    <nvram template=\"/opt/fw/OVMF_VARS.fd\">/var/lib/libvirt/qemu/nvram/x.fd</nvram>\n    <boot dev=\"hd\"/>\n    <boot dev=\"cdrom\"/>",
+        );
+        manager.define(&xml).unwrap();
+        let args = manager.args(ID).unwrap();
+        let machine = one(&args, "-machine");
+        assert_eq!(machine, "q35,accel=kvm");
+        assert_eq!(one(&args, "-cpu"), "host");
+        assert_eq!(one(&args, "-smp"), "2");
+        assert_eq!(one(&args, "-m"), "512");
+        assert_eq!(one(&args, "-boot"), "order=cd", "hd then cdrom");
+        assert_eq!(
+            values(&args, "-drive"),
+            [
+                "if=pflash,format=raw,readonly=on,file=/opt/fw/OVMF_CODE.fd".to_string(),
+                format!(
+                    "if=pflash,format=raw,file={}",
+                    root.join("state").join(ID).join("nvram.fd").display()
+                ),
+            ]
+        );
+        let blockdevs = values(&args, "-blockdev");
+        assert_eq!(
+            blockdevs[0],
+            format!(
+                "driver=file,filename={},node-name=file-vda",
+                fs::canonicalize(&primary).unwrap().display()
+            )
+        );
+        assert_eq!(
+            blockdevs[1],
+            "driver=qcow2,file=file-vda,node-name=drive-vda"
+        );
+        let devices = values(&args, "-device");
+        assert!(devices.contains(&"virtio-blk-pci,id=vda,drive=drive-vda".to_string()));
+        assert!(devices.contains(&"ide-hd,id=sdb,bus=ide.1,drive=drive-sdb".to_string()));
+        assert!(devices.contains(&"ide-cd,id=sda,bus=ide.0,drive=drive-sda".to_string()));
+        assert!(
+            blockdevs
+                .contains(&"driver=raw,file=file-sda,node-name=drive-sda,read-only=on".to_string())
+        );
+        assert!(devices.iter().any(|d| d.starts_with("e1000e,id=")));
+        assert!(
+            devices.contains(&"qxl-vga,ram_size=67108864,vgamem_mb=16,max_outputs=2".to_string())
+        );
+        assert!(devices.contains(&"vfio-pci,host=0000:01:00.0".to_string()));
+        assert!(devices.contains(&"qemu-xhci,id=xhci".to_string()));
+        assert!(
+            devices.contains(&"usb-host,bus=xhci.0,vendorid=0x1234,productid=0x5678".to_string())
+        );
+        assert!(devices.contains(&"virtio-rng-pci,rng=rng0".to_string()));
+        assert!(devices.contains(&"virtio-balloon-pci".to_string()));
+        assert!(devices.contains(
+            &"virtserialport,bus=virtio-serial0.0,chardev=qga0,id=qga0,name=org.qemu.guest_agent.0".to_string()
+        ));
+        assert_eq!(values(&args, "-watchdog-action"), ["poweroff"]);
+        assert!(devices.contains(&"i6300esb".to_string()));
+        assert_eq!(one(&args, "-vnc"), "127.0.0.1:0");
+        assert!(values(&args, "-display").is_empty());
+        assert_eq!(values(&args, "-serial"), ["pty"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_argv_maps_spice_scsi_and_no_display() {
+        let (manager, root) = manager("display");
+        let primary = disk(&root, "a.raw");
+        let xml = spa(ID, &primary, "")
+            .replace(
+                "<graphics type=\"vnc\" port=\"5900\" autoport=\"yes\" listen=\"127.0.0.1\"/>",
+                "<graphics type=\"spice\" port=\"5901\" listen=\"0.0.0.0\"/>",
+            )
+            .replace(
+                "<target dev=\"vda\" bus=\"virtio\"/>",
+                "<target dev=\"vda\" bus=\"scsi\"/>",
+            );
+        manager.define(&xml).unwrap();
+        let args = manager.args(ID).unwrap();
+        assert!(values(&args, "-device").contains(&"virtio-scsi-pci,id=scsi0".to_string()));
+        assert!(
+            values(&args, "-device")
+                .contains(&"scsi-hd,id=vda,bus=scsi0.0,drive=drive-vda".to_string())
+        );
+        assert_eq!(
+            one(&args, "-spice"),
+            "port=5901,addr=0.0.0.0,disable-ticketing=on"
+        );
+
+        manager
+            .update_xml(
+                ID,
+                &xml.replace(
+                    "<graphics type=\"spice\" port=\"5901\" listen=\"0.0.0.0\"/>",
+                    "",
+                ),
+            )
+            .unwrap();
+        let args = manager.args(ID).unwrap();
+        assert_eq!(one(&args, "-display"), "none");
+        assert!(values(&args, "-vnc").is_empty() && values(&args, "-spice").is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A 3D virtio display with no VNC/SPICE needs a display of its own; with
+    /// one, the remote display is kept and the -gl device rides on it.
+    #[test]
+    fn a_gl_video_without_a_display_gets_egl_headless() {
+        let (manager, root) = manager("gl");
+        let primary = disk(&root, "a.raw");
+        let xml = spa(ID, &primary, "")
+            .replace(
+                "<graphics type=\"vnc\" port=\"5900\" autoport=\"yes\" listen=\"127.0.0.1\"/>",
+                "",
+            )
+            .replace(
+                "<devices>",
+                "<devices><video><model type=\"virtio\" device=\"virtio-vga-gl\"><acceleration accel3d=\"yes\"/></model></video>",
+            );
+        manager.define(&xml).unwrap();
+        let args = manager.args(ID).unwrap();
+        assert_eq!(one(&args, "-display"), "egl-headless");
+        assert!(
+            values(&args, "-device").contains(&"virtio-vga-gl".to_string()),
+            "{args:?}"
+        );
+
+        // With a VNC display the -gl device keeps that display.
+        manager
+            .update_xml(
+                ID,
+                &manager.xml(ID).unwrap().replace(
+                    "</devices>",
+                    "<graphics type=\"vnc\" port=\"5900\" listen=\"127.0.0.1\"/></devices>",
+                ),
+            )
+            .unwrap();
+        let args = manager.args(ID).unwrap();
+        assert!(values(&args, "-display").is_empty());
+        assert_eq!(one(&args, "-vnc"), "127.0.0.1:0");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_uefi_guest_keeps_its_variable_store_in_the_runtime_directory() {
+        let (manager, root) = manager("uefi");
+        let primary = disk(&root, "a.raw");
+        let xml = spa(ID, &primary, "").replace(
+            "<boot dev=\"hd\"/>",
+            "<loader readonly=\"yes\" type=\"pflash\" format=\"raw\">/opt/fw/OVMF_CODE.fd</loader>\n    <nvram template=\"/opt/fw/OVMF_VARS.fd\">/var/lib/libvirt/qemu/nvram/x.fd</nvram>\n    <boot dev=\"hd\"/>",
+        );
+        manager.define(&xml).unwrap();
+        let stored = manager.xml(ID).unwrap();
+        let nvram = manager.state_root.join(ID).join("nvram.fd");
+        assert!(
+            stored.contains(&format!(">{}</nvram>", nvram.display())),
+            "{stored}"
+        );
+        let args = manager.args(ID).unwrap();
+        assert_eq!(
+            values(&args, "-drive")[1],
+            format!("if=pflash,format=raw,file={}", nvram.display())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A TPM is a chardev into a running swtpm; without one the argv is refused
+    /// rather than handing QEMU a socket that does not exist.
+    #[test]
+    fn a_tpm_needs_its_swtpm_socket() {
+        use std::os::unix::net::UnixListener;
+        let (manager, root) = manager("tpm");
+        let primary = disk(&root, "a.raw");
+        let xml = spa(
+            ID,
+            &primary,
+            "<tpm model=\"tpm-crb\"><backend type=\"emulator\" version=\"2.0\"/></tpm>",
+        );
+        manager.define(&xml).unwrap();
+        let e = manager.args(ID).unwrap_err();
+        assert!(e.contains("swtpm"), "{e}");
+
+        let dir = manager.state_root.join(ID);
+        fs::create_dir_all(&dir).unwrap();
+        let _socket = UnixListener::bind(dir.join("swtpm.sock")).unwrap();
+        let args = manager.args(ID).unwrap();
+        assert_eq!(
+            values(&args, "-tpmdev"),
+            ["emulator,id=tpm0,chardev=chrtpm"]
+        );
+        assert!(values(&args, "-device").contains(&"tpm-crb,tpmdev=tpm0".to_string()));
+        assert_eq!(
+            values(&args, "-chardev")[0],
+            format!("socket,id=chrtpm,path={}", dir.join("swtpm.sock").display())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The TPM version in the XML decides whether swtpm runs TPM 2
+    /// functionality: only 2.0 gets `--tpm2`.
+    #[test]
+    fn the_swtpm_argv_follows_the_tpm_version_in_the_definition() {
+        let state = Path::new("/run/vm/tpm");
+        let sock = Path::new("/run/vm/swtpm.sock");
+        let pid = Path::new("/run/vm/swtpm.pid");
+        let tpm = |version: &str| {
+            domainxml::parse(&spa(
+                ID,
+                Path::new("/tmp/disk.raw"),
+                &format!(
+                    "<tpm model=\"tpm-crb\"><backend type=\"emulator\" version=\"{version}\"/></tpm>"
+                ),
+            ))
+            .unwrap()
+            .tpm
+            .unwrap()
+            .version
         };
-        (manager, root)
+
+        assert_eq!(
+            swtpm_argv(&tpm("2.0"), state, sock, pid).unwrap(),
+            [
+                "socket",
+                "--tpm2",
+                "--tpmstate",
+                "dir=/run/vm/tpm",
+                "--ctrl",
+                "type=unixio,path=/run/vm/swtpm.sock",
+                "--daemon",
+                "--pid",
+                "file=/run/vm/swtpm.pid",
+            ]
+        );
+        assert!(
+            !swtpm_argv(&tpm("1.2"), state, sock, pid)
+                .unwrap()
+                .contains(&"--tpm2".to_string()),
+            "a 1.2 TPM is not started in TPM 2 mode"
+        );
     }
 
-    fn config(id: &str) -> VmConfig {
-        VmConfig {
-            id: id.into(),
-            title: "web".into(),
-            disk: PathBuf::from("/disk"),
-            memory_mib: 512,
-            vcpus: 2,
-            network: Network::User { hostfwd: vec![] },
-            firewall: Default::default(),
-            extra_nics: vec![],
-            extra_disks: vec![],
+    /// The pid file alone is not proof of ownership, and a process that is not
+    /// this guest's swtpm must never be signalled.
+    #[test]
+    fn swtpm_identity_needs_this_guests_state_and_socket() {
+        let state = Path::new("/run/vm/tpm");
+        let sock = Path::new("/run/vm/swtpm.sock");
+        let pid = Path::new("/run/vm/swtpm.pid");
+        let argv = swtpm_argv("2.0", state, sock, pid).unwrap();
+        let mut cmdline = b"/usr/bin/swtpm".to_vec();
+        for arg in argv {
+            cmdline.push(0);
+            cmdline.extend_from_slice(arg.as_bytes());
         }
+        cmdline.push(0);
+        assert!(swtpm_cmdline_is_ours(&cmdline, state, sock));
+        assert!(
+            !swtpm_cmdline_is_ours(&cmdline, Path::new("/run/other/tpm"), sock),
+            "another guest's state directory is not this one"
+        );
+        assert!(
+            !swtpm_cmdline_is_ours(&cmdline, state, Path::new("/run/other.sock")),
+            "another socket is not this one"
+        );
+        let mut not_ours = b"/usr/bin/qemu-system-x86_64".to_vec();
+        not_ours.push(0);
+        not_ours.extend_from_slice(&cmdline);
+        assert!(
+            !swtpm_cmdline_is_ours(&not_ours, state, sock),
+            "a non-swtpm executable is never ours"
+        );
     }
 
-    /// The values given to one argv flag, in order.
-    fn values(args: &[String], flag: &str) -> Vec<String> {
-        args.windows(2)
-            .filter(|w| w[0] == flag)
-            .map(|w| w[1].clone())
-            .collect()
+    #[test]
+    fn stopping_swtpm_never_kills_a_pid_that_is_not_ours() {
+        let root = std::env::temp_dir().join(format!("vm-swtpm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("swtpm.pid"), std::process::id().to_string()).unwrap();
+        stop_swtpm(&root).unwrap();
+        assert!(
+            process_ticks(std::process::id()).is_some(),
+            "this process is untouched"
+        );
+        assert!(
+            !root.join("swtpm.pid").exists(),
+            "the stale pid file is gone"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
-    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    /// A disk identifier is the XML target dev; a hot-added disk gets the first
+    /// free one, and removal never deletes the file.
+    #[test]
+    fn a_disk_is_added_and_removed_by_its_target() {
+        let (manager, root) = manager("disk");
+        let primary = disk(&root, "a.raw");
+        let extra = disk(&root, "b.qcow2");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let (target, path) = manager.add_disk(ID, &extra, DiskFormat::Qcow2).unwrap();
+        assert_eq!(target, "vdb");
+        assert_eq!(path, fs::canonicalize(&extra).unwrap());
+        let xml = manager.xml(ID).unwrap();
+        assert!(
+            xml.contains("<target dev=\"vdb\" bus=\"virtio\"/>"),
+            "{xml}"
+        );
+        assert!(
+            domainxml::parse(&xml).unwrap().disks[1].source == Some(path.clone()),
+            "{xml}"
+        );
+        // The same file, and the same target, are refused.
+        assert!(manager.add_disk(ID, &extra, DiskFormat::Raw).is_err());
+        assert!(
+            manager
+                .add_disk(ID, &disk(&root, "c.raw"), DiskFormat::Raw)
+                .is_ok()
+        );
+
+        assert!(!manager.remove_disk(ID, "vdb").unwrap());
+        assert!(extra.exists(), "removing a disk never deletes its file");
+        assert_eq!(
+            manager.remove_disk(ID, "vdb").unwrap_err(),
+            "unknown QEMU disk"
+        );
+        assert!(
+            manager
+                .args(ID)
+                .unwrap()
+                .windows(2)
+                .all(|w| w[1] != "drive-vdb")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// NICs are addressed by the MAC the definition carries, so a hot-removal
+    /// does not shift another NIC's identity.
+    #[test]
+    fn a_nic_is_added_and_removed_by_its_mac() {
+        let (manager, root) = manager("nic");
+        let primary = disk(&root, "a.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let mac = manager.add_nic(ID, Some("vbr5b92a1a54f00"), "").unwrap();
+        assert_eq!(mac, stable_mac(ID, "net1"));
+        assert!(!manager.remove_nic(ID, &mac).unwrap());
+        assert_eq!(
+            manager.remove_nic(ID, &mac).unwrap_err(),
+            "unknown QEMU NIC"
+        );
+        assert_eq!(
+            domainxml::parse(&manager.xml(ID).unwrap())
+                .unwrap()
+                .interfaces
+                .len(),
+            1
+        );
+        assert!(manager.remove_nic(ID, "nope").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The Network tab's add form sends an `<interface>` element: its model
+    /// and MAC reach the stored definition, and a stopped guest is not live.
+    #[test]
+    fn a_nic_xml_keeps_the_model_and_mac() {
+        let (manager, root) = manager("nicxml");
+        let primary = disk(&root, "a.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let mac = "52:54:00:11:22:33";
+        let (chosen, live) = manager
+            .add_nic_xml(
+                ID,
+                &format!(
+                    "<interface type='bridge'><mac address='{mac}'/>\
+                     <source bridge='vbr5b92a1a54f00'/><model type='e1000e'/></interface>"
+                ),
+            )
+            .unwrap();
+        assert_eq!(chosen, mac);
+        assert!(!live);
+        let iface = domainxml::parse(&manager.xml(ID).unwrap())
+            .unwrap()
+            .interfaces
+            .remove(1);
+        assert_eq!(iface.model, IfaceModel::E1000e);
+        assert_eq!(iface.mac.as_deref(), Some(mac));
+        assert!(
+            manager
+                .add_nic_xml(
+                    ID,
+                    "<interface type='network'><source network='x'/></interface>"
+                )
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A rate limit is stored as libvirt's KiB/s `<bandwidth>` and a stopped
+    /// guest has no tap to shape.
+    #[test]
+    fn nic_bandwidth_is_stored_and_a_stopped_guest_has_no_tap() {
+        let (manager, root) = manager("bw");
+        let primary = disk(&root, "a.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let mac = stable_mac(ID, "net0");
+        assert_eq!(
+            manager
+                .set_nic_bandwidth(ID, &mac, Some(1250), None)
+                .unwrap(),
+            None
+        );
+        let xml = manager.xml(ID).unwrap();
+        assert!(
+            xml.contains("<bandwidth><inbound average=\"1250\"/></bandwidth>"),
+            "{xml}"
+        );
+        manager
+            .set_nic_bandwidth(ID, &mac, None, Some(2500))
+            .unwrap();
+        let xml = manager.xml(ID).unwrap();
+        assert!(
+            xml.contains("<bandwidth><outbound average=\"2500\"/></bandwidth>"),
+            "{xml}"
+        );
+        manager.set_nic_bandwidth(ID, &mac, None, None).unwrap();
+        assert!(!manager.xml(ID).unwrap().contains("<bandwidth"), "cleared");
+        assert_eq!(
+            manager
+                .set_nic_bandwidth(ID, "52:54:00:aa:bb:99", Some(1), None)
+                .unwrap_err(),
+            "unknown QEMU NIC"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A stopped guest's block counters are zero without a QMP socket.
+    #[test]
+    fn a_stopped_guests_disk_bytes_are_empty() {
+        let (manager, root) = manager("blockstats");
+        let primary = disk(&root, "a.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        assert!(manager.block_stats(ID).unwrap().is_empty());
+        assert!(manager.block_stats(ID2).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_stopped_guest_can_be_moved_between_bridges_and_user_mode() {
+        let (manager, root) = manager("bridge");
+        let primary = disk(&root, "a.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let mac = stable_mac(ID, "net0");
+        manager
+            .set_nic_bridge(ID, &mac, Some("vbr0000000000"))
+            .unwrap();
+        assert_eq!(
+            domainxml::bridges(&manager.xml(ID).unwrap()).unwrap()[0].bridge,
+            "vbr0000000000"
+        );
+        manager.set_nic_bridge(ID, &mac, None).unwrap();
+        assert!(
+            domainxml::bridges(&manager.xml(ID).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(manager.set_nic_bridge(ID, &mac, Some("bad name")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_mac_and_a_tap_are_stable_and_distinct_per_interface() {
         let mac = stable_mac(ID, "net0");
-        assert_eq!(mac, stable_mac(ID, "net0"), "same NIC, same MAC");
+        assert_eq!(mac, stable_mac(ID, "net0"), "same slot, same MAC");
         assert_eq!(mac.len(), 17);
         assert!(mac.starts_with("52:54:00:"), "{mac}");
         assert_eq!(mac, mac.to_ascii_lowercase());
@@ -1592,23 +3028,20 @@ mod tests {
             0,
             "a NIC's MAC is unicast"
         );
-        assert_ne!(mac, stable_mac(ID, "nic1"));
-        assert_ne!(
-            mac,
-            stable_mac("550e8400-e29b-41d4-a716-446655440001", "net0")
-        );
+        assert_ne!(mac, stable_mac(ID, "net1"));
+        assert_ne!(mac, stable_mac(ID2, "net0"));
 
-        let tap = tap_name(ID, "net0");
-        assert_eq!(tap, tap_name(ID, "net0"), "same NIC, same tap");
+        let tap = tap_name(ID, &mac);
+        assert_eq!(tap, tap_name(ID, &mac), "same MAC, same tap");
         assert!(tap.starts_with("tap"), "{tap}");
         assert!(tap.len() <= 15, "the Linux interface-name limit: {tap}");
         assert!(tap[3..].chars().all(|c| c.is_ascii_hexdigit()), "{tap}");
-        assert_ne!(tap, tap_name(ID, "nic1"));
+        assert_ne!(tap, tap_name(ID, &stable_mac(ID, "net1")));
     }
 
     #[test]
     fn a_supplied_mac_is_normalized_and_must_be_unicast() {
-        let none = BTreeMap::new();
+        let none = BTreeSet::new();
         assert_eq!(
             mac_for(&none, ID, "net0", "52-54-00-AB-CD-EF").unwrap(),
             "52:54:00:ab:cd:ef"
@@ -1634,405 +3067,20 @@ mod tests {
     /// per NIC or dnsmasq would hand one address to two guests.
     #[test]
     fn a_mac_is_never_shared_between_nics() {
-        let (a, b) = (ID, "550e8400-e29b-41d4-a716-446655440001");
-        let base = stable_mac(b, "net0");
-        let mut taken = config(a);
-        taken.network = Network::Bridge {
-            network: "lab".into(),
-            bridge: "vbr0".into(),
-            mac: base.clone(),
-        };
-        let all = BTreeMap::from([(a.to_string(), record(taken))]);
-
-        let generated = mac_for(&all, b, "net0", "").unwrap();
+        let base = stable_mac(ID, "net0");
+        let mut used = BTreeSet::new();
+        used.insert(base.clone());
+        let generated = mac_for(&used, ID, "net0", "").unwrap();
         assert_ne!(generated, base, "the taken MAC is skipped");
         assert_eq!(
             generated,
-            stable_mac_salted(b, "net0", 1),
+            stable_mac_salted(ID, "net0", 1),
             "the first free salt wins, deterministically"
         );
         assert!(
-            mac_for(&all, b, "net0", &base).is_err(),
+            mac_for(&used, ID, "net0", &base).is_err(),
             "a supplied duplicate is refused"
         );
-        // The slot being re-set is not a collision with itself.
-        assert_eq!(mac_for(&all, a, "net0", &base).unwrap(), base);
-    }
-
-    fn record(config: VmConfig) -> Record {
-        Record {
-            config,
-            disk_size: 0,
-            pid: None,
-            start_ticks: None,
-        }
-    }
-
-    /// `net0` is the primary NIC's slot and an identifier is a lowercase token.
-    /// A NIC's bridge is stored even before its network exists, so a guest can
-    /// be configured before the network is started; `start` verifies it.
-    #[test]
-    fn an_extra_nic_is_named_safely_and_may_precede_its_network() {
-        let (manager, root) = manager("nicid");
-        let disk = root.join("disk");
-        fs::write(&disk, b"x").unwrap();
-        let mut cfg = config(ID);
-        cfg.disk = disk;
-        manager.define(cfg).unwrap();
-
-        for bad in ["net0", "nic 1", "Nic1", "net_1", "nic.1", ""] {
-            let e = manager
-                .add_nic(ID, bad, Network::User { hostfwd: vec![] })
-                .unwrap_err();
-            assert!(!e.is_empty(), "{bad}");
-        }
-        assert!(
-            manager
-                .add_nic(ID, "net0", Network::User { hostfwd: vec![] })
-                .unwrap_err()
-                .contains("primary"),
-            "the primary slot is reserved"
-        );
-
-        manager
-            .add_nic(ID, "nic1", Network::User { hostfwd: vec![] })
-            .unwrap();
-        manager
-            .add_nic(
-                ID,
-                "nic2",
-                Network::Bridge {
-                    network: "lab".into(),
-                    bridge: "vbrnosuch".into(),
-                    mac: String::new(),
-                },
-            )
-            .unwrap();
-        let stored = manager.list().unwrap().remove(0);
-        assert_eq!(
-            stored.extra_nics[1].network,
-            Network::Bridge {
-                network: "lab".into(),
-                bridge: "vbrnosuch".into(),
-                mac: stable_mac(ID, "nic2"),
-            },
-            "a stopped network's bridge is accepted and a MAC is generated"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// Every NIC goes through one argv builder: user-mode NAT stays exactly as
-    /// it was, and a bridge NIC names the deterministic tap and MAC, with no
-    /// scripting hook (the daemon owns the tap, not QEMU).
-    #[test]
-    fn the_argv_builds_one_netdev_and_device_per_nic() {
-        let (manager, root) = manager("argv");
-
-        let args = manager.args(&config(ID)).unwrap();
-        assert_eq!(values(&args, "-netdev"), ["user,id=net0"]);
-        assert_eq!(values(&args, "-device"), ["virtio-net-pci,netdev=net0"]);
-
-        let mut cfg = config(ID);
-        cfg.network = Network::Bridge {
-            network: "lab".into(),
-            bridge: "vbr5b92a1a54f00".into(),
-            mac: "52:54:00:aa:bb:01".into(),
-        };
-        cfg.extra_nics = vec![
-            Nic {
-                id: "nic1".into(),
-                network: Network::User {
-                    hostfwd: vec![HostForward {
-                        protocol: crate::qemu_network::Protocol::Tcp,
-                        host_port: 2222,
-                        guest_ip: "192.0.2.2".parse().unwrap(),
-                        guest_port: 22,
-                    }],
-                },
-            },
-            Nic {
-                id: "nic2".into(),
-                network: Network::Bridge {
-                    network: "lab".into(),
-                    bridge: "vbr5b92a1a54f00".into(),
-                    mac: "52:54:00:aa:bb:02".into(),
-                },
-            },
-        ];
-        let args = manager.args(&cfg).unwrap();
-        assert_eq!(
-            values(&args, "-netdev"),
-            [
-                format!(
-                    "tap,id=net0,ifname={},script=no,downscript=no",
-                    tap_name(ID, "net0")
-                ),
-                // hostfwd is the primary's policy: an extra user NIC never
-                // opens a port the firewall allowlist did not see.
-                "user,id=net-nic1".to_string(),
-                format!(
-                    "tap,id=net-nic2,ifname={},script=no,downscript=no",
-                    tap_name(ID, "nic2")
-                ),
-            ]
-        );
-        assert_eq!(
-            values(&args, "-device"),
-            [
-                "virtio-net-pci,netdev=net0,mac=52:54:00:aa:bb:01".to_string(),
-                "virtio-net-pci,id=nic1,netdev=net-nic1".to_string(),
-                "virtio-net-pci,id=nic2,netdev=net-nic2,mac=52:54:00:aa:bb:02".to_string(),
-            ]
-        );
-        // Nothing is handed to a shell: each argument is one argv element.
-        assert!(args.iter().all(|a| !a.contains(" -")));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// A disk identifier is a lowercase token and never the primary's reserved
-    /// `disk0`; its path must be a real, non-empty file, and neither the id nor
-    /// the file may be attached twice. Removal never deletes the file.
-    #[test]
-    fn an_extra_disk_is_validated_persisted_and_never_deletes_its_file() {
-        let (manager, root) = manager("diskid");
-        let disk = root.join("disk");
-        fs::write(&disk, b"x").unwrap();
-        let mut cfg = config(ID);
-        cfg.disk = disk;
-        manager.define(cfg).unwrap();
-        let extra = root.join("extra.qcow2");
-        fs::write(&extra, b"qcow2").unwrap();
-
-        for bad in ["disk0", "d 1", "D1", "d_1", "d.1", ""] {
-            assert!(
-                manager
-                    .add_disk(ID, bad, &extra, DiskFormat::Qcow2)
-                    .is_err(),
-                "{bad}"
-            );
-        }
-        assert!(
-            manager
-                .add_disk(ID, "disk0", &extra, DiskFormat::Qcow2)
-                .unwrap_err()
-                .contains("primary"),
-            "the primary slot is reserved"
-        );
-
-        assert!(
-            manager
-                .add_disk(ID, "data", Path::new("extra.qcow2"), DiskFormat::Raw)
-                .is_err(),
-            "a relative path is refused"
-        );
-        assert!(
-            manager
-                .add_disk(ID, "data", &root.join("missing"), DiskFormat::Raw)
-                .is_err()
-        );
-        assert!(
-            manager
-                .add_disk(ID, "data", &root, DiskFormat::Raw)
-                .is_err(),
-            "a directory is not a disk"
-        );
-        let empty = root.join("empty");
-        fs::write(&empty, b"").unwrap();
-        assert!(
-            manager
-                .add_disk(ID, "data", &empty, DiskFormat::Raw)
-                .is_err(),
-            "an empty file is not a disk"
-        );
-        let link = root.join("link");
-        std::os::unix::fs::symlink(&extra, &link).unwrap();
-        assert!(
-            manager
-                .add_disk(ID, "data", &link, DiskFormat::Raw)
-                .is_err(),
-            "a symlink is refused, never followed"
-        );
-
-        let path = manager
-            .add_disk(ID, "data", &extra, DiskFormat::Qcow2)
-            .unwrap();
-        assert_eq!(path, fs::canonicalize(&extra).unwrap());
-        let stored = manager.list().unwrap().remove(0);
-        assert_eq!(
-            stored.extra_disks,
-            vec![Disk {
-                id: "data".into(),
-                path: fs::canonicalize(&extra).unwrap(),
-                format: DiskFormat::Qcow2,
-            }]
-        );
-        // The same id, and the same file under another id, are both refused.
-        assert_eq!(
-            manager
-                .add_disk(ID, "data", &extra, DiskFormat::Raw)
-                .unwrap_err(),
-            "device identifier already exists"
-        );
-        assert!(
-            manager
-                .add_disk(ID, "data2", &extra, DiskFormat::Raw)
-                .is_err()
-        );
-        let other = "550e8400-e29b-41d4-a716-446655440001";
-        let other_disk = root.join("disk2");
-        fs::write(&other_disk, b"x").unwrap();
-        let mut cfg = config(other);
-        cfg.disk = other_disk;
-        manager.define(cfg).unwrap();
-        assert!(
-            manager
-                .add_disk(other, "data", &extra, DiskFormat::Raw)
-                .is_err(),
-            "one file never backs two guests"
-        );
-
-        // A stopped guest's removal is durable and leaves the bytes alone. A
-        // live removal takes the same path after `device_del` (which may leave
-        // the device attached until the guest acks), so the definition no
-        // longer lists it and a repeat DELETE is an honest unknown-disk.
-        assert!(!manager.remove_disk(ID, "data").unwrap());
-        assert!(manager.list().unwrap()[0].extra_disks.is_empty());
-        assert!(extra.exists(), "removing a disk never deletes its file");
-        assert_eq!(
-            manager.remove_disk(ID, "data").unwrap_err(),
-            "unknown QEMU disk"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// A disk identifier and a NIC identifier share one QEMU namespace, so a
-    /// hot-add may not name a device of the other kind — nor either primary's
-    /// reserved slot. The check runs before any QMP call.
-    #[test]
-    fn a_nic_and_a_disk_never_share_a_device_id() {
-        let (manager, root) = manager("idns");
-        let primary = root.join("disk");
-        fs::write(&primary, b"x").unwrap();
-        let extra = root.join("extra");
-        fs::write(&extra, b"y").unwrap();
-        let mut cfg = config(ID);
-        cfg.disk = primary;
-        manager.define(cfg).unwrap();
-
-        assert!(
-            manager
-                .add_nic(ID, "disk0", Network::User { hostfwd: vec![] })
-                .is_err(),
-            "the primary disk's slot is reserved"
-        );
-        assert!(
-            manager
-                .add_disk(ID, "net0", &extra, DiskFormat::Raw)
-                .is_err(),
-            "the primary NIC's slot is reserved"
-        );
-
-        manager
-            .add_nic(ID, "x", Network::User { hostfwd: vec![] })
-            .unwrap();
-        assert_eq!(
-            manager
-                .add_disk(ID, "x", &extra, DiskFormat::Raw)
-                .unwrap_err(),
-            "device identifier already exists"
-        );
-        manager.add_disk(ID, "y", &extra, DiskFormat::Raw).unwrap();
-        assert_eq!(
-            manager
-                .add_nic(ID, "y", Network::User { hostfwd: vec![] })
-                .unwrap_err(),
-            "device identifier already exists"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// QEMU's argv is UTF-8, so a path that cannot be spelled is refused at
-    /// definition/add time instead of yielding a VM that cannot start.
-    #[test]
-    fn a_non_utf8_disk_path_is_refused_before_it_is_stored() {
-        use std::os::unix::ffi::OsStringExt;
-        let (manager, root) = manager("nonutf8");
-        let bad = root.join(std::ffi::OsString::from_vec(b"bad\xff.img".to_vec()));
-        fs::write(&bad, b"x").unwrap();
-        let mut cfg = config(ID);
-        cfg.disk = bad.clone();
-        assert!(
-            manager.define(cfg).is_err(),
-            "a primary disk QEMU cannot spell is refused"
-        );
-
-        let good = root.join("disk");
-        fs::write(&good, b"x").unwrap();
-        let mut cfg = config(ID);
-        cfg.disk = good;
-        manager.define(cfg).unwrap();
-        assert!(manager.add_disk(ID, "data", &bad, DiskFormat::Raw).is_err());
-        assert!(manager.list().unwrap()[0].extra_disks.is_empty());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// Extras are explicit block nodes so QMP can add and drop them by name,
-    /// while the primary keeps the `-drive` shape older guests were defined
-    /// with. Every value is one argv element, never a shell string.
-    #[test]
-    fn the_argv_builds_one_block_node_pair_per_extra_disk() {
-        let (manager, root) = manager("diskargs");
-        let mut cfg = config(ID);
-        cfg.disk = PathBuf::from("/img/primary.raw");
-        cfg.extra_disks = vec![
-            Disk {
-                id: "data".into(),
-                path: PathBuf::from("/img/data.qcow2"),
-                format: DiskFormat::Qcow2,
-            },
-            Disk {
-                id: "scratch".into(),
-                path: PathBuf::from("/img/a,b.raw"),
-                format: DiskFormat::Raw,
-            },
-        ];
-        let args = manager.args(&cfg).unwrap();
-        assert_eq!(
-            values(&args, "-drive"),
-            ["file=/img/primary.raw,if=virtio"],
-            "the primary disk is unchanged"
-        );
-        assert_eq!(
-            values(&args, "-blockdev"),
-            [
-                "driver=file,filename=/img/data.qcow2,node-name=file-data",
-                "driver=qcow2,file=file-data,node-name=drive-data",
-                // A literal comma is doubled for QEMU's option parser.
-                "driver=file,filename=/img/a,,b.raw,node-name=file-scratch",
-                "driver=raw,file=file-scratch,node-name=drive-scratch",
-            ]
-        );
-        let devices: Vec<String> = values(&args, "-device")
-            .into_iter()
-            .filter(|d| d.starts_with("virtio-blk-pci"))
-            .collect();
-        assert_eq!(
-            devices,
-            [
-                "virtio-blk-pci,id=data,drive=drive-data",
-                "virtio-blk-pci,id=scratch,drive=drive-scratch",
-            ]
-        );
-        assert!(args.iter().all(|a| !a.contains(" -")));
-
-        // A duplicated id would give two devices one node namespace.
-        cfg.extra_disks.push(Disk {
-            id: "data".into(),
-            path: PathBuf::from("/img/other.raw"),
-            format: DiskFormat::Raw,
-        });
-        assert!(manager.args(&cfg).is_err());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2044,118 +3092,5 @@ mod tests {
         assert!(!tap_attached("lo", "lo"));
         assert!(delete_tap("lo").is_ok(), "a non-tap is never deleted");
         assert!(delete_tap("tapnosuch0").is_ok(), "an absent tap is success");
-    }
-
-    /// Metadata written before bridge mode existed must still load, byte for
-    /// byte: user-mode networking was a bare block and an extra NIC was a bare
-    /// device id. New files keep the tagged/object shapes.
-    #[test]
-    fn old_metadata_shapes_load_and_new_ones_round_trip() {
-        let old: VmConfig = serde_json::from_value(serde_json::json!({
-            "id": ID,
-            "disk": "/disk",
-            "memory_mib": 512,
-            "vcpus": 1,
-            "network": {"hostfwd": [{
-                "protocol": "tcp", "host_port": 2222,
-                "guest_ip": "192.0.2.2", "guest_port": 22
-            }]},
-            "extra_nics": ["nic1", "nic2"]
-        }))
-        .unwrap();
-        assert_eq!(old.title, "");
-        assert_eq!(
-            old.network,
-            Network::User {
-                hostfwd: vec![HostForward {
-                    protocol: crate::qemu_network::Protocol::Tcp,
-                    host_port: 2222,
-                    guest_ip: "192.0.2.2".parse().unwrap(),
-                    guest_port: 22,
-                }]
-            }
-        );
-        assert_eq!(
-            old.extra_nics,
-            vec![
-                Nic {
-                    id: "nic1".into(),
-                    network: Network::User { hostfwd: vec![] },
-                },
-                Nic {
-                    id: "nic2".into(),
-                    network: Network::User { hostfwd: vec![] },
-                },
-            ]
-        );
-        // A missing network defaults to user-mode NAT, not a failed VM list.
-        let bare: VmConfig = serde_json::from_value(serde_json::json!({
-            "id": ID, "disk": "/disk", "memory_mib": 512, "vcpus": 1
-        }))
-        .unwrap();
-        assert_eq!(bare.network, Network::User { hostfwd: vec![] });
-        assert!(bare.extra_nics.is_empty());
-        assert!(bare.extra_disks.is_empty(), "no extras means none");
-        assert!(old.extra_disks.is_empty(), "metadata predates extra disks");
-
-        // A stored disk without a format is raw, not a failed VM list.
-        let legacy: VmConfig = serde_json::from_value(serde_json::json!({
-            "id": ID, "disk": "/disk", "memory_mib": 512, "vcpus": 1,
-            "extra_disks": [{"id": "data", "path": "/img/data"}]
-        }))
-        .unwrap();
-        assert_eq!(
-            legacy.extra_disks,
-            vec![Disk {
-                id: "data".into(),
-                path: PathBuf::from("/img/data"),
-                format: DiskFormat::Raw,
-            }]
-        );
-        assert_eq!(
-            serde_json::to_value(DiskFormat::Qcow2).unwrap(),
-            serde_json::json!("qcow2")
-        );
-
-        // A malformed tagged value must not silently become user-mode NAT.
-        assert!(
-            serde_json::from_value::<Network>(serde_json::json!({"mode":"bridge","network":"lab"}))
-                .is_err(),
-            "a bridge block missing its bridge/mac is refused"
-        );
-
-        let mut cfg = config(ID);
-        cfg.network = Network::Bridge {
-            network: "lab".into(),
-            bridge: "vbr5b92a1a54f00".into(),
-            mac: "52:54:00:aa:bb:01".into(),
-        };
-        cfg.extra_nics = vec![Nic {
-            id: "nic1".into(),
-            network: Network::User {
-                hostfwd: vec![HostForward {
-                    protocol: crate::qemu_network::Protocol::Tcp,
-                    host_port: 2222,
-                    guest_ip: "192.0.2.2".parse().unwrap(),
-                    guest_port: 22,
-                }],
-            },
-        }];
-        cfg.extra_disks = vec![Disk {
-            id: "data".into(),
-            path: PathBuf::from("/img/data.qcow2"),
-            format: DiskFormat::Qcow2,
-        }];
-        let back: VmConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
-        assert_eq!(back.network, cfg.network);
-        assert_eq!(back.extra_nics, cfg.extra_nics);
-        assert_eq!(back.extra_disks, cfg.extra_disks);
-        assert_eq!(
-            serde_json::to_value(&cfg.network).unwrap(),
-            serde_json::json!({
-                "mode":"bridge","network":"lab","bridge":"vbr5b92a1a54f00",
-                "mac":"52:54:00:aa:bb:01"
-            })
-        );
     }
 }
