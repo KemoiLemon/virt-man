@@ -33,9 +33,20 @@ const dom = new JSDOM(
 );
 const { window } = dom;
 const { document } = window;
+// The 1s poll rebuilds the open view when the tree it reads has changed. Set
+// this to perturb one guest list, which is the same `changed` signal a pool's
+// allocation ticking produces, without touching the host's real resources.
+let nudgeTree = false;
 window.fetch = (input, init) => {
   const url = typeof input === "string" ? new URL(input, base).toString() : input;
-  return fetch(url, init);
+  const res = fetch(url, init);
+  if (!nudgeTree || !String(typeof url === "string" ? url : url?.url).endsWith("/domains")) return res;
+  nudgeTree = false;
+  return res.then(async (r) => {
+    const data = await r.json();
+    if (Array.isArray(data) && data[0]) data[0].title = `${data[0].title ?? data[0].name} `;
+    return new Response(JSON.stringify(data), { status: r.status, headers: { "content-type": "application/json" } });
+  });
 };
 // jsdom has no WebSocket, but the viewer no longer needs one: the RFB client
 // lives in the daemon and frames arrive over fetch. Publish the globals the
@@ -212,6 +223,26 @@ check("the datacenter dashboard summarises every server", () => {
   assert.match(body, /Storage Pools/, "storage pool summary");
   assert.ok(document.querySelector("[data-dc-dash-conn]"), "per-server row links to its dashboard");
 });
+
+// The dashboard is a long page users leave scrolled down. A poll that found
+// the tree changed used to rebuild the whole pane (skeleton included), which
+// flashed and clamped the scroll position back to the top. Repainting #dc-dash
+// in place is the only thing a poll may do here.
+{
+  const head = document.querySelector("#content > .dhead");
+  const scroller = document.querySelector("#content");
+  scroller.scrollTop = 240;
+  nudgeTree = true;
+  await wait(1600);
+  check("a tree change during a poll repaints the dashboard in place", () => {
+    assert.ok(document.querySelector("#dc-dash"), "dashboard still rendered");
+    assert.equal(document.querySelector("#content > .dhead"), head,
+      "the pane was not rebuilt — a rebuild replaces it with the skeleton and clamps the scroll");
+    assert.equal(document.querySelectorAll("#content .skeleton").length, 0,
+      "no skeleton painted over the open dashboard");
+    assert.equal(scroller.scrollTop, 240, "the scroll position survived the poll");
+  });
+}
 
 // A network is named by its UUID and keeps its nickname as a `title`, so the
 // dashboard's Networking table showed a UUID for anything made or migrated

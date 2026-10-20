@@ -1530,7 +1530,13 @@ async function refreshTreeVms() {
     // this its Guests table stays empty until another action redraws it.
     // Not on the admin page: it has no server selected either, and
     // repainting the datacenter over it threw the user off it.
-    if (!selectedConn && !selectedVm && !adminSection) renderDc();
+    // Its dashboard repaints itself in place from the same tree: rebuilding the
+    // pane would paint the skeleton over the user's scroll position every time
+    // a pool's allocation ticks, which is what made a poll reset the page.
+    if (!selectedConn && !selectedVm && !adminSection) {
+      if (dcTab === "dashboard") void loadDcDashboard();
+      else renderDc();
+    }
     // Network/pool pages poll their own data; the tree refresh above is what
     // keeps the sidebar counts and states live.
   }
