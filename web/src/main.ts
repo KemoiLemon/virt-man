@@ -2936,15 +2936,29 @@ function fwRuleRow(r: FirewallRule): string {
     </tr>`;
 }
 
-function fwFwdRow(f: FirewallForward): string {
+function fwFwdRow(f: FirewallForward, hosts: IpamHost[], label: (h: IpamHost) => string): string {
   // One port each side, not a range: DNAT maps a port to a port, and a range
   // had no single internal counterpart.
+  //
+  // The internal address is picked from the guests this network hands one to,
+  // so a forward names the guest rather than an address someone has to look up.
+  // An address no allocation knows (a forward saved before its guest got one,
+  // or a host outside the app) stays selectable: dropping it would silently
+  // point the forward at whichever guest happened to be first.
+  const known = hosts.some((h) => h.ip === f.lan_ip);
+  const current = f.lan_ip && !known
+    ? `<option value="${esc(f.lan_ip)}" selected>${esc(f.lan_ip)} — not a guest</option>`
+    : "";
+  const placeholder = f.lan_ip ? "" : `<option value="" selected>Select a guest…</option>`;
   return `
     <tr>
       <td><input data-f-wanip placeholder="0.0.0.0 = any" value="${f.wan_ip === "0.0.0.0" ? "" : esc(f.wan_ip)}"></td>
       <td><select data-f-proto>${fwOpt(["tcp", "udp"], f.proto)}</select></td>
       <td><input data-f-wport type="number" min="1" max="65535" value="${f.wan_port}"></td>
-      <td><input data-f-lanip placeholder="192.168.x.x" value="${esc(f.lan_ip)}"></td>
+      <td><select data-f-lanip>
+        ${placeholder}${current}
+        ${hosts.map((h) => `<option value="${esc(h.ip)}" ${h.ip === f.lan_ip ? "selected" : ""}>${esc(label(h))} — ${esc(h.ip)}</option>`).join("")}
+      </select></td>
       <td><input data-f-lport type="number" min="1" max="65535" value="${f.lan_port}"></td>
       <td><button class="btn danger icon" data-f-del title="Remove">${ic.trash()}</button></td>
     </tr>`;
@@ -3008,7 +3022,7 @@ function readFwFwdRows(root: Element): FirewallForward[] {
       proto: (tr.querySelector("[data-f-proto]") as HTMLSelectElement).value as FirewallForward["proto"],
       wan_ip: (tr.querySelector("[data-f-wanip]") as HTMLInputElement).value || "0.0.0.0",
       wan_port: num("[data-f-wport]"),
-      lan_ip: (tr.querySelector("[data-f-lanip]") as HTMLInputElement).value,
+      lan_ip: (tr.querySelector("[data-f-lanip]") as HTMLSelectElement).value,
       lan_port: num("[data-f-lport]"),
     };
   });
@@ -3021,6 +3035,11 @@ function openFirewallEditor(netName: string) {
   let rules: FirewallRule[] = [];
   let forwards: FirewallForward[] = [];
   let policy: FirewallPolicy = blankPolicy();
+  // The addresses this network hands out, with the guest each belongs to, so a
+  // forward picks a guest from a list instead of an IP typed from memory.
+  let lanHosts: IpamHost[] = [];
+  const lanLabel = (h: IpamHost) =>
+    (h.vm_name ? displayName(treeVms[conn], h.vm_name) : "") || h.name || h.mac;
   // Every address this daemon knows about, for the source/dest fields.
   // Filled after the modal paints; the suggesters read it lazily per keystroke.
   let ipCandidates: string[] = [];
@@ -3057,8 +3076,8 @@ function openFirewallEditor(netName: string) {
 
       <div class="section-title fw-cat" style="margin-top:18px">NAT Port Forwards</div>
       <table class="grid">
-        <tr><th>WAN</th><th>Proto</th><th>WAN Port</th><th>Internal IP</th><th>Internal Port</th><th></th></tr>
-        ${forwards.map(fwFwdRow).join("") || `<tr><td colspan="6" class="empty">No port forwards.</td></tr>`}
+        <tr><th>WAN</th><th>Proto</th><th>WAN Port</th><th>Internal guest</th><th>Internal Port</th><th></th></tr>
+        ${forwards.map((f) => fwFwdRow(f, lanHosts, lanLabel)).join("") || `<tr><td colspan="6" class="empty">No port forwards.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>`);
 
@@ -3101,10 +3120,13 @@ function openFirewallEditor(netName: string) {
 
   api.get<{ rules: FirewallRule[]; forwards: FirewallForward[]; policy: FirewallPolicy }>(
     `/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`)
-    .then((fw) => {
+    .then(async (fw) => {
       rules = fw.rules ?? [];
       forwards = fw.forwards ?? [];
       policy = fw.policy ?? blankPolicy();
+      const h = await api.get<{ hosts: IpamHost[] }>(
+        `/proxy/${conn}/networks/${encodeURIComponent(netName)}/hosts`).catch(() => null);
+      lanHosts = h?.hosts ?? [];
       render();
     })
     .catch((e) => toast((e as Error).message, "bad"));
@@ -3112,6 +3134,7 @@ function openFirewallEditor(netName: string) {
   $("#fw-cancel", el).onclick = () => el.remove();
   $("#fw-save", el).onclick = async () => {
     read();
+    if (forwards.some((f) => !f.lan_ip)) return toast("Pick a guest for each port forward", "bad");
     try {
       await api.put(`/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`,
         { rules, forwards, policy });
