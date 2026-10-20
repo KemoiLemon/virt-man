@@ -55,12 +55,12 @@ test("paths use the node's name and read the way they were asked for", () => {
   assert.equal(r.routeToPath({ view: "pool", conn: "c1", pool: "ISOs" }, nodes), "/Main/storage/ISOs");
 });
 
-// Containers are not a web view for now: a stale /containers link must land on
-// the Datacenter, and a /<node>/containers link on that server's dashboard.
-test("container paths fall back to the nearest view that exists", () => {
-  assert.deepEqual(r.parsePath("/containers", nodes), { view: "dc", tab: "dashboard" });
-  assert.deepEqual(r.parsePath("/Main/containers/web", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
-  assert.deepEqual(r.parsePath("/Main/containers/web/hardware", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
+// A stale link to a view that no longer exists must land on the nearest view
+// that does, not on an error or a blank pane.
+test("unknown paths fall back to the nearest view that exists", () => {
+  assert.deepEqual(r.parsePath("/nosuchview", nodes), { view: "dc", tab: "dashboard" });
+  assert.deepEqual(r.parsePath("/Main/nosuchview/web", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
+  assert.deepEqual(r.parsePath("/Main/nosuchview/web/hardware", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
 });
 
 test("names with spaces and slashes are encoded, and decode back", () => {
@@ -150,7 +150,6 @@ test("the admin page round-trips through the URL", () => {
   assert.deepEqual(r.parsePath("/admin/dashboard/ownership", nodes), dash("ownership"));
   assert.deepEqual(r.parsePath("/admin/dashboard/bogus", nodes), dash("overview"), "unknown tab");
   assert.deepEqual(r.parsePath("/admin/bogus", nodes), dash("overview"), "unknown section");
-  assert.deepEqual(r.parsePath("/admin/containers", nodes), dash("overview"), "the containers section is gone");
   // An untabbed section ignores a stray tab segment.
   assert.deepEqual(r.parsePath("/admin/users/x", nodes), { view: "admin", section: "users" });
   // The Datacenter's Servers tab is gone; an old link lands on Daemons.

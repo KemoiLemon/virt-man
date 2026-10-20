@@ -2339,7 +2339,7 @@ async function renderNetPage() {
 
 /// Dedicated storage page: one pool's capacity plus full volume management.
 /// Proxmox's words for what a volume holds.
-const CONTENT_LABEL: Record<string, string> = { iso: "ISO image", vztmpl: "CT template", images: "Disk image" };
+const CONTENT_LABEL: Record<string, string> = { iso: "ISO image", images: "Disk image" };
 
 async function renderPoolPage() {
   if (!selectedConn || !selectedPool) return;
@@ -3904,7 +3904,7 @@ async function renderVmBody(vm: string) {
           <div class="hwrow">
             <span class="hwrow-ic">${ic.vm()}</span>
             <div class="hwrow-label"><b>Resource name</b><i>Renamed via the dedicated endpoint</i></div>
-            <div class="hwctl"><input id="opt-name" value="${esc(vm)}"></div>
+            <div class="hwctl"><input id="opt-name" value="${esc(vm)}" ${isUuid(vm) ? "readonly" : ""}></div>
           </div>
           <div class="hwrow">
             <span class="hwrow-ic">${ic.edit()}</span>
@@ -4723,14 +4723,15 @@ async function deleteVm(name: string) {
 /// the daemon rejects a running one and the caller surfaces that reason.
 async function renameVm(name: string) {
   if (!selectedConn) return;
+  const byUuid = isUuid(name);
   const next = await askText("Rename VM", "New name", displayName(guestList(selectedConn), name), "alpine-worker");
   if (!next || next === name) return;
   try {
     await api.post(`/proxy/${selectedConn}/domains/${encodeURIComponent(name)}/rename`, { name: next });
     toast("Renamed");
-    // Every view keys off the old name, so reselect under the new one and
-    // refresh the tree cache.
-    if (selectedVm === name) selectedVm = next;
+    // A UUID-named guest is renamed by its title; its id (the URL and every
+    // stored key) never changes. An older name-keyed guest swaps the name.
+    if (!byUuid && selectedVm === name) selectedVm = next;
     await refreshTreeVms();
     if (selectedVm) renderVm();
     else renderConn();
@@ -4802,7 +4803,7 @@ async function deleteVolume(pool: string, name: string) {
 /// resource's own view uses — including starting a running guest's stop — with
 /// the connection named explicitly and `after` repainting the admin page
 /// instead of navigating to the resource.
-async function adminDeleteResource(kind: Exclude<AdminResource["kind"], "ct">, conn: string, pool: string, name: string, after: () => void) {
+async function adminDeleteResource(kind: AdminResource["kind"], conn: string, pool: string, name: string, after: () => void) {
   const shown = kind === "volume" ? shownVolume(pool, name) : name;
   if (kind === "vm") await deleteVmOn(conn, name, after);
   else if (kind === "network") await deleteNetworkOn(conn, name, shown, after);

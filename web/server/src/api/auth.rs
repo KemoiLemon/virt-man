@@ -156,8 +156,7 @@ struct PrivsQ {
 }
 
 /// What the caller may do at one path. Only their own privileges, so it
-/// reveals nothing they could not learn by trying; the forms use it to offer
-/// only what will be accepted (the privileged-container box).
+/// reveals nothing they could not learn by trying.
 async fn privs(
     State(state): State<AppState>,
     axum::extract::Extension(user): axum::extract::Extension<User>,

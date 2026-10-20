@@ -17,7 +17,6 @@ import Clipboard from "@phosphor-icons/core/assets/fill/clipboard-fill.svg?raw";
 import ClipboardPaste from "@phosphor-icons/core/assets/fill/clipboard-text-fill.svg?raw";
 import Copy from "@phosphor-icons/core/assets/fill/copy-fill.svg?raw";
 import Cpu from "@phosphor-icons/core/assets/fill/cpu-fill.svg?raw";
-import Cube from "@phosphor-icons/core/assets/fill/cube-fill.svg?raw";
 import Database from "@phosphor-icons/core/assets/fill/database-fill.svg?raw";
 import Download from "@phosphor-icons/core/assets/fill/download-simple-fill.svg?raw";
 import FileCode from "@phosphor-icons/core/assets/fill/file-code-fill.svg?raw";
@@ -126,7 +125,6 @@ export const ic = {
   offline: svg(Plugs),
   vm: svg(Monitor),
   vms: svg(Monitor),
-  container: svg(Cube),
   network: svg(Network),
   storage: svg(Database),
   disk: svg(HardDrive),

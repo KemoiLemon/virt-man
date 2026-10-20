@@ -133,7 +133,15 @@ impl Store {
         let mut store: Store = if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-            serde_json::from_str(&text)
+            let mut v: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+            // Containers are gone, and `Kind` no longer has a variant for
+            // them: a leftover ownership row would make the whole store
+            // unparseable and the server would not start.
+            if let Some(rows) = v.get_mut("resources").and_then(|r| r.as_array_mut()) {
+                rows.retain(|r| r.get("kind").and_then(|k| k.as_str()) != Some("ct"));
+            }
+            serde_json::from_value(v)
                 .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
         } else {
             Store::default()
@@ -213,7 +221,6 @@ impl Store {
             let privs = privs_of(&scopes);
             let full = perm::PRIVILEGES
                 .iter()
-                .filter(|p| perm::legacy_expressible(p))
                 .all(|p| privs.iter().any(|x| x == p));
             let role = if full {
                 perm::ADMIN_ROLE.to_string()
@@ -693,7 +700,7 @@ mod tests {
         );
         assert!(!s.is_admin(&v("o")));
         assert!(
-            !s.can(&v("o"), "/nodes/c/containers/x", "CT.Privileged"),
+            !s.can(&v("o"), "/", "Permissions.Modify"),
             "migration grants nothing that did not exist before"
         );
         assert!(
@@ -730,5 +737,30 @@ mod tests {
         let json = r#"{"users":[],"sessions":{},"connections":[],"api_keys":[],"avatar_seq":0}"#;
         let parsed: Store = serde_json::from_str(json).expect("old store parses");
         assert!(parsed.activity.is_empty());
+    }
+
+    /// A container ownership row from an older version cannot deserialize
+    /// (`Kind` has no `Ct`), and must not stop the whole store loading.
+    #[test]
+    fn a_leftover_container_ownership_row_is_dropped_on_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "store-test-{}-{}",
+            std::process::id(),
+            random_hex(4)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("store.json"),
+            r#"{"users":[],"sessions":{},"connections":[],"api_keys":[],"avatar_seq":0,
+                "resources":[
+                  {"kind":"ct","conn":"c","name":"ct1","owner":"u"},
+                  {"kind":"vm","conn":"c","name":"vm1","owner":"u"}
+                ]}"#,
+        )
+        .unwrap();
+        let s = Store::load(&dir).expect("store with a stale container row loads");
+        assert_eq!(s.resources.len(), 1);
+        assert_eq!(s.resources[0].name, "vm1");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

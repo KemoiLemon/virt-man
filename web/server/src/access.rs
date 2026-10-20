@@ -86,9 +86,6 @@ pub struct Query {
     /// VM name (what the UI knows). Empty: every VM.
     #[serde(default)]
     pub vm: String,
-    /// `vm` names a container (its access is checked as one).
-    #[serde(default)]
-    pub ct: bool,
     #[serde(default)]
     pub proto: String,
     /// Substring of the destination IP or domain.

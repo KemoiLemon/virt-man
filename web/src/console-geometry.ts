@@ -1,10 +1,9 @@
-// A container text console's grid size, kept apart from `terminal.ts` so it can
-// be unit-tested without loading xterm (which is a browser module and will not
+// A terminal's grid size, kept apart from `terminal.ts` so it can be
+// unit-tested without loading xterm (which is a browser module and will not
 // import into bare Node).
 //
-// The same figures are sent to the daemon, which writes them onto the
-// container's pty; xterm and the pty must agree or the shell redraws against
-// the wrong geometry.
+// The same figures are sent to the daemon, which writes them onto the pty;
+// xterm and the pty must agree or the shell redraws against the wrong geometry.
 
 /// xterm's grid for a stage of `width`x`height` CSS pixels, given one character
 /// cell. Minus one column: a whole number of cells rarely fits into the stage,

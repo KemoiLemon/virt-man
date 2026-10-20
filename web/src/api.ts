@@ -247,9 +247,7 @@ export interface AclEntry {
 
 /// A row of the admin Resources page.
 export interface AdminResource {
-  kind: "vm" | "ct" | "network" | "pool" | "volume";
-  /// Containers: running without a user namespace (root is host root).
-  privileged?: boolean;
+  kind: "vm" | "network" | "pool" | "volume";
   conn: string;
   conn_name: string;
   /// The libvirt name (a UUID for anything made since UUIDs).
@@ -334,14 +332,6 @@ export interface DomainSummary {
   suspended?: boolean;
 }
 
-/// A container (`GET /containers`): a guest on the daemon's LXC driver.
-export interface ContainerSummary extends DomainSummary {
-  /// No user namespace: the container's root is the host's root.
-  privileged: boolean;
-  autostart?: boolean;
-  rootfs?: string | null;
-}
-
 export interface Graphics {
   kind: string;
   host: string;
@@ -404,9 +394,8 @@ export interface VolumeSummary {
   path: string;
   capacity: number;
   allocation: number;
-  /// What it holds, from its file name: iso, vztmpl (a container template)
-  /// or images.
-  content?: "iso" | "vztmpl" | "images";
+  /// What it holds, from its file name: iso or images.
+  content?: "iso" | "images";
   /// Guests that have it attached (from the daemon).
   used_by?: string[];
   /// From the web server's proxy: the caller owns it; and it was made empty

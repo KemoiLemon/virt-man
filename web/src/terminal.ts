@@ -1,5 +1,4 @@
-// A text terminal in the browser, for a container's console and for a shell on
-// the daemon's host.
+// A text terminal in the browser, for a shell on the daemon's host.
 //
 // Both are the same long-polled byte stream: `connect` opens a session,
 // `read?after=<offset>` parks until there are bytes past the offset, `write`
@@ -127,8 +126,7 @@ async function mountTerminal(
     probe.remove();
     return r.width > 0 ? { width: r.width / 10, height: r.height } : { width: 8, height: 17 };
   };
-  // The pty must match xterm's geometry. libvirt opens an LXC console as a pty
-  // at 0x0 and never sizes it, and the daemon starts a shell pty at the
+  // The pty must match xterm's geometry. The daemon starts a shell pty at the
   // browser's default; either way the shell's line editor redraws the same
   // bottom line instead of scrolling when the two disagree. Report every
   // change; `lastSize` starts impossible, so the first fit is always sent even

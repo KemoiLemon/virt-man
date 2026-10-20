@@ -23,7 +23,6 @@ pub fn routes(state: &AppState) -> Router<AppState> {
 /// every daemon, so they are an administrator's view.
 fn need(q: &history::Query) -> (String, &'static str) {
     match q.kind.as_str() {
-        "vm" | "nic" | "disk" if q.ct => (crate::perm::ct_path(&q.conn, &q.name), "CT.Audit"),
         "vm" | "nic" | "disk" => (crate::perm::vm_path(&q.conn, &q.name), "VM.Audit"),
         "host" => (crate::perm::node_path(&q.conn), "Sys.Audit"),
         _ => ("/".into(), "Permissions.Modify"),

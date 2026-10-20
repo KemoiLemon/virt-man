@@ -48,7 +48,7 @@ export interface AdminCtx {
   createPool(conn: string, after: () => void): void;
   /// Delete one resource, using the same confirmation and running-guest stop
   /// as its own view; `after` repaints this page.
-  deleteResource(kind: Exclude<AdminResource["kind"], "ct">, conn: string, pool: string, name: string, after: () => void): void;
+  deleteResource(kind: AdminResource["kind"], conn: string, pool: string, name: string, after: () => void): void;
   /// The identity changed (your own groups, roles): refresh it and re-render.
   refreshMe(): Promise<void>;
   /// Put this section's primary action in the page header, inline with the
@@ -730,7 +730,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
         table = `<table class="grid">
           <tr><th>Name</th><th>Owner</th><th>State</th><th>vCPUs</th><th>Memory</th><th class="col-actions"></th></tr>
           ${shown.map((r, i) => `<tr class="${r.suspended ? "suspended" : ""}">
-            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}${r.privileged ? ` <span class="state bad">Privileged</span>` : ""}</td>
+            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}</td>
             <td>${r.vcpus ?? "—"}</td><td>${r.memory_mb ? fmtBytes(r.memory_mb * 1048576) : "—"}</td>
             <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No VMs${resOwner ? " for this owner" : ""}.</td></tr>`}
         </table>`;
@@ -802,7 +802,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
       });
       bind(area, "data-del-res", (i) => {
         const r = shown[Number(i)];
-        ctx.deleteResource(r.kind as Exclude<AdminResource["kind"], "ct">, r.conn, r.pool ?? "", r.name, () => ctx.go(section, conn));
+        ctx.deleteResource(r.kind, r.conn, r.pool ?? "", r.name, () => ctx.go(section, conn));
       });
       bind(area, "data-owner-res", (i) => void changeOwner(ctx, shown[Number(i)], section));
       bind(area, "data-suspend-res", async (i) => {

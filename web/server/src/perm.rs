@@ -23,7 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 /// `Permissions.Modify`, deliberately: anyone who can edit accounts can reset
 /// an administrator's password, so a separate "User.Modify" would only look
 /// narrower than it is.
-pub const PRIVILEGES: [&str; 22] = [
+pub const PRIVILEGES: [&str; 16] = [
     "Sys.Audit",
     "Sys.Modify",
     "VM.Audit",
@@ -31,12 +31,6 @@ pub const PRIVILEGES: [&str; 22] = [
     "VM.Config",
     "VM.PowerMgmt",
     "VM.Console",
-    "CT.Audit",
-    "CT.Allocate",
-    "CT.Config",
-    "CT.PowerMgmt",
-    "CT.Console",
-    "CT.Privileged",
     "Network.Audit",
     "Network.Allocate",
     "Network.Config",
@@ -55,24 +49,6 @@ const VM_OWNER: [&str; 5] = [
     "VM.Config",
     "VM.PowerMgmt",
     "VM.Console",
-];
-/// What the owner of a container may do to it. Never `CT.Privileged`: that
-/// would let anyone who can create a container make it privileged -- its root
-/// the host's root -- by editing it. Privilege is granted, not owned.
-const CT_OWNER: [&str; 5] = [
-    "CT.Audit",
-    "CT.Allocate",
-    "CT.Config",
-    "CT.PowerMgmt",
-    "CT.Console",
-];
-const CT_PRIVILEGED: [&str; 6] = [
-    "CT.Audit",
-    "CT.Allocate",
-    "CT.Config",
-    "CT.PowerMgmt",
-    "CT.Console",
-    "CT.Privileged",
 ];
 const NET_OWNER: [&str; 4] = [
     "Network.Audit",
@@ -119,17 +95,11 @@ pub fn builtin_roles() -> Vec<RoleDef> {
                 "Datastore.Audit",
                 "Datastore.AllocateSpace",
                 "VM.Allocate",
-                "CT.Allocate",
                 "Network.Allocate",
             ],
         ),
         role("VMUser", &["VM.Audit", "VM.Console", "VM.PowerMgmt"]),
         role("VMAdmin", &VM_OWNER),
-        role("CTUser", &["CT.Audit", "CT.Console", "CT.PowerMgmt"]),
-        role("CTAdmin", &CT_OWNER),
-        // Grant on `/nodes/<c>/containers` (or one container) to let someone
-        // run containers without user-namespace isolation.
-        role("CTPrivileged", &CT_PRIVILEGED),
         role("NetworkUser", &["Network.Audit", "Network.Use"]),
         role("NetworkAdmin", &NET_OWNER),
         role(
@@ -139,13 +109,7 @@ pub fn builtin_roles() -> Vec<RoleDef> {
         role("BridgeUser", &["Bridge.Use"]),
         role(
             "Auditor",
-            &[
-                "Sys.Audit",
-                "VM.Audit",
-                "CT.Audit",
-                "Network.Audit",
-                "Datastore.Audit",
-            ],
+            &["Sys.Audit", "VM.Audit", "Network.Audit", "Datastore.Audit"],
         ),
         role("NoAccess", &[]),
     ]
@@ -178,7 +142,6 @@ fn yes() -> bool {
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Vm,
-    Ct,
     Network,
     Volume,
 }
@@ -398,9 +361,6 @@ pub fn node_path(conn: &str) -> String {
 pub fn vm_path(conn: &str, name: &str) -> String {
     format!("/nodes/{conn}/vms/{name}")
 }
-pub fn ct_path(conn: &str, name: &str) -> String {
-    format!("/nodes/{conn}/containers/{name}")
-}
 pub fn net_path(conn: &str, name: &str) -> String {
     format!("/nodes/{conn}/networks/{name}")
 }
@@ -473,14 +433,6 @@ pub fn describe_priv(p: &str) -> &'static str {
         "VM.Config" => "change this VM's configuration",
         "VM.PowerMgmt" => "start, stop or restart this VM",
         "VM.Console" => "open this VM's console",
-        "CT.Audit" => "view this container",
-        "CT.Allocate" => "create or delete containers here",
-        "CT.Config" => "change this container's configuration",
-        "CT.PowerMgmt" => "start, stop or restart this container",
-        "CT.Console" => "open this container's console",
-        "CT.Privileged" => {
-            "run a privileged container (no user-namespace isolation: its root is the host's root)"
-        }
         "Network.Audit" => "view this network",
         "Network.Allocate" => "create or delete networks here",
         "Network.Config" => "change this network",
@@ -508,12 +460,10 @@ pub fn describe_path(path: &str, server: &dyn Fn(&str) -> Option<String>) -> Str
         ["nodes"] => "every server".into(),
         ["nodes", c] => format!("server {}", srv(c)),
         ["nodes", c, "vms"] => format!("VMs on {}", srv(c)),
-        ["nodes", c, "containers"] => format!("containers on {}", srv(c)),
         ["nodes", c, "networks"] => format!("networks on {}", srv(c)),
         ["nodes", c, "storage"] => format!("storage on {}", srv(c)),
         ["nodes", c, "bridges"] => format!("bridges on {}", srv(c)),
         ["nodes", c, "vms", n] => format!("VM '{n}' on {}", srv(c)),
-        ["nodes", c, "containers", n] => format!("container '{n}' on {}", srv(c)),
         ["nodes", c, "networks", n] => format!("network '{n}' on {}", srv(c)),
         ["nodes", c, "storage", n] => format!("storage pool '{n}' on {}", srv(c)),
         ["nodes", c, "bridges", n] => format!("bridge '{n}' on {}", srv(c)),
@@ -526,7 +476,6 @@ pub fn path_resource(path: &str) -> Option<(Kind, &str, &str)> {
     let seg: Vec<&str> = path.trim_matches('/').splitn(4, '/').collect();
     match seg.as_slice() {
         ["nodes", conn, "vms", name] => Some((Kind::Vm, conn, name)),
-        ["nodes", conn, "containers", name] => Some((Kind::Ct, conn, name)),
         ["nodes", conn, "networks", name] => Some((Kind::Network, conn, name)),
         _ => None,
     }
@@ -535,18 +484,9 @@ pub fn path_resource(path: &str) -> Option<(Kind, &str, &str)> {
 pub fn owner_privs(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::Vm => &VM_OWNER,
-        Kind::Ct => &CT_OWNER,
         Kind::Network => &NET_OWNER,
         Kind::Volume => &[],
     }
-}
-
-/// Whether a pre-ACL scope map could have expressed `p`. Containers came
-/// after ACLs, so no old scope grants a `CT.*` privilege -- and an old
-/// full-access account must still count as full, or it would lose the
-/// Administrator role in migration for want of privileges it never needed.
-pub fn legacy_expressible(p: &str) -> bool {
-    !p.starts_with("CT.")
 }
 
 /// Map a pre-ACL scope map to privileges, so an upgraded install keeps the
@@ -671,36 +611,6 @@ mod tests {
         for p in PRIVILEGES {
             assert_ne!(describe_priv(p), "do that", "{p} has a description");
         }
-    }
-
-    /// VMs and containers are separate permission sets, and privileged
-    /// containers are a third thing again: nothing implies it but a grant.
-    #[test]
-    fn container_privileges_are_their_own_and_privileged_is_granted_only() {
-        let r = builtin_roles();
-        let get = |n: &str| r.iter().find(|x| x.name == n).unwrap().privs.clone();
-        assert!(get("VMAdmin").iter().all(|p| p.starts_with("VM.")));
-        assert!(get("CTAdmin").iter().all(|p| p.starts_with("CT.")));
-        assert!(!get("CTAdmin").contains(&"CT.Privileged".to_string()));
-        assert!(get("CTPrivileged").contains(&"CT.Privileged".to_string()));
-        let user = get(DEFAULT_ROLE);
-        assert!(
-            user.contains(&"CT.Allocate".to_string()),
-            "users can create"
-        );
-        assert!(!user.contains(&"CT.Privileged".to_string()));
-        assert!(!owner_privs(Kind::Ct).contains(&"CT.Privileged"));
-        // A grant on one container does not reach its siblings.
-        let acl = [entry(&ct_path("c", "a"), "user:u", "CTPrivileged", true)];
-        assert!(has(
-            &acl_privs(&acl, &r, &[], "u", &ct_path("c", "a")),
-            "CT.Privileged"
-        ));
-        assert!(acl_privs(&acl, &r, &[], "u", &ct_path("c", "b")).is_empty());
-        assert_eq!(
-            path_resource(&ct_path("c", "a")),
-            Some((Kind::Ct, "c", "a"))
-        );
     }
 
     #[test]

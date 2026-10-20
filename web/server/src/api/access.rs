@@ -32,13 +32,6 @@ async fn logs(
             &crate::perm::node_path(&q.conn),
             "Sys.Modify",
         )?;
-    } else if q.ct {
-        super::enforce(
-            &state,
-            &user,
-            &crate::perm::ct_path(&q.conn, &q.vm),
-            "CT.Audit",
-        )?;
     } else {
         super::enforce(
             &state,

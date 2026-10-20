@@ -58,7 +58,7 @@ export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
   "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
   "groups", "acl", "resources", "ips", "usage", "shares",
-  "servers", "guests", "networks", "storage", "templates", "admin",
+  "servers", "guests", "networks", "storage", "admin",
 ]);
 
 /// Top-level paths that are a Datacenter tab. They are in RESERVED (the server
