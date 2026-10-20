@@ -19,21 +19,33 @@
 //   node test/live-ipam.mjs [base]      (default http://127.0.0.1:8799)
 
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { ensureTestNetwork, removeTestNetwork } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
 const ISO = process.env.ISO ?? "alpine-standard-3.24.2-x86_64.iso";
-const VM = "vmtest-ipam";
+// A guest is named by its UUID; the UUID is also where its serial socket lives.
+const VM = randomUUID();
 const MAC = "52:54:00:d4:c0:0e";
 const conn = (await (await fetch(base + "/connections")).json())[0];
 const api = (path, init) => fetch(`${base}/proxy/${conn.id}${path}`, init).then((r) => r.json());
-const sh = (...a) => execFileSync("sudo", a, { stdio: ["ignore", "pipe", "ignore"] }).toString();
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail = "") => results.push([!!ok, name, detail]);
+
+// A guest is given a disk by absolute path, so the ISO volume's path comes
+// from the pool it lives in rather than from a pool+volume source.
+let isoPath = "";
+const pools = await api("/pools").catch(() => []);
+for (const p of Array.isArray(pools) ? pools : []) {
+  const vols = await api(`/pools/${encodeURIComponent(p.name)}/volumes`).catch(() => []);
+  isoPath ||= (Array.isArray(vols) ? vols : []).find((v) => v.name === ISO)?.path ?? "";
+}
+if (!isoPath) {
+  console.error(`the Alpine live ISO '${ISO}' is not in any pool; set ISO=<volume name>`);
+  process.exit(1);
+}
 
 // The daemon's network: `name` is its key (a UUID), `bridge` is what the guest
 // NIC names, `gateway` is where its DNS and DHCP answer from.
@@ -54,10 +66,54 @@ const waitForMine = async (ms = 15000) => {
   return await mine();
 };
 
+// The guest's serial console is a Unix socket in the daemon's runtime
+// directory, not a pty. The suite assumes the daemon's standard data dir
+// (`/var/lib/virt-man-daemon`). QEMU owns the socket as root, so a small
+// Python bridge runs under sudo; `select` keeps both directions moving
+// without a terminal in between.
+const SERIAL = `/var/lib/virt-man-daemon/qemu/${VM}/serial.sock`;
+const BRIDGE = `
+import socket, select, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+stdin = sys.stdin.buffer
+open_stdin = True
+while True:
+    fds = [s] + ([stdin] if open_stdin else [])
+    r, _, _ = select.select(fds, [], [], 0.2)
+    if not r:
+        # The caller closed its end: keep relaying until the guest is quiet for
+        # a moment, rather than dropping the last reply.
+        if not open_stdin: sys.exit(0)
+        continue
+    for f in r:
+        if f is s:
+            d = s.recv(65536)
+            if not d: sys.exit(0)
+            sys.stdout.buffer.write(d)
+            sys.stdout.buffer.flush()
+        else:
+            d = stdin.read1(65536)
+            if not d:
+                open_stdin = False
+            else:
+                s.sendall(d)
+`;
+let serialMissing = false;
 /// Type commands on the guest's serial console and return what it printed.
 function consoleRun(cmds, settleMs = 4000) {
+  if (!existsSync(SERIAL)) {
+    // Say why once, and fail the checks that need it instead of waiting on a
+    // connection that will never be made.
+    if (!serialMissing) {
+      serialMissing = true;
+      console.error(`serial socket missing: ${SERIAL}`);
+      check("the guest's serial console socket exists", false, SERIAL);
+    }
+    return Promise.resolve("");
+  }
   return new Promise((resolve) => {
-    const p = spawn("sudo", ["script", "-qfc", `virsh console --force ${VM}`, "/dev/null"], { stdio: ["pipe", "pipe", "ignore"] });
+    const p = spawn("sudo", ["python3", "-u", "-c", BRIDGE, SERIAL], { stdio: ["pipe", "pipe", "ignore"] });
     let out = "";
     p.stdout.on("data", (d) => { out += d.toString(); });
     const steps = ["", ...cmds];
@@ -67,7 +123,9 @@ function consoleRun(cmds, settleMs = 4000) {
         p.stdin.write(`${steps[i++]}\r`);
         setTimeout(next, i === 1 ? 2500 : settleMs);
       } else {
-        p.stdin.write("\x1d");
+        // Closing stdin ends the bridge, so the socket is free for the next
+        // command batch.
+        p.stdin.end();
         setTimeout(() => { p.kill(); resolve(out); }, 500);
       }
     };
@@ -77,7 +135,6 @@ function consoleRun(cmds, settleMs = 4000) {
 const lease = (out) => [...out.matchAll(/lease of (\d+\.\d+\.\d+\.\d+) obtained/g)].map((m) => m[1]).at(-1);
 const dhcp = async () => lease(await consoleRun(["ip addr flush dev eth0; udhcpc -i eth0 -n -q -t 6 2>&1 | tail -2"], 9000));
 
-const tmp = mkdtempSync(join(tmpdir(), "vm-ipam-"));
 try {
   // One dnsmasq per active network, each with its own config. pgrep exits 1
   // when nothing matches, which is the answer we want here.
@@ -89,16 +146,21 @@ try {
   check("dnsmasq serves the network, from its own config",
     dnsmasq.length > 0 && ipamInfo.serving === true, dnsmasq);
 
-  writeFileSync(join(tmp, "vm.xml"), `<domain type='kvm'><name>${VM}</name><memory unit='MiB'>512</memory><vcpu>1</vcpu>
+  const vmXml = `<domain type='kvm'><name>${VM}</name><memory unit='MiB'>512</memory><vcpu>1</vcpu>
     <os><type arch='x86_64' machine='q35'>hvm</type><boot dev='cdrom'/></os><features><acpi/><apic/></features><devices>
-    <disk type='volume' device='cdrom'><source pool='ISOs' volume='${ISO}'/><target dev='sda' bus='sata'/><readonly/></disk>
+    <disk type='file' device='cdrom'><driver name='qemu' type='raw'/><source file='${isoPath}'/><target dev='sda' bus='sata'/><readonly/></disk>
     <interface type='bridge'><source bridge='${net.bridge}'/><mac address='${MAC}'/><model type='virtio'/></interface>
-    <serial type='pty'/><console type='pty'/></devices></domain>`);
-  sh("virsh", "define", join(tmp, "vm.xml"));
-  sh("virsh", "start", VM);
+    <serial type='pty'/><console type='pty'/></devices></domain>`;
+  const def = await fetch(`${base}/proxy/${conn.id}/domains?start=true`, {
+    method: "POST", headers: { "Content-Type": "application/xml" },
+    body: vmXml,
+  });
+  if (!def.ok) throw new Error(`could not define ${VM}: ${def.status} ${await def.text()}`);
+  // QEMU creates the socket at start; give it a moment if the start just returned.
+  for (let i = 0; i < 20 && !existsSync(SERIAL); i++) await wait(250);
   // Boot to the login prompt, then log in.
   let booted = false;
-  for (let i = 0; i < 30 && !booted; i++) {
+  for (let i = 0; i < 30 && !booted && !serialMissing; i++) {
     await wait(3000);
     booted = /login:/.test(await consoleRun([], 500));
   }
@@ -192,11 +254,10 @@ try {
   for (let i = 0; i < 20 && !gone; i++) { await wait(1000); gone = !(await mine()); }
   check("deleting the VM deletes its reservation", gone);
 } finally {
-  try { sh("virsh", "destroy", VM); } catch { /* off */ }
-  try { sh("virsh", "undefine", VM); } catch { /* gone */ }
+  // The delete stops the guest first, so it replaces destroy and undefine.
+  try { await api(`/domains/${VM}`, { method: "DELETE" }); } catch { /* gone */ }
   await api(`${NETP}/hosts/${MAC}`, { method: "DELETE" }).catch(() => {});
   await removeTestNetwork(base, net);
-  rmSync(tmp, { recursive: true, force: true });
 }
 
 for (const [ok, name, detail] of results) console.log(`${ok ? "\u2714" : "\u2716"} ${name}${ok ? "" : `  — ${detail}`}`);

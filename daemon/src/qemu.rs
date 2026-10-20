@@ -766,6 +766,9 @@ impl Manager {
             return Err("QMP socket path exceeds Unix socket limit".into());
         }
         let _ = fs::remove_file(&sock);
+        // A killed run leaves the serial server socket behind, and QEMU refuses
+        // to bind an existing file.
+        let _ = fs::remove_file(dir.join("serial.sock"));
         // Build the argv before starting swtpm: a definition QEMU would refuse
         // must not leave a TPM emulator running with no guest.
         let argv = self.argv(id, &d)?;
@@ -1220,7 +1223,16 @@ impl Manager {
             ]);
         }
         match d.serial {
-            Some(SerialKind::Pty) => args.extend(["-serial".into(), "pty".into()]),
+            // A stable socket in the guest's runtime directory: the console
+            // view and the live suites open it, and `-serial pty` would give a
+            // path nobody can find again.
+            Some(SerialKind::Pty) => args.extend([
+                "-serial".into(),
+                format!(
+                    "unix:{},server=on,wait=off",
+                    escape_blockdev_path(&dir.join("serial.sock"))?
+                ),
+            ]),
             Some(SerialKind::Null) => args.extend(["-serial".into(), "none".into()]),
             None => {}
         }
@@ -2608,7 +2620,48 @@ mod tests {
         assert!(devices.contains(&"i6300esb".to_string()));
         assert_eq!(one(&args, "-vnc"), "127.0.0.1:0");
         assert!(values(&args, "-display").is_empty());
-        assert_eq!(values(&args, "-serial"), ["pty"]);
+        assert_eq!(
+            values(&args, "-serial"),
+            [format!(
+                "unix:{},server=on,wait=off",
+                root.join("state").join(ID).join("serial.sock").display()
+            )]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_argv_binds_a_pty_serial_to_a_stable_socket() {
+        let (manager, root) = manager("serial");
+        let primary = disk(&root, "a.raw");
+        manager.define(&spa(ID, &primary, "")).unwrap();
+        let socket = root.join("state").join(ID).join("serial.sock");
+        assert_eq!(
+            values(&manager.args(ID).unwrap(), "-serial"),
+            [format!("unix:{},server=on,wait=off", socket.display())]
+        );
+
+        // No `<serial>` or `<console>`: no serial device, not a socket nobody
+        // asked for.
+        let bare = manager
+            .xml(ID)
+            .unwrap()
+            .replace("<serial type=\"pty\"><target port=\"0\"/></serial>", "")
+            .replace(
+                "<console type=\"pty\"><target type=\"serial\" port=\"0\"/></console>",
+                "",
+            );
+        manager.update_xml(ID, &bare).unwrap();
+        assert!(values(&manager.args(ID).unwrap(), "-serial").is_empty());
+
+        // A null serial still maps to QEMU's own "none".
+        manager
+            .update_xml(
+                ID,
+                &bare.replace("</devices>", "<serial type=\"null\"/></devices>"),
+            )
+            .unwrap();
+        assert_eq!(values(&manager.args(ID).unwrap(), "-serial"), ["none"]);
         fs::remove_dir_all(root).unwrap();
     }
 

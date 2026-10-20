@@ -4,7 +4,7 @@
 // untouched), hot-add, hot-remove, NICs added elsewhere appearing, and the old
 // /firewall URL.
 //
-// Needs sudo (virsh, tc). Networks are the daemon's own, so nothing is named
+// Needs sudo (tc). Networks are the daemon's own, so nothing is named
 // after a libvirt network: the guest's NIC names the network's bridge, and the
 // daemon's supervisor pre-allocates a permanent reservation for it (there is no
 // "DHCP creates the reservation on first ask" step). When the host has no
@@ -15,12 +15,15 @@
 //   node test/live-vmnet.mjs [base]      (default http://127.0.0.1:8799)
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { ensureTestNetwork, removeTestNetwork } from "./_fixture.mjs";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8799";
-const VM = "vmtest-vmnet";
+// Guests are named by their UUID; `vmtest-vmnet` is only the display title.
+const VM = randomUUID();
+const VM_TITLE = "vmtest-vmnet";
 
 execFileSync("npx", ["vite", "build", "--logLevel", "error", "--outDir", "test/_live"],
   { stdio: "ignore", env: { ...process.env, VM_IIFE: "1" } });
@@ -43,7 +46,7 @@ const hosts = async () => {
   const r = await fetch(`${base}/proxy/${conn.id}${hostsPath}`);
   if (r.ok) return (await r.json()).hosts ?? [];
   // The API is the live view; the store is what it is served from. It is
-  // root-only, and the suite already runs sudo for tc and virsh.
+  // root-only, and the suite already runs sudo for tc.
   try {
     const reservations = JSON.parse(sh("cat", STORE)).networks?.[NET]?.reservations;
     if (Array.isArray(reservations)) return reservations;
@@ -53,16 +56,26 @@ const hosts = async () => {
 };
 const reserved = async (mac) => (await hosts()).find((r) => r.mac === mac);
 // The bridge's ifindex changes if the network is stopped and started, so it is
-// how "the network was not restarted" is measured. No virsh net-info: these
-// networks were never defined in libvirt.
+// how "the network was not restarted" is measured. There is no manager object
+// to ask: these networks are the daemon's own.
 const bridgeIndex = () => readFileSync(`/sys/class/net/${BRIDGE}/ifindex`, "utf8").trim();
+
+// The NICs the daemon reports, with their host tap: the tap is what `tc` shapes.
+const nics = async () => {
+  const r = await fetch(`${base}/proxy/${conn.id}/domains/${VM}/interfaces`);
+  return (await r.json()).interfaces ?? [];
+};
+const domainXml = async () => {
+  const r = await fetch(`${base}/proxy/${conn.id}/domains/${VM}/xml`);
+  return (await r.json()).xml ?? "";
+};
 
 const def = await fetch(`${base}/proxy/${conn.id}/domains?start=true`, {
   method: "POST", headers: { "Content-Type": "application/xml" },
-  body: x.domainXml({ name: VM, cpus: 1, memory_mb: 128, graphics: "vnc", network: NET, bridge: BRIDGE, disks: [] }),
+  body: x.domainXml({ uuid: VM, name: VM_TITLE, cpus: 1, memory_mb: 128, graphics: "vnc", network: NET, bridge: BRIDGE, disks: [] }),
 });
 if (!def.ok) {
-  console.error(`could not define ${VM}: ${await def.text()}`);
+  console.error(`could not define ${VM_TITLE}: ${await def.text()}`);
   await removeTestNetwork(base, net);
   process.exit(1);
 }
@@ -115,7 +128,14 @@ try {
   d.querySelector("#rate-tx").value = "20";
   d.querySelector("#rate-ok").click();
   check("the table shows both limits", await until(() => /10 Mbps[\s\S]*20 Mbps/.test(rows()[0]?.textContent ?? "")));
-  const dev = sh("virsh", "domiflist", VM).match(new RegExp(`(vnet\\d+)\\s+bridge\\s+${BRIDGE}\\s+\\S+\\s+${mac0}`))?.[1];
+  const n0 = (await nics()).find((n) => n.mac === mac0);
+  const dev = n0?.dev;
+  check("the API reports the NIC's host tap, model and network",
+    /^tap[0-9a-f]{10}$/.test(dev ?? "") && n0?.model === "virtio" && n0?.network === NET,
+    JSON.stringify(n0));
+  check("…with its byte counters and both limits as the guest sees them",
+    n0?.rx_mbps === 10 && n0?.tx_mbps === 20 && n0?.rx_bytes >= 0 && n0?.tx_bytes >= 0,
+    JSON.stringify(n0));
   const cls = sh("tc", "class", "show", "dev", dev);
   const pol = sh("tc", "filter", "show", "dev", dev, "parent", "ffff:");
   check("RX limit is enforced on the host tap (htb, ~10 Mbit)", /rate 97\d\dKbit/.test(cls), cls.trim());
@@ -145,10 +165,21 @@ try {
   netSel.dispatchEvent(new w.Event("change", { bubbles: true }));
   d.querySelector("#nic-ok").click();
   check("a hot-added interface appears in the table", await until(() => rows().length === 2), toasts());
-  check("…and is attached to the running guest", (sh("virsh", "domiflist", VM).match(/vnet\d+/g) ?? []).length === 2);
+  check("…and is attached to the running guest", (await nics()).filter((n) => n.dev).length === 2);
 
-  // Added by another path (the hardware editor / virsh): it just shows up.
-  sh("virsh", "attach-interface", VM, "bridge", BRIDGE, "--model", "virtio", "--mac", "52:54:00:9a:00:09", "--live", "--config");
+  // Added by another path (the hardware editor / another API client): it just
+  // shows up. The daemon resolves the network key to its bridge itself.
+  const added = await fetch(`${base}/proxy/${conn.id}/domains/${VM}/interfaces`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ network: NET, model: "virtio", mac: "52:54:00:9a:00:09" }),
+  });
+  const attached = await added.json().catch(() => ({}));
+  check("the API attaches a NIC to the running guest",
+    added.ok && attached.mac === "52:54:00:9a:00:09" && attached.live === true,
+    `${added.status} ${JSON.stringify(attached)}`);
+  check("…and it is live with a host tap and in the definition",
+    !!(await nics()).find((n) => n.mac === "52:54:00:9a:00:09")?.dev
+      && (await domainXml()).includes("52:54:00:9a:00:09"));
   d.querySelector('.tab[data-vmtab="summary"]').click(); await wait(800);
   d.querySelector('.tab[data-vmtab="network"]').click();
   check("a NIC added elsewhere appears in the tab", await until(() => rows().some((r) => macOf(r) === "52:54:00:9a:00:09")));
@@ -158,7 +189,7 @@ try {
   rows().find((r) => macOf(r) === "52:54:00:9a:00:09").querySelector("[data-nic-del]").click(); await wait(100);
   [...d.querySelectorAll(".modal-back.open .btn")].find((b) => /Remove/.test(b.textContent))?.click();
   check("an unacknowledged unplug is reported as pending", await until(() => /has not released it yet/.test(toasts())), toasts());
-  check("removal takes the NIC out of the definition", !sh("virsh", "dumpxml", "--inactive", VM).includes("52:54:00:9a:00:09"));
+  check("removal takes the NIC out of the definition", !(await domainXml()).includes("52:54:00:9a:00:09"));
 
   await until(() => rows()[0]?.querySelector("[data-nic-ipam]"));
   rows()[0].querySelector("[data-nic-ipam]").click(); await wait(50);
@@ -179,8 +210,10 @@ try {
     w.location.pathname);
   w.close();
 } finally {
-  try { sh("virsh", "destroy", VM); } catch { /* already off */ }
-  try { sh("virsh", "undefine", VM); } catch { /* already gone */ }
+  // The delete stops the guest first, so it replaces both destroy and undefine.
+  try {
+    await fetch(`${base}/proxy/${conn.id}/domains/${VM}?remove_storage=true`, { method: "DELETE" });
+  } catch { /* already gone */ }
   if (mac0) await fetch(`${base}/proxy/${conn.id}/networks/${encodeURIComponent(NET)}/hosts/${mac0}`, { method: "DELETE" }).catch(() => {});
   await removeTestNetwork(base, net);
 }
