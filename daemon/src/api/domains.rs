@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use super::ApiError;
+use super::{ApiError, off_runtime};
 use crate::disks;
 use crate::ipam::server::Ipam;
 use crate::pools::Pools;
@@ -210,14 +210,18 @@ async fn delete(
         _ => None,
     };
     let stopped = if let Some(force) = running {
-        if force {
-            s.manager.force_stop(&cfg.id).map_err(err)?;
-        } else {
-            s.manager
-                .powerdown(&cfg.id, false)
-                .or_else(|_| s.manager.force_stop(&cfg.id))
-                .map_err(err)?;
-        }
+        let manager = s.manager.clone();
+        let id = cfg.id.clone();
+        off_runtime(move || {
+            if force {
+                manager.force_stop(&id)
+            } else {
+                manager
+                    .powerdown(&id, false)
+                    .or_else(|_| manager.force_stop(&id))
+            }
+        })
+        .await?;
         true
     } else {
         false
@@ -352,7 +356,9 @@ async fn start(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let cfg = resolve(&s.manager, &name)?;
-    s.manager.start(&cfg.id).map_err(err)?;
+    let manager = s.manager.clone();
+    let id = cfg.id.clone();
+    off_runtime(move || manager.start(&id)).await?;
     Ok(Json(json!({"name": cfg.id, "started": true})))
 }
 
@@ -361,7 +367,9 @@ async fn shutdown(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let cfg = resolve(&s.manager, &name)?;
-    s.manager.powerdown(&cfg.id, false).map_err(err)?;
+    let manager = s.manager.clone();
+    let id = cfg.id.clone();
+    off_runtime(move || manager.powerdown(&id, false)).await?;
     Ok(Json(json!({"name": cfg.id, "shutdown": true})))
 }
 
@@ -379,7 +387,9 @@ async fn destroy(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let cfg = resolve(&s.manager, &name)?;
-    s.manager.force_stop(&cfg.id).map_err(err)?;
+    let manager = s.manager.clone();
+    let id = cfg.id.clone();
+    off_runtime(move || manager.force_stop(&id)).await?;
     Ok(Json(json!({"name": cfg.id, "destroyed": true})))
 }
 

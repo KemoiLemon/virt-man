@@ -910,7 +910,18 @@ impl Manager {
                 format!("QEMU failed readiness check: {detail}")
             });
         }
-        drop(child);
+        // The guest outlives this call, so its handle moves to a waiter thread.
+        // Nothing else can reap it: an unreaped QEMU stays a zombie with its
+        // `/proc/<pid>/stat` entry intact (same pid, same start ticks), which
+        // the exit check below reads as "still running". Every stop then waited
+        // out its whole timeout and reported "QEMU did not exit" for a guest
+        // that was already gone, and the pid stayed occupied for the life of
+        // the daemon.
+        let guest = id.to_string();
+        std::thread::spawn(move || match child.wait() {
+            Ok(status) => tracing::info!("qemu: guest {guest} exited: {status}"),
+            Err(e) => tracing::warn!("qemu: waiting for guest {guest}: {e}"),
+        });
         Ok(())
     }
 
@@ -1650,15 +1661,39 @@ fn display_title(title: &str) -> Result<String, String> {
 fn process_exe_matches(pid: u32, executable: &Path) -> bool {
     fs::canonicalize(format!("/proc/{pid}/exe")).ok() == fs::canonicalize(executable).ok()
 }
+/// The state letter in `/proc/<pid>/stat` (`R`, `S`, `Z`, …). Field 3 follows
+/// the parenthesised command name.
+fn process_state(pid: u32) -> Option<char> {
+    let s = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    s.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
+}
 fn wait_exit(pid: u32, ticks: u64, secs: u64) -> bool {
     let until = Instant::now() + Duration::from_secs(secs);
-    while process_ticks(pid) == Some(ticks) {
+    loop {
+        if process_ticks(pid) != Some(ticks) {
+            return true;
+        }
+        // A zombie has exited: only its `/proc` entry is left, and it survives
+        // until the child is reaped. Counting that as "still running" is what
+        // turned a successful SIGKILL into a timeout and a false "did not
+        // exit". Reap it here too, so the pid is freed even if the guest's
+        // waiter thread has not got to it yet.
+        if process_state(pid) == Some('Z') {
+            // SAFETY: WNOHANG cannot block. A guest started by a previous
+            // daemon is not our child, so ECHILD is an expected answer.
+            unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+            return true;
+        }
         if Instant::now() >= until {
             return false;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    true
 }
 
 const SWTPM: &str = "/usr/bin/swtpm";
@@ -2313,6 +2348,35 @@ mod tests {
 
     fn one(args: &[String], flag: &str) -> String {
         values(args, flag).remove(0)
+    }
+
+    #[test]
+    fn a_killed_child_nobody_reaped_still_counts_as_exited() {
+        // A SIGKILLed QEMU used to stay a zombie: its `/proc/<pid>/stat` entry
+        // keeps the same pid and start ticks until someone reaps it, so the
+        // stop waited out its whole timeout and reported "QEMU did not exit"
+        // for a guest that was already gone. Deliberately leave this child
+        // unreaped, as the daemon did.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let ticks = process_ticks(pid).expect("start ticks of a live child");
+        child.kill().expect("kill the child");
+        let started = Instant::now();
+        assert!(
+            wait_exit(pid, ticks, 5),
+            "a zombie has exited; waiting on it must succeed"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "it must not run out the timeout: took {:?}",
+            started.elapsed()
+        );
+        // `wait_exit` reaped it, so the pid is free and the entry is gone.
+        assert_eq!(process_ticks(pid), None);
+        let _ = child.wait();
     }
 
     #[test]

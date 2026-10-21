@@ -54,6 +54,29 @@ impl ApiError {
     }
 }
 
+/// Run a manager call that waits on a process off the async workers.
+///
+/// A graceful stop waits up to 30 s for QEMU to exit. Running that on a worker
+/// thread stalls the runtime instead: on a one-CPU host the daemon then answers
+/// nothing for those 30 s, so the web server's health probe marks the host
+/// offline and unrelated work — a network start or stop, the IPAM supervisor —
+/// fails on screen. The work itself is a blocking poll of `/proc`, so a
+/// dedicated blocking thread is where it belongs.
+pub(crate) async fn off_runtime<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError::internal(format!("lifecycle worker failed: {e}")))?
+        .map_err(|e| {
+            if e == "unknown QEMU VM" {
+                ApiError::not_found(e)
+            } else {
+                ApiError::conflict(e)
+            }
+        })
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({"error": self.message}))).into_response()

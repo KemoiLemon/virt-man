@@ -6,8 +6,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::ApiError;
 use super::firewall::FirewallState;
+use super::{ApiError, off_runtime};
 use crate::domainxml::{self, IfaceKind, Interface};
 use crate::ipam::server::Ipam;
 use crate::qemu::{DiskFormat, Manager, State as VmState, VmConfig};
@@ -367,26 +367,30 @@ async fn remove_disk(
         json!({"ok": true, "target": target, "pending": pending}),
     ))
 }
+
 async fn start(
     State(s): State<QemuState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     rebind(&s, &id)?;
-    s.manager.start(&id).map_err(err)?;
+    let manager = s.manager.clone();
+    off_runtime(move || manager.start(&id)).await?;
     Ok(Json(json!({"ok": true})))
 }
 async fn shutdown(
     State(s): State<QemuState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    s.manager.powerdown(&id, false).map_err(err)?;
+    let manager = s.manager.clone();
+    off_runtime(move || manager.powerdown(&id, false)).await?;
     Ok(Json(json!({"ok": true})))
 }
 async fn force_stop(
     State(s): State<QemuState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    s.manager.force_stop(&id).map_err(err)?;
+    let manager = s.manager.clone();
+    off_runtime(move || manager.force_stop(&id)).await?;
     Ok(Json(json!({"ok": true})))
 }
 async fn remove(
