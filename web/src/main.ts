@@ -3358,7 +3358,7 @@ function openNetworkForm(
         <option value="">Select a bridge…</option>
         ${initial.bridge ? `<option value="${esc(initial.bridge)}" selected>${esc(initial.bridge)}</option>` : ""}
       </select></label>
-      <label class="field" data-net-field="ip"><span>Network (CIDR)</span><span style="display:flex;gap:7px;align-items:center"><input id="net-ip" placeholder="IP-Less Network" value="${esc(initial.ip)}"${uuid ? "" : " readonly"}>${uuid ? "" : `<button class="btn icon field-btn" id="net-ip-reroll" type="button" title="Pick another subnet">${ic.reroll()}</button><button class="btn icon field-btn" id="net-ip-clear" type="button" title="No subnet">${ic.trash()}</button>`}</span></label>
+      <label class="field" data-net-field="ip"><span>Network (CIDR)</span><span style="display:flex;gap:7px;align-items:center"><input id="net-ip" placeholder="IP-Less Network" value="${esc(initial.ip)}" readonly><button class="btn icon field-btn" id="net-ip-reroll" type="button" title="Pick another subnet">${ic.reroll()}</button><button class="btn icon field-btn" id="net-ip-clear" type="button" title="No subnet">${ic.trash()}</button></span></label>
       <label class="field" data-net-field="dns"><span>DNS servers (NAT, comma separated)</span><input id="net-dns" placeholder="1.1.1.1, 8.8.8.8" value="${esc(initial.dns)}"></label>
     </div>`,
     `<button class="btn primary" id="net-save">${uuid ? "Save" : "Create"}</button>`,
@@ -3418,41 +3418,43 @@ function openNetworkForm(
     })
     .catch(() => {}); // no bridges: the picker shows just the placeholder
 
-  // A new NAT or isolated network is given a subnet the daemon picks, so the
-  // user never types an address that collides with the host's LAN, a VPN or
-  // another network. It is read-only -- the only way to change it is to ask
-  // for another one, which is re-checked against every subnet in use, so the
-  // form cannot be talked into a collision. The create path generates one
-  // too, so this is only the preview. An edit keeps what it has and stays
-  // editable; bridge mode takes its addressing from the bridge.
-  if (!uuid) {
-    const ipInput = $("#net-ip", el) as HTMLInputElement;
-    const reroll = $("#net-ip-reroll", el) as HTMLButtonElement;
-    const clear = $("#net-ip-clear", el) as HTMLButtonElement;
-    const suggest = () => {
-      if (mode() === "bridge") return;
-      // Cleared first so a request that fails leaves no stale address behind
-      // for the form to submit as if it were this network's own.
-      ipInput.value = "";
-      sync();
-      api.get<{ subnet: string }>(`/proxy/${conn}/networks/suggest-subnet`)
-        .then((r) => {
-          ipInput.value = r.subnet;
-          sync();
-        })
-        .catch(() => toast("Could not get a subnet from the server", "bad"));
-    };
-    // Clearing is offered only where a network may have no subnet at all
-    // (isolated), and re-rolling is what brings one back -- so the two buttons
-    // swap places rather than either being permanently unavailable.
-    clear.addEventListener("click", () => {
-      ipInput.value = "";
-      sync();
-    });
-    suggest();
-    reroll.addEventListener("click", suggest);
-    $("#net-mode", el).addEventListener("change", suggest);
-  }
+  // The subnet is the daemon's to choose, for an existing network as much as
+  // for a new one: an address typed here is how two networks end up on one
+  // /24, or on the host's own LAN. The field is read-only and the re-roll is
+  // the only way to change it -- it asks the daemon for another range, which
+  // re-checks every subnet in use, so the form cannot be talked into a
+  // collision. Bridge mode takes its addressing from the bridge.
+  const ipInput = $("#net-ip", el) as HTMLInputElement;
+  const reroll = $("#net-ip-reroll", el) as HTMLButtonElement;
+  const clear = $("#net-ip-clear", el) as HTMLButtonElement;
+  const suggest = () => {
+    if (mode() === "bridge") return;
+    // Cleared first so a request that fails leaves no stale address behind
+    // for the form to submit as if it were this network's own.
+    ipInput.value = "";
+    sync();
+    api.get<{ subnet: string }>(`/proxy/${conn}/networks/suggest-subnet`)
+      .then((r) => {
+        ipInput.value = r.subnet;
+        sync();
+      })
+      .catch(() => toast("Could not get a subnet from the server", "bad"));
+  };
+  // Clearing is offered only where a network may have no subnet at all
+  // (isolated), and re-rolling is what brings one back -- so the two buttons
+  // swap places rather than either being permanently unavailable.
+  clear.addEventListener("click", () => {
+    ipInput.value = "";
+    sync();
+  });
+  reroll.addEventListener("click", suggest);
+  // A new network starts from a suggestion; an edit keeps the subnet it has
+  // until someone re-rolls it, and a mode change never silently re-addresses
+  // a network that is already running.
+  if (!uuid) suggest();
+  $("#net-mode", el).addEventListener("change", () => {
+    if (!uuid || (mode() === "nat" && !ipInput.value)) suggest();
+  });
 
   $("#net-save", el).onclick = async () => {
     const form: NetworkForm = {

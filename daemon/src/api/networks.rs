@@ -69,16 +69,25 @@ fn used_prefixes_host() -> Vec<(u32, u8)> {
         let Ok(o) = std::process::Command::new("ip").args(args).output() else {
             continue;
         };
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
-            for tok in line.split_whitespace() {
-                // `10.0.0.5/24` in addr output, `10.0.0.0/24` in route output.
-                if let Some((net, p)) = read_cidr(tok) {
-                    out.push((net, p));
-                }
-            }
-        }
+        out.extend(prefixes_in(&String::from_utf8_lossy(&o.stdout)));
     }
     out
+}
+
+/// The `a.b.c.d/n` tokens in `ip` output, and only those.
+///
+/// Every other token on those lines is a bare address — `brd 10.77.0.255`,
+/// `src 10.77.0.1`, a default route's gateway — which is *inside* a prefix the
+/// same output already reports. Reading one as a /32 made a running network
+/// collide with its own bridge address: every edit of a live network was
+/// refused with "the subnet overlaps an address range already in use", even a
+/// rename that changed nothing.
+fn prefixes_in(text: &str) -> Vec<(u32, u8)> {
+    text.lines()
+        .flat_map(str::split_whitespace)
+        .filter(|tok| tok.contains('/'))
+        .filter_map(read_cidr)
+        .collect()
 }
 
 /// Every IPv4 prefix this host can already reach: its interfaces and routes,
@@ -449,16 +458,26 @@ async fn put_xml(
     // `bridge_up`, not `is_active`: a crashed dnsmasq must not decide whether
     // the address is reprogrammed.
     let was_up = hostnet::bridge_up(&old, &name);
+    // A definition that keeps its subnet cannot introduce a collision, so it
+    // is not checked again: doing so refused a rename over ambient host state
+    // the network had nothing to do with (a VPN route added since). Only a new
+    // range is checked, against everything but this network.
+    let subnet_changed = old.subnet() != net.subnet();
     // The old bridge's address is on the host, but it is this network's own.
-    let own = old.subnet().as_deref().and_then(read_cidr);
-    let host = host_prefixes(own).await;
+    let host = if subnet_changed {
+        host_prefixes(old.subnet().as_deref().and_then(read_cidr)).await
+    } else {
+        Vec::new()
+    };
     // Refuse before stopping anything: a rejected definition must leave the
     // running network exactly as it is.
     {
         let s = st.ipam.lock();
         check_title(&s, &name, &net.title)?;
         check_bridge(&s, &name, &net)?;
-        subnet_clash(&s, &host, &net, Some(&name))?;
+        if subnet_changed {
+            subnet_clash(&s, &host, &net, Some(&name))?;
+        }
     }
     if reprogram && was_up && !same_bridge {
         st.ipam
@@ -930,6 +949,37 @@ mod tests {
             lease_secs: 3600,
             reservations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_bare_address_in_ip_output_is_not_a_prefix_in_use() {
+        // The lines a running managed network actually produces. The bridge
+        // address and the route's `src` are the network's own; read as /32s
+        // they made the network overlap itself and every edit was refused.
+        let addr = concat!(
+            "2: vbr5b92a1a54f00    inet 10.77.0.1/24 scope global vbr5b92a1a54f00\\       valid_lft forever preferred_lft forever\n",
+            "2: vbr5b92a1a54f00    inet6 fe80::1/64 scope link proto kernel_ll\n",
+        );
+        let route = concat!(
+            "10.77.0.0/24 dev vbr5b92a1a54f00 proto kernel scope link src 10.77.0.1\n",
+            "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.42 metric 100\n",
+        );
+        let mut got = prefixes_in(addr);
+        got.extend(prefixes_in(route));
+        // The bridge's /24 appears twice (its address line and its route);
+        // nothing else is a prefix, so no /32 gets invented from `src` or a
+        // default route's gateway.
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            got.iter().all(|p| *p == (0x0a4d_0000, 24)),
+            "only the bridge's own /24: {got:?}"
+        );
+        // A VPN whose route has no interface address of its own still counts:
+        // the destination prefix is what a new /24 must not land in.
+        assert_eq!(
+            prefixes_in("10.0.0.0/8 dev tun0 scope link\n"),
+            vec![(0x0a00_0000, 8)]
+        );
     }
 
     #[test]
