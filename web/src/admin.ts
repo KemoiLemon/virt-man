@@ -17,6 +17,8 @@ import { ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { fmtBytes } from "./stats";
 import { esc } from "./xml";
+import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
+import type { Unit } from "./units";
 import type { AdminSection, AdminTab } from "./route";
 
 export interface AdminCtx {
@@ -895,23 +897,75 @@ const quotas_: Painter = async (ctx, area) => {
 };
 
 const LIMIT_FIELDS: [keyof Limit, string][] = [
-  ["vms", "VMs"], ["vcpus", "vCPUs"], ["memory_mb", "Memory (MiB)"],
-  ["storage_gb", "Storage (GiB)"], ["networks", "Networks"], ["forwards", "Port forwards"],
+  ["vms", "VMs"], ["vcpus", "vCPUs"], ["memory_mb", "Memory"],
+  ["storage_gb", "Storage"], ["networks", "Networks"], ["forwards", "Port forwards"],
 ];
 
+/// The units each size limit may be entered in, and the canonical one the
+/// server stores. The selector is presentation only: the value is converted
+/// back to MiB/GiB when the form is read.
+const LIMIT_UNITS: Partial<Record<keyof Limit, readonly Unit[]>> = {
+  memory_mb: MEMORY_UNITS,
+  storage_gb: STORAGE_UNITS,
+};
+const LIMIT_DEFAULT: Partial<Record<keyof Limit, Unit>> = {
+  memory_mb: MEMORY_DEFAULT,
+  storage_gb: STORAGE_DEFAULT,
+};
+const LIMIT_CANONICAL: Partial<Record<keyof Limit, Unit>> = {
+  memory_mb: "MiB",
+  storage_gb: "GiB",
+};
+
 function limitFields(prefix: string, l: Limit): string {
-  return `<div class="limit-grid">${LIMIT_FIELDS.map(([k, label]) => `
+  return `<div class="limit-grid">${LIMIT_FIELDS.map(([k, label]) => {
+    const input = `<input type="number" min="0" inputmode="numeric" data-${prefix}="${k}" value="${l[k] ?? ""}" placeholder="∞">`;
+    const units = LIMIT_UNITS[k];
+    if (!units) return `
+    <label class="field"><span>${label}</span>${input}</label>`;
+    const unit = LIMIT_DEFAULT[k]!;
+    return `
     <label class="field"><span>${label}</span>
-      <input type="number" min="0" inputmode="numeric" data-${prefix}="${k}" value="${l[k] ?? ""}" placeholder="∞"></label>`).join("")}</div>`;
+      <div class="unit-row">${input}
+        <select data-unit-for="${k}" data-unit="${unit}">${unitOptions(units, unit)}</select>
+      </div></label>`;
+  }).join("")}</div>`;
 }
 
 function readLimit(root: Element, prefix: string): Limit {
   const out: Limit = {};
   root.querySelectorAll<HTMLInputElement>(`[data-${prefix}]`).forEach((i) => {
+    const key = i.getAttribute(`data-${prefix}`) as keyof Limit;
     const v = i.value.trim();
-    out[i.getAttribute(`data-${prefix}`) as keyof Limit] = v === "" ? null : Math.max(0, Math.floor(Number(v)));
+    if (v === "") {
+      out[key] = null;
+      return;
+    }
+    let n = Math.max(0, Number(v));
+    const canonical = LIMIT_CANONICAL[key];
+    const unit = i.closest(".unit-row")?.querySelector<HTMLSelectElement>("select[data-unit-for]")?.value as Unit | undefined;
+    if (canonical && unit) n = convert(n, unit, canonical);
+    // A storage limit is a whole number of GiB on the server (usage is rounded
+    // up to GiB too), so a sub-GiB entry becomes the first GiB it can express
+    // rather than silently zero.
+    if (key === "storage_gb" && n > 0) n = Math.max(1, Math.round(n));
+    out[key] = Math.max(0, Math.floor(n));
   });
   return out;
+}
+
+/// When a limit's unit changes, rewrite the number in the field so it still
+/// means the same size. The value is read back through the same unit later.
+function bindLimitUnits(el: Element) {
+  el.querySelectorAll<HTMLSelectElement>("select[data-unit-for]").forEach((sel) => {
+    sel.onchange = () => {
+      const input = sel.closest(".unit-row")?.querySelector<HTMLInputElement>("input");
+      const from = sel.dataset.unit as Unit;
+      const to = sel.value as Unit;
+      if (input?.value.trim()) input.value = unitValue(Number(input.value), from, to);
+      sel.dataset.unit = to;
+    };
+  });
 }
 
 export function openQuota(ctx: AdminCtx, u: User) {
@@ -944,6 +998,7 @@ export function openQuota(ctx: AdminCtx, u: User) {
     `<button class="btn" id="q-cancel">Cancel</button><button class="btn primary" id="q-save">Save</button>`,
   );
   el.querySelector(".modal")?.classList.add("wide");
+  bindLimitUnits(el);
   el.querySelectorAll<HTMLInputElement>("[data-qd-on]").forEach((c) => {
     c.onchange = () => {
       const box = el.querySelector(`[data-qd-box="${c.dataset.qdOn}"]`) as HTMLElement | null;

@@ -8,6 +8,8 @@
 
 import { esc } from "./xml";
 import { ic } from "./icons";
+import { STORAGE_DEFAULT, unitValue } from "./units";
+import type { StorageUnit } from "./units";
 
 // ----------------------------------------------------------------- catalogue
 
@@ -71,7 +73,10 @@ export const HW_CATALOG: HwType[] = [
       },
       { key: "pool", label: "Storage Pool", type: "select", options: [] },
       { key: "volume", label: "Volume", type: "select", options: [], showWhen: { key: "mode", value: "existing" } },
-      { key: "size_gb", label: "Disk Size (GB)", type: "number", min: 1, value: "10", placeholder: "10", showWhen: { key: "mode", value: "new" } },
+      // The number is in GiB; the field's unit selector decides how it is
+      // written. One MiB is the floor, so the storage units below can express
+      // sizes smaller than a gigabyte.
+      { key: "size_gb", label: "Disk Size", type: "number", min: 1 / 1024, value: "10", placeholder: "10", showWhen: { key: "mode", value: "new" } },
       {
         // Applies to both forms: `deviceXml` writes it as the driver type for a
         // path-backed disk too, so hiding it here (as this did) meant a value
@@ -390,7 +395,9 @@ export function deviceXml(d: HwDevice, index = 1): string {
       // No path known (a definition we did not write): keep the reference form
       // rather than guessing a path for someone else's volume.
       const newMode = (d.fields.mode ?? "existing") === "new";
-      const vol = newMode ? `(new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"})` : f("volume");
+      const unit = (f("size_unit") || STORAGE_DEFAULT) as StorageUnit;
+      const size = unitValue(Number(f("size_gb") || "10"), "GiB", unit);
+      const vol = newMode ? `(new ${size} ${unit} ${f("format") || "qcow2"})` : f("volume");
       return `<disk type="volume" device="disk">
       <driver name="qemu" type="qcow2"/>
       <source pool="${esc(f("pool"))}" volume="${esc(vol)}"/>
@@ -473,7 +480,9 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
       const path = f("path");
       if (path) return `${path.split("/").pop()} (${f("bus") || "virtio"})`;
       if ((d.fields.mode ?? "existing") === "new") {
-        return `${named("pool", f("pool"))}/new ${f("size_gb") || "10"} GB ${f("format") || "qcow2"}`;
+        const unit = (f("size_unit") || STORAGE_DEFAULT) as StorageUnit;
+        const size = unitValue(Number(f("size_gb") || "10"), "GiB", unit);
+        return `${named("pool", f("pool"))}/new ${size} ${unit} ${f("format") || "qcow2"}`;
       }
       return `${named("pool", f("pool"))}/${f("volume")} (${f("bus") || "virtio"})`;
     }

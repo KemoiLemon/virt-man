@@ -85,6 +85,11 @@ select { display: none !important; }
 .select-trigger:focus-visible, .select-trigger.open { outline: none; border-color: var(--accent); }
 .select-trigger:disabled { opacity: .5; cursor: not-allowed; }
 .select-value { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A size and its unit selector: the number takes the room, the unit stays
+   narrow enough that changing it never pushes the value out of view. */
+.unit-row { display: flex; gap: 6px; }
+.unit-row input { flex: 1 1 0; width: auto; min-width: 0; }
+.unit-row .select-trigger { flex: 0 0 auto; width: auto; min-width: 72px; }
 /* Inline selects inside a metric card head (disk/interface pickers) sit
    beside the title, not on their own line. */
 .metric-head .metric-sel { flex: 0 1 auto; min-width: 0; }

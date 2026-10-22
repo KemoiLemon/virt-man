@@ -113,7 +113,20 @@ test("a new-volume disk needs a pool and size, not an existing volume", () => {
     "a new disk with a size passes",
   );
   const xml = hw.deviceXml({ kind: "disk", fields: { mode: "new", pool: "p", size_gb: "20", format: "raw" } }, 1);
-  assert.match(xml, /volume="\(new 20 GB raw\)"/, "preview marks the pending volume");
+  assert.match(xml, /volume="\(new 20 GiB raw\)"/, "preview marks the pending volume");
+});
+
+test("a new disk's preview follows the unit chosen for its size", () => {
+  const xml = hw.deviceXml({
+    kind: "disk",
+    fields: { mode: "new", pool: "p", size_gb: "1", size_unit: "TiB", format: "qcow2" },
+  }, 1);
+  assert.match(xml, /volume="\(new 0\.00097656 TiB qcow2\)"/, `size shown in TiB: ${xml}`);
+  const summary = hw.deviceSummary({
+    kind: "disk",
+    fields: { mode: "new", pool: "p", size_gb: "2048", size_unit: "MiB", format: "qcow2" },
+  });
+  assert.match(summary, /new 2097152 MiB qcow2/, `summary shown in MiB: ${summary}`);
 });
 
 test("TPM and watchdog serialise to their libvirt elements", () => {

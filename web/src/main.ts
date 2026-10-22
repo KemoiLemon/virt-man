@@ -16,6 +16,8 @@ import { attachLongPress, isCoarsePointer } from "./touch";
 import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type DcTab, type Route } from "./route";
 import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice, HwField } from "./hardware";
+import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
+import type { MemoryUnit, StorageUnit } from "./units";
 import { enhanceSelects } from "./listbox";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
@@ -5152,6 +5154,19 @@ function maxAttr(n: number | null | undefined): string {
   return n == null ? "" : ` max="${n}"`;
 }
 
+/// The smallest volume the form will ask for, in GiB: one MiB. Volumes may be
+/// smaller than a gigabyte, and the unit selector can say so.
+const MIN_DISK_GIB = 1 / 1024;
+
+/// A disk size in GiB, held to the floor and to an optional ceiling. The floor
+/// matters because an empty field must not become zero, and the ceiling is the
+/// caller's remaining storage so a create is not refused after the volume is
+/// made.
+function clampGib(value: number, hi: number | null): number {
+  const n = Number.isFinite(value) ? Math.max(MIN_DISK_GIB, value) : MIN_DISK_GIB;
+  return hi == null ? n : Math.min(hi, n);
+}
+
 /// Create a volume for every "new volume" disk in the device list, then rewrite
 /// the device to reference it, so the XML builder can attach it like an
 /// existing volume. Called before defining the domain in both create and edit.
@@ -5167,12 +5182,14 @@ async function createPendingVolumes(
     const d = devices[i];
     if (d.kind !== "disk" || (d.fields.mode ?? "existing") !== "new") continue;
     const pool = (d.fields.pool ?? "").trim();
-    const sizeGb = Math.max(1, +(d.fields.size_gb ?? "") || 1);
+    const raw = d.fields.size_gb ?? "";
+    const size = raw === "" ? 1 : Number(raw);
+    const sizeGb = Math.max(MIN_DISK_GIB, Number.isFinite(size) ? size : 1);
     const format = (d.fields.format ?? "qcow2") === "raw" ? "raw" : "qcow2";
     const name = nicknameBased
       ? `${vmName}-disk${newUuid().slice(0, 8)}.${format}`
       : `${vmName}-disk${i + 1}-${sizeGb}gb.${format}`;
-    set(`creating ${sizeGb} GB volume ${name}`);
+    set(`creating ${unitValue(sizeGb, "GiB", "GiB")} GiB volume ${name}`);
     const vol = await api.post<{ name: string; path: string }>(
       `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`,
       { xml: volumeXml({ name, capacity_gb: sizeGb, format }),
@@ -5295,6 +5312,11 @@ async function openHardwareEditor(opts: {
   // Create VM keeps its modal; editing an existing guest renders the editor
   // inline in the Hardware tab, so devices are editable without an extra
   // "Edit hardware" click.
+  // Unit selectors are presentation state: the model stays in MiB and GiB, so
+  // changing a unit converts the number in the field, never the stored size.
+  let memUnit: MemoryUnit = MEMORY_DEFAULT;
+  let diskUnit: StorageUnit = STORAGE_DEFAULT;
+
   const modal = inline ? null : openModal(
     editing ? `Hardware — ${esc(opts.vm ?? "")}` : "Create VM",
     "",
@@ -5321,7 +5343,7 @@ async function openHardwareEditor(opts: {
     mem: left.memory_mb == null ? null : left.memory_mb + (editing ? general.memory_mb : 0),
     disk: left.storage_gb == null ? null : left.storage_gb,
   };
-  if (cap.disk != null) newDisk.size_gb = Math.min(newDisk.size_gb, Math.max(1, cap.disk));
+  if (cap.disk != null) newDisk.size_gb = Math.min(newDisk.size_gb, Math.max(MIN_DISK_GIB, cap.disk));
   // Volumes per pool, fetched lazily and cached for the device forms.
   const volCache: Record<string, VolumeSummary[]> = {};
   const volumes = async (pool: string): Promise<VolumeSummary[]> => {
@@ -5484,10 +5506,12 @@ async function openHardwareEditor(opts: {
     const fixed = [
       { key: "general", icon: ic.datacenter(), label: "General", sum: general.name || "unnamed" },
       { key: "processors", icon: ic.cpu(), label: "Processors", sum: `${general.cpus} vCPU` },
-      { key: "memory", icon: ic.memory(), label: "Memory", sum: `${general.memory_mb} MB` },
+      { key: "memory", icon: ic.memory(), label: "Memory", sum: `${unitValue(general.memory_mb, "MiB", memUnit)} ${memUnit}` },
       ...(editing ? [] : [{
         key: "disk", icon: ic.disk(), label: "Hard Disk",
-        sum: newDisk.mode === "existing" ? (newDisk.volume || "choose a volume") : `${newDisk.size_gb} GB ${newDisk.format}`,
+        sum: newDisk.mode === "existing"
+          ? (newDisk.volume || "choose a volume")
+          : `${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} ${newDisk.format}`,
       }]),
       { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics.toUpperCase() },
       { key: "firmware", icon: ic.cpu(), label: "BIOS", sum: general.firmware === "uefi" ? "UEFI (OVMF)" : "BIOS (SeaBIOS)" },
@@ -5563,7 +5587,18 @@ async function openHardwareEditor(opts: {
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-field="${esc(f.key)}">${labels}</select></label>`;
         }
-        const bound = f.key === "size_gb" ? cap.disk : f.max;
+        if (f.key === "size_gb") {
+          const unit = (d.fields.size_unit as StorageUnit) || STORAGE_DEFAULT;
+          const bound = cap.disk == null ? null : convert(cap.disk, "GiB", unit);
+          return `<label class="field"><span>${esc(f.label)}</span>
+            <div class="unit-row">
+              <input data-field="${esc(f.key)}" type="number" value="${esc(unitValue(Number(val), "GiB", unit))}"
+                min="${unitValue(MIN_DISK_GIB, "GiB", unit)}" step="any"${maxAttr(bound)}
+                placeholder="${esc(f.placeholder ?? "")}">
+              <select data-field="size_unit">${unitOptions(STORAGE_UNITS, unit)}</select>
+            </div></label>`;
+        }
+        const bound = f.max;
         return `<label class="field"><span>${esc(f.label)}</span>
           <input data-field="${esc(f.key)}" type="${f.type}" value="${esc(val)}"
             ${f.readonly ? "readonly" : ""}
@@ -5595,8 +5630,13 @@ async function openHardwareEditor(opts: {
       case "memory":
         return `<div class="hw-page active">
           <h3 class="hw-title">Memory</h3>
-          <label class="field"><span>Memory (MB)</span>
-            <input id="g-mem" type="number" min="128" step="256"${maxAttr(cap.mem)} value="${general.memory_mb}"></label>
+          <label class="field"><span>Memory</span>
+            <div class="unit-row">
+              <input id="g-mem" type="number" min="${convert(128, "MiB", memUnit)}" step="any"
+                ${maxAttr(cap.mem == null ? null : convert(cap.mem, "MiB", memUnit))}
+                value="${unitValue(general.memory_mb, "MiB", memUnit)}">
+              <select id="g-mem-unit">${unitOptions(MEMORY_UNITS, memUnit)}</select>
+            </div></label>
         </div>`;
       case "disk": {
         // Volumes the user may boot from: their own, and not already another
@@ -5631,8 +5671,13 @@ async function openHardwareEditor(opts: {
         return `<div class="hw-page active">
           <h3 class="hw-title">Hard Disk</h3>
           ${mode}${pool}
-          <label class="field"><span>Disk Size (GB)</span>
-            <input id="g-size" type="number" min="1"${maxAttr(cap.disk)} value="${newDisk.size_gb}"></label>
+          <label class="field"><span>Disk Size</span>
+            <div class="unit-row">
+              <input id="g-size" type="number" min="${unitValue(MIN_DISK_GIB, "GiB", diskUnit)}" step="any"
+                ${maxAttr(cap.disk == null ? null : convert(cap.disk, "GiB", diskUnit))}
+                value="${unitValue(newDisk.size_gb, "GiB", diskUnit)}">
+              <select id="g-size-unit">${unitOptions(STORAGE_UNITS, diskUnit)}</select>
+            </div></label>
           <label class="field"><span>Format</span>
             <select id="g-format">${opt(["qcow2", "raw"], newDisk.format)}</select></label>
         </div>`;
@@ -5694,9 +5739,14 @@ async function openHardwareEditor(opts: {
       const n = Math.max(lo, Math.floor(+v || lo));
       return hi == null ? n : Math.min(hi, n);
     };
+    // A value is read in the unit currently shown and stored in the canonical
+    // one, so the number on screen is always the number that will be written.
     bind("#g-name", (v) => { general.name = v; });
     bind("#g-cpus", (v) => { general.cpus = Math.max(1, clamp(v, 1, cap.cpu)); });
-    bind("#g-mem", (v) => { general.memory_mb = clamp(v, 128, cap.mem); });
+    bind("#g-mem", (v) => {
+      general.memory_mb = clamp(String(Math.round(convert(Number(v), memUnit, "MiB"))), 128, cap.mem);
+    });
+    bind("#g-mem-unit", (v) => { memUnit = v as MemoryUnit; });
     bind("#g-gfx", (v) => {
       general.graphics = v as "vnc" | "spice";
       // The note is part of the decision, so it must not show the old choice's
@@ -5708,7 +5758,10 @@ async function openHardwareEditor(opts: {
     bind("#g-pool", (v) => { newDisk.pool = v; newDisk.volume = ""; });
     bind("#g-disk-mode", (v) => { newDisk.mode = v === "existing" ? "existing" : "new"; });
     bind("#g-volume", (v) => { newDisk.volume = v; });
-    bind("#g-size", (v) => { newDisk.size_gb = clamp(v, 1, cap.disk); });
+    bind("#g-size", (v) => {
+      newDisk.size_gb = clampGib(convert(Number(v), diskUnit, "GiB"), cap.disk);
+    });
+    bind("#g-size-unit", (v) => { diskUnit = v as StorageUnit; });
     bind("#g-format", (v) => { newDisk.format = v as "raw" | "qcow2"; });
 
     // Device field edits, plus removal.
@@ -5718,10 +5771,12 @@ async function openHardwareEditor(opts: {
         (n as HTMLElement).onchange = () => {
           const key = (n as HTMLElement).dataset.field!;
           let val = (n as HTMLInputElement).value;
-          // A new disk's size is storage the owner holds: cap it at what is
-          // left, or the create is refused after the volume is made.
-          if (key === "size_gb" && cap.disk != null) {
-            val = String(clamp(val, 1, cap.disk));
+          // A new disk's size is storage the owner holds: read it in the unit
+          // the field shows, store it in GiB, and cap it at what is left or the
+          // create is refused after the volume is made.
+          if (key === "size_gb") {
+            const unit = (devices[i].fields.size_unit as StorageUnit) || STORAGE_DEFAULT;
+            val = String(clampGib(convert(Number(val), unit, "GiB"), cap.disk));
           }
           devices[i].fields[key] = val;
           // A NIC attaches by the network's bridge, so the two fields are one
@@ -5821,7 +5876,18 @@ async function openHardwareEditor(opts: {
           return `<label class="field"><span>${esc(f.label)}</span>
             <select data-af="${esc(f.key)}">${labels}</select></label>`;
         }
-        const bound = f.key === "size_gb" ? cap.disk : f.max;
+        if (f.key === "size_gb") {
+          const unit = (draft.size_unit as StorageUnit) || STORAGE_DEFAULT;
+          const bound = cap.disk == null ? null : convert(cap.disk, "GiB", unit);
+          return `<label class="field"><span>${esc(f.label)}</span>
+            <div class="unit-row">
+              <input data-af="${esc(f.key)}" type="number" value="${esc(unitValue(Number(val), "GiB", unit))}"
+                min="${unitValue(MIN_DISK_GIB, "GiB", unit)}" step="any"${maxAttr(bound)}
+                placeholder="${esc(f.placeholder ?? "")}">
+              <select data-af="size_unit">${unitOptions(STORAGE_UNITS, unit)}</select>
+            </div></label>`;
+        }
+        const bound = f.max;
         return `<label class="field"><span>${esc(f.label)}</span>
           <input data-af="${esc(f.key)}" type="${f.type}" value="${esc(val)}"
             ${f.min != null ? `min="${f.min}"` : ""}${maxAttr(bound)}
@@ -5868,7 +5934,12 @@ async function openHardwareEditor(opts: {
       add.querySelectorAll("[data-af]").forEach((n: Element) => {
         (n as HTMLElement).onchange = () => {
           const key = (n as HTMLElement).dataset.af!;
-          draft[key] = (n as HTMLInputElement).value;
+          // The size field shows the chosen unit; `deviceXml` and the volume
+          // API speak GiB, so convert on the way in.
+          draft[key] = key === "size_gb"
+            ? String(clampGib(convert(Number((n as HTMLInputElement).value),
+              (draft.size_unit as StorageUnit) || STORAGE_DEFAULT, "GiB"), cap.disk))
+            : (n as HTMLInputElement).value;
           // Keep a gl device and 3D acceleration in step; see the device page.
           if (kind === "video") {
             if (key === "device" && draft.device.endsWith("-gl")) draft.accel3d = "yes";
@@ -5892,12 +5963,22 @@ async function openHardwareEditor(opts: {
         if (alreadyAdded(kind)) {
           return toast(`${hwType(kind)!.label} is already added`, "bad");
         }
-        // Seed any untouched select with its first rendered option, so a
-        // device added without interaction is still valid.
+        // Seed any untouched field with its rendered value, so a device added
+        // without interaction is still valid. A size seeded this way is in the
+        // unit on screen, not in GiB; a value the user edited was already
+        // converted by the field's change handler.
+        let sizeFromDom = false;
         add.querySelectorAll("[data-af]").forEach((n: Element) => {
           const key = (n as HTMLElement).dataset.af!;
-          if (draft[key] === undefined) draft[key] = (n as HTMLInputElement).value;
+          if (draft[key] === undefined) {
+            draft[key] = (n as HTMLInputElement).value;
+            if (key === "size_gb") sizeFromDom = true;
+          }
         });
+        if (sizeFromDom) {
+          const unit = (draft.size_unit as StorageUnit) || STORAGE_DEFAULT;
+          draft.size_gb = String(clampGib(convert(Number(draft.size_gb), unit, "GiB"), cap.disk));
+        }
         // A NIC attaches by the network's bridge; the form picks by network,
         // and the bridge is what `deviceXml` writes.
         if (kind === "interface") {
@@ -6047,7 +6128,7 @@ async function openHardwareEditor(opts: {
         const qcow = v.name.toLowerCase().endsWith(".qcow2");
         form.disk_format = qcow && (v.blank || canAdmin()) ? "qcow2" : "raw";
       } else {
-        set(`creating ${newDisk.size_gb} GB volume`);
+        set(`creating ${unitValue(newDisk.size_gb, "GiB", "GiB")} GiB volume`);
         disk = await api.post<{ name: string; path: string }>(
           `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
           { xml: volumeXml({ name: `${general.name.trim()}-${newUuid().slice(0, 8)}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
@@ -6255,20 +6336,35 @@ function openCreatePool(conn = selectedConn, after?: () => void) {
 
 function openCreateVolume(pool: string) {
   if (!selectedConn) return;
+  let unit: StorageUnit = STORAGE_DEFAULT;
   const el = openModal(
     `New volume in ${esc(shownPool(pool))}`,
     `<div class="grid2">
       <label class="field"><span>Name</span><input id="vol-name"></label>
-      <label class="field"><span>Size (GB)</span><input id="vol-size" type="number" value="10" min="1"></label>
+      <label class="field"><span>Size</span>
+        <div class="unit-row">
+          <input id="vol-size" type="number" value="${unitValue(10, "GiB", unit)}"
+            min="${unitValue(MIN_DISK_GIB, "GiB", unit)}" step="any">
+          <select id="vol-size-unit">${unitOptions(STORAGE_UNITS, unit)}</select>
+        </div></label>
       <label class="field"><span>Format</span><select id="vol-format"><option>qcow2</option><option>raw</option></select></label>
     </div>`,
     `<button class="btn primary" id="vol-create">Create</button>`,
   );
+  // Convert the number in place when the unit changes, so the size it means
+  // stays the same; the canonical GiB value is read at create time.
+  ($("#vol-size-unit", el) as HTMLSelectElement).onchange = () => {
+    const next = ($("#vol-size-unit", el) as HTMLSelectElement).value as StorageUnit;
+    const input = $("#vol-size", el) as HTMLInputElement;
+    if (input.value.trim() !== "") input.value = unitValue(Number(input.value), unit, next);
+    unit = next;
+  };
   $("#vol-create", el).onclick = async () => {
     const name = $("#vol-name", el).value;
-    const size = +$("#vol-size", el).value;
+    const raw = ($("#vol-size", el) as HTMLInputElement).value.trim();
+    const size = raw === "" ? 0 : clampGib(convert(Number(raw), unit, "GiB"), null);
     const format = ($("#vol-format", el) as HTMLSelectElement).value as "raw" | "qcow2";
-    if (!name || !size) return toast("Name and size required", "bad");
+    if (!name || !(size > 0)) return toast("Name and size required", "bad");
     el.remove();
     void runTask(`Create volume ${name}`, async () => {
       await api.post(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`, {
