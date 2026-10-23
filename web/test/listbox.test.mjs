@@ -173,3 +173,43 @@ test("scrolling the popover itself does not close it", () => {
   document.body.dispatchEvent(new window.Event("scroll", { bubbles: true }));
   assert.equal(pop.hidden, true, "background scroll closes the popover");
 });
+
+test("a narrow trigger near the right edge stays aligned with its popover", () => {
+  // The popover reserved a fixed 200px of viewport whatever its own width, so
+  // a 72px size-unit picker at the right edge of the hardware form was drawn
+  // ~90px left of the trigger it belongs to (the MiB/GiB misalignment). The
+  // reserve must be the measured popover width. jsdom has no layout, so pin
+  // the trigger's rect and the viewport; the popover reports its inline
+  // min-width (the trigger's width) as its measured width.
+  makeSelect([["MiB", "MiB"], ["GiB", "GiB"]], "MiB");
+  listbox.enhanceSelects(document);
+  const trigger = document.querySelector(".select-trigger");
+  const beforeWidth = window.innerWidth;
+  const original = window.Element.prototype.getBoundingClientRect;
+  let rect = { left: 174, right: 246, top: 31, bottom: 65, width: 72, height: 34, x: 174, y: 31 };
+  window.innerWidth = 300;
+  window.Element.prototype.getBoundingClientRect = function () {
+    if (this.classList?.contains("select-popover")) {
+      const width = Number.parseFloat(this.style.minWidth) || 0;
+      return { ...rect, left: 0, right: width, width, x: 0 };
+    }
+    return this.classList?.contains("select-trigger")
+      ? rect
+      : { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 };
+  };
+  try {
+    trigger.click();
+    const pop = document.querySelector(".select-popover");
+    // 174 + 72 = 246, inside the 300px viewport, so it sits under the trigger.
+    assert.equal(pop.style.left, "174px", "popover aligns with the trigger while it fits");
+
+    listbox.closeSelect();
+    // Pushed to the right edge: it may shift, but only by what overflows.
+    rect = { ...rect, left: 260, right: 332, x: 260 };
+    trigger.click();
+    assert.equal(pop.style.left, "220px", "popover shifts only as far as needed to fit");
+  } finally {
+    window.Element.prototype.getBoundingClientRect = original;
+    window.innerWidth = beforeWidth;
+  }
+});

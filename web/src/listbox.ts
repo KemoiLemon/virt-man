@@ -66,11 +66,6 @@ function openSelect(select: HTMLSelectElement, trigger: HTMLButtonElement) {
 
   const p = getPopover();
   const r = trigger.getBoundingClientRect();
-  p.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 200))}px`;
-  // visualHeight, not innerHeight: innerHeight does not shrink while the iOS
-  // keyboard is up, so a select near the bottom of a phone screen would be
-  // positioned behind it.
-  p.style.top = `${Math.min(r.bottom + 3, visualHeight() - 50)}px`;
   p.style.minWidth = `${r.width}px`;
 
   for (const opt of Array.from(select.options)) {
@@ -93,6 +88,18 @@ function openSelect(select: HTMLSelectElement, trigger: HTMLButtonElement) {
   }
 
   p.hidden = false;
+  // Position against the popover's own width, measured now that it is shown
+  // and populated. Reserving a fixed 200px pulled a narrow trigger (a size
+  // unit picker is 72px) far to the left of the field it belongs to whenever
+  // that field sat near the viewport's right edge, even though the popover
+  // fit on screen. Options can widen the popover past the trigger, so the
+  // measured width is what must stay inside the viewport.
+  const width = p.getBoundingClientRect().width || r.width;
+  p.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - width - 8))}px`;
+  // visualHeight, not innerHeight: innerHeight does not shrink while the iOS
+  // keyboard is up, so a select near the bottom of a phone screen would be
+  // positioned behind it.
+  p.style.top = `${Math.min(r.bottom + 3, visualHeight() - 50)}px`;
   trigger.classList.add("open");
   openTrigger = trigger;
 
