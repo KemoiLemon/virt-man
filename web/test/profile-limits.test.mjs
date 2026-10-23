@@ -14,13 +14,20 @@
 // Run: pnpm test
 
 import assert from "node:assert/strict";
-import test, { before } from "node:test";
+import test, { after, before } from "node:test";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const BASE = "https://127.0.0.1:8006";
 
 let appCode;
+
+/// Every window a test opened, so the file-level `after` can close the ones a
+/// failed assertion left behind. The app schedules 1s timers, and a window
+/// left open keeps Node's event loop alive after the last test -- which looked
+/// like the suite hanging for minutes rather than failing.
+const windows = [];
+after(() => windows.forEach((w) => w.close()));
 
 before(() => {
   // The app is only reachable as a bundle; build the IIFE the live suites use.
@@ -40,6 +47,7 @@ async function openProfileWith(me, usage) {
     { url: `${BASE}/`, runScripts: "dangerously", pretendToBeVisual: true, virtualConsole: vc },
   );
   const { window } = dom;
+  windows.push(window);
   const json = (body) => Promise.resolve({
     ok: true, status: 200,
     headers: { get: () => null },
@@ -87,14 +95,32 @@ test("an administrator sees no Resource Limits section at all", async () => {
   window.close();
 });
 
-test("a non-admin still gets the Resource Limits section", async () => {
-  // The removal must be about being an administrator, not about the profile
-  // page having changed for everyone.
+test("a non-admin with no limits gets no section either", async () => {
+  // A section with no figures is just a heading, so the rule that removes it
+  // for an administrator applies to anyone with no limits. Being a non-admin
+  // is not what makes it appear.
   const { window, modal } = await openProfileWith(USER, NO_QUOTA);
   const limits = modal.querySelector("#pf-limits");
   assert.ok(limits, "the container exists for a non-admin");
-  assert.equal(limits.textContent.trim(), "Resource LimitsYou have no resource limits.",
-    "a user with no limits is told so under the heading");
+  assert.equal(limits.innerHTML.trim(), "", "no limits means no section");
+  window.close();
+});
+
+test("a non-admin with a limit still gets the Resource Limits section", async () => {
+  // The removal above must be about having no figures to show, not about the
+  // profile page having dropped the section for everyone.
+  const usage = {
+    admin: false,
+    quota: { shared: false, default: { vms: 5 }, daemons: {} },
+    total: { vms: 1, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+    daemons: [
+      { conn: "c1", name: "Big", online: true, vms: 1, vcpus: 0, memory_mb: 0, storage_bytes: 0, networks: 0 },
+    ],
+  };
+  const { window, modal } = await openProfileWith(USER, usage);
+  const limits = modal.querySelector("#pf-limits");
+  assert.match(limits.textContent, /Resource Limits/, `got: ${limits.textContent}`);
+  assert.match(limits.textContent, /5/, `the limit renders: ${limits.textContent}`);
   window.close();
 });
 

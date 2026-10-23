@@ -23,6 +23,13 @@ and QMP calls without handing it to another manager.
 # frontend: typecheck, build, unit tests (225, incl. the mobile CSS contract)
 cd web && npx tsc --noEmit && npx vite build && pnpm test
 
+# the test command is two halves: `test:build` (20 Vite SSR bundles) then
+# `test:unit`. For one module, build just it and run its file:
+cd web && npx vite build --ssr src/listbox.ts --outDir test/_build --logLevel error \
+  && node --test test/listbox.test.mjs
+# when test/_build is current, the suite itself is ~30 s:
+cd web && pnpm test:unit
+
 # web backend (150 tests: permissions/roles/key caps, routes, xmlcheck, shares...)
 cd web/server && cargo clippy && cargo test
 
@@ -448,6 +455,34 @@ looked fine in code review and were only caught by measuring: a console that
 connected but never rendered (decoded the frame bytes), a graphics parser that
 silently fell back to loopback (asserted the parsed address).
 
+**Run the narrow check first.** `pnpm test` rebuilds 20 Vite bundles before it
+runs a test; that build is the slow half. For a change to one module, build
+that module and run its test file, as shown under Commands. Use
+`pnpm test:unit` once `test/_build` is current, and keep `pnpm test` for the
+final gate.
+
+**Long runs write to a log, in the background.** Redirect output to a file
+(`pnpm test > /tmp/test.log 2>&1`) and start it as a background task, then read
+the log as it grows. Piping a live run through `tail` hides the current test
+and every result until exit, so a runner that finished but never exited looks
+identical to a slow one.
+
+**A jsdom test that boots the SPA must close its window on failure too.** Push
+each `JSDOM` window onto a list and close them in a file-level
+`after(() => windows.forEach((w) => w.close()))`. The app schedules 1 s timers;
+a failed assertion that skips `window.close()` leaves those timers running and
+Node waits forever after the last test (see `profile-limits.test.mjs`).
+
+**Browser layout checks need a real engine.** jsdom has no layout. Serve a
+harness page with the real CSS bundle and the Vite-built module, screenshot it
+with headless Firefox (`--profile /tmp/vm-ffprofile`), and decode the PNG to
+compare rectangles. Firefox takes the screenshot at the load event: hold that
+event with a slow **image** and cache-bust its URL. A slow `<script src>` in
+`<head>` blocks parsing, so the page never renders; an image loads without
+blocking. To drive the real app, build to a throwaway `--outDir`, run a
+loopback instance against the live daemon with its own `VIRT_MAN_WEB_DATA`,
+and load the route plus open the control inside a same-origin iframe.
+
 Concretely:
 
 - A test that prints nothing is **not** a passing test. Check the exit code and
@@ -468,7 +503,9 @@ Non-trivial logic leaves one runnable check behind. Prefer a real
   Explain the *cause* in the body, not just the change.
 - **Commit and push** finished work — do not leave it uncommitted in the
   working tree. Branch `dev` on
-  `ssh://git@git.kemoi.top:2222/kemoi/virt-man.git`.
+  `ssh://git@git.kemoi.top:2222/kemoi/virt-man.git`. Check `git remote -v` and
+  `git status -sb` before pushing: this clone tracks `github/dev`, and the
+  git.kemoi.top host is not reachable from every environment.
 - `rustfmt` and `clippy --all-targets` clean before committing Rust.
 - Comments explain *why*, especially where the obvious approach is wrong.
   Several comments in this codebase exist to stop a future reader "fixing"
