@@ -19,6 +19,7 @@ import type { HwDevice, HwField } from "./hardware";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
 import type { MemoryUnit, StorageUnit } from "./units";
 import { enhanceSelects } from "./listbox";
+import { poolUsed } from "./pool-usage";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
 import { bindChartHover, isLive, loadHistory, range, rangeBar, setRange } from "./history";
@@ -1824,7 +1825,7 @@ async function loadDcDashboard() {
   const live1 = addHostSample("datacenter", agg);
   const memUsedKib = agg.mem_total_kib - agg.mem_available_kib;
   const diskTotal = pools.reduce((a, { p }) => a + (p.capacity ?? 0), 0);
-  const diskUsed = pools.reduce((a, { p }) => a + (p.allocation ?? 0), 0);
+  const diskUsed = pools.reduce((a, { p }) => a + poolUsed(p), 0);
   const diskLive = diskTotal > 0 ? Math.max(0, Math.min(100, (diskUsed / diskTotal) * 100)) : 0;
   const diskHist1 = addDiskSample("datacenter", diskLive);
   // A stored range replaces the live minute; the headline figures stay live.
@@ -1926,7 +1927,7 @@ async function loadDcDashboard() {
           const mUsed = h.mem_total_kib - h.mem_available_kib;
           const mPct = h.mem_total_kib ? Math.max(0, Math.min(100, (mUsed / h.mem_total_kib) * 100)) : 0;
           const dTotal = ps.reduce((a, p) => a + (p.capacity ?? 0), 0);
-          const dUsed = ps.reduce((a, p) => a + (p.allocation ?? 0), 0);
+          const dUsed = ps.reduce((a, p) => a + poolUsed(p), 0);
           const dPct = dTotal > 0 ? Math.max(0, Math.min(100, (dUsed / dTotal) * 100)) : 0;
           return `
           <tr>
@@ -1952,7 +1953,7 @@ async function loadDcDashboard() {
     <div class="dash-section">
       <div class="section-title">Storage Pools</div>
       ${pools.map(({ c, p }) => {
-        const used = p.allocation ?? 0;
+        const used = poolUsed(p);
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
@@ -2384,7 +2385,7 @@ async function renderPoolPage() {
     // Same guard as the network page: never paint over a newer view.
     if (!stillCurrent(gen)) return;
     if (!p) return leaveMissing("storage", `Pool "${name}" no longer exists`);
-    const used = p.allocation ?? 0;
+    const used = poolUsed(p);
     const cap = p.capacity ?? 0;
     const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
 
@@ -2404,7 +2405,7 @@ async function renderPoolPage() {
       <div class="metric">
         <div class="metric-head">
           <span class="metric-ic">${ic.storage()}</span>
-          <b>Allocation</b>
+          <b>Usage</b>
           <span class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</span>
         </div>
         <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
@@ -2651,7 +2652,7 @@ async function loadDashboard() {
     <div class="dash-section">
       <div class="section-title">Storage Pools</div>
       ${pools.map((p) => {
-        const used = p.allocation ?? 0;
+        const used = poolUsed(p);
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
@@ -3511,7 +3512,7 @@ function openNetworkForm(
 /// pools at once. `volumeTable` is for the server's own Storage tab, which
 /// expands a pool's volumes underneath its card.
 function poolCard(p: PoolSummary, conn: string, opts: { server?: string; volumeTable?: boolean } = {}): string {
-  const used = p.allocation ?? 0;
+  const used = poolUsed(p);
   const cap = p.capacity ?? 0;
   const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
   return `
@@ -3583,7 +3584,7 @@ async function loadPools() {
     for (const p of pools) {
       const card = $(`[data-pool-card="${cssId(p.name)}"]`, list);
       if (!card) continue;
-      const used = p.allocation ?? 0;
+      const used = poolUsed(p);
       const cap = p.capacity ?? 0;
       const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
       const fill = card.querySelector("[data-pool-fill]");

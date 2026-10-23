@@ -326,8 +326,31 @@ export async function ensureTestVm(base) {
     method: "POST",
     headers: { "Content-Type": "application/xml" },
     body: domainXml(fixtureId, FIXTURE, diskPool, volume, network),
+  }).catch(async (e) => {
+    // The volume was made before the domain. If the define is refused, the
+    // disk would never be referenced again -- the orphan this fixture used
+    // to leave behind.
+    await dropVolume(base, conn, pool, volume);
+    throw e;
   });
-  return { created: true, name: fixtureId, conn, network };
+  return {
+    created: true, name: fixtureId, conn, network,
+    volume: pool && volume ? { pool, name: volume } : null,
+  };
+}
+
+/// Best-effort delete of a volume a fixture created. A failed delete leaves
+/// nothing worse than an orphaned test disk, so it never throws.
+async function dropVolume(base, conn, pool, volume) {
+  if (!pool || !volume) return;
+  try {
+    await json(
+      base,
+      `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(volume)}`,
+      { method: "DELETE" });
+  } catch {
+    // cleanup is best effort
+  }
 }
 
 /// Remove the fixture domain (and its disk) when this run created it, then the
@@ -344,5 +367,9 @@ export async function removeTestVm(base, fixture) {
     // Best effort: leaving a shut-off fixture behind is better than failing
     // the suite on cleanup.
   }
+  // `remove_storage` can miss a disk the daemon could not match to the
+  // definition. The fixture created this volume and knows its name, so remove
+  // it explicitly rather than trusting the domain delete.
+  await dropVolume(base, fixture.conn, fixture.volume?.pool, fixture.volume?.name);
   await removeTestNetwork(base, fixture.network);
 }

@@ -213,6 +213,13 @@ sidebar's poll uses a header-free block walk, not the volume list. Startup never
 creates a missing autostart root — an absent filesystem must not look like an
 empty pool — it only leaves it inactive; an explicit start recreates it.
 
+**Pool-used figures share the filesystem's scope.** `allocation` counts only the
+files directly in the pool root, while `capacity`/`available` describe the
+whole filesystem, so the two cannot be shown in one used/free/total row. Every
+surface uses `capacity - available` (`web/src/pool-usage.ts`), and chart history
+samples the same figure (`available` travels in `/metrics`); showing allocation
+beside filesystem total made a 931 GiB disk with 222 GiB used read as 0.0%.
+
 Volumes are files: raw ones are sparse (`set_len`), qcow2 ones are made by
 `qemu-img` with the target pre-created 0600, so its own 0644 default never lands.
 Upload and fetch write a dot-prefixed temp **in the pool root**, hash while

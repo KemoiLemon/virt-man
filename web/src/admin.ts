@@ -16,6 +16,7 @@ import type {
 import { ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { fmtBytes } from "./stats";
+import { poolUsed } from "./pool-usage";
 import { esc } from "./xml";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
 import type { Unit } from "./units";
@@ -750,7 +751,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
         const pools = shown.filter((r) => r.kind === "pool");
         table = pools.map((p) => {
           const cap = p.capacity ?? 0;
-          const used = p.allocation ?? 0;
+          const used = poolUsed(p);
           const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
           const vols = shown.filter((v) => v.kind === "volume" && v.pool === p.name);
           const pi = shown.indexOf(p);
@@ -760,6 +761,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
               <span class="storage-card-title row-link" data-open-res="${pi}">${esc(p.title || p.name)}</span>
               <span class="badge ${p.state === "active" ? "on" : ""}">${esc(p.state === "active" ? "Active" : "Inactive")}</span>
               <span class="badge">${vols.length} volume${vols.length === 1 ? "" : "s"}</span>
+              ${actions(p, pi)}
             </div>
             <div class="meter"><div class="meter-fill ${pct > 85 ? "hot" : ""}" style="width:${pct.toFixed(1)}%"></div></div>
             <div class="metric-foot"><span>${fmtBytes(used)} used</span><span>${fmtBytes(cap)} total</span></div>

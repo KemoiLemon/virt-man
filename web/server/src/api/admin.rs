@@ -347,6 +347,7 @@ async fn resources(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
                 "uuid": p["uuid"], "title": p["title"],
                 "state": if p["active"].as_bool() == Some(true) { "active" } else { "inactive" },
                 "capacity": p["capacity"], "allocation": p["allocation"],
+                "available": p["available"],
             }));
             let Ok(vols) = daemon_get(c, &format!("/pools/{}/volumes", enc(&pool))).await else {
                 continue;

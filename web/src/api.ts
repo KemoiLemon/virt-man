@@ -267,6 +267,7 @@ export interface AdminResource {
   ip?: string;
   bridge?: string;
   allocation?: number;
+  available?: number;
 }
 
 export interface IpRow {

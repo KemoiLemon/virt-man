@@ -47,6 +47,8 @@ pub struct HostM {
 pub struct PoolM {
     pub capacity: Option<u64>,
     pub allocation: Option<u64>,
+    #[serde(default)]
+    pub available: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,7 +114,7 @@ pub struct Totals {
     mem_total: u64,
     mem_avail: u64,
     disk_cap: u64,
-    disk_alloc: u64,
+    disk_used: u64,
 }
 
 fn clamp_pct(n: f64) -> f64 {
@@ -183,7 +185,13 @@ pub fn fold(m: &Metrics, now_ms: u64, prev: Option<&Counters>) -> (Vec<Point>, C
 
     for p in &m.pools {
         totals.disk_cap += p.capacity.unwrap_or(0);
-        totals.disk_alloc += p.allocation.unwrap_or(0);
+        // The filesystem's used bytes, the same scope as its total. A pool's
+        // `allocation` counts only the files in its root, which understates a
+        // directory pool sharing a disk with the rest of the host.
+        totals.disk_used += match (p.capacity, p.available) {
+            (Some(c), Some(a)) => c.saturating_sub(a),
+            _ => p.allocation.unwrap_or(0),
+        };
     }
 
     for d in &m.domains {
@@ -266,7 +274,7 @@ pub fn datacenter(all: &[Totals]) -> Vec<Point> {
         mem_total: a.mem_total + t.mem_total,
         mem_avail: a.mem_avail + t.mem_avail,
         disk_cap: a.disk_cap + t.disk_cap,
-        disk_alloc: a.disk_alloc + t.disk_alloc,
+        disk_used: a.disk_used + t.disk_used,
     });
     let cpu =
         (s.d_total > 0).then(|| clamp_pct(100.0 * (1.0 - s.d_idle as f64 / s.d_total as f64)));
@@ -279,7 +287,7 @@ pub fn datacenter(all: &[Totals]) -> Vec<Point> {
             "",
             "",
             "",
-            fill_pct(Some(s.disk_alloc), Some(s.disk_cap)),
+            fill_pct(Some(s.disk_used), Some(s.disk_cap)),
             None,
         ),
     ]
@@ -583,6 +591,7 @@ mod tests {
             pools: vec![PoolM {
                 capacity: Some(200),
                 allocation: Some(50),
+                available: Some(150),
             }],
             domains,
         }
@@ -688,6 +697,26 @@ mod tests {
         let p = datacenter(&[big, small]);
         assert_eq!(find(&p, "dc").a, Some(25.0));
         assert_eq!(find(&p, "dc").b, Some(25.0));
+    }
+
+    #[test]
+    fn the_datacenter_disk_figure_is_filesystem_usage() {
+        // The disk total is the filesystem's, so the used share must be too.
+        // A pool whose own files hold 5 of 1000 bytes on a disk with 760 free
+        // is 24 % used, not 0.5 %.
+        let mut m = metrics(0, 0, vec![]);
+        m.pools = vec![PoolM {
+            capacity: Some(1000),
+            allocation: Some(5),
+            available: Some(760),
+        }];
+        let (_, _, totals) = fold(&m, 0, None);
+        assert_eq!(find(&datacenter(&[totals]), "dcdisk").a, Some(24.0));
+
+        // An older daemon without `available` falls back to the pool's files.
+        m.pools[0].available = None;
+        let (_, _, totals) = fold(&m, 0, None);
+        assert_eq!(find(&datacenter(&[totals]), "dcdisk").a, Some(0.5));
     }
 
     fn db() -> History {

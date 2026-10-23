@@ -159,8 +159,8 @@ export function addHostSample(
 }
 
 /// Per-key disk-usage history (the Datacenter dashboard's Total Disk graph).
-/// Disk has no host-stats source: it is derived from storage-pool allocation,
-/// which is only known client-side, so it gets its own series.
+/// Disk has no host-stats source: it is derived from storage-pool filesystem
+/// usage, which is only known client-side, so it gets its own series.
 const diskSeries = new Map<string, number[]>();
 
 export function addDiskSample(key: string, pctValue: number): number[] {

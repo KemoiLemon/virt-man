@@ -67,19 +67,20 @@ fn pool_metrics(pools: &Pools) -> Vec<Value> {
             // An inactive pool reports no figures: zeros would read as an
             // empty disk in the history chart.
             let active = p.active && p.path.is_dir();
-            let (capacity, allocation) = if active {
+            let (capacity, allocation, available) = if active {
                 match pools.stats(key) {
-                    Some((c, a, _)) => (c, a),
-                    None => (None, None),
+                    Some((c, a, v)) => (c, a, v),
+                    None => (None, None, None),
                 }
             } else {
-                (None, None)
+                (None, None, None)
             };
             json!({
                 "uuid": key,
                 "name": key,
                 "capacity": capacity,
                 "allocation": allocation,
+                "available": available,
             })
         })
         .collect()
