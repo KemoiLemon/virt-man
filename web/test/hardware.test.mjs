@@ -634,11 +634,11 @@ test("libvirt's own video read-back round-trips without losing it", () => {
   assert.doesNotMatch(out, /device="virtio-vga"/, "libvirt's default device is not re-written");
 });
 
-test("an existing disk's row reads size, format, then nickname", () => {
+test("an existing disk's row reads size, then nickname", () => {
   const d = { kind: "disk", fields: { path: "/p/a.qcow2", format: "qcow2", bus: "virtio", cap_gib: "20", title: "Data" } };
-  assert.equal(hw.deviceSummary(d), "20 GiB qcow2 · Data");
+  assert.equal(hw.deviceSummary(d), "20 GiB · Data");
   d.fields.title = "";
-  assert.equal(hw.deviceSummary(d), "20 GiB qcow2 · a.qcow2");
+  assert.equal(hw.deviceSummary(d), "20 GiB · a.qcow2");
   delete d.fields.cap_gib;
   assert.equal(hw.deviceSummary(d), "a.qcow2 (virtio)", "no size known yet: the old row");
 });

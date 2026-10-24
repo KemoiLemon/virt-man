@@ -488,10 +488,10 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
       // the user chose.
       const title = f("title");
       const path = f("path");
-      // Same shape as the Create VM row: size, format, then the nickname.
+      // Same shape as the Create VM row: size, then the nickname.
       if (f("cap_gib") && (title || path)) {
         const unit = (f("size_unit") || STORAGE_DEFAULT) as StorageUnit;
-        return `${unitValue(Number(f("cap_gib")), "GiB", unit)} ${unit} ${f("format") === "raw" ? "raw" : "qcow2"} · ${title || path.split("/").pop()}`;
+        return `${unitValue(Number(f("cap_gib")), "GiB", unit)} ${unit} · ${title || path.split("/").pop()}`;
       }
       if (title) return `${title} (${f("bus") || "virtio"})`;
       if (path) return `${path.split("/").pop()} (${f("bus") || "virtio"})`;
