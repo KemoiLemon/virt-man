@@ -815,3 +815,9 @@ export function devicesFromXml(xml: string): HwDevice[] {
   }
   return out;
 }
+
+/// The file a Create VM boot disk is made as. The form's placeholder and the
+/// volume create both call this, so the name shown is the name made.
+export function bootDiskName(vm: string, suffix: string): string {
+  return `${vm.trim() || "vm"}-${suffix}.qcow2`;
+}

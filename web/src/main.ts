@@ -15,7 +15,7 @@ import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
 import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type CtTab, type DcTab, type Route } from "./route";
-import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
+import { BOOT_LABEL, HW_CATALOG, bootChoices, bootDiskName, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice, HwField } from "./hardware";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
 import type { MemoryUnit, StorageUnit, Unit } from "./units";
@@ -5577,12 +5577,17 @@ async function deleteVolumeOn(conn: string, pool: string, name: string, after: (
   }
 }
 
+function setVolumeTitle(conn: string, pool: string, name: string, title: string) {
+  return api.put(
+    `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}/title`, { title });
+}
+
 async function renameVolume(pool: string, name: string) {
   if (!selectedConn) return;
   const title = await askText("Volume nickname", "Nickname", shownVolume(pool, name) === name ? "" : shownVolume(pool, name));
   if (title == null) return;
   try {
-    await api.put(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}/title`, { title });
+    await setVolumeTitle(selectedConn, pool, name, title);
     volumeNames[`${pool}/${name}`] = title.trim() || name;
     toast("Volume nickname saved");
   } catch (e) { toast((e as Error).message, "bad"); }
@@ -5968,9 +5973,7 @@ async function applyDiskTitles(conn: string, devices: HwDevice[]) {
     const name = (d.fields.volume ?? "").trim();
     // A path outside every pool has no title to set.
     if (!pool || !name) continue;
-    await api.put(
-      `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}/title`,
-      { title });
+    await setVolumeTitle(conn, pool, name, title);
   }
 }
 
@@ -6520,7 +6523,7 @@ async function openHardwareEditor(opts: {
           </div>`;
         }
         if (!newDisk.suffix) newDisk.suffix = newUuid().slice(0, 8);
-        const bootName = `${general.name.trim() || "vm"}-${newDisk.suffix}.qcow2`;
+        const bootName = bootDiskName(general.name, newDisk.suffix);
         return `<div class="hw-page active">
           <h3 class="hw-title">Hard Disk</h3>
           ${mode}
@@ -7033,14 +7036,12 @@ async function openHardwareEditor(opts: {
         set(`creating ${unitValue(newDisk.size_gb, "GiB", "GiB")} GiB volume`);
         disk = await api.post<{ name: string; path: string }>(
           `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
-          { xml: volumeXml({ name: `${general.name.trim()}-${newDisk.suffix || newUuid().slice(0, 8)}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+          { xml: volumeXml({ name: bootDiskName(general.name, newDisk.suffix || newUuid().slice(0, 8)), capacity_gb: newDisk.size_gb, format: newDisk.format }) });
         // Only a volume made here is deleted again if the create is refused;
         // a chosen one was the user's before and stays theirs.
         made.push({ pool: newDisk.pool, name: disk.name });
         if (newDisk.title.trim()) {
-          await api.put(
-            `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes/${encodeURIComponent(disk.name)}/title`,
-            { title: newDisk.title.trim() });
+          await setVolumeTitle(conn, newDisk.pool, disk.name, newDisk.title.trim());
         }
       }
       // Refer to the disk by its absolute path rather than by pool+volume: the
