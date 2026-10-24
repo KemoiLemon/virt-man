@@ -633,8 +633,3 @@ test("libvirt's own video read-back round-trips without losing it", () => {
   assert.match(out, /heads="1"/, "the resolved head count survives");
   assert.doesNotMatch(out, /device="virtio-vga"/, "libvirt's default device is not re-written");
 });
-
-test("the boot disk's file name is the same for the placeholder and the create", () => {
-  assert.equal(hw.bootDiskName(" web ", "ab12cd34"), "web-ab12cd34.qcow2");
-  assert.equal(hw.bootDiskName("", "ab12cd34"), "vm-ab12cd34.qcow2");
-});

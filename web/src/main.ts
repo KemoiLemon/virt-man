@@ -15,7 +15,7 @@ import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
 import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type CtTab, type DcTab, type Route } from "./route";
-import { BOOT_LABEL, HW_CATALOG, bootChoices, bootDiskName, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
+import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice, HwField } from "./hardware";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
 import type { MemoryUnit, StorageUnit, Unit } from "./units";
@@ -5922,6 +5922,9 @@ function clampGib(value: number, hi: number | null): number {
   return hi == null ? n : Math.min(hi, n);
 }
 
+/// What the first disk of a new guest is called until the user picks a name.
+const PRIMARY_DISK = "Primary";
+
 /// Create a volume for every "new volume" disk in the device list, then rewrite
 /// the device to reference it, so the XML builder can attach it like an
 /// existing volume. Called before defining the domain in both create and edit.
@@ -5933,8 +5936,10 @@ async function createPendingVolumes(
   made: { pool: string; name: string }[] = [],
   nicknameBased = false,
 ) {
+  let diskNo = 1; // the boot disk is the first
   for (let i = 0; i < devices.length; i++) {
     const d = devices[i];
+    if (d.kind === "disk") diskNo++;
     if (d.kind !== "disk" || (d.fields.mode ?? "existing") !== "new") continue;
     const pool = (d.fields.pool ?? "").trim();
     const raw = d.fields.size_gb ?? "";
@@ -5955,6 +5960,13 @@ async function createPendingVolumes(
     // every libvirt, and an unresolvable disk keeps the guest from starting.
     if (vol.path) d.fields.path = vol.path;
     delete d.fields.mode;
+    // Create VM names a disk the user left unnamed after the guest and its
+    // place in the list; applyDiskTitles then writes it like a typed one.
+    if (nicknameBased && !(d.fields.title ?? "").trim()) {
+      d.fields.title = `${vmName.trim()} ${diskNo}`;
+      d.fields.title_loaded = "1";
+      d.fields.title_original = "";
+    }
   }
 }
 
@@ -6083,7 +6095,7 @@ async function openHardwareEditor(opts: {
     mode: "new" as "new" | "existing", volume: "",
     // The boot disk's nickname, for the volume this form creates. An existing
     // volume keeps the title it already has.
-    title: "", suffix: "",
+    title: "",
   };
 
   // Create VM keeps its modal; editing an existing guest renders the editor
@@ -6348,8 +6360,7 @@ async function openHardwareEditor(opts: {
         key: "disk", icon: ic.disk(), label: "Hard Disk",
         sum: newDisk.mode === "existing"
           ? (newDisk.volume || "choose a volume")
-          : [`${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} ${newDisk.format}`, newDisk.title.trim()]
-            .filter(Boolean).join(" · "),
+          : `${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} ${newDisk.format} · ${newDisk.title.trim() || PRIMARY_DISK}`,
       }]),
       { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics.toUpperCase() },
       { key: "firmware", icon: ic.cpu(), label: "BIOS", sum: general.firmware === "uefi" ? "UEFI (OVMF)" : "BIOS (SeaBIOS)" },
@@ -6523,14 +6534,12 @@ async function openHardwareEditor(opts: {
             ${held.length ? `<p class="hint">In use, not offered: ${held.map((v) => esc(`${v.name} (${v.used_by!.join(", ")})`)).join("; ")}.</p>` : ""}
           </div>`;
         }
-        if (!newDisk.suffix) newDisk.suffix = newUuid().slice(0, 8);
-        const bootName = bootDiskName(general.name, newDisk.suffix);
         return `<div class="hw-page active">
           <h3 class="hw-title">Hard Disk</h3>
           ${mode}
           <label class="field"><span>Nickname</span>
             <input id="g-disk-title" value="${esc(newDisk.title)}"
-              placeholder="${esc(bootName)}"></label>
+              placeholder="${PRIMARY_DISK}"></label>
           ${pool}
           <label class="field"><span>Disk Size</span>
             <div class="unit-row">
@@ -7037,13 +7046,11 @@ async function openHardwareEditor(opts: {
         set(`creating ${unitValue(newDisk.size_gb, "GiB", "GiB")} GiB volume`);
         disk = await api.post<{ name: string; path: string }>(
           `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
-          { xml: volumeXml({ name: bootDiskName(general.name, newDisk.suffix || newUuid().slice(0, 8)), capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+          { xml: volumeXml({ name: `${general.name.trim()}-${newUuid().slice(0, 8)}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
         // Only a volume made here is deleted again if the create is refused;
         // a chosen one was the user's before and stays theirs.
         made.push({ pool: newDisk.pool, name: disk.name });
-        if (newDisk.title.trim()) {
-          await setVolumeTitle(conn, newDisk.pool, disk.name, newDisk.title.trim());
-        }
+        await setVolumeTitle(conn, newDisk.pool, disk.name, newDisk.title.trim() || PRIMARY_DISK);
       }
       // Refer to the disk by its absolute path rather than by pool+volume: the
       // reference form cannot be resolved by every libvirt, and a disk libvirt
