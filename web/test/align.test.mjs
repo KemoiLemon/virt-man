@@ -152,7 +152,7 @@ function footer() {
       `<button class="btn icon" id="al-next"></button></div>` +
       `</div>` +
       // A .dsub outside the footer: the override must not reach it.
-      `<div class="section"><div class="dsub" id="elsewhere">Storage pool</div></div>` +
+      `<div class="section"><div class="dsub" id="elsewhere">Storage Pool</div></div>` +
       `</div></div></body></html>`,
     { url: "http://localhost/", pretendToBeVisual: true },
   );

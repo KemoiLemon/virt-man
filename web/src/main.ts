@@ -516,7 +516,7 @@ function openCommandPalette() {
     if (running) {
       power("ct-shutdown", "Shutdown", ic.stop(), "/shutdown");
       power("ct-reboot", "Reboot", ic.reboot(), "/reboot");
-      power("ct-destroy", "Force stop", ic.forceStop(), "/destroy");
+      power("ct-destroy", "Force Stop", ic.forceStop(), "/destroy");
     } else {
       power("ct-start", "Start", ic.start(), "/start");
     }
@@ -534,7 +534,7 @@ function openCommandPalette() {
       power("vm-shutdown", "Shutdown", ic.stop(), "/shutdown");
       power("vm-reboot", "Reboot", ic.reboot(), "/reboot");
       power("vm-reset", "Reset", ic.reset(), "/reset");
-      power("vm-destroy", "Force stop", ic.forceStop(), "/destroy");
+      power("vm-destroy", "Force Stop", ic.forceStop(), "/destroy");
     } else {
       power("vm-start", "Start", ic.start(), "/start");
       // libvirt can only rename a shut-off guest.
@@ -544,7 +544,7 @@ function openCommandPalette() {
   }
   if (selectedConn && selectedNet) {
     const net = selectedNet;
-    add("net-edit", `Edit network — ${net}`, "This network", ic.edit(), () => void openEditNetwork(net));
+    add("net-edit", `Edit Network — ${net}`, "This network", ic.edit(), () => void openEditNetwork(net));
     add("net-fw", `Firewall rules — ${net}`, "This network", ic.firewall(), () => openFirewallEditor(net));
     add("net-delete", `Delete network — ${net}`, "This network", ic.trash(),
       () => void deleteNetwork(net).then(() => refreshTreeVms()));
@@ -552,7 +552,7 @@ function openCommandPalette() {
   if (selectedConn && selectedPool) {
     const pool = selectedPool;
     add("pool-upload", `Upload ISO — ${pool}`, "This pool", ic.upload(), () => openUpload(pool));
-    add("pool-volume", `New volume — ${pool}`, "This pool", ic.disk(), () => openCreateVolume(pool));
+    add("pool-volume", `New Volume — ${pool}`, "This pool", ic.disk(), () => openCreateVolume(pool));
     add("pool-templates", `Templates — ${pool}`, "This pool", ic.container(), () => void openTemplates(pool));
   }
 
@@ -561,9 +561,9 @@ function openCommandPalette() {
   if (selectedConn) {
     const server = connections.find((c) => c.id === selectedConn)?.name ?? "";
     add("create-vm", "Create VM", server, ic.vm(), () => openCreateVm());
-    add("create-ct", "Create container", server, ic.container(), () => void openCreateCt());
-    add("create-net", "Create network", server, ic.network(), () => openCreateNetwork());
-    add("create-pool", "Create pool", server, ic.storage(), () => openCreatePool());
+    add("create-ct", "Create Container", server, ic.container(), () => void openCreateCt());
+    add("create-net", "Create Network", server, ic.network(), () => openCreateNetwork());
+    add("create-pool", "Create Pool", server, ic.storage(), () => openCreatePool());
   }
 
   // Navigation. Every page with a URL is reachable, and the hint says where
@@ -619,7 +619,7 @@ function openCommandPalette() {
 
   add(
     "toggle-theme",
-    "Toggle theme",
+    "Toggle Theme",
     document.documentElement.getAttribute("data-theme") === "dark" ? "dark → light" : "light → dark",
     ic.theme(),
     toggleTheme,
@@ -633,7 +633,7 @@ function openCommandPalette() {
       add(`admin-${sec}`, `Administration — ${label}`, `/admin/${sec}`, ic.admin(), () => openAdmin(sec));
     }
   }
-  if (!authDisabled) add("logout", "Sign out", "End this session", ic.logout(), () => void logout());
+  if (!authDisabled) add("logout", "Sign Out", "End this session", ic.logout(), () => void logout());
 
   openTayne(cmds);
 }
@@ -815,14 +815,14 @@ function renderApp() {
   const app = $("#app");
 setHtml(app, `
     <div class="topbar">
-      <button class="btn icon mobile-only" id="nav-btn" title="Servers and guests">${ic.menu()}</button>
+      <button class="btn icon mobile-only" id="nav-btn" title="Servers and Guests">${ic.menu()}</button>
       <span class="brand">virt-<span>man</span></span>
       <span class="host">web${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
       <span class="topbar-quick">
         <button class="btn icon mobile-only" id="palette-btn" title="Commands">${ic.logs()}</button>
-        <button class="btn icon" id="theme-btn" title="Toggle theme">${ic.theme()}</button>
+        <button class="btn icon" id="theme-btn" title="Toggle Theme">${ic.theme()}</button>
         ${canAdmin() ? `<button class="btn icon" id="admin-btn"></button>` : ""}
-        ${authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign out">${ic.logout()}</button>`}
+        ${authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign Out">${ic.logout()}</button>`}
       </span>
     </div>
     <div class="layout">
@@ -1175,7 +1175,7 @@ function ctMenu(connId: string, name: string): CtxItem[] {
     { label: "Start", icon: ic.start(), disabled: running, separator: true, run: () => void treeCtPower(connId, name, "/start") },
     { label: "Shutdown", icon: ic.stop(), disabled: !running, run: () => void treeCtPower(connId, name, "/shutdown") },
     { label: "Reboot", icon: ic.reboot(), disabled: !running, run: () => void treeCtPower(connId, name, "/reboot") },
-    { label: "Force stop", icon: ic.forceStop(), disabled: !running, run: () => void treeCtPower(connId, name, "/destroy") },
+    { label: "Force Stop", icon: ic.forceStop(), disabled: !running, run: () => void treeCtPower(connId, name, "/destroy") },
     { label: "Console", icon: ic.keyboard(), separator: true, run: () => selectCtRow(connId, name, "console") },
     { label: "Hardware", icon: ic.cpu(), run: () => selectCtRow(connId, name, "hardware") },
     { label: "Options", icon: ic.options(), run: () => selectCtRow(connId, name, "options") },
@@ -1293,10 +1293,10 @@ async function openShareVm(connId: string, vmName: string, ct = false) {
      <table class="grid" id="sh-list">
        <tr><th>User</th><th>Access</th><th class="col-actions"></th></tr>
        ${data.shares.map((x) => `<tr><td class="tname">${esc(x.username)}</td><td>${esc(LEVEL[x.role] ?? x.role)}</td>
-         <td class="col-actions"><button class="btn danger icon" data-unshare="${esc(x.user)}" title="Stop sharing">${ic.trash()}</button></td></tr>`).join("")
+         <td class="col-actions"><button class="btn danger icon" data-unshare="${esc(x.user)}" title="Stop Sharing">${ic.trash()}</button></td></tr>`).join("")
          || `<tr><td colspan="3" class="empty">Not shared with anyone.</td></tr>`}
      </table>
-     <div class="section-title">Add someone</div>
+     <div class="section-title">Add Someone</div>
      <div class="grid2">
        <label class="field"><span>User</span><select id="sh-user">
          ${people.map((u) => `<option value="${esc(u.id)}">${esc(u.username)}</option>`).join("")}
@@ -1351,7 +1351,7 @@ function vmMenu(connId: string, vmName: string): CtxItem[] {
       run: () => void treeVmPower(connId, vmName, "/reset"),
     },
     {
-      label: "Force stop", icon: ic.forceStop(), disabled: !running,
+      label: "Force Stop", icon: ic.forceStop(), disabled: !running,
       run: () => void treeVmPower(connId, vmName, "/destroy"),
     },
     { label: "Console", icon: ic.vm(), separator: true, run: () => selectVmRow(connId, vmName, "console") },
@@ -1391,8 +1391,8 @@ function netMenu(connId: string, netName: string): CtxItem[] {
       label: active ? "Stop" : "Start", icon: active ? ic.stop() : ic.start(), separator: true,
       run: () => void treeNetPower(connId, netName, active ? "stop" : "start"),
     },
-    { label: "Edit network", icon: ic.edit(), separator: true, run: onConn(() => void openEditNetwork(netName)) },
-    { label: "Firewall rules", icon: ic.firewall(), run: onConn(() => openFirewallEditor(netName)) },
+    { label: "Edit Network", icon: ic.edit(), separator: true, run: onConn(() => void openEditNetwork(netName)) },
+    { label: "Firewall Rules", icon: ic.firewall(), run: onConn(() => openFirewallEditor(netName)) },
     {
       label: "Delete", icon: ic.trash(), danger: true, separator: true,
       run: () => {
@@ -1410,9 +1410,9 @@ function poolMenu(connId: string, poolName: string): CtxItem[] {
     { label: "Open", icon: ic.storage(), run: () => selectPoolRow(connId, poolName) },
     { label: "Upload ISO", icon: ic.upload(), separator: true, run: onConn(() => openUpload(poolName)) },
     { label: "Download ISO from URL", icon: ic.download(), run: onConn(() => openFetch(poolName)) },
-    { label: "New volume", icon: ic.disk(), run: onConn(() => openCreateVolume(poolName)) },
+    { label: "New Volume", icon: ic.disk(), run: onConn(() => openCreateVolume(poolName)) },
     {
-      label: "Delete pool", icon: ic.trash(), danger: true, separator: true,
+      label: "Delete Pool", icon: ic.trash(), danger: true, separator: true,
       run: () => {
         selectPoolRow(connId, poolName);
         void deletePool(poolName).then(() => refreshTreeVms());
@@ -1432,11 +1432,11 @@ function serverMenu(serverId: string): CtxItem[] {
     { label: "Storage", icon: ic.storage(), run: () => selectServer(serverId, "storage") },
     { label: "Firewall", icon: ic.firewall(), run: () => selectServer(serverId, "firewall") },
     { label: "Create VM", icon: ic.plus(), separator: true, run: create(() => openCreateVm()) },
-    { label: "Create container", icon: ic.plus(), run: create(() => void openCreateCt(serverId)) },
-    { label: "Create network", icon: ic.plus(), run: create(() => openCreateNetwork()) },
-    { label: "Create pool", icon: ic.plus(), run: create(() => openCreatePool()) },
-    { label: "Edit server", icon: ic.edit(), separator: true, run: () => openConnectionDialog(serverId) },
-    { label: "Remove server", icon: ic.trash(), danger: true, run: () => void deleteConnection(serverId) },
+    { label: "Create Container", icon: ic.plus(), run: create(() => void openCreateCt(serverId)) },
+    { label: "Create Network", icon: ic.plus(), run: create(() => openCreateNetwork()) },
+    { label: "Create Pool", icon: ic.plus(), run: create(() => openCreatePool()) },
+    { label: "Edit Server", icon: ic.edit(), separator: true, run: () => openConnectionDialog(serverId) },
+    { label: "Remove Server", icon: ic.trash(), danger: true, run: () => void deleteConnection(serverId) },
   ];
 }
 
@@ -1471,12 +1471,12 @@ function adminTreeMenu(row: HTMLElement | null): CtxItem[] | null {
   // What each section's own add button does, reached from the menu. It opens
   // the section, then clicks its real button, so it is the same code path.
   const add: Partial<Record<AdminSection, [string, string]>> = {
-    users: ["Add user", "#add-user"],
-    groups: ["Add group", "#add-group"],
-    roles: ["New role", "#add-role"],
-    permissions: ["Add permission", "#add-acl"],
-    daemons: ["Add daemon", "#add-daemon"],
-    keys: ["New API key", "#add-key"],
+    users: ["Add User", "#add-user"],
+    groups: ["Add Group", "#add-group"],
+    roles: ["New Role", "#add-role"],
+    permissions: ["Add Permission", "#add-acl"],
+    daemons: ["Add Daemon", "#add-daemon"],
+    keys: ["New API Key", "#add-key"],
     vms: ["Create VM for a user", "#res-new"],
     networks: ["Create network for a user", "#res-new"],
   };
@@ -1733,7 +1733,7 @@ function renderDc() {
         <div class="storage-card-actions net-actions">
           <button class="btn icon ${vm.active ? "on" : ""}" data-dc-toggle="${esc(vm.name)}" data-dc-toggle-conn="${conn.id}" data-dc-action="${vm.active ? "stop" : "start"}" title="${vm.active ? "Shutdown" : "Start"}">${vm.active ? ic.stop() : ic.start()}</button>
           <button class="btn icon" data-dc-console="${esc(vm.name)}" data-conn="${conn.id}" title="Console">${ic.vm()}</button>
-          <button class="btn icon" data-dc-hwedit="${esc(vm.name)}" data-conn="${conn.id}" title="Edit hardware">${ic.edit()}</button>
+          <button class="btn icon" data-dc-hwedit="${esc(vm.name)}" data-conn="${conn.id}" title="Edit Hardware">${ic.edit()}</button>
         </div>
       </div>`).join("");
 
@@ -2273,8 +2273,8 @@ function leaveMissing(tab: "networks" | "storage", message: string) {
 function openIpamSettings(conn: string, net: string, ipam: IpamInfo) {
   const el = openModal(`DHCP & DNS — ${esc(shownNet(net))}`, `
     <div class="grid2">
-      <label class="field"><span>Range start</span><input id="ipam-rs" value="${esc(ipam.range_start)}"></label>
-      <label class="field"><span>Range end</span><input id="ipam-re" value="${esc(ipam.range_end)}"></label>
+      <label class="field"><span>Range Start</span><input id="ipam-rs" value="${esc(ipam.range_start)}"></label>
+      <label class="field"><span>Range End</span><input id="ipam-re" value="${esc(ipam.range_end)}"></label>
     </div>
     <label class="field"><span>DNS forwarders (blank = the host's own resolvers)</span>
       <input id="ipam-fwd" value="${esc(ipam.dns_forwarders.join(", "))}" placeholder="1.1.1.1, 9.9.9.9"></label>
@@ -2362,7 +2362,7 @@ async function renderNetPage() {
         ? "Served by this host. A guest with no allocation gets one from the range and keeps it until the VM is deleted."
         : "Not being served right now (the network is stopped)."}</div>
       <table class="grid" id="ipam-hosts">
-        <tr><th>Name</th><th>VM</th><th>MAC address</th><th>IP address</th><th>Last seen</th><th></th></tr>
+        <tr><th>Name</th><th>VM</th><th>MAC Address</th><th>IP Address</th><th>Last Seen</th><th></th></tr>
         ${hosts.map((h, i) => `
           <tr data-ipam-mac="${esc(h.mac)}">
             <td>${esc(h.name || "—")}</td>
@@ -2377,7 +2377,7 @@ async function renderNetPage() {
           </tr>`).join("") || `<tr><td colspan="6" class="empty">No allocations yet — guests get one from the range when they first ask.</td></tr>`}
       </table>
       <div class="actions">
-        <button class="btn" id="ipam-add">${ic.plus(14)} Add allocation</button>
+        <button class="btn" id="ipam-add">${ic.plus(14)} Add Allocation</button>
         <button class="btn" id="ipam-settings">${ic.options(14)} DHCP &amp; DNS settings</button>
       </div>` : ""}`);
 
@@ -2385,17 +2385,17 @@ async function renderNetPage() {
       const h = idx === null ? { mac: "", ip: "", name: "" } : hosts[idx];
       const vms = treeVms[conn] ?? [];
       const el = openModal(
-        idx === null ? "Add IPAM allocation" : "Edit IPAM allocation",
+        idx === null ? "Add IPAM Allocation" : "Edit IPAM Allocation",
         `<div class="grid2">
           <label class="field"><span>VM (optional)</span>
             <select id="ipam-vm">
-              <option value="">Manual entry</option>
+              <option value="">Manual Entry</option>
               ${vms.map((v) => `<option value="${esc(v.name)}" ${v.name === h.name ? "selected" : ""}>${esc(v.title || v.name)}</option>`).join("")}
             </select></label>
-          <label class="field" id="ipam-nic-wrap" hidden><span>Interface</span><select id="ipam-nic"><option value="">Select an interface…</option></select></label>
+          <label class="field" id="ipam-nic-wrap" hidden><span>Interface</span><select id="ipam-nic"><option value="">Select an Interface…</option></select></label>
           <label class="field"><span>Name (optional)</span><input id="ipam-name" value="${esc(h.name ?? "")}" placeholder="guest hostname"></label>
-          <label class="field"><span>IP address</span><input id="ipam-ip" value="${esc(h.ip)}" placeholder="192.168.100.50"></label>
-          <label class="field"><span>MAC address</span><input id="ipam-mac" value="${esc(h.mac)}" placeholder="52:54:00:aa:bb:cc"></label>
+          <label class="field"><span>IP Address</span><input id="ipam-ip" value="${esc(h.ip)}" placeholder="192.168.100.50"></label>
+          <label class="field"><span>MAC Address</span><input id="ipam-mac" value="${esc(h.mac)}" placeholder="52:54:00:aa:bb:cc"></label>
         </div>`,
         `<button class="btn primary" id="ipam-save">${idx === null ? "Add" : "Save"}</button>`,
       );
@@ -2534,13 +2534,13 @@ async function renderPoolPage() {
         <span class="dtitle">${esc(displayName(treePools[selectedConn!], name))}</span>
         <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
       </div>
-      <div class="dsub">Storage pool</div>
+      <div class="dsub">Storage Pool</div>
       <div class="actions">
         <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
         <button class="btn" id="pool-fetch">${ic.download(14)} From URL</button>
-        <button class="btn" id="pool-newvol">${ic.plus(14)} New volume</button>
+        <button class="btn" id="pool-newvol">${ic.plus(14)} New Volume</button>
         <button class="btn" id="pool-tpl">${ic.container(14)} Templates</button>
-        <button class="btn danger" id="pool-del">${ic.trash(14)} Delete pool</button>
+        <button class="btn danger" id="pool-del">${ic.trash(14)} Delete Pool</button>
       </div>
       <div class="metric">
         <div class="metric-head">
@@ -2564,7 +2564,7 @@ async function renderPoolPage() {
           <tr><td>${esc(v.title || v.name)}</td><td>${esc(CONTENT_LABEL[v.content ?? "images"] ?? "Disk image")}</td>
           <td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
           <td class="col-actions"><div class="row-actions">
-            <button class="btn icon" data-pvol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
+            <button class="btn icon" data-pvol-title="${esc(v.name)}" title="Edit Nickname">${ic.edit()}</button>
             <button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button>
           </div></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No volumes.</td></tr>`}
       </table>`);
@@ -2863,7 +2863,7 @@ async function loadFilters() {
             </td>
           </tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>
-      <div class="actions"><button class="btn al-open" id="fw-tab-logs">${ic.logs(14)} Access logs</button></div>`);
+      <div class="actions"><button class="btn al-open" id="fw-tab-logs">${ic.logs(14)} Access Logs</button></div>`);
     const conn = selectedConn;
     $("#fw-tab-logs", list).onclick = () => openAccessLogs(conn);
     list.querySelectorAll("[data-fwedit]").forEach((b: Element) => {
@@ -2880,7 +2880,7 @@ async function loadFilters() {
 function openAccessLogs(conn: string, vm = "", ct = false) {
   let f: LogFilter = defaultFilter(vm);
   let vms: string[] = [];
-  const el = openModal(`Access logs${vm ? ` — ${esc(vm)}` : ""}`, `<div id="al-body">${skeleton("table")}</div>`, "");
+  const el = openModal(`Access Logs${vm ? ` — ${esc(vm)}` : ""}`, `<div id="al-body">${skeleton("table")}</div>`, "");
   el.querySelector(".modal")?.classList.add("wide", "al-modal");
   void api.get<{ vms: string[] }>(`/access-logs/vms?conn=${encodeURIComponent(conn)}`)
     .then((r) => { vms = r.vms; paint(null); }).catch(() => {});
@@ -2977,9 +2977,9 @@ function openAccessLogs(conn: string, vm = "", ct = false) {
       <div class="al-foot">
         <span class="dsub">${total} ${f.group ? "groups" : "entries"} · kept 14 days; oldest removed first if disk space runs low</span>
         <span class="al-pager">
-          <button class="btn icon" id="al-prev" ${f.page ? "" : "disabled"} title="Newer page">${ic.back()}</button>
+          <button class="btn icon" id="al-prev" ${f.page ? "" : "disabled"} title="Newer Page">${ic.back()}</button>
           <span>${f.page + 1} / ${pages}</span>
-          <button class="btn icon" id="al-next" ${f.page + 1 < pages ? "" : "disabled"} title="Older page">${ic.forward()}</button>
+          <button class="btn icon" id="al-next" ${f.page + 1 < pages ? "" : "disabled"} title="Older Page">${ic.forward()}</button>
           <button class="btn icon" id="al-reload" title="Refresh">${ic.reboot()}</button>
         </span>
       </div>`);
@@ -3106,7 +3106,7 @@ function fwFwdRow(f: FirewallForward, hosts: IpamHost[], label: (h: IpamHost) =>
   const current = f.lan_ip && !known
     ? `<option value="${esc(f.lan_ip)}" selected>${esc(f.lan_ip)} — not a guest</option>`
     : "";
-  const placeholder = f.lan_ip ? "" : `<option value="" selected>Select a guest…</option>`;
+  const placeholder = f.lan_ip ? "" : `<option value="" selected>Select a Guest…</option>`;
   return `
     <tr>
       <td><input data-f-wanip placeholder="0.0.0.0 = any" value="${f.wan_ip === "0.0.0.0" ? "" : esc(f.wan_ip)}"></td>
@@ -3227,16 +3227,16 @@ function openFirewallEditor(netName: string) {
         ${rules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
       </table>
       <div class="actions">
-        <button class="btn" id="fw-add-rule">${ic.plus(14)} Add rule</button>
-        <button class="btn al-open" id="fw-logs">${ic.logs(14)} Access logs</button>
+        <button class="btn" id="fw-add-rule">${ic.plus(14)} Add Rule</button>
+        <button class="btn al-open" id="fw-logs">${ic.logs(14)} Access Logs</button>
       </div>
 
       <div class="section-title fw-cat" style="margin-top:18px">NAT Port Forwards</div>
       <table class="grid">
-        <tr><th>WAN</th><th>Proto</th><th>WAN Port</th><th>Internal guest</th><th>Internal Port</th><th></th></tr>
+        <tr><th>WAN</th><th>Proto</th><th>WAN Port</th><th>Internal Guest</th><th>Internal Port</th><th></th></tr>
         ${forwards.map((f) => fwFwdRow(f, lanHosts, lanLabel)).join("") || `<tr><td colspan="6" class="empty">No port forwards.</td></tr>`}
       </table>
-      <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add forward</button></div>`);
+      <div class="actions"><button class="btn" id="fw-add-fwd">${ic.plus(14)} Add Forward</button></div>`);
 
     // Re-attached every render: render() rebuilds these inputs from scratch.
     attachRuleIpSuggest(el, () => ipCandidates);
@@ -3323,7 +3323,7 @@ async function loadVms() {
         <div class="storage-card-actions net-actions">
           <button class="btn icon ${v.active ? "on" : ""}" data-vm-toggle="${esc(v.name)}" data-vm-action="${v.active ? "stop" : "start"}" title="${v.active ? "Shutdown" : "Start"}">${v.active ? ic.stop() : ic.start()}</button>
           <button class="btn icon" data-vm-console="${esc(v.name)}" title="Console">${ic.vm()}</button>
-          <button class="btn icon" data-vm-edit="${esc(v.name)}" title="Edit hardware">${ic.edit()}</button>
+          <button class="btn icon" data-vm-edit="${esc(v.name)}" title="Edit Hardware">${ic.edit()}</button>
           <button class="btn danger icon" data-vm-del="${esc(v.name)}" title="Delete">${ic.trash()}</button>
         </div>
       </div>`).join("") || emptyState("VMs", "Create VM", "vm-create-empty"));
@@ -3602,7 +3602,7 @@ async function renderCtOptions(body: HTMLElement, conn: string, ct: string) {
       </div>
       <div class="hwrow">
         <span class="hwrow-ic">${ic.autostart()}</span>
-        <div class="hwrow-label"><b>Start with the host</b></div>
+        <div class="hwrow-label"><b>Start with the Host</b></div>
         <div class="hwctl"><label class="check"><input type="checkbox" id="ctopt-auto" ${info.autostart ? "checked" : ""}> Autostart</label></div>
       </div>
       <div class="hwrow">
@@ -3617,7 +3617,7 @@ async function renderCtOptions(body: HTMLElement, conn: string, ct: string) {
       </div>
       <div class="hwrow">
         <span class="hwrow-ic">${ic.disk()}</span>
-        <div class="hwrow-label"><b>Root filesystem</b></div>
+        <div class="hwrow-label"><b>Root Filesystem</b></div>
         <div class="hwctl hwctl-static">${esc(info.rootfs || "—")}</div>
       </div>
     </div>`);
@@ -3761,13 +3761,13 @@ async function openCreateCt(conn = selectedConn, forUser?: { owner: string; afte
   // The first running network is the default: a container is rarely wanted
   // without one.
   const firstActive = nets.find((n) => n.active);
-  const el = openModal(forUser ? "Create container for a user" : "Create container", `
+  const el = openModal(forUser ? "Create Container for a User" : "Create Container", `
     <div class="section-title">General</div>
     <div class="grid2">
       <label class="field"><span>Name</span><input id="ct-title" placeholder="web-1"></label>
       <label class="field"><span>Hostname (optional)</span><input id="ct-host" placeholder="from the name"></label>
-      <label class="field"><span>Root password</span><input id="ct-pass" type="password" autocomplete="new-password"></label>
-      <label class="field"><span>SSH public key (optional)</span><input id="ct-keys" placeholder="ssh-ed25519 AAAA…"></label>
+      <label class="field"><span>Root Password</span><input id="ct-pass" type="password" autocomplete="new-password"></label>
+      <label class="field"><span>SSH Public Key (optional)</span><input id="ct-keys" placeholder="ssh-ed25519 AAAA…"></label>
     </div>
     ${canPriv ? `<label class="check"><input type="checkbox" id="ct-priv"> Privileged container</label>` : ""}
     <div class="section-title">Template</div>
@@ -3776,12 +3776,12 @@ async function openCreateCt(conn = selectedConn, forUser?: { owner: string; afte
     </select></label>` : `<div class="empty">No templates yet. Open a storage pool and choose <b>Templates</b> to download one.</div>`}
     <div class="section-title">Disk</div>
     <div class="grid2">
-      <label class="field"><span>Storage pool</span><select id="ct-pool">
+      <label class="field"><span>Storage Pool</span><select id="ct-pool">
         ${active.map((p) => `<option value="${esc(p.name)}">${esc(p.title || p.name)}</option>`).join("")}
       </select></label>
-      <label class="field"><span>Root disk</span>${unitInput("ct-size", 8, "GiB", CT_DISK_UNITS, STORAGE_DEFAULT, 1)}</label>
+      <label class="field"><span>Root Disk</span>${unitInput("ct-size", 8, "GiB", CT_DISK_UNITS, STORAGE_DEFAULT, 1)}</label>
     </div>
-    <div class="section-title">CPU and memory</div>
+    <div class="section-title">CPU and Memory</div>
     <div class="grid2">
       <label class="field"><span>vCPUs</span><input id="ct-cpu" type="number" min="1" step="1" value="1"></label>
       <label class="field"><span>Memory</span>${unitInput("ct-mem", 512, "MiB", MEMORY_UNITS, MEMORY_DEFAULT, 16)}</label>
@@ -3854,7 +3854,7 @@ async function openCreateCt(conn = selectedConn, forUser?: { owner: string; afte
 /// Shared by the container's view, its cards and menu, and the admin panel.
 async function deleteCtOn(conn: string, name: string, after: () => void) {
   const shown = displayName(treeCts[conn], name);
-  if (!(await askConfirm("Delete container",
+  if (!(await askConfirm("Delete Container",
     `Delete container "${shown}" and its root filesystem? The template it was made from is kept.`, "Delete", true))) return;
   let outcome = `Container ${shown} deleted`;
   const ok = await runTask(`Delete container ${shown}`, async (set) => {
@@ -3893,7 +3893,7 @@ async function deleteCt(name: string) {
 /// Rename a container. It is named by its UUID, so this sets its title: the
 /// id -- the URL and every stored key -- never changes.
 async function renameCt(conn: string, name: string) {
-  const next = await askText("Rename container", "New name", displayName(treeCts[conn], name), "web-1");
+  const next = await askText("Rename Container", "New name", displayName(treeCts[conn], name), "web-1");
   if (!next || next === displayName(treeCts[conn], name)) return;
   try {
     await api.post(`${guestBase(conn, name, true)}/rename`, { name: next });
@@ -4031,7 +4031,7 @@ function openNetworkForm(
 ) {
   if (!conn) return;
   const el = openModal(
-    uuid ? `Edit network — ${esc(initial.name)}` : "Create network",
+    uuid ? `Edit Network — ${esc(initial.name)}` : "Create Network",
     `<div class="grid2">
       <label class="field"><span>Name</span><input id="net-name" value="${esc(initial.name)}"></label>
       <label class="field"><span>Mode</span><select id="net-mode">
@@ -4040,10 +4040,10 @@ function openNetworkForm(
         <option value="none" ${initial.forward === "none" ? "selected" : ""}>Isolated</option>
       </select></label>
       <label class="field" data-net-field="bridge"><span>Bridge</span><select id="net-bridge">
-        <option value="">Select a bridge…</option>
+        <option value="">Select a Bridge…</option>
         ${initial.bridge ? `<option value="${esc(initial.bridge)}" selected>${esc(initial.bridge)}</option>` : ""}
       </select></label>
-      <label class="field" data-net-field="ip"><span>Network (CIDR)</span><span style="display:flex;gap:7px;align-items:center"><input id="net-ip" placeholder="IP-Less Network" value="${esc(initial.ip)}" readonly><button class="btn icon field-btn" id="net-ip-reroll" type="button" title="Pick another subnet">${ic.reroll()}</button><button class="btn icon field-btn" id="net-ip-clear" type="button" title="No subnet">${ic.trash()}</button></span></label>
+      <label class="field" data-net-field="ip"><span>Network (CIDR)</span><span style="display:flex;gap:7px;align-items:center"><input id="net-ip" placeholder="IP-Less Network" value="${esc(initial.ip)}" readonly><button class="btn icon field-btn" id="net-ip-reroll" type="button" title="Pick Another Subnet">${ic.reroll()}</button><button class="btn icon field-btn" id="net-ip-clear" type="button" title="No Subnet">${ic.trash()}</button></span></label>
       <label class="field" data-net-field="dns"><span>DNS servers (NAT, comma separated)</span><input id="net-dns" placeholder="1.1.1.1, 8.8.8.8" value="${esc(initial.dns)}"></label>
     </div>`,
     `<button class="btn primary" id="net-save">${uuid ? "Save" : "Create"}</button>`,
@@ -4090,7 +4090,7 @@ function openNetworkForm(
       bridgeSelect.replaceChildren();
       const ph = document.createElement("option");
       ph.value = "";
-      ph.textContent = "Select a bridge…";
+      ph.textContent = "Select a Bridge…";
       bridgeSelect.append(ph);
       for (const b of bridges) {
         const o = document.createElement("option");
@@ -4312,11 +4312,11 @@ setHtml(target, `<table class="grid">
       ${vols.map((v) => `
         <tr><td>${esc(v.title || v.name)}</td><td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
         <td class="col-actions"><div class="row-actions">
-          <button class="btn icon" data-vol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
+          <button class="btn icon" data-vol-title="${esc(v.name)}" title="Edit Nickname">${ic.edit()}</button>
           <button class="btn danger icon" data-delvol="${esc(v.name)}">${ic.trash()}</button>
         </div></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
     </table>
-    <div class="actions"><button class="btn" id="create-vol" data-pool="${esc(pool)}">New volume</button></div>`);
+    <div class="actions"><button class="btn" id="create-vol" data-pool="${esc(pool)}">New Volume</button></div>`);
     target.querySelectorAll("[data-vol-title]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => void renameVolume(pool, (b as HTMLElement).dataset.volTitle!).then(() => loadVolumes(pool));
     });
@@ -4388,7 +4388,7 @@ setHtml(content, `
         <button class="btn icon" id="vm-shutdown" title="Shutdown" ${running ? "" : "disabled"}>${ic.stop()}</button>
         <button class="btn icon" id="vm-reboot" title="Reboot" ${running ? "" : "disabled"}>${ic.reboot()}</button>
         ${ct ? "" : `<button class="btn icon" id="vm-reset" title="Reset" ${running ? "" : "disabled"}>${ic.reset()}</button>`}
-        <button class="btn icon" id="vm-destroy" title="Force stop" ${running ? "" : "disabled"}>${ic.forceStop()}</button>
+        <button class="btn icon" id="vm-destroy" title="Force Stop" ${running ? "" : "disabled"}>${ic.forceStop()}</button>
         ${ct ? "" : `<button class="btn icon" id="vm-vv" title="Open in virt-viewer" ${running ? "" : "disabled"}>${ic.download()}</button>`}
         ${canShareVm(selectedConn!, vm, ct) ? `<button class="btn icon" id="vm-share" title="Share">${ic.perms()}</button>` : ""}
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
@@ -4487,15 +4487,15 @@ async function renderVmBody(vm: string) {
     setHtml(body, `
       <div class="console-bar">
         <span class="console-group">
-          <button class="btn icon" id="con-zoom-out" title="Zoom out">${ic.zoomOut()}</button>
-          <button class="btn" id="con-zoom-reset" title="Fit to window">${zoomLabel(consoleZoom)}</button>
+          <button class="btn icon" id="con-zoom-out" title="Zoom Out">${ic.zoomOut()}</button>
+          <button class="btn" id="con-zoom-reset" title="Fit to Window">${zoomLabel(consoleZoom)}</button>
           <button class="btn icon" id="con-zoom-in" title="Zoom in">${ic.zoomIn()}</button>
-          <button class="btn icon" id="con-fit" title="Fit to window">${ic.fit()}</button>
+          <button class="btn icon" id="con-fit" title="Fit to Window">${ic.fit()}</button>
         </span>
         <span class="console-group" style="margin-left:auto">
           <label class="console-speed" title="${esc(speed().hint)}">
             <span class="console-speed-label">Speed</span>
-            <select id="con-speed" aria-label="Console speed">${speedOptions()}</select>
+            <select id="con-speed" aria-label="Console Speed">${speedOptions()}</select>
           </label>
           <button class="btn icon" id="con-type" title="Type text into the guest">${ic.clipboard()}</button>
           <button class="btn" id="con-cad" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
@@ -4671,7 +4671,7 @@ async function renderVmBody(vm: string) {
         <div class="hwtable">
           <div class="hwrow">
             <span class="hwrow-ic">${ic.vm()}</span>
-            <div class="hwrow-label"><b>Resource name</b><i>Renamed via the dedicated endpoint</i></div>
+            <div class="hwrow-label"><b>Resource Name</b><i>Renamed via the dedicated endpoint</i></div>
             <div class="hwctl"><input id="opt-name" value="${esc(vm)}" ${isUuid(vm) ? "readonly" : ""}></div>
           </div>
           <div class="hwrow">
@@ -4691,7 +4691,7 @@ async function renderVmBody(vm: string) {
               <div id="opt-boot-list" class="boot-list"></div>
               <div class="actions" style="margin:8px 0 0">
                 <select id="opt-boot-add"></select>
-                <button class="btn" id="opt-boot-add-btn">${ic.plus(14)} Add device</button>
+                <button class="btn" id="opt-boot-add-btn">${ic.plus(14)} Add Device</button>
               </div>
             </div>
           </div>
@@ -4753,8 +4753,8 @@ async function renderVmBody(vm: string) {
             <span class="boot-order">${i + 1}</span>
             <span class="boot-name"><b>${esc(bootNames[d] ?? BOOT_LABEL[d] ?? d)}</b><i>${esc(BOOT_LABEL[d] ?? d)}</i></span>
             <span class="boot-acts">
-              <button class="btn icon" data-boot-up ${i === 0 ? "disabled" : ""} title="Move up">${ic.up(14)}</button>
-              <button class="btn icon" data-boot-down ${i === bootOrder.length - 1 ? "disabled" : ""} title="Move down">${ic.down(14)}</button>
+              <button class="btn icon" data-boot-up ${i === 0 ? "disabled" : ""} title="Move Up">${ic.up(14)}</button>
+              <button class="btn icon" data-boot-down ${i === bootOrder.length - 1 ? "disabled" : ""} title="Move Down">${ic.down(14)}</button>
               <button class="btn danger icon" data-boot-del title="Remove">${ic.trash()}</button>
             </span>
           </div>`).join("") || `<p class="hint">Nothing to boot from; libvirt uses its own order.</p>`);
@@ -4903,7 +4903,7 @@ async function renderVmBody(vm: string) {
       <div class="section-title fw-cat">Interfaces</div>
       ${liveNote ? `<div class="dsub" style="margin-bottom:8px">${liveNote}</div>` : ""}
       <table class="grid" id="vmnet-nics">
-        <tr><th>Device</th><th>MAC</th><th>Network</th>${ct ? "" : "<th>Model</th>"}<th>IPAM address</th><th>RX limit</th><th>TX limit</th><th class="col-actions"></th></tr>
+        <tr><th>Device</th><th>MAC</th><th>Network</th>${ct ? "" : "<th>Model</th>"}<th>IPAM Address</th><th>RX Limit</th><th>TX Limit</th><th class="col-actions"></th></tr>
         ${nics.map((n, i) => {
           const r = reservation(n);
           const hasDhcp = !!(n.network && netIpam.has(n.network));
@@ -4918,20 +4918,20 @@ async function renderVmBody(vm: string) {
             <td>${fmtRateCell(n.rx_mbps)}</td>
             <td>${fmtRateCell(n.tx_mbps)}</td>
             <td class="col-actions">
-              <button class="btn icon" data-nic-ipam="${i}" title="IPAM address" ${hasDhcp ? "" : "disabled"}>${ic.edit()}</button>
-              <button class="btn icon" data-nic-rate="${i}" title="Rate limit">${ic.autostart()}</button>
-              <button class="btn danger icon" data-nic-del="${i}" title="Remove interface">${ic.trash()}</button>
+              <button class="btn icon" data-nic-ipam="${i}" title="IPAM Address" ${hasDhcp ? "" : "disabled"}>${ic.edit()}</button>
+              <button class="btn icon" data-nic-rate="${i}" title="Rate Limit">${ic.autostart()}</button>
+              <button class="btn danger icon" data-nic-del="${i}" title="Remove Interface">${ic.trash()}</button>
             </td></tr>`;
         }).join("") || `<tr><td colspan="${ct ? 7 : 8}" class="empty">No network interfaces.</td></tr>`}
       </table>
-      <div class="actions"><button class="btn" id="vmnet-add">${ic.plus(14)} Add interface</button></div>
+      <div class="actions"><button class="btn" id="vmnet-add">${ic.plus(14)} Add Interface</button></div>
       <div class="section-title fw-cat" style="margin-top:22px">Firewall</div>
       <div id="vmnet-fw">${skeleton("table")}</div>`);
 
     const reload = () => { if (stillCurrentVm(conn, vm, "network")) void renderVmBody(vm); };
 
     $("#vmnet-add", body).onclick = () => {
-      const el = openModal("Add interface", `
+      const el = openModal("Add Interface", `
         <label class="field"><span>Network</span><select id="nic-net">
           <option value="">None</option>
           ${nets.map((n) => `<option value="${esc(n.name)}">${esc(n.title || n.name)}${n.active ? "" : " (inactive)"}</option>`).join("")}
@@ -4939,7 +4939,7 @@ async function renderVmBody(vm: string) {
         ${ct ? "" : `<label class="field"><span>Model</span><select id="nic-model">
           <option value="virtio">virtio</option><option value="e1000e">e1000e</option><option value="rtl8139">rtl8139</option>
         </select></label>`}
-        <label class="field"><span>MAC address (optional)</span><input id="nic-mac" placeholder="generated if blank"></label>
+        <label class="field"><span>MAC Address (optional)</span><input id="nic-mac" placeholder="generated if blank"></label>
         ${ct ? "" : `<div class="dsub">${running ? "Hot-added to the running guest." : "Added to the guest's definition."}</div>`}`,
         `<button class="btn primary" id="nic-ok">${ic.plus(14)} Add</button>`);
       $("#nic-ok", el).onclick = async () => {
@@ -4964,7 +4964,7 @@ async function renderVmBody(vm: string) {
       (b as HTMLElement).onclick = async () => {
         const n = nics[Number((b as HTMLElement).dataset.nicDel)];
         if (!n?.mac) return;
-        const ok = await askConfirm("Remove interface",
+        const ok = await askConfirm("Remove Interface",
           `Remove ${n.mac} (${n.network ?? "no network"})${running ? " from the running guest" : ""}?`, "Remove", true);
         if (!ok) return;
         try {
@@ -4985,7 +4985,7 @@ async function renderVmBody(vm: string) {
       (b as HTMLElement).onclick = () => {
         const n = nics[Number((b as HTMLElement).dataset.nicRate)];
         if (!n?.mac) return;
-        const el = openModal(`Rate limit — ${n.mac}`, `
+        const el = openModal(`Rate Limit — ${n.mac}`, `
           <label class="field"><span>RX limit, Mbps (to the guest; blank = unlimited)</span>
             <input id="rate-rx" type="number" min="0" step="any" value="${n.rx_mbps ?? ""}"></label>
           <label class="field"><span>TX limit, Mbps (from the guest; blank = unlimited)</span>
@@ -5020,7 +5020,7 @@ async function renderVmBody(vm: string) {
         const suggested = current?.ip
           ?? nextFreeIp(`${ipam.gateway}/${ipam.prefix}`, ipamNet.hosts.map((h) => h.ip),
             { start: ipam.range_start, end: ipam.range_end }) ?? "";
-        const el = openModal(`IPAM address — ${n.mac}`, `
+        const el = openModal(`IPAM Address — ${n.mac}`, `
           <label class="field"><span>IP address on ${esc(n.network ? displayName(nets, n.network) : "—")} (${esc(ipam.gateway)}/${ipam.prefix})</span>
             <input id="ipam-ip" value="${esc(suggested)}" placeholder="blank = assign automatically"></label>
           <label class="field"><span>Hostname (optional)</span>
@@ -5081,9 +5081,9 @@ async function renderVmBody(vm: string) {
           ${vmRules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
         </table>
         <div class="actions">
-          <button class="btn" id="vmfw-add">${ic.plus(14)} Add rule</button>
+          <button class="btn" id="vmfw-add">${ic.plus(14)} Add Rule</button>
           <button class="btn primary" id="vmfw-apply">${ic.firewall(14)} Apply</button>
-          <button class="btn al-open" id="vmfw-logs">${ic.logs(14)} Access logs</button>
+          <button class="btn al-open" id="vmfw-logs">${ic.logs(14)} Access Logs</button>
         </div>`);
       $("#vmfw-logs", rulesBody).onclick = () => openAccessLogs(conn, vm, ct);
       attachRuleIpSuggest(rulesBody, () => ipCandidates);
@@ -5118,7 +5118,7 @@ async function renderVmBody(vm: string) {
 
   if (vmTab === "hardware") {
     // The hardware editor is embedded here — no read-only table and no
-    // "Edit hardware" click. Devices are edited in place and saved.
+    // "Edit Hardware" click. Devices are edited in place and saved.
     await openHardwareEditor({ vm, inline: true });
     return;
   }
@@ -5286,7 +5286,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     const hwStrip = ct ? [
       { icon: ic.container(), label: "Container", sum: `${s.vcpus} vCPU` },
       { icon: ic.lock(), label: "Isolation", sum: d?.privileged ? "privileged (host root)" : "user namespace" },
-      { icon: ic.disk(), label: "Root filesystem", sum: rootfs.split("/").pop() || "—" },
+      { icon: ic.disk(), label: "Root Filesystem", sum: rootfs.split("/").pop() || "—" },
       ...(nic.interfaces ?? []).map((x) => ({
         icon: ic.network(), label: "Network", sum: x.network ? displayName(treeNets[conn], x.network) : (x.mac ?? "—"),
       })),
@@ -5480,7 +5480,7 @@ async function deleteVmOn(conn: string, name: string, after: () => void) {
   const shown = displayName(guestList(conn), name);
   if (!(await askConfirm("Delete VM", `Delete VM "${shown}"?`, "Delete", true))) return;
   const removeStorage = await askConfirm(
-    "Remove storage",
+    "Remove Storage",
     // Say what will NOT go: an ISO the guest boots from is shared media, and a
     // disk another guest uses is not this VM's to delete.
     `Also delete the disks belonging to "${shown}"? ISOs and disks other guests use are kept.`,
@@ -5535,7 +5535,7 @@ async function renameVm(name: string) {
 }
 
 async function deleteNetworkOn(conn: string, name: string, shown: string, after: () => void) {
-  if (!(await askConfirm("Delete network", `Delete network "${shown}"?`, "Delete", true))) return;
+  if (!(await askConfirm("Delete Network", `Delete network "${shown}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${conn}/networks/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -5551,7 +5551,7 @@ async function deleteNetwork(name: string) {
 }
 
 async function deletePoolOn(conn: string, name: string, shown: string, after: () => void) {
-  if (!(await askConfirm("Delete pool", `Delete storage pool "${shown}"?`, "Delete", true))) return;
+  if (!(await askConfirm("Delete Pool", `Delete storage pool "${shown}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${conn}/pools/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -5567,7 +5567,7 @@ async function deletePool(name: string) {
 }
 
 async function deleteVolumeOn(conn: string, pool: string, name: string, after: () => void) {
-  if (!(await askConfirm("Delete volume", `Delete volume "${shownVolume(pool, name)}"?`, "Delete", true))) return;
+  if (!(await askConfirm("Delete Volume", `Delete volume "${shownVolume(pool, name)}"?`, "Delete", true))) return;
   try {
     await api.del(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}`);
     toast("Deleted");
@@ -5584,7 +5584,7 @@ function setVolumeTitle(conn: string, pool: string, name: string, title: string)
 
 async function renameVolume(pool: string, name: string) {
   if (!selectedConn) return;
-  const title = await askText("Volume nickname", "Nickname", shownVolume(pool, name) === name ? "" : shownVolume(pool, name));
+  const title = await askText("Volume Nickname", "Nickname", shownVolume(pool, name) === name ? "" : shownVolume(pool, name));
   if (title == null) return;
   try {
     await setVolumeTitle(selectedConn, pool, name, title);
@@ -5614,7 +5614,7 @@ async function adminDeleteResource(kind: AdminResource["kind"], conn: string, po
 async function deleteConnection(id: string) {
   const c = connections.find((x) => x.id === id);
   if (!c) return;
-  if (!(await askConfirm("Remove server", `Remove server "${c.name}"?`, "Remove", true))) return;
+  if (!(await askConfirm("Remove Server", `Remove server "${c.name}"?`, "Remove", true))) return;
   try {
     await api.del(`/connections/${id}`);
     connections = await api.get<Connection[]>("/connections");
@@ -5727,7 +5727,7 @@ function askMultiline(title: string, label: string, hint: string): Promise<strin
        <textarea id="ask-text" rows="8" spellcheck="false" placeholder=""></textarea>
        <div class="muted" style="font-size:11px">${esc(hint)}</div>`,
       `<button class="btn" id="ask-cancel">Cancel</button>
-       <button class="btn primary" id="ask-ok">Type it</button>`,
+       <button class="btn primary" id="ask-ok">Type It</button>`,
     );
     const ta = $("#ask-text", el) as HTMLTextAreaElement;
     // Ctrl/Cmd+Enter submits; a bare Enter must stay a newline, or a pasted
@@ -5833,7 +5833,7 @@ async function reloadConnections() {
 /// Returns the status line element so the poller can update it in place.
 function offerInstallScript(script: string): HTMLElement | null {
   const el = openModal(
-    "Daemon not reachable",
+    "Daemon Not Reachable",
     `
     <label class="field"><span>Install Script</span>
       <textarea id="install-script" rows="14" readonly spellcheck="false">${esc(script)}</textarea>
@@ -6100,7 +6100,7 @@ async function openHardwareEditor(opts: {
 
   // Create VM keeps its modal; editing an existing guest renders the editor
   // inline in the Hardware tab, so devices are editable without an extra
-  // "Edit hardware" click.
+  // "Edit Hardware" click.
   // Unit selectors are presentation state: the model stays in MiB and GiB, so
   // changing a unit converts the number in the field, never the stored size.
   let memUnit: MemoryUnit = MEMORY_DEFAULT;
@@ -6448,7 +6448,7 @@ async function openHardwareEditor(opts: {
           }
           // A cdrom may be empty: that is a valid empty drive.
           const emptyOpt = d.kind === "cdrom" && f.key === "volume"
-            ? `<option value="" ${val ? "" : "selected"}>No media</option>`
+            ? `<option value="" ${val ? "" : "selected"}>No Media</option>`
             : "";
           const labels = f.options?.length
             ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
@@ -6486,7 +6486,7 @@ async function openHardwareEditor(opts: {
         ${fields.join("")}
         <div class="actions">
           ${advToggle}
-          <button class="btn danger" id="hw-remove">${ic.trash(14)} Remove device</button>
+          <button class="btn danger" id="hw-remove">${ic.trash(14)} Remove Device</button>
         </div>
       </div>`;
     }
@@ -6521,8 +6521,8 @@ async function openHardwareEditor(opts: {
           newDisk.volume = usable[0]?.name ?? "";
         }
         const mode = `<label class="field"><span>Disk</span><select id="g-disk-mode">
-            <option value="new" ${newDisk.mode === "new" ? "selected" : ""}>Create a new volume</option>
-            <option value="existing" ${newDisk.mode === "existing" ? "selected" : ""}>Use one of my volumes</option>
+            <option value="new" ${newDisk.mode === "new" ? "selected" : ""}>Create a New Volume</option>
+            <option value="existing" ${newDisk.mode === "existing" ? "selected" : ""}>Use One of My Volumes</option>
           </select></label>`;
         const pool = `<label class="field"><span>Storage Pool</span>
             <select id="g-pool">${optNamed("pool", pools.map((p) => p.name), newDisk.pool)}</select></label>`;
@@ -6535,7 +6535,7 @@ async function openHardwareEditor(opts: {
                   ${esc(`${v.title || v.name} — ${fmtBytes(v.capacity)}`)}</option>`).join("")}
               </select></label>`
               : `<p class="hint">You have no free volumes in this pool${held.length ? " (the ones you have are already attached to a guest)" : ""}.
-                  Create one from the pool's page, or choose "Create a new volume".</p>`}
+                  Create one from the pool's page, or choose "Create a New Volume".</p>`}
             ${held.length ? `<p class="hint">In use, not offered: ${held.map((v) => esc(`${v.name} (${v.used_by!.join(", ")})`)).join("; ")}.</p>` : ""}
           </div>`;
         }
@@ -6774,7 +6774,7 @@ async function openHardwareEditor(opts: {
           }
           // A cdrom may be empty: that is a valid empty drive.
           const emptyOpt = kind === "cdrom" && f.key === "volume"
-            ? `<option value="" ${val ? "" : "selected"}>No media</option>`
+            ? `<option value="" ${val ? "" : "selected"}>No Media</option>`
             : "";
           const labels = f.options?.length
             ? f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === val ? "selected" : ""}>${esc(o.label)}</option>`).join("")
@@ -7123,7 +7123,7 @@ function pickDaemon(): Promise<string | null> {
       return;
     }
     const el = openModal(
-      "Create guest — select daemon",
+      "Create Guest — Select Daemon",
       `<div class="create-resource-grid">
         ${connections.map((c) => `
           <button class="create-resource-card" data-pick-conn="${c.id}">
@@ -7237,7 +7237,7 @@ function openCreateResource() {
 function openCreatePool(conn = selectedConn, after?: () => void) {
   if (!conn) return;
   const el = openModal(
-    "Create storage pool",
+    "Create Storage Pool",
     `<div class="grid2">
       <label class="field"><span>Name</span><input id="pool-name"></label>
       <label class="field"><span>Target Path</span><input id="pool-target" placeholder="/var/lib/libvirt/images"></label>
@@ -7272,7 +7272,7 @@ function openCreateVolume(pool: string) {
   if (!selectedConn) return;
   let unit: StorageUnit = STORAGE_DEFAULT;
   const el = openModal(
-    `New volume in ${esc(shownPool(pool))}`,
+    `New Volume in ${esc(shownPool(pool))}`,
     `<div class="grid2">
       <label class="field"><span>Name</span><input id="vol-name"></label>
       <label class="field"><span>Size</span>
@@ -7406,7 +7406,7 @@ function uploadsSection(pool: string): string {
           <span>${fmtBytes(j.sent)} of ${fmtBytes(j.size)}</span>
           <span>${speed}</span>
           <span>${done && j.sha256 ? `sha256 ${esc(j.sha256.slice(0, 12))}…` : ""}</span>
-          ${j.phase === "staged" ? `<button class="btn" data-up-push="${esc(j.id)}">Send to daemon</button>` : ""}
+          ${j.phase === "staged" ? `<button class="btn" data-up-push="${esc(j.id)}">Send to Daemon</button>` : ""}
           <button class="btn icon" data-up-${live ? "cancel" : "clear"}="${esc(j.id)}"
             title="${live ? "Cancel and discard the staged copy" : "Dismiss"}">${ic.close()}</button>
         </div>
@@ -7723,7 +7723,7 @@ function openProfile() {
   const el = openModal(
     "Profile",
     `<div class="profile-id">
-       <button class="pop-avatar" id="pf-avatar-btn" title="Change picture">
+       <button class="pop-avatar" id="pf-avatar-btn" title="Change Picture">
          <div class="avatar">${avatarHtml()}</div>
          <span class="camera-badge">${ic.camera()}</span>
        </button>
@@ -7744,14 +7744,14 @@ function openProfile() {
      <div class="grid2">
        <label class="field"><span>Current Password</span>
          <input id="pf-pass" type="password" autocomplete="current-password"></label>
-       <label class="field"><span>New password</span>
+       <label class="field"><span>New Password</span>
          <input id="pf-pass2" type="password" autocomplete="new-password" placeholder="min 8 characters"></label>
      </div>
-     <div class="actions"><button class="btn" id="pf-pass-save">${ic.lock()} Change password</button></div>
+     <div class="actions"><button class="btn" id="pf-pass-save">${ic.lock()} Change Password</button></div>
 
      <div class="section-title">API Keys</div>
      <div class="key-list" id="pf-keys"></div>
-     <div class="actions"><button class="btn" id="pf-newkey">${ic.key()} New API key</button></div>
+     <div class="actions"><button class="btn" id="pf-newkey">${ic.key()} New API Key</button></div>
 
      <div id="pf-limits"></div>`,
     // Save sits next to Cancel and only appears once something differs, so the
@@ -7831,7 +7831,7 @@ setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done">
   refreshKeys();
   $("#pf-newkey", el).onclick = async () => {
     const name = await askText(
-      "New API key", "Key name (blank to generate one)", "", "leave blank for a random name");
+      "New API Key", "Key name (blank to generate one)", "", "leave blank for a random name");
     // askText returns null when cancelled and "" when accepted while empty, so
     // only null aborts; empty means "let the server name it".
     if (name === null) return;

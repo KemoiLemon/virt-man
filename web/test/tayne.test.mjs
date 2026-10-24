@@ -19,7 +19,7 @@ before(async () => {
 const cmds = [
   { id: "go-dc", label: "Go to Datacenter", hint: "Servers" },
   { id: "vm-start", label: "Start — alpine", hint: "Selected VM" },
-  { id: "toggle-theme", label: "Toggle theme", hint: "dark → light" },
+  { id: "toggle-theme", label: "Toggle Theme", hint: "dark → light" },
 ];
 
 test("opening shows every command, first one selected", () => {
@@ -45,7 +45,7 @@ test("typing filters across label, hint and id", () => {
   input.dispatchEvent(new window.Event("input", { bubbles: true }));
   rows = [...document.querySelectorAll(".tayne-row")];
   assert.equal(rows.length, 1, "hint text is searchable");
-  assert.equal(rows[0].textContent, "Toggle themedark → light");
+  assert.equal(rows[0].textContent, "Toggle Themedark → light");
   tayne.closeTayne();
 });
 

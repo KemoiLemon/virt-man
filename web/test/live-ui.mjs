@@ -328,7 +328,7 @@ await (async () => {
     rightClick(server);
     check("a server row offers its tabs and server actions", () => {
       const items = labels();
-      for (const want of ["Dashboard", "VMs", "Networks", "Storage", "Remove server"]) {
+      for (const want of ["Dashboard", "VMs", "Networks", "Storage", "Remove Server"]) {
         assert.ok(items.includes(want), `${want} offered (${items})`);
       }
     });
@@ -366,7 +366,7 @@ await (async () => {
     rightClick(serverCard);
     check("a server row offers the server's menu", () => {
       const items = labels();
-      for (const want of ["Dashboard", "Storage", "Create VM", "Remove server"]) {
+      for (const want of ["Dashboard", "Storage", "Create VM", "Remove Server"]) {
         assert.ok(items.includes(want), `${want} offered (${items})`);
       }
     });
@@ -645,7 +645,7 @@ check("the palette filters commands as you type", () => {
   input.dispatchEvent(new window.Event("input", { bubbles: true }));
   const rows = [...document.querySelectorAll(".tayne-row")];
   assert.equal(rows.length, 1, "only the theme command matches");
-  assert.ok(rows[0].textContent.includes("Toggle theme"), "theme command shown");
+  assert.ok(rows[0].textContent.includes("Toggle Theme"), "theme command shown");
 });
 
 check("the palette reaches every page, with an icon on each command", () => {

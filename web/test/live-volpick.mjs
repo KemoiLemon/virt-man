@@ -1,7 +1,7 @@
 // Create VM can boot from one of the user's own volumes.
 //
 // Drives the real Create VM form as a limited, non-admin user: picks
-// "Use one of my volumes", and checks the guest boots from that exact file,
+// "Use One of My Volumes", and checks the guest boots from that exact file,
 // as qcow2 (it was made empty here), that a refused create leaves the chosen
 // volume alone (it was the user's before), and that other users' volumes are
 // not offered.

@@ -242,18 +242,18 @@ const users_: Painter = async (ctx, area) => {
           <td>${limitsApply(u) ? quotaSummary(u.quota) : `<span class="dim-note">—</span>`}</td>
           <td class="col-actions"><div class="row-actions">
             <button class="btn icon" data-edit-user="${u.id}" title="Edit">${ic.edit()}</button>
-            <button class="btn icon" data-user-password="${u.id}" title="Change password">${ic.key()}</button>
+            <button class="btn icon" data-user-password="${u.id}" title="Change Password">${ic.key()}</button>
             <button class="btn danger icon" data-del-user="${u.id}" title="Delete">${ic.trash()}</button>
           </div></td>
         </tr>`).join("")}
     </table>`);
-  ctx.head(`<button class="btn primary" id="add-user">${ic.plus(14)} Add user</button>`);
+  ctx.head(`<button class="btn primary" id="add-user">${ic.plus(14)} Add User</button>`);
   ctx.$("#add-user").onclick = () => openUser(ctx, null);
   bind(area, "data-edit-user", (id) => openUser(ctx, users.find((u) => u.id === id) ?? null));
   bind(area, "data-user-password", (id) => openPassword(ctx, users.find((u) => u.id === id) ?? null));
   bind(area, "data-del-user", async (id) => {
     const u = users.find((x) => x.id === id);
-    if (!await ctx.askConfirm("Delete user",
+    if (!await ctx.askConfirm("Delete User",
       `Delete ${u?.username ?? "this user"}? Their API keys, sessions and grants go too; what they own passes to an Administrator.`,
       "Delete", true)) return;
     try {
@@ -293,9 +293,9 @@ function quotaSummary(q?: Quota): string {
 function openPassword(ctx: AdminCtx, u: User | null) {
   if (!u) return;
   const el = ctx.openModal(
-    `Change password — ${esc(u.username)}`,
-    `<label class="field"><span>New password (min 8)</span><input id="u-new-pass" type="password" autocomplete="new-password"></label>`,
-    `<button class="btn" id="up-cancel">Cancel</button><button class="btn primary" id="up-save">Change password</button>`,
+    `Change Password — ${esc(u.username)}`,
+    `<label class="field"><span>New Password (min 8)</span><input id="u-new-pass" type="password" autocomplete="new-password"></label>`,
+    `<button class="btn" id="up-cancel">Cancel</button><button class="btn primary" id="up-save">Change Password</button>`,
   );
   ctx.$("#up-cancel", el).onclick = () => el.remove();
   ctx.$("#up-save", el).onclick = async () => {
@@ -314,7 +314,7 @@ function openPassword(ctx: AdminCtx, u: User | null) {
 
 function openUser(ctx: AdminCtx, u: User | null) {
   const el = ctx.openModal(
-    u ? `Edit — ${esc(u.username)}` : "Add user",
+    u ? `Edit — ${esc(u.username)}` : "Add User",
     `<div class="grid2">
        <label class="field"><span>Username</span><input id="u-name" value="${esc(u?.username ?? "")}" autocomplete="off"></label>
        <label class="field"><span>Display Name</span><input id="u-nick" value="${esc(u?.nickname ?? "")}"></label>
@@ -375,11 +375,11 @@ const groups_: Painter = async (ctx, area) => {
           </div></td>
         </tr>`).join("") || `<tr><td colspan="4" class="empty">No groups. A group gets permissions like a user does, and every member has them.</td></tr>`}
     </table>`);
-  ctx.head(`<button class="btn primary" id="add-group">${ic.plus(14)} Add group</button>`);
+  ctx.head(`<button class="btn primary" id="add-group">${ic.plus(14)} Add Group</button>`);
   ctx.$("#add-group").onclick = () => openGroup(ctx, null);
   bind(area, "data-edit-group", (n) => openGroup(ctx, groups.find((g) => g.name === n) ?? null));
   bind(area, "data-del-group", async (n) => {
-    if (!await ctx.askConfirm("Delete group", `Delete @${n} and every permission granted to it?`, "Delete", true)) return;
+    if (!await ctx.askConfirm("Delete Group", `Delete @${n} and every permission granted to it?`, "Delete", true)) return;
     try {
       await api.del(`/groups/${encodeURIComponent(n)}`);
       ctx.toast("Group deleted");
@@ -390,7 +390,7 @@ const groups_: Painter = async (ctx, area) => {
 
 function openGroup(ctx: AdminCtx, g: GroupDef | null) {
   const el = ctx.openModal(
-    g ? `Group — @${esc(g.name)}` : "Add group",
+    g ? `Group — @${esc(g.name)}` : "Add Group",
     `<div class="grid2">
        <label class="field"><span>Name</span><input id="g-name" value="${esc(g?.name ?? "")}" placeholder="ops"></label>
        <label class="field"><span>Comment</span><input id="g-comment" value="${esc(g?.comment ?? "")}"></label>
@@ -447,12 +447,12 @@ const roles_: Painter = async (ctx, area) => {
           </div></td>
         </tr>`).join("")}
     </table>`);
-  ctx.head(`<button class="btn primary" id="add-role">${ic.plus(14)} New role</button>`);
+  ctx.head(`<button class="btn primary" id="add-role">${ic.plus(14)} New Role</button>`);
   ctx.$("#add-role").onclick = () => openRole(ctx, null);
   const find = (n: string) => roles.find((r) => r.name === n) ?? null;
   bind(area, "data-edit-role", (n) => openRole(ctx, find(n)));
   bind(area, "data-del-role", async (n) => {
-    if (!await ctx.askConfirm("Delete role", `Delete the role "${n}"?`, "Delete", true)) return;
+    if (!await ctx.askConfirm("Delete Role", `Delete the role "${n}"?`, "Delete", true)) return;
     try {
       await api.del(`/roles/${encodeURIComponent(n)}`);
       ctx.toast("Role deleted");
@@ -464,7 +464,7 @@ const roles_: Painter = async (ctx, area) => {
 function openRole(ctx: AdminCtx, r: RoleDef | null) {
   const ro = false;
   const el = ctx.openModal(
-    r ? `Role — ${esc(r.name)}` : "New role",
+    r ? `Role — ${esc(r.name)}` : "New Role",
     `<label class="field"><span>Name</span><input id="r-name" value="${esc(r?.name ?? "")}" ${ro ? "disabled" : ""} placeholder="BackupOperator"></label>
      ${privGroups().map(([grp, ps]) => `
        <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">${esc(grp)}
@@ -588,12 +588,12 @@ const permissions_: Painter = async (ctx, area) => {
           <button class="btn danger icon" data-del-acl="${i}" title="Remove">${ic.trash()}</button></td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No permissions.</td></tr>`}
     </table>`);
-  ctx.head(`<button class="btn primary" id="add-acl">${ic.plus(14)} Add permission</button>`);
+  ctx.head(`<button class="btn primary" id="add-acl">${ic.plus(14)} Add Permission</button>`);
   ctx.$("#add-acl").onclick = () => openGrant(ctx, {});
   bind(area, "data-edit-acl", (i) => void openGrant(ctx, {}, sorted[Number(i)]));
   bind(area, "data-del-acl", async (i) => {
     const e = sorted[Number(i)];
-    if (!await ctx.askConfirm("Remove permission",
+    if (!await ctx.askConfirm("Remove Permission",
       `Remove ${e.role} for ${e.label ?? ugidLabel(e.ugid)} on ${pathLabel(ctx, e.path)}?`, "Remove", true)) return;
     try {
       await api.del("/acl", e);
@@ -619,7 +619,7 @@ export async function openGrant(ctx: AdminCtx, pre: { ugid?: string; path?: stri
   if (wantPath && !paths.some((p) => p.path === wantPath)) paths.push({ path: wantPath, label: pathLabel(ctx, wantPath) });
   const ugid = edit?.ugid ?? pre.ugid;
   const el = ctx.openModal(
-    edit ? "Edit permission" : "Add permission",
+    edit ? "Edit Permission" : "Add Permission",
     `<label class="field"><span>Path</span><select id="a-path">
         ${paths.map((p) => option(p.path, p.label, p.path === (wantPath ?? "/"))).join("")}
       </select></label>
@@ -680,7 +680,7 @@ const daemons_: Painter = async (ctx, area) => {
           </div></td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No daemons yet.</td></tr>`}
     </table>`);
-  ctx.head(`<button class="btn primary" id="add-daemon">${ic.plus(14)} Add daemon</button>`);
+  ctx.head(`<button class="btn primary" id="add-daemon">${ic.plus(14)} Add Daemon</button>`);
   ctx.$("#add-daemon").onclick = () => ctx.openConnectionDialog();
   bind(area, "data-edit-conn", (id) => ctx.openConnectionDialog(id));
   bind(area, "data-del-conn", (id) => void ctx.deleteConnection(id));
@@ -699,7 +699,7 @@ const KIND_SECTION: Record<"vm" | "ct" | "network" | "pool", AdminSection> = {
 
 /// What the section's create button makes, as its label reads.
 const KIND_NOUN: Record<"vm" | "ct" | "network" | "pool", string> = {
-  vm: "VM", ct: "Container", network: "Network", pool: "Storage pool",
+  vm: "VM", ct: "Container", network: "Network", pool: "Storage Pool",
 };
 
 function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
@@ -731,9 +731,9 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
       // they carry delete alone; volumes add only an owner change.
       const actions = (r: AdminResource, i: number) => `
         <div class="row-actions">
-          ${r.kind === "pool" ? "" : `<button class="btn icon" data-owner-res="${i}" title="Change owner">${ic.user()}</button>`}
+          ${r.kind === "pool" ? "" : `<button class="btn icon" data-owner-res="${i}" title="Change Owner">${ic.user()}</button>`}
           ${r.kind === "volume" ? "" : `
-            <button class="btn icon ${r.suspended ? "on" : ""}" data-suspend-res="${i}" title="${r.suspended ? "Restore access" : "Suspend access"}">${r.suspended ? ic.start() : ic.suspend()}</button>`}
+            <button class="btn icon ${r.suspended ? "on" : ""}" data-suspend-res="${i}" title="${r.suspended ? "Restore Access" : "Suspend Access"}">${r.suspended ? ic.start() : ic.suspend()}</button>`}
           <button class="btn danger icon" data-del-res="${i}" title="Delete">${ic.trash()}</button>
         </div>`;
       const state = (r: AdminResource) => r.suspended
@@ -826,7 +826,7 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
       bind(area, "data-suspend-res", async (i) => {
         const r = shown[Number(i)];
         const to = !r.suspended;
-        if (to && !await ctx.askConfirm("Suspend access",
+        if (to && !await ctx.askConfirm("Suspend Access",
           `Suspend ${r.owner_name ?? "the owner"}'s access to ${r.title || r.name}? They keep read-only access; Administrators are unaffected.`, "Suspend", true)) return;
         try {
           await api.put("/resources", { kind: r.kind, conn: r.conn, pool: r.pool ?? "", name: r.name, suspended: to });
@@ -869,7 +869,7 @@ export async function assignOwner(conn: string, kind: "vm" | "ct" | "network", n
 /// on -- and the result is handed to them. Admins are not held to their limits.
 function createFor(ctx: AdminCtx, kind: "vm" | "ct" | "network", conn: string, after: () => void) {
   const el = ctx.openModal(
-    `Create ${kind === "vm" ? "VM" : kind === "ct" ? "container" : "network"} for a user`,
+    `Create ${kind === "vm" ? "VM" : kind === "ct" ? "Container" : "Network"} for a User`,
     `<label class="field"><span>Owner</span><select id="cf-user">
        ${users.filter((u) => !u.admin).concat(users.filter((u) => u.admin))
          .map((u) => option(u.id, u.username, false)).join("")}
@@ -903,7 +903,7 @@ const quotas_: Painter = async (ctx, area) => {
           <td>${fmtLimit(d.storage_gb, " GiB")}</td><td>${fmtLimit(d.networks)}</td>
           <td>${fmtLimit(d.forwards)}</td>
           <td>${n || "—"}</td>
-          <td class="col-actions"><button class="btn icon" data-quota="${u.id}" title="Edit limits">${ic.edit()}</button></td>
+          <td class="col-actions"><button class="btn icon" data-quota="${u.id}" title="Edit Limits">${ic.edit()}</button></td>
         </tr>`;
       }).join("")}
     </table>`);
@@ -1065,7 +1065,7 @@ const ips_: Painter = async (ctx, area, gen) => {
           <td class="mono">${esc(r.mac)}</td>
           <td>${r.dynamic ? "Assigned" : "Reserved"}</td>
           <td class="col-actions"><div class="row-actions">
-            <button class="btn icon" data-edit-ip="${i}" title="Change address">${ic.edit()}</button>
+            <button class="btn icon" data-edit-ip="${i}" title="Change Address">${ic.edit()}</button>
             <button class="btn danger icon" data-del-ip="${i}" title="Release">${ic.trash()}</button>
           </div></td>
         </tr>`).join("") || `<tr><td colspan="8" class="empty">No addresses allocated.</td></tr>`}
@@ -1080,8 +1080,8 @@ const ips_: Painter = async (ctx, area, gen) => {
     const el = ctx.openModal(
       `Address — ${esc(r.vm_name ?? r.mac)}`,
       `<div class="grid2">
-         <label class="field"><span>IPv4 address</span><input id="ip-addr" value="${esc(r.ip)}"></label>
-         <label class="field"><span>Host name</span><input id="ip-name" value="${esc(r.name ?? "")}"></label>
+         <label class="field"><span>IPv4 Address</span><input id="ip-addr" value="${esc(r.ip)}"></label>
+         <label class="field"><span>Host Name</span><input id="ip-name" value="${esc(r.name ?? "")}"></label>
        </div>`,
       `<button class="btn" id="ip-cancel">Cancel</button><button class="btn primary" id="ip-save">Save</button>`,
     );
@@ -1097,7 +1097,7 @@ const ips_: Painter = async (ctx, area, gen) => {
   });
   bind(area, "data-del-ip", async (i) => {
     const r = rows[Number(i)];
-    if (!await ctx.askConfirm("Release address", `Release ${r.ip} from ${r.vm_name ?? r.mac}? It gets a new one at its next DHCP.`, "Release", true)) return;
+    if (!await ctx.askConfirm("Release Address", `Release ${r.ip} from ${r.vm_name ?? r.mac}? It gets a new one at its next DHCP.`, "Release", true)) return;
     try {
       await api.del(`${base(r)}/${encodeURIComponent(r.mac)}`);
       ctx.toast("Address released");
@@ -1118,14 +1118,14 @@ const keys_: Painter = async (ctx, area) => {
           <td class="tname">${esc(k.name)}</td>
           <td>${esc(userName(k.user_id ?? ""))}</td>
           <td class="mono">${esc(k.prefix)}…</td>
-          <td class="priv-cell">${k.privs?.length ? k.privs.map((p) => `<span class="priv">${esc(p)}</span>`).join("") : `<span class="dim-note">Owner's access</span>`}</td>
+          <td class="priv-cell">${k.privs?.length ? k.privs.map((p) => `<span class="priv">${esc(p)}</span>`).join("") : `<span class="dim-note">Owner's Access</span>`}</td>
           <td class="col-actions"><button class="btn danger icon" data-del-key="${k.id}" title="Revoke">${ic.trash()}</button></td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No keys.</td></tr>`}
     </table>`);
-  ctx.head(`<button class="btn primary" id="add-key">${ic.plus(14)} New API key</button>`);
+  ctx.head(`<button class="btn primary" id="add-key">${ic.plus(14)} New API Key</button>`);
   ctx.$("#add-key").onclick = () => {
     const el = ctx.openModal(
-      "New API key",
+      "New API Key",
       `<div class="grid2">
          <label class="field"><span>Name</span><input id="k-name" placeholder="blank for a random name"></label>
           <label class="field"><span>Owner</span><select id="k-owner">
@@ -1206,9 +1206,9 @@ const activity_: Painter = async (ctx, area, gen) => {
           <td class="task-msg">${esc(e.message || "—")}</td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No activity recorded yet.</td></tr>`}
     </table>`);
-  ctx.head(`<button class="btn danger" id="act-clear">${ic.trash(14)} Clear all activity</button>`);
+  ctx.head(`<button class="btn danger" id="act-clear">${ic.trash(14)} Clear All Activity</button>`);
   ctx.$("#act-clear").onclick = async () => {
-    if (!await ctx.askConfirm("Clear activity log", "Delete every user's activity history?", "Clear", true)) return;
+    if (!await ctx.askConfirm("Clear Activity Log", "Delete every user's activity history?", "Clear", true)) return;
     try {
       await api.del("/activity");
       ctx.toast("Activity log cleared");
@@ -1345,12 +1345,12 @@ const dashboard_: Painter = async (ctx, area, gen) => {
           `${today.length - failedToday} done`, `${failedToday} failed`, "activity")}
       </div>
       <div class="dash-section">
-        <div class="section-title">Needs attention</div>
+        <div class="section-title">Needs Attention</div>
         <table class="grid">
           <tr><th>What</th><th>Where</th><th>Detail</th></tr>
           ${[
             ...conns.filter((c) => c.online === false).map((c) =>
-              `<tr class="row-open" tabindex="0" data-go="daemons"><td class="tname">Daemon offline</td><td>${esc(c.name)}</td>
+              `<tr class="row-open" tabindex="0" data-go="daemons"><td class="tname">Daemon Offline</td><td>${esc(c.name)}</td>
                 <td class="task-msg">${esc(c.offline_error ?? "not answering")}</td></tr>`),
             ...suspended.map((r) =>
               `<tr class="row-open" tabindex="0" data-go="${r.kind === "vm" || r.kind === "ct" ? KIND_SECTION[r.kind] : "networks"}"><td class="tname">Suspended ${r.kind === "vm" ? "VM" : r.kind === "ct" ? "container" : r.kind}</td>
@@ -1409,7 +1409,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
           <td class="task-msg">${esc(e.message || "—")}</td>
         </tr>`).join("") || `<tr><td colspan="5" class="empty">No activity recorded yet.</td></tr>`}
     </table>
-    ${act.entries.length > 50 ? `<div class="actions"><button class="btn" data-go="activity">${ic.logs(14)} Full activity log</button></div>` : ""}`;
+    ${act.entries.length > 50 ? `<div class="actions"><button class="btn" data-go="activity">${ic.logs(14)} Full Activity Log</button></div>` : ""}`;
   }
 
   ctx.setHtml(area, `

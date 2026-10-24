@@ -1,5 +1,5 @@
 // The admin panel can create and delete resources: the Storage Pools page
-// offers a "Storage pool" create button, and every resource row (VM, network,
+// offers a "Storage Pool" create button, and every resource row (VM, network,
 // pool, volume) carries a delete action. Drives the real app in jsdom
 // against a running backend.
 //
@@ -60,7 +60,7 @@ try {
   const doc = w.document;
   const create = doc.querySelector("#res-new");
   check("pools: a create button is rendered", !!create, create ? "" : "#res-new missing");
-  check("pools: the create button says 'Storage pool'",
+  check("pools: the create button says 'Storage Pool'",
     !!create && /storage pool/i.test(create.textContent), create?.textContent?.trim() ?? "");
 
   click(w, create);

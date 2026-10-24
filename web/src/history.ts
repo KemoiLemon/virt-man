@@ -35,7 +35,7 @@ export function setRange(key: string): boolean {
 
 /// The range buttons, for a dashboard or summary header.
 export function rangeBar(): string {
-  return `<div class="range-bar" role="group" aria-label="Chart range">${RANGES.map((r) =>
+  return `<div class="range-bar" role="group" aria-label="Chart Range">${RANGES.map((r) =>
     `<button class="btn range-btn ${r === current ? "on" : ""}" data-range="${r.key}" aria-pressed="${r === current}">${r.label}</button>`).join("")}</div>`;
 }
 

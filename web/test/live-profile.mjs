@@ -530,10 +530,10 @@ for (const k of mintedKeys) await window.fetch(`/keys/${k.id}`, { method: "DELET
   rc(document.querySelector('#tree [data-admin-section="groups"]'));
   check("the admin sidebar offers admin actions, not the resource tree's", () => {
     const l = labels();
-    assert.deepEqual(l, ["Open Groups", "Add group", "Return"]);
+    assert.deepEqual(l, ["Open Groups", "Add Group", "Return"]);
     assert.ok(!l.some((x) => /Add server|Create VM|Add resource/i.test(x)), `no resource-tree items (${l})`);
   });
-  [...document.querySelectorAll(".ctxmenu-item")].find((b) => b.textContent.includes("Add group")).click();
+  [...document.querySelectorAll(".ctxmenu-item")].find((b) => b.textContent.includes("Add Group")).click();
   await wait(1500);
   check("a sidebar action opens the section and runs its button", () => {
     assert.equal(window.location.pathname, "/admin/groups");
