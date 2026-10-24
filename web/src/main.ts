@@ -6358,13 +6358,13 @@ async function openHardwareEditor(opts: {
   /** Sidebar rows mirror Proxmox: label plus the current value. */
   function sidebar(): string {
     const fixed = [
-      { key: "general", icon: ic.datacenter(), label: "General", sum: general.name || "unnamed" },
+      { key: "general", icon: ic.datacenter(), label: "General", sum: general.name || "Unnamed" },
       { key: "processors", icon: ic.cpu(), label: "Processors", sum: `${general.cpus} vCPU` },
       { key: "memory", icon: ic.memory(), label: "Memory", sum: `${unitValue(general.memory_mb, "MiB", memUnit)} ${memUnit}` },
       ...(editing ? [] : [{
         key: "disk", icon: ic.disk(), label: "Hard Disk",
         sum: newDisk.mode === "existing"
-          ? (newDisk.volume || "choose a volume")
+          ? (newDisk.volume || "Choose a volume")
           : `${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} · ${newDisk.title.trim() || PRIMARY_DISK}`,
       }]),
       { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics.toUpperCase() },

@@ -498,7 +498,7 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
       if ((d.fields.mode ?? "existing") === "new") {
         const unit = (f("size_unit") || STORAGE_DEFAULT) as StorageUnit;
         const size = unitValue(Number(f("size_gb") || "10"), "GiB", unit);
-        return `${named("pool", f("pool"))}/new ${size} ${unit} ${f("format") || "qcow2"}`;
+        return `${named("pool", f("pool"))}/New ${size} ${unit} ${f("format") || "qcow2"}`;
       }
       return `${named("pool", f("pool"))}/${f("volume")} (${f("bus") || "virtio"})`;
     }
@@ -506,14 +506,14 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
       const path = f("path");
       if (path) return path.split("/").pop() ?? path;
       const vol = f("volume");
-      return vol ? `${named("pool", f("pool"))}/${vol}` : "empty";
+      return vol ? `${named("pool", f("pool"))}/${vol}` : "Empty";
     }
     case "interface": {
       // A NIC read from XML names the bridge until the editor maps it to the
       // network, so the summary must not claim it has no network.
       const on = f("network")
         ? named("network", f("network"))
-        : f("bridge") ? `bridge ${f("bridge")}` : "No network";
+        : f("bridge") ? `Bridge ${f("bridge")}` : "No network";
       return `${on} (${f("model") || "virtio"})`;
     }
     case "hostdev": return `${f("domain")}:${f("bus")}:${f("slot")}.${f("function")}`;
@@ -521,7 +521,7 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
     case "rng": return f("backend") || "/dev/urandom";
     case "memballoon": return f("model") || "virtio";
     case "channel": return "org.qemu.guest_agent.0";
-    case "tpm": return `emulated ${f("version") || "2.0"}`;
+    case "tpm": return `Emulated ${f("version") || "2.0"}`;
     case "watchdog": return `${f("model") || "i6300esb"} (${f("action") || "reset"})`;
     case "video": {
       const model = f("model") || "virtio";

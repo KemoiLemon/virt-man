@@ -126,7 +126,7 @@ test("a new disk's preview follows the unit chosen for its size", () => {
     kind: "disk",
     fields: { mode: "new", pool: "p", size_gb: "2048", size_unit: "MiB", format: "qcow2" },
   });
-  assert.match(summary, /new 2097152 MiB qcow2/, `summary shown in MiB: ${summary}`);
+  assert.match(summary, /New 2097152 MiB qcow2/, `summary shown in MiB: ${summary}`);
 });
 
 test("TPM and watchdog serialise to their libvirt elements", () => {
@@ -290,7 +290,7 @@ test("summaries describe each device for the sidebar", () => {
   // the network; it must read as attached, not as "No network".
   assert.equal(
     hw.deviceSummary({ kind: "interface", fields: { bridge: "vbr0123456789ab", model: "e1000e" } }),
-    "bridge vbr0123456789ab (e1000e)",
+    "Bridge vbr0123456789ab (e1000e)",
   );
   assert.equal(hw.deviceSummary({ kind: "interface", fields: {} }), "No network (virtio)");
   assert.equal(hw.deviceSummary({ kind: "memballoon", fields: {} }), "virtio");
