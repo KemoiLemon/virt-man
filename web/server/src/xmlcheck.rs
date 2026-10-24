@@ -728,6 +728,232 @@ pub fn check_domain(xml: &str) -> Result<DomainSpec, String> {
     Ok(spec)
 }
 
+/// What a checked container definition asks for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ContainerSpec {
+    pub name: String,
+    pub uuid: Option<String>,
+    pub vcpus: u64,
+    pub memory_mb: u64,
+    /// Networks named by `type='network'` interfaces (older definitions).
+    pub networks: Vec<String>,
+    /// Bridges named by `type='bridge'` interfaces: the shape the daemon
+    /// writes, one bridge per managed network.
+    pub bridges: Vec<String>,
+    /// No `<idmap>`: the container's root is the host's root. Allowed only
+    /// with `CT.Privileged` -- the caller checks that, this only reports it.
+    pub privileged: bool,
+    /// Every `<uid>`/`<gid>` entry as (tag, start, target, count), so a
+    /// change to the mapping can be told apart from any other edit.
+    pub idmap: Vec<[String; 4]>,
+    /// The metadata's `rootfs` (the image the daemon mounts) and the
+    /// `<filesystem>` source (where it is mounted). Both name host paths, so
+    /// the proxy refuses a non-admin edit that changes either.
+    pub rootfs: String,
+    pub mount: String,
+}
+
+/// A container definition, as a non-admin may redefine it: the libvirt-shaped
+/// `<domain type='lxc'>` the daemon writes, plus what older read-backs carried
+/// (`<emulator>`, `<clock>`, console targets). The rootfs and its mount must
+/// stay what they were (`guard`, against the current definition, and the
+/// daemon again); here the point is that nothing else reaches the host: no
+/// second `<filesystem>` (a bind mount of `/` is an escape), no `<hostdev>`,
+/// no `<features><capabilities>` (which grants the container host
+/// capabilities), no `<seclabel>` changes.
+pub fn check_container(xml: &str) -> Result<ContainerSpec, String> {
+    let doc = parse(xml)?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "domain" || root.tag_name().namespace().is_some() {
+        return Err("not a domain definition".into());
+    }
+    attrs_only(root, &["type", "id"])?;
+    one_of(root, "type", &["lxc"])?;
+    let mut spec = ContainerSpec {
+        privileged: true,
+        ..Default::default()
+    };
+    let mut seen = HashSet::new();
+    let mut vm = DomainSpec::default();
+    for c in elements(root) {
+        let tag = c.tag_name().name();
+        if c.tag_name().namespace().is_some() {
+            return Err(refuse(&format!("<{tag}>")));
+        }
+        if !seen.insert(tag) {
+            return Err(format!("<{tag}> appears twice"));
+        }
+        match tag {
+            "name" => spec.name = text(c),
+            "uuid" => {
+                leaf(c)?;
+                spec.uuid = Some(text(c));
+            }
+            "title" | "description" => leaf(c)?,
+            // The daemon's own record of the rootfs; it must be unchanged.
+            "metadata" => {
+                attrs_only(c, &[])?;
+                for m in elements(c) {
+                    if m.tag_name().name() != "container"
+                        || m.tag_name().namespace() != Some("https://virt-man.invalid/container/1")
+                    {
+                        return Err(refuse("that metadata"));
+                    }
+                    plain(m, &["rootfs"])?;
+                    spec.rootfs = attr(m, "rootfs").to_string();
+                }
+            }
+            "memory" => spec.memory_mb = to_mb(c)?,
+            "currentMemory" => attrs_only(c, &["unit"])?,
+            "memtune" => {
+                for m in elements(c) {
+                    if m.tag_name().name() != "swap_hard_limit" {
+                        return Err(refuse(&format!("<{}> in memtune", m.tag_name().name())));
+                    }
+                    plain(m, &["unit"])?;
+                }
+            }
+            "vcpu" => {
+                attrs_only(c, &["placement", "current"])?;
+                spec.vcpus = number(c)?;
+            }
+            // The CPU limit (`cpu_limit_pct` on the hardware form): a CFS
+            // period and quota, numbers that name nothing on the host.
+            "cputune" => {
+                attrs_only(c, &[])?;
+                for t in elements(c) {
+                    if !matches!(t.tag_name().name(), "period" | "quota") {
+                        return Err(refuse(&format!("<{}> in cputune", t.tag_name().name())));
+                    }
+                    plain(t, &[])?;
+                    number(t)?;
+                }
+            }
+            "resource" | "clock" => harmless_subtree(c)?,
+            "on_poweroff" | "on_reboot" | "on_crash" => leaf(c)?,
+            // Only `privnet` (a private network namespace). `capabilities`
+            // hands the container host capabilities.
+            "features" => {
+                attrs_only(c, &[])?;
+                for f in elements(c) {
+                    if f.tag_name().name() != "privnet" {
+                        return Err(refuse(&format!("<{}> in <features>", f.tag_name().name())));
+                    }
+                    plain(f, &[])?;
+                }
+            }
+            "os" => {
+                attrs_only(c, &[])?;
+                for o in elements(c) {
+                    match o.tag_name().name() {
+                        "type" => plain(o, &["arch"])?,
+                        // The container's own init, inside its rootfs.
+                        "init" => leaf(o)?,
+                        other => return Err(refuse(&format!("<{other}> in <os>"))),
+                    }
+                }
+            }
+            "idmap" => {
+                attrs_only(c, &[])?;
+                for m in elements(c) {
+                    if !matches!(m.tag_name().name(), "uid" | "gid") {
+                        return Err(refuse("that idmap entry"));
+                    }
+                    plain(m, &["start", "target", "count"])?;
+                    spec.idmap.push([
+                        m.tag_name().name().to_string(),
+                        attr(m, "start").to_string(),
+                        attr(m, "target").to_string(),
+                        attr(m, "count").to_string(),
+                    ]);
+                }
+                spec.privileged = spec.idmap.is_empty();
+            }
+            "devices" => {
+                attrs_only(c, &[])?;
+                let mut fs = 0;
+                for d in elements(c) {
+                    match d.tag_name().name() {
+                        "emulator" => leaf(d)?,
+                        // Exactly one, the rootfs mounted at `/`; its source
+                        // must be the directory the daemon mounted (`guard`
+                        // compares it with the current definition).
+                        "filesystem" => {
+                            fs += 1;
+                            spec.mount = check_rootfs_mount(d)?;
+                        }
+                        "interface" => check_interface(d, &mut vm)?,
+                        "console" => {
+                            plain_or_target(d)?;
+                        }
+                        other => return Err(refuse(&format!("<{other}> in a container"))),
+                    }
+                }
+                if fs != 1 {
+                    return Err(refuse("a filesystem besides the container's rootfs"));
+                }
+            }
+            other => return Err(refuse(&format!("<{other}> in a container"))),
+        }
+    }
+    if spec.name.is_empty() {
+        return Err("the container has no name".into());
+    }
+    uuid_name_agrees(&spec.name, spec.uuid.as_deref(), "container")?;
+    if spec.vcpus == 0 || spec.memory_mb == 0 {
+        return Err("a container needs <vcpu> and <memory>".into());
+    }
+    spec.networks = vm.networks;
+    spec.bridges = vm.bridges;
+    Ok(spec)
+}
+
+/// The container's root filesystem: a passthrough mount of one host
+/// directory at `/`. Answers that directory.
+fn check_rootfs_mount(d: Node) -> Result<String, String> {
+    attrs_only(d, &["type", "accessmode"])?;
+    one_of(d, "type", &["mount"])?;
+    if !matches!(attr(d, "accessmode"), "" | "passthrough") {
+        return Err(refuse("that filesystem access mode"));
+    }
+    let (mut source, mut target) = (None, None);
+    for c in elements(d) {
+        match c.tag_name().name() {
+            "source" => {
+                plain(c, &["dir"])?;
+                source = Some(attr(c, "dir").to_string());
+            }
+            "target" => {
+                plain(c, &["dir"])?;
+                target = Some(attr(c, "dir").to_string());
+            }
+            "alias" => plain(c, &["name"])?,
+            other => return Err(refuse(&format!("<{other}> in a filesystem"))),
+        }
+    }
+    if target.as_deref() != Some("/") {
+        return Err(refuse("a filesystem besides the container's rootfs"));
+    }
+    match source {
+        Some(s) if !s.is_empty() => Ok(s),
+        _ => Err("the container's rootfs needs a <source dir='…'/>".into()),
+    }
+}
+
+/// A pty console, with the target libvirt adds.
+fn plain_or_target(d: Node) -> Result<(), String> {
+    attrs_only(d, &["type"])?;
+    one_of(d, "type", &["pty"])?;
+    for c in elements(d) {
+        match c.tag_name().name() {
+            "target" => plain(c, &["type", "port"])?,
+            "alias" => plain(c, &["name"])?,
+            other => return Err(refuse(&format!("<{other}> in a console"))),
+        }
+    }
+    Ok(())
+}
+
 pub fn check_network(xml: &str) -> Result<NetworkSpec, String> {
     let doc = parse(xml)?;
     let root = doc.root_element();
@@ -1375,5 +1601,130 @@ mod tests {
         ] {
             assert!(check_volume(bad).is_err(), "{bad}");
         }
+    }
+    /// The definition the native LXC backend writes for a container made by
+    /// `POST /containers`, with every optional part present.
+    const CT: &str = r#"<domain type='lxc'>
+  <name>4b5ae5de-d025-467a-b415-faaa4a3a25ce</name>
+  <uuid>4b5ae5de-d025-467a-b415-faaa4a3a25ce</uuid>
+  <title>Probe CT</title>
+  <description>probe</description>
+  <metadata>
+    <virtman:container xmlns:virtman='https://virt-man.invalid/container/1' rootfs='/var/lib/virt-man/pools/default/ct-4b5ae5de-d025-467a-b415-faaa4a3a25ce.raw'/>
+  </metadata>
+  <memory unit='MiB'>256</memory>
+  <memtune><swap_hard_limit unit='MiB'>512</swap_hard_limit></memtune>
+  <vcpu>1</vcpu>
+  <cputune><period>100000</period><quota>50000</quota></cputune>
+  <features><privnet/></features>
+  <os><type>exe</type><init>/sbin/init</init></os>
+  <idmap>
+    <uid start='0' target='1073741824' count='65536'/>
+    <gid start='0' target='1073741824' count='65536'/>
+  </idmap>
+  <devices>
+    <filesystem type='mount' accessmode='passthrough'>
+      <source dir='/run/virt-man-daemon/ct/4b5ae5de-d025-467a-b415-faaa4a3a25ce'/><target dir='/'/>
+    </filesystem>
+    <interface type='bridge'><mac address='52:54:00:76:cf:2b'/><source bridge='vbr0123456789ab'/><bandwidth><inbound average='1250'/><outbound average='1250'/></bandwidth></interface>
+    <console type='pty'/>
+  </devices>
+</domain>"#;
+
+    #[test]
+    fn a_container_as_the_daemon_writes_it_passes() {
+        let s = check_container(CT).expect("the daemon's own container XML");
+        assert!(!s.privileged);
+        assert_eq!((s.vcpus, s.memory_mb), (1, 256));
+        assert_eq!(s.bridges, ["vbr0123456789ab"]);
+        assert!(s.networks.is_empty());
+        assert_eq!(
+            s.mount,
+            "/run/virt-man-daemon/ct/4b5ae5de-d025-467a-b415-faaa4a3a25ce"
+        );
+        assert!(s
+            .rootfs
+            .ends_with("ct-4b5ae5de-d025-467a-b415-faaa4a3a25ce.raw"));
+        assert_eq!(s.idmap.len(), 2);
+        // The minimal shape: no description, swap, CPU limit or NICs.
+        let mut bare = CT.to_string();
+        for (a, b) in [
+            ("<description>", "</description>"),
+            ("<memtune>", "</memtune>"),
+            ("<cputune>", "</cputune>"),
+            ("<interface", "</interface>"),
+        ] {
+            let i = bare.find(a).unwrap();
+            let j = bare.find(b).unwrap() + b.len();
+            bare.replace_range(i..j, "");
+        }
+        let b = check_container(&bare).expect("a container with no extras");
+        assert!(b.bridges.is_empty());
+    }
+
+    /// What an older definition carried on read-back still passes, so a
+    /// container from then can be re-saved by its owner.
+    #[test]
+    fn a_container_with_older_read_back_parts_passes() {
+        let old = CT
+            .replace(
+                "<devices>",
+                "<devices><emulator>/usr/lib/libvirt/libvirt_lxc</emulator>",
+            )
+            .replace(
+                "<console type='pty'/>",
+                "<console type='pty'><target type='lxc' port='0'/></console>",
+            )
+            .replace(
+                "<features>",
+                "<resource><partition>/machine</partition></resource><clock offset='utc'/><features>",
+            )
+            .replace(
+                "<interface type='bridge'><mac address='52:54:00:76:cf:2b'/><source bridge='vbr0123456789ab'/>",
+                "<interface type='network'><mac address='52:54:00:76:cf:2b'/><source network='internet'/>",
+            )
+            .replace("<memory unit='MiB'>256</memory>", "<memory unit='KiB'>262144</memory><currentMemory unit='KiB'>262144</currentMemory>");
+        let s = check_container(&old).expect("an older container definition");
+        assert_eq!(s.memory_mb, 256);
+        assert_eq!(s.networks, vec!["internet"]);
+    }
+
+    #[test]
+    fn dropping_the_idmap_is_reported_as_privileged() {
+        let i = CT.find("<idmap>").unwrap();
+        let j = CT.find("</idmap>").unwrap() + "</idmap>".len();
+        let priv_ = format!("{}{}", &CT[..i], &CT[j..]);
+        assert!(check_container(&priv_).unwrap().privileged);
+    }
+
+    #[test]
+    fn a_container_cannot_reach_the_host() {
+        // A bridge NIC is not a host escape: the proxy checks the bridge
+        // against the networks the caller may use (see `guard`).
+        let with = |from: &str, to: &str| CT.replace(from, to);
+        let host_mount = with(
+            "<interface",
+            "<filesystem type='mount'><source dir='/'/><target dir='/host'/></filesystem><interface",
+        );
+        for (what, xml) in [
+            ("host bind mount", host_mount),
+            ("rootfs mounted elsewhere", with("<target dir='/'/>", "<target dir='/mnt'/>")),
+            ("rootfs from a block device", with("type='mount' accessmode", "type='block' accessmode")),
+            ("rootfs mapped", with("accessmode='passthrough'", "accessmode='mapped'")),
+            ("a driver on the mount", with("<target dir='/'/>", "<target dir='/'/><driver type='nbd'/>")),
+            ("hostdev", with("<console", "<hostdev mode='capabilities' type='storage'><source><block>/dev/sda</block></source></hostdev><console")),
+            ("capabilities", with("<privnet/>", "<privnet/><capabilities policy='allow'/>")),
+            ("a VM", with("type='lxc'>", "type='kvm'>")),
+            ("seclabel", with("<features>", "<seclabel type='none'/><features>")),
+            ("other cputune", with("<quota>", "<emulatorpin cpuset='0'/><quota>")),
+            ("other metadata", with("rootfs=", "extra='x' rootfs=")),
+            ("a serial console", with("<console type='pty'/>", "<console type='file'><source path='/etc/shadow'/></console>")),
+        ] {
+            assert!(check_container(&xml).is_err(), "{what} passed");
+        }
+        assert!(
+            check_domain(CT).is_err(),
+            "a container is not a VM definition"
+        );
     }
 }

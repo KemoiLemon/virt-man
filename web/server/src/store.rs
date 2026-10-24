@@ -133,15 +133,7 @@ impl Store {
         let mut store: Store = if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-            let mut v: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
-            // Containers are gone, and `Kind` no longer has a variant for
-            // them: a leftover ownership row would make the whole store
-            // unparseable and the server would not start.
-            if let Some(rows) = v.get_mut("resources").and_then(|r| r.as_array_mut()) {
-                rows.retain(|r| r.get("kind").and_then(|k| k.as_str()) != Some("ct"));
-            }
-            serde_json::from_value(v)
+            serde_json::from_str(&text)
                 .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
         } else {
             Store::default()
@@ -221,6 +213,7 @@ impl Store {
             let privs = privs_of(&scopes);
             let full = perm::PRIVILEGES
                 .iter()
+                .filter(|p| perm::legacy_expressible(p))
                 .all(|p| privs.iter().any(|x| x == p));
             let role = if full {
                 perm::ADMIN_ROLE.to_string()
@@ -700,7 +693,7 @@ mod tests {
         );
         assert!(!s.is_admin(&v("o")));
         assert!(
-            !s.can(&v("o"), "/", "Permissions.Modify"),
+            !s.can(&v("o"), "/nodes/c/containers/x", "CT.Privileged"),
             "migration grants nothing that did not exist before"
         );
         assert!(
@@ -739,10 +732,11 @@ mod tests {
         assert!(parsed.activity.is_empty());
     }
 
-    /// A container ownership row from an older version cannot deserialize
-    /// (`Kind` has no `Ct`), and must not stop the whole store loading.
+    /// A container ownership row survives a save and a load: containers
+    /// are owned like VMs, and a row lost on restart would hand the
+    /// container to the first administrator.
     #[test]
-    fn a_leftover_container_ownership_row_is_dropped_on_load() {
+    fn a_container_ownership_row_round_trips() {
         let dir = std::env::temp_dir().join(format!(
             "store-test-{}-{}",
             std::process::id(),
@@ -758,9 +752,20 @@ mod tests {
                 ]}"#,
         )
         .unwrap();
-        let s = Store::load(&dir).expect("store with a stale container row loads");
-        assert_eq!(s.resources.len(), 1);
-        assert_eq!(s.resources[0].name, "vm1");
+        let s = Store::load(&dir).expect("store with a container row loads");
+        assert_eq!(s.owner_of(Kind::Ct, "c", "ct1").as_deref(), Some("u"));
+        s.save(&dir).unwrap();
+        let again = Store::load(&dir).expect("saved store loads");
+        let kinds: Vec<(Kind, &str)> = again
+            .resources
+            .iter()
+            .map(|r| (r.kind, r.name.as_str()))
+            .collect();
+        assert_eq!(kinds, [(Kind::Ct, "ct1"), (Kind::Vm, "vm1")]);
+        assert!(
+            again.can(&user("u"), &perm::ct_path("c", "ct1"), "CT.Console"),
+            "the owner holds the container's privileges"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

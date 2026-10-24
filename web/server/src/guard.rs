@@ -79,8 +79,8 @@ pub fn enc(s: &str) -> String {
 ///
 /// An ISO is shared media: it belongs to nobody, so it costs no one storage,
 /// and any user who may read the pool may upload or download one. Anything
-/// else (a disk image) is the uploader's own, and counts against their storage
-/// like any other volume.
+/// else (a disk image, a container template) is the uploader's own, and counts
+/// against their storage like any other volume.
 pub fn is_iso(name: &str) -> bool {
     name.trim().to_ascii_lowercase().ends_with(".iso")
 }
@@ -109,6 +109,7 @@ pub fn filter_list(
     let store = state.read();
     let (path_of, audit): (fn(&str, &str) -> String, &str) = match kind {
         Kind::Vm => (perm::vm_path, "VM.Audit"),
+        Kind::Ct => (perm::ct_path, "CT.Audit"),
         Kind::Network => (perm::net_path, "Network.Audit"),
         Kind::Volume => return None,
     };
@@ -205,7 +206,7 @@ pub fn annotate_volumes(
 /// they own, running or not. Read live rather than tracked, so a guest
 /// resized or deleted outside the app is counted as it is.
 pub async fn usage_on(state: &AppState, conn: &Connection, owner: &str) -> Result<Usage, ApiError> {
-    let (vms, nets, vols): (Vec<String>, Vec<String>, Vec<Resource>) = {
+    let (vms, cts, nets, vols): (Vec<String>, Vec<String>, Vec<String>, Vec<Resource>) = {
         let store = state.read();
         let is_default = store.default_owner().as_deref() == Some(owner);
         let mine = |k: Kind| -> Vec<String> {
@@ -223,6 +224,7 @@ pub async fn usage_on(state: &AppState, conn: &Connection, owner: &str) -> Resul
         }
         (
             mine(Kind::Vm),
+            mine(Kind::Ct),
             mine(Kind::Network),
             store
                 .resources
@@ -241,6 +243,19 @@ pub async fn usage_on(state: &AppState, conn: &Connection, owner: &str) -> Resul
         for d in list.as_array().into_iter().flatten() {
             let name = d.get("name").and_then(Value::as_str).unwrap_or("");
             if vms.iter().any(|v| v == name) {
+                u.vms += 1;
+                u.vcpus += d.get("vcpus").and_then(Value::as_u64).unwrap_or(0);
+                u.memory_mb += d.get("memory_mb").and_then(Value::as_u64).unwrap_or(0);
+            }
+        }
+    }
+    // ponytail: a container counts against the VM, vCPU and memory limits;
+    // separate container limits when someone needs to set them apart.
+    if !cts.is_empty() {
+        let list = daemon_get(conn, "/containers").await?;
+        for d in list.as_array().into_iter().flatten() {
+            let name = d.get("name").and_then(Value::as_str).unwrap_or("");
+            if cts.iter().any(|v| v == name) {
                 u.vms += 1;
                 u.vcpus += d.get("vcpus").and_then(Value::as_u64).unwrap_or(0);
                 u.memory_mb += d.get("memory_mb").and_then(Value::as_u64).unwrap_or(0);
@@ -506,7 +521,11 @@ pub async fn before(
         id.and_then(|id| state.read().user_by_id(&id).cloned())
     };
     match special {
-        Special::None | Special::ListVms | Special::ListNetworks | Special::ListPools => Ok(None),
+        Special::None
+        | Special::ListVms
+        | Special::ListCts
+        | Special::ListNetworks
+        | Special::ListPools => Ok(None),
         Special::ListVolumes { .. } | Special::ListBridges => Ok(None),
         Special::AdminOnly => {
             if admin {
@@ -594,9 +613,178 @@ pub async fn before(
             }
             Ok(None)
         }
+        Special::CreateCt => {
+            let req: Value =
+                serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
+            let privileged = req
+                .get("privileged")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let cts = perm::node_path(&conn.id) + "/containers";
+            if privileged && !state.read().can(user, &cts, "CT.Privileged") {
+                return Err(forbidden(format!(
+                    "a privileged container runs as the host's root, which needs CT.Privileged on {}. \
+                     Create it unprivileged, or ask an administrator for the CTPrivileged role.",
+                    describe(state, &cts)
+                )));
+            }
+            let s = |p: &[&str]| {
+                p.iter()
+                    .try_fold(&req, |v, k| v.get(k))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let (tpool, rpool) = (s(&["template", "pool"]), s(&["rootfs", "pool"]));
+            let size_gb = req
+                .pointer("/rootfs/size_gb")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if !admin {
+                // Scoped: a read guard held across the quota's await would
+                // make the proxy future non-Send.
+                {
+                    let store = state.read();
+                    if !store.can(user, &perm::pool_path(&conn.id, &tpool), "Datastore.Audit") {
+                        return Err(forbidden(format!(
+                            "you may not use templates in pool '{tpool}'"
+                        )));
+                    }
+                    if !store.can(
+                        user,
+                        &perm::pool_path(&conn.id, &rpool),
+                        "Datastore.AllocateSpace",
+                    ) {
+                        return Err(forbidden(format!(
+                            "you may not create a container's disk in pool '{rpool}'"
+                        )));
+                    }
+                    for n in req
+                        .get("networks")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        if !store.can(user, &perm::net_path(&conn.id, n), "Network.Use") {
+                            return Err(forbidden(format!("you may not use network '{n}'")));
+                        }
+                    }
+                }
+                let num = |k: &str| req.get(k).and_then(Value::as_u64).unwrap_or(0);
+                check_quota(
+                    state,
+                    conn,
+                    user,
+                    Usage {
+                        vms: 1,
+                        vcpus: num("vcpus"),
+                        memory_mb: num("memory_mb"),
+                        storage_bytes: size_gb << 30,
+                        ..Usage::default()
+                    },
+                )
+                .await?;
+            }
+            // Named by the daemon (a new UUID); `after` fills it in and
+            // records the rootfs volume too, from the same answer.
+            let mut r = record(Kind::Ct, &rpool, "", size_gb << 30);
+            r.blank = false;
+            Ok(Some(r))
+        }
+        Special::PutCtXml { ct } => {
+            if admin {
+                return Ok(None);
+            }
+            let spec = xmlcheck::check_container(text()?).map_err(ApiError::bad_request)?;
+            if &spec.name != ct {
+                return Err(ApiError::bad_request(
+                    "the definition names a different container",
+                ));
+            }
+            let cur = daemon_get(conn, &format!("/containers/{}/xml", enc(ct))).await?;
+            let cur =
+                xmlcheck::check_container(cur.get("xml").and_then(Value::as_str).unwrap_or(""))
+                    .map_err(ApiError::internal)?;
+            // The idmap *is* the isolation: dropping it, or pointing it at
+            // another range (uid 0, or someone else's container), makes the
+            // container's root someone it should not be.
+            if (spec.privileged || spec.idmap != cur.idmap)
+                && !state
+                    .read()
+                    .can(user, &perm::ct_path(&conn.id, ct), "CT.Privileged")
+            {
+                return Err(forbidden(
+                    "changing a container's user-namespace mapping, or running it privileged, \
+                     needs CT.Privileged on it; ask an administrator"
+                        .to_string(),
+                ));
+            }
+            // Both name host paths: the image the daemon mounts and where it
+            // mounts it. Pointing either elsewhere hands the container a
+            // directory or file of someone else's -- or of the host's.
+            if spec.rootfs != cur.rootfs || spec.mount != cur.mount {
+                return Err(forbidden(
+                    "a container's root filesystem cannot be changed in its definition; \
+                     only an administrator can point it elsewhere"
+                        .to_string(),
+                ));
+            }
+            for n in &spec.networks {
+                if !cur.networks.contains(n)
+                    && !state
+                        .read()
+                        .can(user, &perm::net_path(&conn.id, n), "Network.Use")
+                {
+                    return Err(forbidden(format!("you may not use network '{n}'")));
+                }
+            }
+            // A bridge must belong to a network the caller may use. Only one
+            // this edit adds is checked, like the networks above: an unchanged
+            // bridge was allowed when the container was made, and a grant
+            // revoked since must not lock an owner out of their own container.
+            let added: Vec<String> = spec
+                .bridges
+                .iter()
+                .filter(|b| !cur.bridges.contains(b))
+                .cloned()
+                .collect();
+            check_network_bridges(state, user, conn, &added).await?;
+            let grow = Usage {
+                vcpus: spec.vcpus.saturating_sub(cur.vcpus),
+                memory_mb: spec.memory_mb.saturating_sub(cur.memory_mb),
+                ..Usage::default()
+            };
+            if grow != Usage::default() {
+                let owner = owner_user(owner_of(Kind::Ct, ct)).unwrap_or_else(|| user.clone());
+                check_quota(state, conn, &owner, grow).await?;
+            }
+            Ok(None)
+        }
+        Special::PutCtHardware { ct } => {
+            if admin {
+                return Ok(None);
+            }
+            let want: Value =
+                serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
+            let cur = daemon_get(conn, &format!("/containers/{}/hardware", enc(ct))).await?;
+            let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+            // Only growth counts, and a bigger disk is storage the owner holds.
+            let grow = Usage {
+                vcpus: n(&want, "vcpus").saturating_sub(n(&cur, "vcpus")),
+                memory_mb: n(&want, "memory_mb").saturating_sub(n(&cur, "memory_mb")),
+                storage_bytes: n(&want, "disk_gb").saturating_sub(n(&cur, "disk_gb")) << 30,
+                ..Usage::default()
+            };
+            if grow != Usage::default() {
+                let owner = owner_user(owner_of(Kind::Ct, ct)).unwrap_or_else(|| user.clone());
+                check_quota(state, conn, &owner, grow).await?;
+            }
+            Ok(None)
+        }
         // Ownership and grants follow the guest to its new name once the
         // daemon accepts it (see `after`).
-        Special::RenameVm { .. } => Ok(None),
+        Special::RenameVm { .. } | Special::RenameCt { .. } => Ok(None),
         Special::AddNic { .. } => {
             let req: Value =
                 serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
@@ -703,7 +891,7 @@ pub async fn before(
             }
             Ok(Some(record(Kind::Volume, pool, &spec.name, spec.capacity)))
         }
-        Special::Fetch { pool } => {
+        Special::Fetch { pool } | Special::FetchTemplate { pool } => {
             let req: Value =
                 serde_json::from_slice(body).map_err(|_| ApiError::bad_request("bad JSON"))?;
             let name = req
@@ -742,7 +930,9 @@ pub async fn before(
             r.blank = false;
             Ok(Some(r))
         }
-        Special::DeleteVm { .. } | Special::DeleteNetwork { .. } => Ok(None),
+        Special::DeleteVm { .. } | Special::DeleteCt { .. } | Special::DeleteNetwork { .. } => {
+            Ok(None)
+        }
         Special::DeleteVolume { pool, vol } => {
             if admin {
                 return Ok(None);
@@ -765,6 +955,16 @@ pub async fn before(
             }
         }
     }
+}
+
+fn forbidden(m: String) -> ApiError {
+    ApiError::new(axum::http::StatusCode::FORBIDDEN, m)
+}
+
+/// A path in words, for a refusal.
+fn describe(state: &AppState, path: &str) -> String {
+    let store = state.read();
+    perm::describe_path(path, &|c| store.connection(c).map(|x| x.name.clone()))
 }
 
 /// A network on a host bridge puts guests straight onto that bridge's LAN,
@@ -804,10 +1004,34 @@ pub fn after(
 ) {
     let mut store = state.write();
     match special {
+        Special::CreateCt => {
+            let Some(r) = created else { return };
+            let resp: Value = serde_json::from_slice(response).unwrap_or_default();
+            let Some(name) = resp.get("name").and_then(Value::as_str) else {
+                return;
+            };
+            // The rootfs is a volume the owner made: it counts against their
+            // storage, and goes with the container (`DeleteCt`).
+            let vol = Resource {
+                kind: Kind::Volume,
+                name: ct_rootfs(name),
+                ..r.clone()
+            };
+            let ct = Resource {
+                kind: Kind::Ct,
+                pool: String::new(),
+                name: name.to_string(),
+                capacity: 0,
+                ..r
+            };
+            store.resources.push(vol);
+            store.resources.push(ct);
+        }
         Special::CreateVm
         | Special::CreateNetwork
         | Special::CreateVolume { .. }
-        | Special::Fetch { .. } => {
+        | Special::Fetch { .. }
+        | Special::FetchTemplate { .. } => {
             let Some(mut r) = created else { return };
             // Trust the daemon's name over ours where it reports one.
             if let Some(n) = serde_json::from_slice::<Value>(response)
@@ -828,7 +1052,26 @@ pub fn after(
             });
             store.resources.push(r);
         }
-        Special::RenameVm { vm } => {
+        Special::PutCtHardware { ct } => {
+            // A grown rootfs is more of the owner's storage: the quota sums
+            // volume records, so the record must say the new size.
+            let gb = serde_json::from_slice::<Value>(response)
+                .ok()
+                .and_then(|v| v.pointer("/hardware/disk_gb").and_then(Value::as_u64));
+            let Some(gb) = gb else { return };
+            let vol = ct_rootfs(ct);
+            for r in store.resources.iter_mut() {
+                if r.kind == Kind::Volume && r.conn == conn && r.name == vol {
+                    r.capacity = r.capacity.max(gb << 30);
+                }
+            }
+        }
+        Special::RenameVm { vm: old } | Special::RenameCt { ct: old } => {
+            let (kind, path_of): (Kind, fn(&str, &str) -> String) = match special {
+                Special::RenameCt { .. } => (Kind::Ct, perm::ct_path),
+                _ => (Kind::Vm, perm::vm_path),
+            };
+            let vm = old;
             let to = serde_json::from_slice::<Value>(body)
                 .ok()
                 .and_then(|v| {
@@ -840,16 +1083,20 @@ pub fn after(
             if to.is_empty() {
                 return;
             }
-            if let Some(r) = store.resource_mut(Kind::Vm, conn, vm) {
+            if let Some(r) = store.resource_mut(kind, conn, vm) {
                 r.name = to.clone();
             }
-            let (from, dest) = (perm::vm_path(conn, vm), perm::vm_path(conn, &to));
+            let (from, dest) = (path_of(conn, vm), path_of(conn, &to));
             for e in store.acl.iter_mut().filter(|e| e.path == from) {
                 e.path = dest.clone();
             }
         }
-        Special::DeleteVm { vm: name } => {
-            forget(&mut store, Kind::Vm, conn, "", name);
+        Special::DeleteVm { vm: name } | Special::DeleteCt { ct: name } => {
+            let kind = match special {
+                Special::DeleteCt { .. } => Kind::Ct,
+                _ => Kind::Vm,
+            };
+            forget(&mut store, kind, conn, "", name);
             // Disks removed with the guest take their records with them, or
             // their size would still count against the owner's storage.
             let removed: Vec<String> = serde_json::from_slice::<Value>(response)
@@ -857,12 +1104,16 @@ pub fn after(
                 .and_then(|v| v.get("removed").cloned())
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
+            // A container's rootfs always goes with it, whatever `removed`
+            // spells it as; its record was made under this name (`CreateCt`).
+            let rootfs = matches!(special, Special::DeleteCt { .. }).then(|| ct_rootfs(name));
             store.resources.retain(|r| {
                 !(r.kind == Kind::Volume
                     && r.conn == conn
-                    && removed
-                        .iter()
-                        .any(|x| *x == r.path || *x == format!("{}/{}", r.pool, r.name)))
+                    && (rootfs.as_deref() == Some(r.name.as_str())
+                        || removed
+                            .iter()
+                            .any(|x| *x == r.path || *x == format!("{}/{}", r.pool, r.name))))
             });
         }
         Special::DeleteNetwork { net } => forget(&mut store, Kind::Network, conn, "", net),
@@ -874,12 +1125,19 @@ pub fn after(
     }
 }
 
+/// The volume the daemon makes a container's rootfs in, named from its UUID
+/// (the container's name).
+fn ct_rootfs(ct: &str) -> String {
+    format!("ct-{ct}.raw")
+}
+
 fn forget(store: &mut crate::store::Store, kind: Kind, conn: &str, pool: &str, name: &str) {
     store
         .resources
         .retain(|r| !(r.kind == kind && r.conn == conn && r.pool == pool && r.name == name));
     let path = match kind {
         Kind::Vm => perm::vm_path(conn, name),
+        Kind::Ct => perm::ct_path(conn, name),
         Kind::Network => perm::net_path(conn, name),
         Kind::Volume => return,
     };

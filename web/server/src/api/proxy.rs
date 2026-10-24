@@ -156,6 +156,7 @@ fn filter(
 ) -> Option<Vec<u8>> {
     match special {
         Special::ListVms => guard::filter_list(state, user, conn, Kind::Vm, body),
+        Special::ListCts => guard::filter_list(state, user, conn, Kind::Ct, body),
         Special::ListNetworks => guard::filter_list(state, user, conn, Kind::Network, body),
         Special::ListPools => guard::filter_pools(state, user, conn, body),
         Special::ListBridges => guard::filter_bridges(state, user, conn, body),
@@ -174,6 +175,7 @@ fn delete_label(path: &str) -> Option<String> {
     let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
     match seg.as_slice() {
         ["domains", name] => Some(format!("Delete VM {name}")),
+        ["containers", name] => Some(format!("Delete container {name}")),
         ["networks", name] => Some(format!("Delete network {name}")),
         ["pools", name] => Some(format!("Delete storage pool {name}")),
         // A volume's name means nothing without its pool, so both are recorded.
@@ -290,7 +292,7 @@ fn record_delete(state: &AppState, user: &User, path_and_query: &str, status: u1
 /// UUID -> libvirt name, per connection and resource kind, from the daemon's
 /// own lists.
 ///
-/// The daemon answers a guest, network or pool by its UUID as well
+/// The daemon answers a guest, container, network or pool by its UUID as well
 /// as its name. The permission check here is keyed by name (grants, ownership
 /// and suspension are recorded under it), so a request by UUID must be checked
 /// as the name it resolves to -- otherwise it reaches an ACL path that
@@ -363,6 +365,7 @@ fn uuid_kind(rest: &str) -> Option<&'static str> {
     let mut seg = rest.trim_start_matches('/').split('/');
     match seg.next()? {
         "domains" => Some("domains"),
+        "containers" => Some("containers"),
         "pools" => Some("pools"),
         "networks" if seg.next() != Some("bridges") => Some("networks"),
         _ => None,
@@ -492,6 +495,7 @@ async fn proxy(
         Special::None
             | Special::AdminOnly
             | Special::DeleteVm { .. }
+            | Special::DeleteCt { .. }
             | Special::DeleteNetwork { .. }
             | Special::DeleteVolume { .. }
     ) && write;
@@ -587,6 +591,7 @@ mod tests {
         // path's kind decides which list is consulted, so the network cannot
         // shadow the guest's link.
         assert_eq!(super::uuid_kind("/domains/x"), Some("domains"));
+        assert_eq!(super::uuid_kind("/containers/x"), Some("containers"));
         assert_eq!(super::uuid_kind("/networks/x"), Some("networks"));
         assert_eq!(super::uuid_kind("/networks/x/hosts"), Some("networks"));
         assert_eq!(super::uuid_kind("/pools/x/volumes"), Some("pools"));

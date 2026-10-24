@@ -309,6 +309,10 @@ pub struct Query {
     pub name: String,
     #[serde(default)]
     pub sub: String,
+    /// The subject is a container: the series is the same (keyed by UUID),
+    /// the permission is not.
+    #[serde(default)]
+    pub ct: bool,
     pub since_ms: i64,
     #[serde(default = "default_points")]
     pub points: i64,
@@ -609,6 +613,28 @@ mod tests {
         p.iter().find(|x| x.kind == kind).expect(kind)
     }
 
+    /// The daemon lists containers among the guests, tagged `kind: "ct"`,
+    /// with their rootfs as the one disk. They are sampled as guests (keyed
+    /// by UUID); only the permission to read the series differs.
+    #[test]
+    fn a_container_in_metrics_is_sampled_like_a_guest() {
+        let m: Metrics = serde_json::from_str(
+            r#"{"host":{"cpu_total":1,"cpu_idle":1,"mem_total_kib":1,"mem_available_kib":1},
+                "domains":[{"kind":"ct","uuid":"c1","name":"c1","state":"running",
+                  "cpu_time_ns":0,"vcpus":1,"memory_kib":1024,"max_memory_kib":2048,
+                  "rss_kib":512,"usable_kib":null,
+                  "nics":[{"mac":"52:54:00:00:00:02","rx_bytes":0,"tx_bytes":0}],
+                  "disks":[{"dev":"rootfs","capacity":100,"allocation":25}]}]}"#,
+        )
+        .expect("a container entry parses");
+        let (p, _, _) = fold(&m, 10_000, None);
+        let g = find(&p, "vm");
+        assert_eq!((g.owner.as_str(), g.b), ("c1", Some(25.0)));
+        let d = find(&p, "disk");
+        assert_eq!((d.sub.as_str(), d.a), ("rootfs", Some(25.0)));
+        assert_eq!(find(&p, "nic").owner, "c1");
+    }
+
     #[test]
     fn counters_become_rates_on_the_second_sample() {
         let m1 = metrics(1000, 800, vec![dom("u1", "vm", 0, vec![nic(0, 0)], vec![])]);
@@ -733,6 +759,7 @@ mod tests {
             kind: kind.into(),
             name: name.into(),
             sub: sub.into(),
+            ct: false,
             since_ms: 0,
             points: 240,
         }
