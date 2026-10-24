@@ -13,9 +13,10 @@ Two parts, one product:
 | `daemon/` | `cargo` | Rust + axum over direct QEMU. Runs on the hypervisor host. Token auth, HTTPS `[::]:8443`. |
 | `web/` | `pnpm` + `cargo` | `web/src` is the SPA; `web/server` is `virt-man-web` (users, ACL permissions, ownership, quotas, API keys, TLS-pinned daemon proxy). HTTPS `[::]:8006`. |
 
-Nothing in `daemon/` links libvirt. A guest is a direct QEMU process; the SPA
-still writes libvirt-shaped XML, which the daemon parses into an explicit argv
-and QMP calls without handing it to another manager.
+Nothing in `daemon/` links libvirt. A VM is a direct QEMU process; a container
+is run by LXC's own tools (`lxc-start`, not libvirt's LXC driver). The SPA still
+writes libvirt-shaped XML for both, which the daemon parses into an explicit
+argv and QMP calls, or an LXC config, without handing it to another manager.
 
 ## Commands
 
@@ -30,7 +31,7 @@ cd web && npx vite build --ssr src/listbox.ts --outDir test/_build --logLevel er
 # when test/_build is current, the suite itself is ~30 s:
 cd web && pnpm test:unit
 
-# web backend (150 tests: permissions/roles/key caps, routes, xmlcheck, shares...)
+# web backend (157 tests: permissions/roles/key caps, routes, xmlcheck, shares...)
 cd web/server && cargo clippy && cargo test
 
 # live suites — drive the real app in jsdom against a running backend
@@ -45,6 +46,8 @@ cd web && node test/live-ui.mjs      http://127.0.0.1:<port>
 #   live-history (needs the server to have been sampling for ~30 s),
 #   live-empty (no args: runs its own server against a stub daemon with no resources),
 #   live-ops (needs sudo: defines a SPICE guest, stops/starts the daemon),
+#   live-ct (needs a root daemon with the lxc package and a NAT network it can
+#   start: makes an Alpine container, drives its pages and console, deletes it),
 # auth-enabled suites need real credentials, since the account can be renamed
 # through the feature under test. Point them at an HTTPS instance:
 cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
@@ -57,7 +60,7 @@ cd web && NODE_TLS_REJECT_UNAUTHORIZED=0 VM_USER=... VM_PASS=... \
 cd web && node test/live-redirect.mjs https://127.0.0.1:8006
 
 # daemon
-cd daemon && cargo clippy --all-targets && cargo test --bins   # 263 tests
+cd daemon && cargo clippy --all-targets && cargo test --bins   # 290 tests
 
 # web backend
 cd web/server && cargo clippy --all-targets
@@ -682,13 +685,50 @@ script leaves the previous rules in force rather than an empty table.
   with Docker and other services; `apply_store` writes
   `1` when an active NAT network exists and otherwise leaves it alone.
 
+**Containers are LXC, driven directly.** (`daemon/src/lxc.rs`, `ctxml.rs`,
+`ct.rs`, `api/containers.rs`, `api/ct_console.rs`.) No libvirt: the daemon
+runs the stock `lxc-start`/`lxc-stop`/`lxc-console` (the `lxc` package; the
+installer disables its `lxc-net` and `lxc.service`). Things that bite:
+
+- **`<data_dir>/containers.json` is the definition; the LXC config is
+  derived.** Each record is the `<domain type='lxc'>` XML the SPA edits
+  (`ctxml` parses and renders it) plus `autostart`. `lxc.rs` renders
+  `/run/virt-man-daemon/lxc/<id>/config` from it at *every* start and never
+  reads it back. Edit the definition, never the config.
+- **The rootfs is a raw ext4 image in a pool, `ct-<uuid>.raw`**, loop-mounted
+  by the daemon at `/run/virt-man-daemon/ct/<uuid>` (0711 all the way down,
+  or a mapped root cannot pivot into it) and given to LXC as `dir:`. The web
+  server records storage by that volume name. The in-use checks see it as a
+  `<disk>` (`Manager::disk_definitions`), so a volume delete refuses it.
+- **Unprivileged = an `<idmap>` onto a whole 65536-id block at or above
+  2^30**, unique per container, allocated from the other definitions. The
+  daemon refuses any other mapping (`target='0'` would be host root); no
+  `<idmap>` is privileged, which only `CT.Privileged` may set.
+- **Running = the monitor pid `lxc-start -p` wrote (checked by its `[lxc
+  monitor] <path> <id>` title) has a child in `lxc.payload.<id>`.** The pid
+  file holds the *monitor*, not init — measured. Containers survive a daemon
+  restart (`KillMode=process`, LXC's own top-level cgroups).
+- **Shutdown signals init by what `/proc/<init>/exe` is**: busybox ignores
+  LXC's SIGPWR and powers off only on SIGUSR2 (an Alpine container otherwise
+  sat out the whole timeout), systemd gets SIGRTMIN+3. Force is `lxc-stop -k`.
+- **No NIC means `lxc.net.0.type = empty`.** Without any `lxc.net` entry LXC
+  shares the *host's* network namespace.
+- **Limits are cgroup v2 files, so they all apply live** (`memory.max`,
+  `memory.swap.max` when swap is accounted, `cpu.max`, `cpuset.cpus`); the
+  hardware PUT reports them `applied`, never `pending`. A NIC add/remove is
+  `pending` on a running container (veths are made at start); its rate limit
+  is live, on the host veth `vc<11 hex>`.
+- **A console resize is written to the container's own `/dev/console`**, the
+  fd the LXC monitor holds (matched by dev+inode). `lxc-console` does not
+  carry our pty's size through its proxy pty: `stty size` stayed 24 80.
+
 **The daemon shell is a host login, and only an administrator's.** (`daemon/src/api/shell.rs`.) A Shell tab on a server page opens a login shell on the hypervisor host. Things that bite:
 
 - **The pty runs the host's `login(1)`; the terminal is the login UI.** The daemon never sees a password and runs no PAM conversation of its own — it only starts `login` in a pty. `login` prints `login:`/`Password:`, authenticates through the host's PAM and execs the account's shell. So the daemon must run as **root** (its normal mode): `login` refuses a non-root caller with "for superuser only", and a non-root daemon cannot `setuid`/`setgroups` to the target account anyway. Do not reintroduce a credentials form in the SPA.
 - **`/connect` takes no body fields but the optional size.** If a `login` prompt never appears, check the daemon is root before anything else; a non-root daemon starts `login`, `login` exits, and the session closes immediately with "the session ended".
 - **Every `/shell` route is `Special::AdminOnly`** in `web/server/src/routes.rs` on `Sys.Modify`. There is no narrower privilege, on purpose — nothing in the ACL honestly means "a host shell". A route there that is missing from the table is refused for everyone.
 - **A session belongs to the page.** A random id names it; `pagehide` in `terminal.ts` beacons a disconnect, `leaveCurrentView()` and `renderConn()`'s `connTab !== "shell"` guard close it on any navigation, and an unread session closes after `IDLE` (30 s). The pump `kill(-pid, SIGHUP)`s the whole process group, so background jobs die with the page too.
-- **The child after `forkpty` only calls async-signal-safe functions** (`close_range`, `dup2`, `execve`, `write`, `_exit`) and parks its error pipe at fd 3 before sweeping the rest, so a failed `execve` is reported rather than looking like a clean start.
+- **The child after `forkpty` only calls async-signal-safe functions** (`close_range`, `dup2`, `fcntl`, `execve`, `write`, `_exit`) and parks its error pipe at fd 3 before sweeping the rest, so a failed `execve` is reported rather than looking like a clean start. `dup2` clears close-on-exec on fd 3, so it is set back: otherwise the program inherits the pipe and `connect` blocks until it exits. The pty machinery is `daemon/src/pty.rs`, shared with the container console.
 - **`daemon/src/lib.rs` exists for integration tests.** A shell test needs a root daemon, so there is no runnable-by-default suite here; drive `/connect` against a root daemon and read back the `login:` prompt.
 
 **Access logs record every guest connection, cheaply.** (`daemon/src/ipam/flows.rs`,

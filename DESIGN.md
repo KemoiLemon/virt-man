@@ -347,8 +347,6 @@ measurement. Hence the testing rules in `AGENTS.md`.
 ## Deliberately not built
 
 - **Clustering / migration / HA** — one hypervisor is the use case.
-- **Containers** — removed; direct QEMU is VM-only and there is no replacement
-  runtime.
 - **A database** — see above.
 - **VNC passwords, ZRLE/Tight** — noted ceilings, add when needed.
 - **SPICE in the browser** — tried twice; virt-viewer is the answer.
