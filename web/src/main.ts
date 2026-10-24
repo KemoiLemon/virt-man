@@ -6348,7 +6348,8 @@ async function openHardwareEditor(opts: {
         key: "disk", icon: ic.disk(), label: "Hard Disk",
         sum: newDisk.mode === "existing"
           ? (newDisk.volume || "choose a volume")
-          : newDisk.title.trim() || `${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} ${newDisk.format}`,
+          : [`${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} ${newDisk.format}`, newDisk.title.trim()]
+            .filter(Boolean).join(" · "),
       }]),
       { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics.toUpperCase() },
       { key: "firmware", icon: ic.cpu(), label: "BIOS", sum: general.firmware === "uefi" ? "UEFI (OVMF)" : "BIOS (SeaBIOS)" },
