@@ -1048,20 +1048,16 @@ impl Manager {
             "-m".into(),
             d.memory_mib.to_string(),
         ];
-        if !d.boot.is_empty() {
-            let order: String = d
-                .boot
-                .iter()
-                .map(|b| match b {
-                    // QEMU's letters: c hard disk, d CD-ROM, n network, a floppy.
-                    BootDev::Hd => 'c',
-                    BootDev::Cdrom => 'd',
-                    BootDev::Network => 'n',
-                    BootDev::Floppy => 'a',
-                })
-                .collect();
-            args.extend(["-boot".into(), format!("order={order}")]);
-        }
+        // The order is given as `bootindex` on the devices rather than
+        // `-boot order=`, which only SeaBIOS reads: OVMF ignores it and boots
+        // whatever its NVRAM or the first bootable device says, so a CD-ROM
+        // listed after the disk still won. Each kind boots its first device.
+        let rank = |kind: BootDev| d.boot.iter().position(|b| *b == kind).map(|i| i + 1);
+        let disk_rank = rank(BootDev::Hd);
+        let cd_rank = rank(BootDev::Cdrom);
+        let first_disk = d.disks.iter().position(|x| x.device == DiskDevice::Disk);
+        let first_cd = d.disks.iter().position(|x| x.device == DiskDevice::Cdrom);
+        let first_nic = (!d.interfaces.is_empty()).then_some(0usize);
         if d.firmware == Firmware::Uefi
             && let Some(loader) = &d.loader
         {
@@ -1085,7 +1081,7 @@ impl Manager {
             args.extend(["-device".into(), "virtio-scsi-pci,id=scsi0".into()]);
         }
         let mut sata = 0usize;
-        for disk in &d.disks {
+        for (disk_idx, disk) in d.disks.iter().enumerate() {
             let target = &disk.target;
             if let Some(source) = &disk.source {
                 args.extend([
@@ -1131,9 +1127,20 @@ impl Manager {
                     format!("{driver},id={target},bus=scsi0.0{drive}")
                 }
             };
+            let index = if Some(disk_idx) == first_disk {
+                disk_rank
+            } else if Some(disk_idx) == first_cd {
+                cd_rank
+            } else {
+                None
+            };
+            let device = match index {
+                Some(n) => format!("{device},bootindex={n}"),
+                None => device,
+            };
             args.extend(["-device".into(), device]);
         }
-        for iface in &d.interfaces {
+        for (nic_idx, iface) in d.interfaces.iter().enumerate() {
             // `<bandwidth>` is not in QEMU's argv: `Manager::start` installs the
             // `tc` shaping on the tap, and `api::nics` when a limit changes.
             let mac = iface
@@ -1159,8 +1166,15 @@ impl Manager {
                 netdev_arg,
                 "-device".into(),
                 format!(
-                    "{},id={device},netdev={netdev},mac={mac}",
-                    iface.model.driver()
+                    "{},id={device},netdev={netdev},mac={mac}{}",
+                    iface.model.driver(),
+                    match (Some(nic_idx) == first_nic)
+                        .then(|| rank(BootDev::Network))
+                        .flatten()
+                    {
+                        Some(n) => format!(",bootindex={n}"),
+                        None => String::new(),
+                    }
                 ),
             ]);
         }
@@ -2695,7 +2709,10 @@ mod tests {
         assert_eq!(one(&args, "-cpu"), "host");
         assert_eq!(one(&args, "-smp"), "2");
         assert_eq!(one(&args, "-m"), "512");
-        assert_eq!(one(&args, "-boot"), "order=cd", "hd then cdrom");
+        assert!(
+            !args.iter().any(|a| a == "-boot"),
+            "-boot order is SeaBIOS only; bootindex carries the order"
+        );
         assert_eq!(
             values(&args, "-drive"),
             [
@@ -2719,9 +2736,11 @@ mod tests {
             "driver=qcow2,file=file-vda,node-name=drive-vda"
         );
         let devices = values(&args, "-device");
-        assert!(devices.contains(&"virtio-blk-pci,id=vda,drive=drive-vda".to_string()));
+        assert!(devices.contains(&"virtio-blk-pci,id=vda,drive=drive-vda,bootindex=1".to_string()));
         assert!(devices.contains(&"ide-hd,id=sdb,bus=ide.1,drive=drive-sdb".to_string()));
-        assert!(devices.contains(&"ide-cd,id=sda,bus=ide.0,drive=drive-sda".to_string()));
+        assert!(
+            devices.contains(&"ide-cd,id=sda,bus=ide.0,drive=drive-sda,bootindex=2".to_string())
+        );
         assert!(
             blockdevs
                 .contains(&"driver=raw,file=file-sda,node-name=drive-sda,read-only=on".to_string())
@@ -2807,7 +2826,7 @@ mod tests {
         assert!(values(&args, "-device").contains(&"virtio-scsi-pci,id=scsi0".to_string()));
         assert!(
             values(&args, "-device")
-                .contains(&"scsi-hd,id=vda,bus=scsi0.0,drive=drive-vda".to_string())
+                .contains(&"scsi-hd,id=vda,bus=scsi0.0,drive=drive-vda,bootindex=1".to_string())
         );
         assert_eq!(
             one(&args, "-spice"),

@@ -1686,6 +1686,8 @@ dependencies = [
  "axum-server",
  "base64 0.22.1",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "rcgen",
  "reqwest",

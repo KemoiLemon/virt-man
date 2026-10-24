@@ -15,7 +15,6 @@ mod pools;
 mod pty;
 mod qemu;
 mod qemu_network;
-mod rfb;
 mod tls;
 mod volume_titles;
 

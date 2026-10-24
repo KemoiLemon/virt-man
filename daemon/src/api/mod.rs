@@ -128,13 +128,11 @@ pub fn build(
         ))
         .merge(ct_console::routes())
         .merge(templates::routes())
+        .merge(console::routes(qemu_manager.clone()))
         .layer(middleware::from_fn(crate::auth::require_token));
 
-    // console authenticates via ?token= (browsers can't set WS headers), so it
-    // is merged after the middleware layer. Auth is shared via Extension.
     Router::new()
         .merge(authed)
-        .merge(console::routes(qemu_manager.clone()))
         .layer(Extension(auth))
         // Storage pools and their volumes are the daemon's own.
         .layer(Extension(pools))

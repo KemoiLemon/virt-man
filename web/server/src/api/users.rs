@@ -85,7 +85,7 @@ async fn create(
         return Err(ApiError::bad_request(format!("no such role: {role}")));
     }
     let nickname = match req.nickname.trim() {
-        "" => "user".to_string(),
+        "" => username.clone(),
         n => n.to_string(),
     };
     let mut user = User::new(username, hash, nickname);
@@ -192,7 +192,7 @@ async fn update(
     }
     if let Some(nickname) = req.nickname {
         u.nickname = match nickname.trim() {
-            "" => "user".into(),
+            "" => u.username.clone(),
             n => n.into(),
         };
     }

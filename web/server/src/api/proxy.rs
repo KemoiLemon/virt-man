@@ -5,7 +5,7 @@ use axum::middleware;
 use axum::response::Response;
 use axum::routing::any;
 use axum::Router;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 
 use super::ApiError;
 use crate::auth;
@@ -76,11 +76,116 @@ fn read_cache() -> &'static Mutex<ReadCache> {
 }
 
 pub fn routes(state: &AppState) -> Router<AppState> {
-    // The console is plain HTTP now (the RFB client lives in the daemon and
-    // frames are fetched), so it needs no route of its own.
     Router::new()
+        .route(
+            "/proxy/{conn_id}/domains/{name}/console/stream",
+            axum::routing::get(console_stream),
+        )
         .route("/proxy/{conn_id}/{*rest}", any(proxy))
         .layer(middleware::from_fn(auth::require_user(state.clone())))
+}
+
+/// Browser WebSocket <-> the daemon's console byte pipe, so noVNC can talk to a
+/// guest's VNC server. Checked like any other proxied call (the same `VM.Console`
+/// privilege, a UUID resolved to its name first), then spliced: the daemon leg
+/// is an HTTP upgrade over the same pinned client every other call uses.
+async fn console_stream(
+    State(state): State<AppState>,
+    Path((conn_id, name)): Path<(String, String)>,
+    axum::extract::Extension(user): axum::extract::Extension<User>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    use axum::extract::ws::Message;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // A WebSocket is not bound by the same-origin policy, and the session
+    // cookie rides along on a cross-site one: refuse a page from elsewhere.
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|o| o.to_str().ok())
+        .and_then(|o| o.split_once("://").map(|(_, h)| h));
+    if origin.is_some() && origin != host {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "console must be opened from this site",
+        ));
+    }
+    let conn = {
+        let store = state.read();
+        let Some(c) = store.connection(&conn_id) else {
+            return Err(ApiError::not_found("no such connection"));
+        };
+        c.clone()
+    };
+    let rest = canonical_path(&conn, &format!("/domains/{name}/console/stream")).await;
+    let need = routes::classify(&conn_id, "GET", &rest)
+        .ok_or_else(|| ApiError::new(axum::http::StatusCode::FORBIDDEN, "console not allowed"))?;
+    super::enforce(&state, &user, &need.path, need.privilege)?;
+
+    let addr = daemon::parse_url(&conn.url)?;
+    let client =
+        daemon::http_client(&conn).map_err(|e| ApiError::internal(format!("client: {e}")))?;
+    let resp = client
+        .get(format!("{}{rest}", addr.base))
+        .header(header::AUTHORIZATION, format!("Bearer {}", conn.token))
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "vnc")
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("daemon error: {e}")))?;
+    if resp.status() != axum::http::StatusCode::SWITCHING_PROTOCOLS {
+        // The daemon's own reason (no graphics, not running, SPICE) is the
+        // useful part; pass it on as the error.
+        let code = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or(body);
+        return Err(ApiError::new(code, msg));
+    }
+    let mut daemon_io = resp
+        .upgrade()
+        .await
+        .map_err(|e| ApiError::internal(format!("daemon upgrade: {e}")))?;
+
+    // noVNC asks for the `binary` subprotocol; a server that does not echo it
+    // makes the browser fail the connection.
+    Ok(ws.protocols(["binary"]).on_upgrade(move |browser| async move {
+        let (mut tx, mut rx) = browser.split();
+        let (mut dr, mut dw) = tokio::io::split(&mut daemon_io);
+        let down = async {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match dr.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        let up = async {
+            while let Some(Ok(m)) = rx.next().await {
+                match m {
+                    Message::Binary(b) => {
+                        if dw.write_all(&b).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        };
+        // Either side ending ends the session; dropping the daemon half closes
+        // the guest's display socket.
+        tokio::select! { _ = down => {}, _ = up => {} }
+    }))
 }
 
 /// The daemon URL for a `.vv` request, with the viewer's address and the

@@ -16,6 +16,10 @@ export default defineConfig({
         emptyOutDir: true,
       }
     : {},
+  // noVNC awaits at the top level, which a classic script cannot contain. The
+  // smoke build gets a stand-in with the same surface; the real client is
+  // exercised in a browser and by test/live-console-stream.mjs.
+  resolve: iife ? { alias: { "@novnc/novnc": new URL("./test/_novnc-stub.js", import.meta.url).pathname } } : {},
   server: {
     port: 5173,
     strictPort: true,

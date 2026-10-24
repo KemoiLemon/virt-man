@@ -19,6 +19,5 @@ pub mod pools;
 pub mod pty;
 pub mod qemu;
 pub mod qemu_network;
-pub mod rfb;
 pub mod tls;
 pub mod volume_titles;

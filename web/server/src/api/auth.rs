@@ -62,7 +62,7 @@ async fn setup(
     }
 
     let nickname = match req.nickname.trim() {
-        "" => "admin".to_string(),
+        "" => username.clone(),
         n => n.to_string(),
     };
     let user = User::new(username, auth::hash_password(&password)?, nickname);
