@@ -2559,12 +2559,14 @@ async function renderPoolPage() {
       <div id="pool-fetches">${fetchesSection(conn, name)}</div>
       <div class="section-title fw-cat" style="margin-top:18px">Volumes</div>
       <table class="grid">
-        <tr><th>Volume</th><th>Content</th><th>Size</th><th>Allocated</th><th></th></tr>
+        <tr><th>Volume</th><th>Content</th><th>Size</th><th>Allocated</th><th class="col-actions"></th></tr>
         ${vols.map((v) => `
           <tr><td>${esc(v.title || v.name)}</td><td>${esc(CONTENT_LABEL[v.content ?? "images"] ?? "Disk image")}</td>
           <td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
-          <td><button class="btn icon" data-pvol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
-          <button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No volumes.</td></tr>`}
+          <td class="col-actions"><div class="row-actions">
+            <button class="btn icon" data-pvol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
+            <button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button>
+          </div></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No volumes.</td></tr>`}
       </table>`);
 
     $("#pool-upload", content).onclick = () => openUpload(name);
@@ -4306,11 +4308,13 @@ async function loadVolumes(pool: string) {
     const vols = await api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
     for (const v of vols) volumeNames[`${pool}/${v.name}`] = v.title || v.name;
 setHtml(target, `<table class="grid">
-      <tr><th>Volume</th><th>Size</th><th>Allocated</th><th></th></tr>
+      <tr><th>Volume</th><th>Size</th><th>Allocated</th><th class="col-actions"></th></tr>
       ${vols.map((v) => `
         <tr><td>${esc(v.title || v.name)}</td><td>${fmtBytes(v.capacity)}</td><td>${fmtBytes(v.allocation)}</td>
-        <td><button class="btn icon" data-vol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
-        <button class="btn danger icon" data-delvol="${esc(v.name)}">${ic.trash()}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
+        <td class="col-actions"><div class="row-actions">
+          <button class="btn icon" data-vol-title="${esc(v.name)}" title="Edit nickname">${ic.edit()}</button>
+          <button class="btn danger icon" data-delvol="${esc(v.name)}">${ic.trash()}</button>
+        </div></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No volumes.</td></tr>`}
     </table>
     <div class="actions"><button class="btn" id="create-vol" data-pool="${esc(pool)}">New volume</button></div>`);
     target.querySelectorAll("[data-vol-title]").forEach((b: Element) => {
