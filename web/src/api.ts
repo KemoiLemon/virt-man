@@ -247,7 +247,9 @@ export interface AclEntry {
 
 /// A row of the admin Resources page.
 export interface AdminResource {
-  kind: "vm" | "network" | "pool" | "volume";
+  kind: "vm" | "ct" | "network" | "pool" | "volume";
+  /// Containers: running without a user namespace (root is host root).
+  privileged?: boolean;
   conn: string;
   conn_name: string;
   /// The libvirt name (a UUID for anything made since UUIDs).
@@ -333,6 +335,19 @@ export interface DomainSummary {
   suspended?: boolean;
 }
 
+/// A container (`GET /containers`), named by its UUID like a VM. The list
+/// carries no `id`/`persistent` (a container has no QEMU process number and is
+/// always defined), so those are optional here.
+export interface ContainerSummary extends Omit<DomainSummary, "id" | "persistent"> {
+  id?: number;
+  persistent?: boolean;
+  /// No user namespace: the container's root is the host's root.
+  privileged: boolean;
+  autostart?: boolean;
+  /// The root filesystem image's absolute path on the host.
+  rootfs?: string | null;
+}
+
 export interface Graphics {
   kind: string;
   host: string;
@@ -395,8 +410,9 @@ export interface VolumeSummary {
   path: string;
   capacity: number;
   allocation: number;
-  /// What it holds, from its file name: iso or images.
-  content?: "iso" | "images";
+  /// What it holds, from its file name: iso, vztmpl (a container template)
+  /// or images.
+  content?: "iso" | "vztmpl" | "images";
   /// Guests that have it attached (from the daemon).
   used_by?: string[];
   /// From the web server's proxy: the caller owns it; and it was made empty

@@ -1,4 +1,5 @@
-// A text terminal in the browser, for a shell on the daemon's host.
+// A text terminal in the browser, for a container's console and for a shell on
+// the daemon's host.
 //
 // Both are the same long-polled byte stream: `connect` opens a session,
 // `read?after=<offset>` parks until there are bytes past the offset, `write`
@@ -197,6 +198,31 @@ async function mountTerminal(
       return;
     }
   }
+}
+
+/// Attach a terminal to a container's text console for the guest at `base`
+/// (`/proxy/<c>/containers/<ct>`). Replaces any terminal already attached.
+/// Resolves once the session is mounted, or `false` when it could not open.
+export async function attachTextConsole(
+  stage: HTMLElement,
+  base: string,
+  status: (msg: string | null) => void,
+): Promise<boolean> {
+  detachTextConsole();
+  let r: { offset: number; joined: boolean };
+  try {
+    // No size yet: the stage is measured once xterm is mounted, and the first
+    // fit reports it through `resize` before the shell draws anything.
+    r = await post<{ offset: number; joined: boolean }>(`${base}/console/connect`, {});
+  } catch (e) {
+    status((e as Error).message);
+    return false;
+  }
+  // A second tab joins the session already open: start from what is buffered
+  // rather than from nothing, so it shows the current prompt.
+  const offset = r.joined ? Math.max(0, r.offset - 64 * 1024) : 0;
+  void mountTerminal(stage, `${base}/console`, status, offset, `${base}/console/disconnect`);
+  return true;
 }
 
 /// Open a login shell on the daemon's host. The daemon runs the host's

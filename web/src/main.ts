@@ -1,11 +1,12 @@
 import { openCropDialog } from "./crop";
 import { api, cacheFirst, effectiveLimit, remainingLimits, uploadWithProgress } from "./api";
-import type { AdminResource, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, StagedUpload, UsageCounts, User, VolumeSummary } from "./api";
+import type { AdminResource, ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, StagedUpload, UsageCounts, User, VolumeSummary } from "./api";
 import { adminRowMenu, adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
 import { setSpeed, speed, speedOptions } from "./console-speed";
-// The text console (xterm.js) is loaded when a host shell opens: it would
-// otherwise more than double the bundle every page load pays for.
+// The text console (xterm.js) is loaded when a container console or a host
+// shell opens: it would otherwise more than double the bundle every page load
+// pays for.
 let terminal: typeof import("./terminal") | null = null;
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import DOMPurify from "dompurify";
@@ -13,11 +14,11 @@ import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
-import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type DcTab, type Route } from "./route";
+import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type CtTab, type DcTab, type Route } from "./route";
 import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice, HwField } from "./hardware";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
-import type { MemoryUnit, StorageUnit } from "./units";
+import type { MemoryUnit, StorageUnit, Unit } from "./units";
 import { enhanceSelects } from "./listbox";
 import { poolUsed } from "./pool-usage";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
@@ -119,6 +120,13 @@ let volumesOpen: string | null = null;
 // compared equal to the fresh container and stayed on its skeleton forever.
 let renderedPools: string[] | null = null;
 let selectedVm: string | null = null;
+/// The open guest is a container. Containers are served by the same view as
+/// VMs (summary, console, hardware, options, network, XML); this picks the
+/// daemon's `/containers` routes instead of `/domains`, and swaps in what a
+/// container has instead (a text console, a resources editor) while hiding what
+/// it does not (graphics, reset, devices). One flag rather than a second copy
+/// of the guest view, so the two cannot drift apart.
+let ctMode = false;
 let vmTab: "summary" | "hardware" | "options" | "network" | "console" | "xml" = "summary";
 /// Which disk the summary's Disks card is graphing, per VM, so the 1s poll
 /// does not reset the user's selection back to the first disk.
@@ -141,6 +149,8 @@ let pendingPoll: number | null = null;
 /// VMs per connection, so the sidebar tree can nest guests under their server
 /// without every render refetching.
 const treeVms: Record<string, DomainSummary[]> = {};
+/// Containers per connection, shown in the tree below the VMs.
+const treeCts: Record<string, ContainerSummary[]> = {};
 
 /// Networks and storage pools per connection, shown in the sidebar alongside
 /// guests so a network or pool is one click away from its management page.
@@ -210,20 +220,23 @@ function currentRoute(): Route {
   // route accepts too. A resource the lists have not loaded yet keeps its
   // name in the URL until they do.
   const c = selectedConn;
+  if (selectedVm && ctMode) {
+    return { view: "ct", conn: c, ct: uuidOf(treeCts[c], selectedVm), tab: vmTab as CtTab };
+  }
   if (selectedVm) return { view: "vm", conn: c, vm: uuidOf(treeVms[c], selectedVm), tab: vmTab };
   if (selectedNet) return { view: "net", conn: c, net: uuidOf(treeNets[c], selectedNet) };
   if (selectedPool) return { view: "pool", conn: c, pool: uuidOf(treePools[c], selectedPool) };
   return { view: "conn", conn: c, tab: connTab };
 }
 
-/// The daemon path for the open guest: `/domains/<vm>`.
-function guestBase(conn: string, name: string): string {
-  return `/proxy/${conn}/domains/${encodeURIComponent(name)}`;
+/// The daemon path for the open guest: `/domains/<vm>` or `/containers/<ct>`.
+function guestBase(conn: string, name: string, ct = ctMode): string {
+  return `/proxy/${conn}/${ct ? "containers" : "domains"}/${encodeURIComponent(name)}`;
 }
 
 /// The list the open guest belongs to.
-function guestList(conn: string): DomainSummary[] | undefined {
-  return treeVms[conn];
+function guestList(conn: string, ct = ctMode): (DomainSummary | ContainerSummary)[] | undefined {
+  return ct ? treeCts[conn] : treeVms[conn];
 }
 
 /// Whether `s` is a UUID in libvirt's canonical form: a guest, network or pool
@@ -356,6 +369,7 @@ function applyRoute(r: Route) {
   if (r.view === "dc") dcTab = r.tab;
   else if (r.view === "conn") connTab = r.tab === "shell" && !canAdmin() ? "dashboard" : r.tab;
   else if (r.view === "vm") { selectedVm = nameOf(treeVms[r.conn], r.vm); vmTab = r.tab; }
+  else if (r.view === "ct") { selectedVm = nameOf(treeCts[r.conn], r.ct); ctMode = true; vmTab = r.tab; }
   else if (r.view === "net") selectedNet = nameOf(treeNets[r.conn], r.net);
   else selectedPool = nameOf(treePools[r.conn], r.pool);
 }
@@ -453,6 +467,7 @@ function stillCurrent(gen: number): boolean {
 /// resurrects that page about a second after the user navigates away.
 function clearResourceSelection() {
   selectedVm = null;
+  ctMode = false;
   selectedNet = null;
   selectedPool = null;
 }
@@ -491,7 +506,24 @@ function openCommandPalette() {
   };
 
   // Actions on what is open come first: they are what you most likely want.
-  if (selectedConn && selectedVm) {
+  if (selectedConn && selectedVm && ctMode) {
+    const conn = selectedConn;
+    const ct = selectedVm;
+    const shown = displayName(treeCts[conn], ct);
+    const running = (treeCts[conn] ?? []).find((v) => v.name === ct)?.active === true;
+    const power = (id: string, label: string, icon: string, path: string) =>
+      add(id, `${label} — ${shown}`, "This container", icon, () => void treeCtPower(conn, ct, path));
+    if (running) {
+      power("ct-shutdown", "Shutdown", ic.stop(), "/shutdown");
+      power("ct-reboot", "Reboot", ic.reboot(), "/reboot");
+      power("ct-destroy", "Force stop", ic.forceStop(), "/destroy");
+    } else {
+      power("ct-start", "Start", ic.start(), "/start");
+    }
+    add("ct-rename", `Rename — ${shown}`, "This container", ic.edit(), () => void renameCt(conn, ct));
+    add("ct-delete", `Delete — ${shown}`, "This container", ic.trash(), () => void deleteCt(ct));
+  }
+  if (selectedConn && selectedVm && !ctMode) {
     const conn = selectedConn;
     const vm = selectedVm;
     const running = (treeVms[conn] ?? []).find((v) => v.name === vm)?.active === true;
@@ -521,13 +553,15 @@ function openCommandPalette() {
     const pool = selectedPool;
     add("pool-upload", `Upload ISO — ${pool}`, "This pool", ic.upload(), () => openUpload(pool));
     add("pool-volume", `New volume — ${pool}`, "This pool", ic.disk(), () => openCreateVolume(pool));
+    add("pool-templates", `Templates — ${pool}`, "This pool", ic.container(), () => void openTemplates(pool));
   }
 
   // Creation. Resource kinds that need a server are offered for the one open.
-  add("add-resource", "Add resource", "VM, network, pool or server", ic.plus(), () => openAddResource());
+  add("add-resource", "Add resource", "VM, container, network or pool", ic.plus(), () => openAddResource());
   if (selectedConn) {
     const server = connections.find((c) => c.id === selectedConn)?.name ?? "";
     add("create-vm", "Create VM", server, ic.vm(), () => openCreateVm());
+    add("create-ct", "Create container", server, ic.container(), () => void openCreateCt());
     add("create-net", "Create network", server, ic.network(), () => openCreateNetwork());
     add("create-pool", "Create pool", server, ic.storage(), () => openCreatePool());
   }
@@ -536,9 +570,11 @@ function openCommandPalette() {
   // it lives, so typing a server, guest, network or pool name finds it.
   add("nav-dc", "Datacenter", "Dashboard", ic.datacenter(), toDc("dashboard"));
   add("nav-dc-guests", "Datacenter — Guests", "/guests", ic.vms(), toDc("guests"));
+  add("nav-dc-cts", "Datacenter — Containers", "/containers", ic.container(), toDc("containers"));
   const connTabs: [typeof connTab, string, string][] = [
     ["dashboard", "Dashboard", ic.datacenter()],
     ["vms", "VMs", ic.vms()],
+    ["containers", "Containers", ic.container()],
     ["networks", "Networks", ic.network()],
     ["storage", "Storage", ic.storage()],
     ["firewall", "Firewall", ic.firewall()],
@@ -566,6 +602,13 @@ function openCommandPalette() {
           c.name, icon, () => selectVmRow(c.id, v.name, tab));
       }
     }
+    for (const v of treeCts[c.id] ?? []) {
+      const name = v.title || v.name;
+      for (const [tab, label, icon] of vmTabs) {
+        add(`nav-${c.id}-ct-${v.name}-${tab}`, tab === "summary" ? `Container — ${name}` : `Container — ${name} — ${label}`,
+          c.name, tab === "summary" || tab === "console" ? ic.container() : icon, () => selectCtRow(c.id, v.name, tab));
+      }
+    }
     for (const n of treeNets[c.id] ?? []) {
       add(`nav-${c.id}-net-${n.name}`, `Network — ${n.title || n.name}`, c.name, ic.network(), () => selectNetRow(c.id, n.name));
     }
@@ -584,7 +627,7 @@ function openCommandPalette() {
   if (canAdmin()) {
     add("admin-panel", "Administration", "Users, groups, permissions, resources, limits", ic.admin(), () => openAdmin());
     for (const [sec, label] of [["users", "Users"], ["groups", "Groups"], ["permissions", "Permissions"],
-      ["vms", "VMs"], ["networks", "Networks"], ["pools", "Storage Pools"],
+      ["vms", "VMs"], ["containers", "Containers"], ["networks", "Networks"], ["pools", "Storage Pools"],
       ["quotas", "Quotas"], ["ips", "IP Addresses"], ["daemons", "Daemons"],
       ["activity", "Activity"]] as const) {
       add(`admin-${sec}`, `Administration — ${label}`, `/admin/${sec}`, ic.admin(), () => openAdmin(sec));
@@ -922,10 +965,11 @@ function renderTree() {
     .map((c) => {
       const selected = c.id === selectedConn && !selectedVm && !selectedNet && !selectedPool;
       const vms = treeVms[c.id] ?? [];
+      const cts = treeCts[c.id] ?? [];
       const nets = treeNets[c.id] ?? [];
       const pools = treePools[c.id] ?? [];
-      const running = vms.filter((v) => v.active).length;
-      const guests = vms.length;
+      const running = vms.filter((v) => v.active).length + cts.filter((v) => v.active).length;
+      const guests = vms.length + cts.length;
       const offline = c.online === false;
       // Servers auto-expand: guests show as soon as they are known, without
       // requiring the server to be selected first.
@@ -936,7 +980,7 @@ function renderTree() {
           ? vms
               .map(
                 (v) => `
-      <button class="tree-row tree-vm ${selectedVm === v.name && selectedConn === c.id ? "sel" : ""}"
+      <button class="tree-row tree-vm ${!ctMode && selectedVm === v.name && selectedConn === c.id ? "sel" : ""}"
         data-vm="${esc(v.name)}" data-vm-conn="${c.id}">
         <span class="tree-ic ${v.active ? "on" : ""}">${ic.vm()}</span>
         <span class="tree-label">${esc(v.title || v.name)}</span>
@@ -945,6 +989,20 @@ function renderTree() {
               )
               .join("")
           : "";
+      // Containers sit below the VMs and above networks and pools: both are
+      // guests, and the tree lists guests first.
+      const ctRows = cts
+        .map(
+          (v) => `
+      <button class="tree-row tree-vm tree-ct ${ctMode && selectedVm === v.name && selectedConn === c.id ? "sel" : ""}"
+        data-ct="${esc(v.name)}" data-ct-conn="${c.id}">
+        <span class="tree-ic ${v.active ? "on" : ""}">${ic.container()}</span>
+        <span class="tree-label">${esc(v.title || v.name)}</span>
+        ${v.privileged ? `<span class="tree-state bad" title="Privileged: its root is the host's root">priv</span>` : ""}
+        <span class="tree-state ${v.active ? "on" : ""}">${esc(capLabel(v.state))}</span>
+      </button>`,
+        )
+        .join("");
       const netRows = nets.length
         ? nets
             .map(
@@ -979,7 +1037,7 @@ function renderTree() {
         <span class="tree-ic ${running > 0 && !offline ? "on" : ""}">${offline ? ic.offline() : ic.server()}</span>
         <span class="tree-label">${esc(c.name)}</span>
         <span class="tree-state ${offline ? "bad" : ""}">${offline ? "Offline" : guests ? `${running}/${guests}` : ""}</span>
-      </button>${offline ? `<div class="tree-stale">${guestRows}${netRows}${poolRows}</div>` : `${guestRows}${netRows}${poolRows}`}`;
+      </button>${offline ? `<div class="tree-stale">${guestRows}${ctRows}${netRows}${poolRows}</div>` : `${guestRows}${ctRows}${netRows}${poolRows}`}`;
     })
     .join("");
 
@@ -1026,6 +1084,10 @@ function renderTree() {
       void renderVm();
     };
   });
+  tree.querySelectorAll("[data-ct]").forEach((row: Element) => {
+    const el = row as HTMLElement;
+    el.onclick = () => selectCtRow(el.dataset.ctConn!, el.dataset.ct!);
+  });
   tree.querySelectorAll("[data-net]").forEach((row: Element) => {
     const el = row as HTMLElement;
     el.onclick = () => {
@@ -1058,9 +1120,7 @@ function renderTree() {
 function selectServer(id: string, tab?: typeof connTab) {
   leaveCurrentView();
   selectedConn = id;
-  selectedVm = null;
-  selectedNet = null;
-  selectedPool = null;
+  clearResourceSelection();
   if (tab) connTab = tab;
   renderTree();
   renderConn();
@@ -1071,6 +1131,7 @@ function selectVmRow(conn: string, vm: string, tab?: typeof vmTab) {
   leaveCurrentView();
   selectedConn = conn;
   selectedVm = vm;
+  ctMode = false;
   selectedNet = null;
   selectedPool = null;
   if (tab) vmTab = tab;
@@ -1078,12 +1139,60 @@ function selectVmRow(conn: string, vm: string, tab?: typeof vmTab) {
   void renderVm();
 }
 
+/// Select a container (optionally opening one of its tabs).
+function selectCtRow(conn: string, ct: string, tab: typeof vmTab = "summary") {
+  leaveCurrentView();
+  selectedConn = conn;
+  clearResourceSelection();
+  selectedVm = ct;
+  ctMode = true;
+  vmTab = tab;
+  renderTree();
+  void renderVm();
+}
+
+/// A lifecycle POST for a container from anywhere it is listed (tree, cards,
+/// palette), whether or not it is the one open.
+async function treeCtPower(conn: string, ct: string, path: string) {
+  try {
+    await act(`${guestBase(conn, ct, true)}${path}`, "POST");
+  } catch {
+    return; // act already toasted the daemon's reason
+  }
+  await refreshTreeVms();
+  if (selectedConn === conn && selectedVm === ct && ctMode) void renderVm();
+}
+
+/// Actions for one container, on every surface it appears: the tree, the
+/// container cards (a server's tab and the Datacenter's), the page header and
+/// its tabs, and the palette's equivalents.
+function ctMenu(connId: string, name: string): CtxItem[] {
+  const guest = (treeCts[connId] ?? []).find((v) => v.name === name);
+  const running = guest?.active === true;
+  const share = canShareVm(connId, name, true);
+  return [
+    { label: "Open", icon: ic.container(), run: () => selectCtRow(connId, name) },
+    { label: "Start", icon: ic.start(), disabled: running, separator: true, run: () => void treeCtPower(connId, name, "/start") },
+    { label: "Shutdown", icon: ic.stop(), disabled: !running, run: () => void treeCtPower(connId, name, "/shutdown") },
+    { label: "Reboot", icon: ic.reboot(), disabled: !running, run: () => void treeCtPower(connId, name, "/reboot") },
+    { label: "Force stop", icon: ic.forceStop(), disabled: !running, run: () => void treeCtPower(connId, name, "/destroy") },
+    { label: "Console", icon: ic.keyboard(), separator: true, run: () => selectCtRow(connId, name, "console") },
+    { label: "Hardware", icon: ic.cpu(), run: () => selectCtRow(connId, name, "hardware") },
+    { label: "Options", icon: ic.options(), run: () => selectCtRow(connId, name, "options") },
+    { label: "Network", icon: ic.network(), run: () => selectCtRow(connId, name, "network") },
+    { label: "XML", icon: ic.xml(), run: () => selectCtRow(connId, name, "xml") },
+    ...(share ? [{ label: "Share", icon: ic.perms(), separator: true, run: () => void openShareVm(connId, name, true) }] : []),
+    { label: "Rename", icon: ic.edit(), separator: !share, run: () => void renameCt(connId, name) },
+    // A running container is stopped by the delete itself, as a VM is.
+    { label: "Delete", icon: ic.trash(), danger: true, run: () => void deleteCtOn(connId, name, () => afterCtDelete(connId)) },
+  ];
+}
+
 function selectNetRow(conn: string, net: string) {
   leaveCurrentView();
   selectedConn = conn;
-  selectedVm = null;
+  clearResourceSelection();
   selectedNet = net;
-  selectedPool = null;
   renderTree();
   showPageSkeleton();
   void fastLoad(renderNetPage);
@@ -1092,8 +1201,7 @@ function selectNetRow(conn: string, net: string) {
 function selectPoolRow(conn: string, pool: string) {
   leaveCurrentView();
   selectedConn = conn;
-  selectedVm = null;
-  selectedNet = null;
+  clearResourceSelection();
   selectedPool = pool;
   renderTree();
   showPageSkeleton();
@@ -1151,18 +1259,21 @@ async function downloadVv(connId: string, vm: string) {
 
 /// Whether the signed-in user may share this guest: its owner or an admin.
 /// Cosmetic, like `canAdmin`; the server checks the same rule.
-function canShareVm(connId: string, vmName: string): boolean {
-  const guest = (guestList(connId) ?? []).find((v) => v.name === vmName);
+function canShareVm(connId: string, vmName: string, ct = false): boolean {
+  const guest = (guestList(connId, ct) ?? []).find((v) => v.name === vmName);
+  // A privileged container is a root shell on the host: an admin's to share.
+  if (ct && (guest as ContainerSummary | undefined)?.privileged) return canAdmin();
   return canAdmin() || (!!guest?.mine && !guest?.suspended);
 }
 
-/// Share one of your guests with other users, at a fixed level.
-async function openShareVm(connId: string, vmName: string) {
-  const shown = displayName(guestList(connId), vmName);
+/// Share one of your guests (a VM, or a container with `ct`) with other users,
+/// at a fixed level.
+async function openShareVm(connId: string, vmName: string, ct = false) {
+  const shown = displayName(guestList(connId, ct), vmName);
   let data: { shares: { user: string; username: string; role: string }[]; roles: string[] };
   let people: { id: string; username: string }[];
   try {
-    const q = `conn=${encodeURIComponent(connId)}&vm=${encodeURIComponent(vmName)}&kind=vm`;
+    const q = `conn=${encodeURIComponent(connId)}&vm=${encodeURIComponent(vmName)}&kind=${ct ? "ct" : "vm"}`;
     [data, people] = await Promise.all([
       api.get<typeof data>(`/shares?${q}`),
       api.get<typeof people>("/shares/users"),
@@ -1173,6 +1284,8 @@ async function openShareVm(connId: string, vmName: string) {
   const LEVEL: Record<string, string> = {
     VMUser: "Use — console, start and stop",
     VMAdmin: "Manage — also change its hardware and settings",
+    CTUser: "Use — console, start and stop",
+    CTAdmin: "Manage — also change its resources, settings and network",
   };
   const el = openModal(
     `Share — ${esc(shown)}`,
@@ -1194,14 +1307,14 @@ async function openShareVm(connId: string, vmName: string) {
      </div>`,
     `<button class="btn" id="sh-close">Close</button><button class="btn primary" id="sh-add">${ic.plus(14)} Share</button>`,
   );
-  const body = { conn: connId, vm: vmName, kind: "vm" };
+  const body = { conn: connId, vm: vmName, kind: ct ? "ct" : "vm" };
   $("#sh-close", el).onclick = () => el.remove();
   $("#sh-add", el).onclick = async () => {
     try {
       await api.put("/shares", { ...body, user: $("#sh-user", el).value, role: $("#sh-role", el).value });
       toast(`${shown} shared`);
       el.remove();
-      void openShareVm(connId, vmName);
+      void openShareVm(connId, vmName, ct);
     } catch (e) { toast((e as Error).message, "bad"); }
   };
   el.querySelectorAll<HTMLElement>("[data-unshare]").forEach((b) => {
@@ -1210,7 +1323,7 @@ async function openShareVm(connId: string, vmName: string) {
         await api.del("/shares", { ...body, user: b.dataset.unshare });
         toast("Sharing stopped");
         el.remove();
-        void openShareVm(connId, vmName);
+        void openShareVm(connId, vmName, ct);
       } catch (e) { toast((e as Error).message, "bad"); }
     };
   });
@@ -1314,10 +1427,12 @@ function serverMenu(serverId: string): CtxItem[] {
   return [
     { label: "Dashboard", icon: ic.datacenter(), run: () => selectServer(serverId, "dashboard") },
     { label: "VMs", icon: ic.vms(), run: () => selectServer(serverId, "vms") },
+    { label: "Containers", icon: ic.container(), run: () => selectServer(serverId, "containers") },
     { label: "Networks", icon: ic.network(), run: () => selectServer(serverId, "networks") },
     { label: "Storage", icon: ic.storage(), run: () => selectServer(serverId, "storage") },
     { label: "Firewall", icon: ic.firewall(), run: () => selectServer(serverId, "firewall") },
     { label: "Create VM", icon: ic.plus(), separator: true, run: create(() => openCreateVm()) },
+    { label: "Create container", icon: ic.plus(), run: create(() => void openCreateCt(serverId)) },
     { label: "Create network", icon: ic.plus(), run: create(() => openCreateNetwork()) },
     { label: "Create pool", icon: ic.plus(), run: create(() => openCreatePool()) },
     { label: "Edit server", icon: ic.edit(), separator: true, run: () => openConnectionDialog(serverId) },
@@ -1339,6 +1454,7 @@ function treeMenuItems(row: HTMLElement | null): CtxItem[] {
   if (!row || row.id === "dc-row") return rootMenu();
   const d = row.dataset;
   if (d.vm && d.vmConn) return vmMenu(d.vmConn, d.vm);
+  if (d.ct && d.ctConn) return ctMenu(d.ctConn, d.ct);
   if (d.net && d.netConn) return netMenu(d.netConn, d.net);
   if (d.pool && d.poolConn) return poolMenu(d.poolConn, d.pool);
   if (d.conn) return serverMenu(d.conn);
@@ -1392,7 +1508,7 @@ function adminTreeMenu(row: HTMLElement | null): CtxItem[] | null {
 function contentMenuItems(target: Element): CtxItem[] | null {
   if (target.closest("input, textarea, select, .cmd, pre, .select-popover")) return null;
   const el = target.closest<HTMLElement>(
-    "[data-vm-open], [data-dc-vm], [data-net-open], [data-dash-net], [data-pool-open], " +
+    "[data-vm-open], [data-dc-vm], [data-dc-ct], [data-net-open], [data-dash-net], [data-pool-open], " +
     "[data-dash-pool], [data-open-conn-row], [data-dc-dash-conn], .tab[data-tab], .tab[data-vmtab], " +
     ".tab[data-dctab], .dhead",
   );
@@ -1400,6 +1516,7 @@ function contentMenuItems(target: Element): CtxItem[] | null {
   const d = el.dataset;
   if (d.vmOpen && selectedConn) return vmMenu(selectedConn, d.vmOpen);
   if (d.dcVm && d.dcVmConn) return vmMenu(d.dcVmConn, d.dcVm);
+  if (d.dcCt && d.dcCtConn) return ctMenu(d.dcCtConn, d.dcCt);
   if (d.netOpen && selectedConn) return netMenu(selectedConn, d.netOpen);
   if (d.dashNet && d.dashConn) return netMenu(d.dashConn, d.dashNet);
   if (d.poolOpen && selectedConn) return poolMenu(selectedConn, d.poolOpen);
@@ -1411,13 +1528,13 @@ function contentMenuItems(target: Element): CtxItem[] | null {
     return serverMenu(selectedConn);
   }
   if (d.vmtab && selectedConn && selectedVm) {
-    return vmMenu(selectedConn, selectedVm);
+    return ctMode ? ctMenu(selectedConn, selectedVm) : vmMenu(selectedConn, selectedVm);
   }
   if (d.dctab) return rootMenu();
   // The page header stands for the page's own resource.
   if (el.matches(".dhead")) {
     if (!selectedConn) return rootMenu();
-    if (selectedVm) return vmMenu(selectedConn, selectedVm);
+    if (selectedVm) return ctMode ? ctMenu(selectedConn, selectedVm) : vmMenu(selectedConn, selectedVm);
     if (selectedNet) return netMenu(selectedConn, selectedNet);
     if (selectedPool) return poolMenu(selectedConn, selectedPool);
     return serverMenu(selectedConn);
@@ -1475,16 +1592,19 @@ async function refreshTreeVms() {
   const results = await Promise.all(
     connections.map(async (c) => {
       try {
-        const [vms, nets, pools] = await Promise.all([
+        const [vms, nets, pools, cts] = await Promise.all([
           api.get<DomainSummary[]>(`/proxy/${c.id}/domains`),
           api.get<NetworkSummary[]>(`/proxy/${c.id}/networks`),
           api.get<PoolSummary[]>(`/proxy/${c.id}/pools`),
+          // A daemon without the container runtime, or no right to list
+          // them: no containers, which must not take the VMs down with it.
+          api.get<ContainerSummary[]>(`/proxy/${c.id}/containers`).catch(() => [] as ContainerSummary[]),
         ]);
-        return [c.id, vms, nets, pools] as const;
+        return [c.id, vms, nets, pools, cts] as const;
       } catch {
         // Unreachable daemon: keep whatever we last knew rather than
         // collapsing its branch. The content pane surfaces the error.
-        return [c.id, treeVms[c.id] ?? [], treeNets[c.id] ?? [], treePools[c.id] ?? []] as const;
+        return [c.id, treeVms[c.id] ?? [], treeNets[c.id] ?? [], treePools[c.id] ?? [], treeCts[c.id] ?? []] as const;
       }
     }),
   );
@@ -1497,9 +1617,13 @@ async function refreshTreeVms() {
   // buried an administrator's own guests under nothing and hid the resources
   // they are meant to look after, so it is deliberately not done.
   let changed = false;
-  for (const [id, vms, nets, pools] of results) {
+  for (const [id, vms, nets, pools, cts] of results) {
     if (JSON.stringify(treeVms[id]) !== JSON.stringify(vms)) {
       treeVms[id] = vms;
+      changed = true;
+    }
+    if (JSON.stringify(treeCts[id]) !== JSON.stringify(cts)) {
+      treeCts[id] = cts;
       changed = true;
     }
     if (JSON.stringify(treeNets[id]) !== JSON.stringify(nets)) {
@@ -1565,6 +1689,7 @@ function renderDc() {
   const tabs = `<div class="tabbar">
       <button class="tab ${dcTab === "dashboard" ? "active" : ""}" data-dctab="dashboard">${ic.datacenter(14)} Dashboard</button>
       <button class="tab ${dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
+      <button class="tab ${dcTab === "containers" ? "active" : ""}" data-dctab="containers">${ic.container(14)} Containers</button>
       <button class="tab ${dcTab === "networks" ? "active" : ""}" data-dctab="networks">${ic.network(14)} Networks</button>
       <button class="tab ${dcTab === "storage" ? "active" : ""}" data-dctab="storage">${ic.storage(14)} Storage</button>
     </div>`;
@@ -1616,6 +1741,15 @@ function renderDc() {
   let body: string;
   if (dcTab === "dashboard") {
     body = `<div id="dc-dash">${skeleton("dashboard")}</div>`;
+  } else if (dcTab === "containers") {
+    // Same quick statistics as the Guests tab, over the tree's container cache;
+    // each card names its own server, so its actions do too.
+    const all = connections.flatMap((c) => (treeCts[c.id] ?? []).map((v) => ({ conn: c, ct: v })));
+    const running = all.filter(({ ct }) => ct.active).length;
+    body = `${quickStats(all.length, running, "CONTAINERS", ic.container)}
+       <div class="section-title">Containers</div>
+       ${all.length ? `<div class="card-grid">${all.map(({ conn, ct }) => ctCard(ct, conn.id, conn.name)).join("")}</div>`
+         : emptyState("containers", "Create Container", "dc-ct-create")}`;
   } else if (dcTab === "networks") {
     const all = connections.flatMap((c) => (treeNets[c.id] ?? []).map((n) => ({ conn: c, n })));
     const active = all.filter(({ n }) => n.active).length;
@@ -1648,8 +1782,10 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
   // explicit connection and the view stays put, rather than switching the
   // whole app to the daemon the user picked.
   $("#dc-guest-create")?.addEventListener("click", () => void openCreateVm());
+  $("#dc-ct-create")?.addEventListener("click", () => dcCreate((conn) => void openCreateCt(conn)));
   $("#dc-net-create")?.addEventListener("click", () => dcCreate((conn) => openCreateNetwork(conn)));
   $("#dc-pool-create")?.addEventListener("click", () => dcCreate((conn) => openCreatePool(conn)));
+  bindCtCards(content);
   bindDcNetCards(content);
   bindDcPoolCards(content);
   content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
@@ -1663,6 +1799,7 @@ setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div
     leaveCurrentView();
     selectedConn = connId;
     selectedVm = vm;
+    ctMode = false;
     vmTab = tab;
     renderTree();
     void renderVm();
@@ -2046,12 +2183,14 @@ const adminCtx: AdminCtx = {
   openResource: (kind, conn, name) => {
     adminSection = null;
     if (kind === "vm") selectVmRow(conn, name);
+    else if (kind === "ct") selectCtRow(conn, name);
     else if (kind === "network") selectNetRow(conn, name);
     else selectPoolRow(conn, name);
   },
   go: (section, tab) => openAdmin(section, tab),
   createVm: (conn, owner, after) => void openHardwareEditor({ conn, forUser: { owner, after } }),
   createNetwork: (conn, owner, after) => openCreateNetwork(conn, { owner, after }),
+  createCt: (conn, owner, after) => void openCreateCt(conn, { owner, after }),
   createPool: (conn, after) => openCreatePool(conn, after),
   deleteResource: (kind, conn, pool, name, after) => void adminDeleteResource(kind, conn, pool, name, after),
   tab: () => adminTab,
@@ -2363,7 +2502,7 @@ async function renderNetPage() {
 
 /// Dedicated storage page: one pool's capacity plus full volume management.
 /// Proxmox's words for what a volume holds.
-const CONTENT_LABEL: Record<string, string> = { iso: "ISO image", images: "Disk image" };
+const CONTENT_LABEL: Record<string, string> = { iso: "ISO image", vztmpl: "CT template", images: "Disk image" };
 
 async function renderPoolPage() {
   if (!selectedConn || !selectedPool) return;
@@ -2400,6 +2539,7 @@ async function renderPoolPage() {
         <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
         <button class="btn" id="pool-fetch">${ic.download(14)} From URL</button>
         <button class="btn" id="pool-newvol">${ic.plus(14)} New volume</button>
+        <button class="btn" id="pool-tpl">${ic.container(14)} Templates</button>
         <button class="btn danger" id="pool-del">${ic.trash(14)} Delete pool</button>
       </div>
       <div class="metric">
@@ -2430,6 +2570,7 @@ async function renderPoolPage() {
     $("#pool-upload", content).onclick = () => openUpload(name);
     $("#pool-fetch", content).onclick = () => openFetch(name);
     $("#pool-newvol", content).onclick = () => openCreateVolume(name);
+    $("#pool-tpl", content).onclick = () => void openTemplates(name);
     $("#pool-del", content).onclick = async () => {
       await deletePool(name);
       backToConn();
@@ -2484,6 +2625,7 @@ setHtml(content, `
     <div class="tabbar">
       <button class="tab ${connTab === "dashboard" ? "active" : ""}" data-tab="dashboard">${ic.datacenter(14)} Dashboard</button>
       <button class="tab ${connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
+      <button class="tab ${connTab === "containers" ? "active" : ""}" data-tab="containers">${ic.container(14)} Containers</button>
       <button class="tab ${connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
       <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
       <button class="tab ${connTab === "firewall" ? "active" : ""}" data-tab="firewall">${ic.firewall(14)} Firewall</button>
@@ -2491,6 +2633,7 @@ setHtml(content, `
       <div class="tabbar-actions">
         ${connTab === "dashboard" ? `<button class="btn primary" id="create-resource">${ic.plus(14)} Create Resource</button>` : ""}
         ${connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
+        ${connTab === "containers" ? `<button class="btn primary" id="create-ct">${ic.plus(14)} Create CT</button>` : ""}
         ${connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create Network</button>` : ""}
         ${connTab === "storage" ? `<button class="btn primary" id="create-pool">${ic.plus(14)} Create Pool</button>` : ""}
       </div>
@@ -2510,6 +2653,7 @@ setHtml(content, `
   renderConnBody();
   $("#create-resource")?.addEventListener("click", () => openCreateResource());
   $("#create-vm")?.addEventListener("click", () => openCreateVm());
+  $("#create-ct")?.addEventListener("click", () => void openCreateCt());
   $("#create-net")?.addEventListener("click", () => openCreateNetwork());
   $("#create-pool")?.addEventListener("click", () => openCreatePool());
 }
@@ -2530,6 +2674,9 @@ async function renderConnBody() {
   } else if (connTab === "vms") {
     setHtml(body, `<div id="vms-list" class="card-grid">${skeleton("cards")}</div>`);
     await fastLoad(loadVms);
+  } else if (connTab === "containers") {
+    setHtml(body, `<div id="cts-list">${skeleton("cards")}</div>`);
+    await fastLoad(loadCts);
   } else if (connTab === "networks") {
     setHtml(body, `<div id="nets-list" class="card-grid">${skeleton("cards")}</div>`);
     await fastLoad(loadNetworks);
@@ -2728,7 +2875,7 @@ async function loadFilters() {
 /// Access log: every connection this server's guests made, two weeks back.
 /// `vm` pre-selects one guest (the VM Network tab); from the Firewall page it
 /// starts on every VM with a filter to pick one.
-function openAccessLogs(conn: string, vm = "") {
+function openAccessLogs(conn: string, vm = "", ct = false) {
   let f: LogFilter = defaultFilter(vm);
   let vms: string[] = [];
   const el = openModal(`Access logs${vm ? ` — ${esc(vm)}` : ""}`, `<div id="al-body">${skeleton("table")}</div>`, "");
@@ -2756,7 +2903,10 @@ function openAccessLogs(conn: string, vm = "") {
   const load = async () => {
     const mine = ++gen;
     try {
-      const r = await api.get<typeof data>(`/access-logs?${logQuery(conn, f, Date.now())}`);
+      // A container's own log is checked against its container permission
+      // (CT.Audit), not VM.Audit; the rows are the same.
+      const ctq = ct && vm && f.vm === vm ? "&ct=true" : "";
+      const r = await api.get<typeof data>(`/access-logs?${logQuery(conn, f, Date.now())}${ctq}`);
       if (mine !== gen) return; // a newer filter won
       data = r;
     } catch (e) {
@@ -3181,6 +3331,7 @@ async function loadVms() {
     list.querySelectorAll("[data-vm-open]").forEach((card: Element) => {
       (card as HTMLElement).onclick = () => {
         selectedVm = (card as HTMLElement).dataset.vmOpen!;
+        ctMode = false;
         vmTab = "summary";
         renderVm();
       };
@@ -3200,6 +3351,7 @@ async function loadVms() {
         e.stopPropagation();
         leaveCurrentView();
         selectedVm = (b as HTMLElement).dataset.vmConsole!;
+        ctMode = false;
         vmTab = "console";
         renderTree();
         void renderVm();
@@ -3220,6 +3372,534 @@ async function loadVms() {
   } catch (e) {
     const list = $("#vms-list");
     if (list) setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
+  }
+}
+
+// ---------------------------------------------------------------- containers
+
+/// One container as a card: shared by a server's Containers tab and the
+/// Datacenter's, so both offer the same actions. `conn` is the owning server,
+/// carried on the card and on every button, because the Datacenter lists
+/// containers from every server side by side: an action names its own daemon,
+/// never the app's selected one.
+function ctCard(v: ContainerSummary, conn: string, server?: string): string {
+  return `
+      <div class="storage-card ${v.active ? "ok" : ""}" data-open tabindex="0" data-dc-ct="${esc(v.name)}" data-dc-ct-conn="${esc(conn)}">
+        <div class="storage-card-head">
+          <span class="storage-card-icon">${ic.container()}</span>
+          <span class="storage-card-title">${esc(v.title || v.name)}</span>
+          ${server ? `<span class="badge">${esc(server)}</span>` : ""}
+          ${v.privileged ? `<span class="badge bad" title="Its root is the host's root">privileged</span>` : ""}
+          <span class="badge ${v.active ? "on" : ""}">${v.active ? "Active" : "Inactive"}</span>
+        </div>
+        <div class="specs">
+          <div class="spec"><b>vCPUs</b><span>${v.vcpus || "—"}</span></div>
+          <div class="spec"><b>Memory</b><span>${v.memory_mb ? fmtBytes(v.memory_mb * 1024 * 1024) : "—"}</span></div>
+        </div>
+        <div class="storage-card-actions net-actions">
+          <button class="btn icon ${v.active ? "on" : ""}" data-ct-power="${esc(v.name)}" data-ct-conn="${esc(conn)}"
+            data-ct-action="${v.active ? "shutdown" : "start"}" title="${v.active ? "Shutdown" : "Start"}">${v.active ? ic.stop() : ic.start()}</button>
+          <button class="btn icon" data-ct-console="${esc(v.name)}" data-ct-conn="${esc(conn)}" title="Console">${ic.keyboard()}</button>
+          <button class="btn icon" data-ct-hw="${esc(v.name)}" data-ct-conn="${esc(conn)}" title="Hardware">${ic.cpu()}</button>
+          <button class="btn danger icon" data-ct-del="${esc(v.name)}" data-ct-conn="${esc(conn)}" title="Delete">${ic.trash()}</button>
+        </div>
+      </div>`;
+}
+
+/// A rendered set of container cards' handlers. Every one acts on the card's
+/// own server (`data-ct-conn`); only Open, Console and Hardware navigate.
+function bindCtCards(root: Element) {
+  root.querySelectorAll<HTMLElement>("[data-dc-ct]").forEach((card) => {
+    card.onclick = (e) => {
+      if ((e.target as Element).closest?.("button")) return;
+      selectCtRow(card.dataset.dcCtConn!, card.dataset.dcCt!);
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-ct-power]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      void treeCtPower(b.dataset.ctConn!, b.dataset.ctPower!, `/${b.dataset.ctAction}`);
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-ct-console]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      selectCtRow(b.dataset.ctConn!, b.dataset.ctConsole!, "console");
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-ct-hw]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      selectCtRow(b.dataset.ctConn!, b.dataset.ctHw!, "hardware");
+    };
+  });
+  root.querySelectorAll<HTMLElement>("[data-ct-del]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const conn = b.dataset.ctConn!;
+      void deleteCtOn(conn, b.dataset.ctDel!, () => afterCtDelete(conn));
+    };
+  });
+}
+
+/// A server's Containers tab.
+async function loadCts() {
+  if (!selectedConn) return;
+  const conn = selectedConn;
+  try {
+    const cts = await api.get<ContainerSummary[]>(`/proxy/${conn}/containers`);
+    const list = $("#cts-list");
+    // The poll or a click may have moved on while the daemon answered.
+    if (selectedConn !== conn || !list) return;
+    setHtml(list, cts.length
+      ? `<div class="card-grid">${cts.map((v) => ctCard(v, conn)).join("")}</div>`
+      : emptyState("containers", "Create CT", "ct-create-empty"));
+    const b = $("#ct-create-empty");
+    if (b) b.onclick = () => void openCreateCt(conn);
+    bindCtCards(list);
+  } catch (e) {
+    const list = $("#cts-list");
+    if (list && selectedConn === conn) setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
+  }
+}
+
+/// A size field with its unit picker. The number is shown in `unit` and read
+/// back in `base` (the unit the daemon speaks), so the picker is presentation
+/// only: changing it converts the number in place, never the size it means.
+function unitInput(id: string, canonical: number, base: Unit, units: readonly Unit[], unit: Unit, minCanonical = 0): string {
+  return `<div class="unit-row">
+      <input id="${id}" type="number" step="any" data-base="${base}" data-min="${minCanonical}"
+        min="${unitValue(minCanonical, base, unit)}" value="${unitValue(canonical, base, unit)}">
+      <select id="${id}-unit" data-unit-for="${id}">${unitOptions(units, unit)}</select>
+    </div>`;
+}
+
+/// Wire every `unitInput` under `root`: a unit change rewrites the number and
+/// its floor in the new unit.
+function bindUnitInputs(root: Element) {
+  root.querySelectorAll<HTMLSelectElement>("select[data-unit-for]").forEach((sel) => {
+    let prev = sel.value as Unit;
+    sel.onchange = () => {
+      const input = root.querySelector<HTMLInputElement>(`#${sel.dataset.unitFor}`);
+      const next = sel.value as Unit;
+      if (input) {
+        if (input.value.trim() !== "") input.value = unitValue(Number(input.value), prev, next);
+        input.min = unitValue(Number(input.dataset.min ?? 0), input.dataset.base as Unit, next);
+      }
+      prev = next;
+    };
+  });
+}
+
+/// A `unitInput`'s value in its base unit, or NaN when it is not a number.
+function readUnitInput(root: Element, id: string): number {
+  const input = root.querySelector<HTMLInputElement>(`#${id}`);
+  const sel = root.querySelector<HTMLSelectElement>(`#${id}-unit`);
+  if (!input || !sel || input.value.trim() === "") return NaN;
+  return convert(Number(input.value), sel.value as Unit, input.dataset.base as Unit);
+}
+
+/// A container's root disk is sized in whole GiB.
+const CT_DISK_UNITS = ["GiB", "TiB"] as const;
+
+/// A container's resources (`GET/PUT /containers/{ct}/hardware`).
+interface CtHardware {
+  vcpus: number; memory_mb: number; swap_mb: number; cpu_limit_pct: number; disk_gb: number;
+}
+
+/// A container's Hardware tab: its resources, in the rows the VM editor uses.
+/// Loaded once and never repainted by the poll, so what is typed stays.
+async function renderCtHardware(body: HTMLElement, conn: string, ct: string) {
+  let hw: CtHardware;
+  try {
+    hw = await api.get<CtHardware>(`${guestBase(conn, ct, true)}/hardware`);
+  } catch (e) {
+    if (stillCurrentVm(conn, ct, "hardware")) setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
+    return;
+  }
+  if (!stillCurrentVm(conn, ct, "hardware")) return;
+  const row = (icon: string, label: string, ctl: string) => `
+    <div class="hwrow">
+      <span class="hwrow-ic">${icon}</span>
+      <div class="hwrow-label"><b>${label}</b></div>
+      <div class="hwctl">${ctl}</div>
+    </div>`;
+  const paint = () => {
+    setHtml(body, `
+      <div class="actions">
+        <button class="btn primary" id="cthw-save">${ic.edit(14)} Save Hardware</button>
+      </div>
+      <div class="hwtable">
+        ${row(ic.cpu(), "vCPUs", `<input id="cthw-cpu" type="number" min="1" step="1" value="${hw.vcpus}">`)}
+        ${row(ic.quota(), "CPU limit (% of one CPU, 0 = none)", `<input id="cthw-cap" type="number" min="0" step="1" value="${hw.cpu_limit_pct}">`)}
+        ${row(ic.memory(), "Memory", unitInput("cthw-mem", hw.memory_mb, "MiB", MEMORY_UNITS, MEMORY_DEFAULT, 16))}
+        ${row(ic.memory(), "Swap", unitInput("cthw-swap", hw.swap_mb, "MiB", MEMORY_UNITS, MEMORY_DEFAULT, 0))}
+        ${row(ic.disk(), "Root disk (grow only)", unitInput("cthw-disk", hw.disk_gb, "GiB", CT_DISK_UNITS, STORAGE_DEFAULT, hw.disk_gb))}
+      </div>`);
+    bindUnitInputs(body);
+    $("#cthw-save", body).onclick = save;
+  };
+  const save = () => {
+    const int = (id: string) => Math.round(Number(($(id, body) as HTMLInputElement).value));
+    const next: CtHardware = {
+      vcpus: int("#cthw-cpu"),
+      cpu_limit_pct: int("#cthw-cap"),
+      memory_mb: Math.round(readUnitInput(body, "cthw-mem")),
+      swap_mb: Math.round(readUnitInput(body, "cthw-swap")),
+      // Whole GiB, rounded up: a size typed in TiB must not land below it.
+      disk_gb: Math.ceil(readUnitInput(body, "cthw-disk") - 1e-9),
+    };
+    if (Object.values(next).some((v) => !Number.isFinite(v))) return toast("Every field needs a number", "bad");
+    if (next.vcpus < 1) return toast("A container needs at least one vCPU", "bad");
+    if (next.disk_gb < hw.disk_gb) return toast(`The root disk can only grow (${hw.disk_gb} GiB now)`, "bad");
+    const shown = displayName(treeCts[conn], ct);
+    void (async () => {
+      let pending: string[] = [];
+      let grown = false;
+      const ok = await runTask(`Update hardware for ${shown}`, async () => {
+        const r = await api.put<{ pending?: string[]; disk_grown?: boolean; hardware?: CtHardware }>(
+          `${guestBase(conn, ct, true)}/hardware`, next);
+        pending = r?.pending ?? [];
+        grown = r?.disk_grown === true;
+        hw = r?.hardware ?? next;
+      }, { done: "", notify: toast });
+      if (!ok) return;
+      // Say what is not in effect yet, rather than claim it all applied.
+      toast(pending.length
+        ? `Saved. ${capLabel(pending.join(", "))} take${pending.length === 1 ? "s" : ""} effect at the next start.`
+        : grown ? "Hardware updated; the root disk was grown" : "Hardware updated");
+      await refreshTreeVms();
+      if (stillCurrentVm(conn, ct, "hardware")) paint();
+    })();
+  };
+  paint();
+}
+
+/// A container's Options tab: its name, start-with-host, and what it is.
+/// The name is a title (the container is named by its UUID, which stays), so
+/// it is changed through the rename endpoint, never by rewriting the id.
+async function renderCtOptions(body: HTMLElement, conn: string, ct: string) {
+  let info: ContainerSummary;
+  try {
+    info = await api.get<ContainerSummary>(guestBase(conn, ct, true));
+  } catch (e) {
+    if (stillCurrentVm(conn, ct, "options")) setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
+    return;
+  }
+  if (!stillCurrentVm(conn, ct, "options")) return;
+  const title = info.title || "";
+  setHtml(body, `
+    <div class="actions">
+      <button class="btn primary" id="ctopt-save">${ic.edit(14)} Save Options</button>
+    </div>
+    <div class="hwtable">
+      <div class="hwrow">
+        <span class="hwrow-ic">${ic.edit()}</span>
+        <div class="hwrow-label"><b>Name</b></div>
+        <div class="hwctl"><input id="ctopt-title" value="${esc(title)}" placeholder="web-1"></div>
+      </div>
+      <div class="hwrow">
+        <span class="hwrow-ic">${ic.autostart()}</span>
+        <div class="hwrow-label"><b>Start with the host</b></div>
+        <div class="hwctl"><label class="check"><input type="checkbox" id="ctopt-auto" ${info.autostart ? "checked" : ""}> Autostart</label></div>
+      </div>
+      <div class="hwrow">
+        <span class="hwrow-ic">${ic.key()}</span>
+        <div class="hwrow-label"><b>UUID</b></div>
+        <div class="hwctl hwctl-static">${esc(info.uuid ?? info.name)}</div>
+      </div>
+      <div class="hwrow">
+        <span class="hwrow-ic">${ic.lock()}</span>
+        <div class="hwrow-label"><b>Isolation</b></div>
+        <div class="hwctl hwctl-static">${info.privileged ? "Privileged (host root)" : "User namespace"}</div>
+      </div>
+      <div class="hwrow">
+        <span class="hwrow-ic">${ic.disk()}</span>
+        <div class="hwrow-label"><b>Root filesystem</b></div>
+        <div class="hwctl hwctl-static">${esc(info.rootfs || "—")}</div>
+      </div>
+    </div>`);
+  $("#ctopt-save", body).onclick = () => {
+    const nextTitle = ($("#ctopt-title", body) as HTMLInputElement).value.trim();
+    const nextAuto = ($("#ctopt-auto", body) as HTMLInputElement).checked;
+    if (!nextTitle) return toast("Give the container a name", "bad");
+    const shown = nextTitle || displayName(treeCts[conn], ct);
+    void runTask(`Update options for ${shown}`, async (set) => {
+      if (nextTitle !== title) {
+        set("renaming");
+        await api.post(`${guestBase(conn, ct, true)}/rename`, { name: nextTitle });
+      }
+      if (nextAuto !== !!info.autostart) {
+        set(nextAuto ? "enabling autostart" : "disabling autostart");
+        await api.post(`${guestBase(conn, ct, true)}/autostart`, { autostart: nextAuto });
+      }
+    }, { done: `Options for ${shown} saved`, notify: toast }).then(async (ok) => {
+      if (!ok) return;
+      await refreshTreeVms();
+      if (stillCurrentVm(conn, ct, "options")) void renderVm();
+    });
+  };
+}
+
+/// A template from the catalog (`GET /templates/catalog`).
+interface CatalogEntry {
+  id: string; source: string; section: string; os: string; release: string;
+  description: string; file: string;
+}
+
+/// What a catalog section is called; an unknown one is shown as it is named.
+const TEMPLATE_SECTION: Record<string, string> = {
+  system: "System (linuxcontainers.org)",
+  turnkeylinux: "Applications (TurnKey)",
+};
+
+/// Proxmox-style template store: browse the catalog, download into a pool.
+/// The download is the daemon's own (the bytes never pass through the web
+/// server), tracked with the pool's other fetches.
+async function openTemplates(pool: string, conn = selectedConn) {
+  if (!conn) return;
+  const el = openModal(`Templates — ${esc(displayName(treePools[conn], pool))}`,
+    `<div id="tpl-body">${skeleton("table")}</div>`, `<button class="btn" id="tpl-close">Close</button>`);
+  el.querySelector(".modal")?.classList.add("wide");
+  $("#tpl-close", el).onclick = () => el.remove();
+  let cat: { templates: CatalogEntry[]; errors?: string[] };
+  let have: VolumeSummary[] = [];
+  try {
+    [cat, have] = await Promise.all([
+      api.get<typeof cat>(`/proxy/${conn}/templates/catalog`),
+      api.get<VolumeSummary[]>(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes`),
+    ]);
+  } catch (e) {
+    if (el.isConnected) setHtml($("#tpl-body", el), `<div class="empty">${esc((e as Error).message)}</div>`);
+    return;
+  }
+  if (!el.isConnected) return;
+  const templates = cat.templates ?? [];
+  const errors = cat.errors ?? [];
+  const sections = [...new Set(templates.map((t) => t.section))];
+  let section = sections.includes("system") ? "system" : sections[0] ?? "";
+  let filter = "";
+  const paint = () => {
+    const f = filter.toLowerCase();
+    const rows = templates.filter((t) => t.section === section
+      && (!f || `${t.os} ${t.release} ${t.description}`.toLowerCase().includes(f)));
+    setHtml($("#tpl-body", el), `
+      ${errors.length ? `<div class="dsub">Some sources did not answer: ${esc(errors.join("; "))}</div>` : ""}
+      <div class="actions admin-filters">
+        <label class="field"><span>Section</span><select id="tpl-sec">
+          ${sections.map((sct) => `<option value="${esc(sct)}" ${sct === section ? "selected" : ""}>${esc(TEMPLATE_SECTION[sct] ?? sct)}</option>`).join("")}
+        </select></label>
+        <label class="field"><span>Search</span><input id="tpl-q" value="${esc(filter)}" placeholder="debian, alpine, wordpress…"></label>
+      </div>
+      <table class="grid">
+        <tr><th>OS</th><th>Release</th><th>Description</th><th class="col-actions"></th></tr>
+        ${rows.map((t, i) => {
+          const got = have.some((v) => v.name === t.file);
+          return `<tr><td class="tname">${esc(t.os)}</td><td>${esc(t.release)}</td><td>${esc(t.description)}</td>
+            <td class="col-actions">${got ? `<span class="state on">Downloaded</span>`
+              : `<button class="btn" data-tpl="${i}">${ic.download(14)} Download</button>`}</td></tr>`;
+        }).join("") || `<tr><td colspan="4" class="empty">No templates match.</td></tr>`}
+      </table>`);
+    const sec = $("#tpl-sec", el) as HTMLSelectElement | null;
+    if (sec) sec.onchange = () => { section = sec.value; paint(); };
+    const q = $("#tpl-q", el) as HTMLInputElement;
+    q.oninput = () => {
+      filter = q.value;
+      paint();
+      // The repaint replaced the field: put the caret back where typing was.
+      const again = $("#tpl-q", el) as HTMLInputElement | null;
+      again?.focus();
+      again?.setSelectionRange(filter.length, filter.length);
+    };
+    el.querySelectorAll<HTMLElement>("[data-tpl]").forEach((b) => {
+      b.onclick = async () => {
+        const t = rows[Number(b.dataset.tpl)];
+        try {
+          await api.post(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/templates`, { id: t.id });
+          toast(`Downloading ${t.os} ${t.release}: progress is on the pool page`);
+          el.remove();
+          void pollFetches(conn);
+          if (selectedConn === conn && selectedPool === pool) void renderPoolPage();
+        } catch (e) { toast((e as Error).message, "bad"); }
+      };
+    });
+  };
+  paint();
+}
+
+/// Create a container, Proxmox's CT wizard in one form: general, template,
+/// disk, CPU/memory, network. `conn` is explicit (the Datacenter and the admin
+/// page create on a daemon without switching the app to it); `forUser` is the
+/// admin page creating it for someone, who is made its owner, with `after`
+/// repainting that page. The privileged box is shown only to someone who holds
+/// CT.Privileged here (the server checks the same thing).
+async function openCreateCt(conn = selectedConn, forUser?: { owner: string; after: () => void }) {
+  if (!conn) return withDaemon((id) => void openCreateCt(id, forUser));
+  let pools: PoolSummary[] = [];
+  let nets: NetworkSummary[] = [];
+  let canPriv = false;
+  const templates: { pool: string; vol: VolumeSummary }[] = [];
+  try {
+    [pools, nets] = await Promise.all([
+      api.get<PoolSummary[]>(`/proxy/${conn}/pools`),
+      api.get<NetworkSummary[]>(`/proxy/${conn}/networks`),
+    ]);
+    const perm = await api.get<{ privs: string[] }>(`/auth/privs?path=${encodeURIComponent(`/nodes/${conn}/containers`)}`)
+      .catch(() => ({ privs: [] as string[] }));
+    canPriv = canAdmin() || perm.privs.includes("CT.Privileged");
+    const lists = await Promise.all(pools.filter((p) => p.active).map(async (p) =>
+      [p.name, await api.get<VolumeSummary[]>(`/proxy/${conn}/pools/${encodeURIComponent(p.name)}/volumes`).catch(() => [])] as const));
+    for (const [pool, vols] of lists) {
+      for (const v of vols) if (v.content === "vztmpl") templates.push({ pool, vol: v });
+    }
+  } catch (e) {
+    return toast((e as Error).message, "bad");
+  }
+  const active = pools.filter((p) => p.active);
+  // The first running network is the default: a container is rarely wanted
+  // without one.
+  const firstActive = nets.find((n) => n.active);
+  const el = openModal(forUser ? "Create container for a user" : "Create container", `
+    <div class="section-title">General</div>
+    <div class="grid2">
+      <label class="field"><span>Name</span><input id="ct-title" placeholder="web-1"></label>
+      <label class="field"><span>Hostname (optional)</span><input id="ct-host" placeholder="from the name"></label>
+      <label class="field"><span>Root password</span><input id="ct-pass" type="password" autocomplete="new-password"></label>
+      <label class="field"><span>SSH public key (optional)</span><input id="ct-keys" placeholder="ssh-ed25519 AAAA…"></label>
+    </div>
+    ${canPriv ? `<label class="check"><input type="checkbox" id="ct-priv"> Privileged container</label>` : ""}
+    <div class="section-title">Template</div>
+    ${templates.length ? `<label class="field"><span>Template</span><select id="ct-tpl">
+      ${templates.map((t, i) => `<option value="${i}">${esc(t.vol.title || t.vol.name)} (${esc(displayName(pools, t.pool))})</option>`).join("")}
+    </select></label>` : `<div class="empty">No templates yet. Open a storage pool and choose <b>Templates</b> to download one.</div>`}
+    <div class="section-title">Disk</div>
+    <div class="grid2">
+      <label class="field"><span>Storage pool</span><select id="ct-pool">
+        ${active.map((p) => `<option value="${esc(p.name)}">${esc(p.title || p.name)}</option>`).join("")}
+      </select></label>
+      <label class="field"><span>Root disk</span>${unitInput("ct-size", 8, "GiB", CT_DISK_UNITS, STORAGE_DEFAULT, 1)}</label>
+    </div>
+    <div class="section-title">CPU and memory</div>
+    <div class="grid2">
+      <label class="field"><span>vCPUs</span><input id="ct-cpu" type="number" min="1" step="1" value="1"></label>
+      <label class="field"><span>Memory</span>${unitInput("ct-mem", 512, "MiB", MEMORY_UNITS, MEMORY_DEFAULT, 16)}</label>
+      <label class="field"><span>Swap</span>${unitInput("ct-swap", 512, "MiB", MEMORY_UNITS, MEMORY_DEFAULT, 0)}</label>
+    </div>
+    <div class="section-title">Network</div>
+    <label class="field"><span>Network</span><select id="ct-net">
+      <option value="">None</option>
+      ${nets.map((n) => `<option value="${esc(n.name)}" ${n.active ? "" : "disabled"} ${n === firstActive ? "selected" : ""}>${esc(n.title || n.name)}${n.active ? "" : " (inactive)"}</option>`).join("")}
+    </select></label>
+    <label class="check"><input type="checkbox" id="ct-start" checked> Start after creating</label>
+    <label class="check"><input type="checkbox" id="ct-auto"> Start with the host</label>`,
+    `<button class="btn" id="ct-cancel">Cancel</button><button class="btn primary" id="ct-ok" ${templates.length ? "" : "disabled"}>${ic.plus(14)} Create</button>`);
+  bindUnitInputs(el);
+  const netSel = $("#ct-net", el) as HTMLSelectElement;
+  $("#ct-cancel", el).onclick = () => el.remove();
+  $("#ct-ok", el).onclick = () => {
+    const v = (id: string) => ($(id, el) as HTMLInputElement).value.trim();
+    const title = v("#ct-title");
+    if (!title) return toast("Give the container a name", "bad");
+    const t = templates[Number(($("#ct-tpl", el) as HTMLSelectElement).value)];
+    if (!t) return toast("Choose a template", "bad");
+    const pool = ($("#ct-pool", el) as HTMLSelectElement | null)?.value ?? "";
+    if (!pool) return toast("Choose a storage pool for the root disk", "bad");
+    const size = Math.ceil(readUnitInput(el, "ct-size") - 1e-9);
+    const memory = Math.round(readUnitInput(el, "ct-mem"));
+    const swap = Math.round(readUnitInput(el, "ct-swap"));
+    const vcpus = Math.round(Number(v("#ct-cpu")));
+    if (![size, memory, swap, vcpus].every(Number.isFinite) || size < 1 || memory < 16 || vcpus < 1) {
+      return toast("Root disk, memory and vCPUs need a size", "bad");
+    }
+    const body = {
+      title,
+      hostname: v("#ct-host") || undefined,
+      template: { pool: t.pool, volume: t.vol.name },
+      rootfs: { pool, size_gb: size },
+      memory_mb: memory,
+      swap_mb: Math.max(0, swap),
+      vcpus,
+      networks: netSel.value ? [netSel.value] : [],
+      password: v("#ct-pass") || undefined,
+      ssh_keys: v("#ct-keys") || undefined,
+      privileged: ($("#ct-priv", el) as HTMLInputElement | null)?.checked ?? false,
+      start: ($("#ct-start", el) as HTMLInputElement).checked,
+      autostart: ($("#ct-auto", el) as HTMLInputElement).checked,
+    };
+    el.remove();
+    void runTask(`Create container ${title}`, async (set) => {
+      set("unpacking the template");
+      const r = await api.post<{ name: string; uuid?: string; started?: boolean }>(`/proxy/${conn}/containers`, body);
+      if (forUser) {
+        set("assigning owner");
+        await assignOwner(conn, "ct", r.name, forUser.owner);
+      }
+    }, { done: `Container ${title} created`, notify: toast }).then(async (ok) => {
+      if (!ok) return;
+      await refreshTreeVms();
+      if (forUser) forUser.after();
+      else if (selectedConn === conn && connTab === "containers" && !selectedVm) void loadCts();
+      // Created from the Datacenter (or a server that is not open): the view
+      // on screen needs the repaint, and it stays where it is.
+      else if (!selectedConn && !adminSection) renderDc();
+    });
+  };
+}
+
+/// Delete a container on `conn`. Its rootfs is the container, so it always goes
+/// with it; its template stays in its pool. A running container is stopped
+/// first by the daemon, which can take a few seconds, so this is a task.
+/// Shared by the container's view, its cards and menu, and the admin panel.
+async function deleteCtOn(conn: string, name: string, after: () => void) {
+  const shown = displayName(treeCts[conn], name);
+  if (!(await askConfirm("Delete container",
+    `Delete container "${shown}" and its root filesystem? The template it was made from is kept.`, "Delete", true))) return;
+  let outcome = `Container ${shown} deleted`;
+  const ok = await runTask(`Delete container ${shown}`, async (set) => {
+    set("Stopping the container if it is running…");
+    const res = await api.del<DomainDeleteResult>(guestBase(conn, name, true));
+    const failed = res?.failed ?? [];
+    if (failed.length) throw new Error(`deleted, but its root filesystem could not be: ${failed.map((f) => f.disk).join(", ")}`);
+    if (res?.stopped) outcome = `Container ${shown} deleted (stopped it first)`;
+  }, { done: "", notify: toast });
+  if (ok) toast(outcome);
+  // Its own page was open: land on the list it was in, not on a dead page.
+  if (ok && selectedConn === conn && selectedVm === name && ctMode) {
+    clearResourceSelection();
+    connTab = "containers";
+  }
+  await refreshTreeVms();
+  after();
+}
+
+/// What to repaint once a container is gone, wherever its delete was started:
+/// the server's Containers tab (the container's own page lands there too) or
+/// the Datacenter.
+function afterCtDelete(conn: string) {
+  if (adminSection) return;
+  if (!selectedConn) { renderDc(); return; }
+  if (selectedConn !== conn || selectedVm || selectedNet || selectedPool) return;
+  renderConn();
+}
+
+async function deleteCt(name: string) {
+  const conn = selectedConn;
+  if (!conn) return;
+  await deleteCtOn(conn, name, () => afterCtDelete(conn));
+}
+
+/// Rename a container. It is named by its UUID, so this sets its title: the
+/// id -- the URL and every stored key -- never changes.
+async function renameCt(conn: string, name: string) {
+  const next = await askText("Rename container", "New name", displayName(treeCts[conn], name), "web-1");
+  if (!next || next === displayName(treeCts[conn], name)) return;
+  try {
+    await api.post(`${guestBase(conn, name, true)}/rename`, { name: next });
+    toast("Renamed");
+    await refreshTreeVms();
+    if (selectedConn === conn && selectedVm === name && ctMode) void renderVm();
+  } catch (e) {
+    toast((e as Error).message, "bad");
   }
 }
 
@@ -3679,15 +4359,22 @@ async function renderVm() {
   syncUrl();
   const content = $("#content");
   const vm = selectedVm;
+  const ct = ctMode;
   const guest = guestList(selectedConn)?.find((x) => x.name === vm);
   const title = guest?.title || vm;
   const running = guest?.active === true;
+  const privileged = ct && (guest as ContainerSummary | undefined)?.privileged === true;
+  // A container has no display to hand to virt-viewer, and no reset. Its
+  // Hardware tab is its own editor (CPU, memory, swap, root disk): the VM one
+  // edits devices a container does not have.
   const restoreTabFocus = holdFocus(content, ".tab.active");
 setHtml(content, `
-    <div class="dhead"><span class="dhead-ic">${ic.vm(20)}</span><span class="dtitle">${esc(title)}</span></div>
+    <div class="dhead"><span class="dhead-ic">${ct ? ic.container(20) : ic.vm(20)}</span><span class="dtitle">${esc(title)}</span>
+      ${ct ? `<span class="badge">container</span>` : ""}
+      ${privileged ? `<span class="badge bad" title="No user namespace: its root is the host's root">privileged</span>` : ""}</div>
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
-      <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ic.vm(14)} Console</button>
+      <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ct ? ic.keyboard(14) : ic.vm(14)} Console</button>
       <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
       <button class="tab ${vmTab === "options" ? "active" : ""}" data-vmtab="options">${ic.options(14)} Options</button>
       <button class="tab ${vmTab === "network" ? "active" : ""}" data-vmtab="network">${ic.network(14)} Network</button>
@@ -3696,10 +4383,10 @@ setHtml(content, `
         <button class="btn icon" id="vm-start" title="Start" ${running ? "disabled" : ""}>${ic.start()}</button>
         <button class="btn icon" id="vm-shutdown" title="Shutdown" ${running ? "" : "disabled"}>${ic.stop()}</button>
         <button class="btn icon" id="vm-reboot" title="Reboot" ${running ? "" : "disabled"}>${ic.reboot()}</button>
-        <button class="btn icon" id="vm-reset" title="Reset" ${running ? "" : "disabled"}>${ic.reset()}</button>
+        ${ct ? "" : `<button class="btn icon" id="vm-reset" title="Reset" ${running ? "" : "disabled"}>${ic.reset()}</button>`}
         <button class="btn icon" id="vm-destroy" title="Force stop" ${running ? "" : "disabled"}>${ic.forceStop()}</button>
-        <button class="btn icon" id="vm-vv" title="Open in virt-viewer" ${running ? "" : "disabled"}>${ic.download()}</button>
-        ${canShareVm(selectedConn!, vm) ? `<button class="btn icon" id="vm-share" title="Share">${ic.perms()}</button>` : ""}
+        ${ct ? "" : `<button class="btn icon" id="vm-vv" title="Open in virt-viewer" ${running ? "" : "disabled"}>${ic.download()}</button>`}
+        ${canShareVm(selectedConn!, vm, ct) ? `<button class="btn icon" id="vm-share" title="Share">${ic.perms()}</button>` : ""}
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
@@ -3729,9 +4416,9 @@ setHtml(content, `
   if (reset) reset.onclick = () => act(`${base}/reset`, "POST").then(refresh);
   $("#vm-destroy").onclick = () => act(`${base}/destroy`, "POST").then(refresh);
   $("#vm-reboot").onclick = () => act(`${base}/reboot`, "POST").then(refresh);
-  $("#vm-delete").onclick = () => deleteVm(vm);
+  $("#vm-delete").onclick = () => (ct ? deleteCt(vm) : deleteVm(vm));
   const share = $("#vm-share");
-  if (share) share.onclick = () => void openShareVm(selectedConn!, vm);
+  if (share) share.onclick = () => void openShareVm(selectedConn!, vm, ct);
   const vvConn = selectedConn;
   const vv = $("#vm-vv");
   if (vv) vv.onclick = () => void downloadVv(vvConn, vm);
@@ -3765,6 +4452,32 @@ async function renderVmBody(vm: string) {
   // Only the Hardware tab stretches to fill the pane; every other tab scrolls
   // normally. Drop the class here and let the hardware branch re-add it.
   body.parentElement?.classList.remove("vm-fill");
+  if (vmTab === "console" && ctMode) {
+    // A container's console is a text terminal: its first tty, long-polled
+    // through the daemon, with no graphics to zoom or keys to synthesise.
+    setHtml(body, `
+      <div class="console-stage term-stage" id="console-stage" tabindex="0">
+        <div class="console-msg" id="console-msg">connecting…</div>
+      </div>`);
+    terminal ??= await import("./terminal");
+    if (!stillCurrentVm(conn, vm, "console")) return;
+    await terminal.attachTextConsole($("#console-stage"), guestBase(conn, vm, true), (msg: string | null) => {
+      const m = $("#console-msg");
+      if (m) {
+        m.textContent = msg ?? "";
+        m.classList.toggle("hidden", !msg);
+      }
+    });
+    return;
+  }
+  if (vmTab === "options" && ctMode) {
+    await renderCtOptions(body, conn, vm);
+    return;
+  }
+  if (vmTab === "hardware" && ctMode) {
+    await renderCtHardware(body, conn, vm);
+    return;
+  }
   if (vmTab === "console") {
     const zoomLabel = (z: number) => (z === 0 ? "Fit" : `${Math.round(z * 100)}%`);
     setHtml(body, `
@@ -4174,15 +4887,19 @@ async function renderVmBody(vm: string) {
       (n.network ? netIpam.get(n.network)?.hosts : undefined)
         ?.find((h) => h.mac === (n.mac ?? "").toLowerCase());
     const fmtRateCell = (v: number | null) => (v ? `${v} Mbps` : "Unlimited");
-    const liveNote = running
+    // A container's interface is a veth: it has no model, and it is added and
+    // removed at its next start (the response says when), so only a VM gets
+    // the live/shut-off line.
+    const ct = ctMode;
+    const liveNote = ct ? "" : running
       ? "Changes apply to the running guest immediately and are kept for its next boot."
       : "The guest is shut off: changes are saved to its definition.";
 
     setHtml(body, `
       <div class="section-title fw-cat">Interfaces</div>
-      <div class="dsub" style="margin-bottom:8px">${liveNote}</div>
+      ${liveNote ? `<div class="dsub" style="margin-bottom:8px">${liveNote}</div>` : ""}
       <table class="grid" id="vmnet-nics">
-        <tr><th>Device</th><th>MAC</th><th>Network</th><th>Model</th><th>IPAM address</th><th>RX limit</th><th>TX limit</th><th class="col-actions"></th></tr>
+        <tr><th>Device</th><th>MAC</th><th>Network</th>${ct ? "" : "<th>Model</th>"}<th>IPAM address</th><th>RX limit</th><th>TX limit</th><th class="col-actions"></th></tr>
         ${nics.map((n, i) => {
           const r = reservation(n);
           const hasDhcp = !!(n.network && netIpam.has(n.network));
@@ -4190,7 +4907,7 @@ async function renderVmBody(vm: string) {
             <td>${esc(n.dev ?? "—")}</td>
             <td><code>${esc(n.mac ?? "—")}</code></td>
             <td>${esc(n.network ? displayName(nets, n.network) : "—")}</td>
-            <td>${esc(n.model ?? "—")}</td>
+            ${ct ? "" : `<td>${esc(n.model ?? "—")}</td>`}
             <td>${r
               ? `${esc(r.ip)}${r.dynamic ? ` <span class="state" title="Assigned from the range when the guest first asked; kept until the VM is deleted">auto</span>` : ""}`
               : `<span class="state">${hasDhcp ? "Not yet assigned" : "No DHCP"}</span>`}</td>
@@ -4201,7 +4918,7 @@ async function renderVmBody(vm: string) {
               <button class="btn icon" data-nic-rate="${i}" title="Rate limit">${ic.autostart()}</button>
               <button class="btn danger icon" data-nic-del="${i}" title="Remove interface">${ic.trash()}</button>
             </td></tr>`;
-        }).join("") || `<tr><td colspan="8" class="empty">No network interfaces.</td></tr>`}
+        }).join("") || `<tr><td colspan="${ct ? 7 : 8}" class="empty">No network interfaces.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="vmnet-add">${ic.plus(14)} Add interface</button></div>
       <div class="section-title fw-cat" style="margin-top:22px">Firewall</div>
@@ -4215,21 +4932,25 @@ async function renderVmBody(vm: string) {
           <option value="">None</option>
           ${nets.map((n) => `<option value="${esc(n.name)}">${esc(n.title || n.name)}${n.active ? "" : " (inactive)"}</option>`).join("")}
         </select></label>
-        <label class="field"><span>Model</span><select id="nic-model">
+        ${ct ? "" : `<label class="field"><span>Model</span><select id="nic-model">
           <option value="virtio">virtio</option><option value="e1000e">e1000e</option><option value="rtl8139">rtl8139</option>
-        </select></label>
+        </select></label>`}
         <label class="field"><span>MAC address (optional)</span><input id="nic-mac" placeholder="generated if blank"></label>
-        <div class="dsub">${running ? "Hot-added to the running guest." : "Added to the guest's definition."}</div>`,
+        ${ct ? "" : `<div class="dsub">${running ? "Hot-added to the running guest." : "Added to the guest's definition."}</div>`}`,
         `<button class="btn primary" id="nic-ok">${ic.plus(14)} Add</button>`);
       $("#nic-ok", el).onclick = async () => {
         try {
-          const r = await api.post<{ mac: string; warning?: string }>(`${guestBase(conn, vm)}/interfaces`, {
+          const r = await api.post<{ mac: string; warning?: string; pending?: boolean }>(`${guestBase(conn, vm)}/interfaces`, {
             network: ($("#nic-net", el) as HTMLSelectElement).value,
-            model: ($("#nic-model", el) as HTMLSelectElement | null)?.value,
+            // A container's interface is a veth: it has no model.
+            model: ct ? undefined : ($("#nic-model", el) as HTMLSelectElement | null)?.value,
             mac: ($("#nic-mac", el) as HTMLInputElement).value.trim() || undefined,
           });
           el.remove();
-          toast(r.warning ?? `Interface ${r.mac} added`, r.warning ? "bad" : "ok");
+          // Never claim an interface the running container does not have yet.
+          toast(r.warning ?? (r.pending
+            ? `Interface ${r.mac} added: the running container gets it at its next start`
+            : `Interface ${r.mac} added`), r.warning ? "bad" : "ok");
           reload();
         } catch (e) { toast((e as Error).message, "bad"); }
       };
@@ -4248,7 +4969,8 @@ async function renderVmBody(vm: string) {
           // An unplug is a request to the guest OS; say so when it is still
           // holding the device, instead of claiming it is gone.
           toast(r.pending
-            ? "Removed from the definition; the running guest has not released it yet"
+            ? (ct ? "Removed from the definition: the running container keeps it until its next start"
+              : "Removed from the definition; the running guest has not released it yet")
             : r.warning ?? "Interface removed", r.pending || r.warning ? "bad" : "ok");
           reload();
         } catch (e) { toast((e as Error).message, "bad"); }
@@ -4264,7 +4986,7 @@ async function renderVmBody(vm: string) {
             <input id="rate-rx" type="number" min="0" step="any" value="${n.rx_mbps ?? ""}"></label>
           <label class="field"><span>TX limit, Mbps (from the guest; blank = unlimited)</span>
             <input id="rate-tx" type="number" min="0" step="any" value="${n.tx_mbps ?? ""}"></label>
-          <div class="dsub">${running ? "Applied to the running guest immediately." : "Applied when the guest next starts."}</div>`,
+          ${ct ? "" : `<div class="dsub">${running ? "Applied to the running guest immediately." : "Applied when the guest next starts."}</div>`}`,
           `<button class="btn primary" id="rate-ok">Apply</button>`);
         const num = (id: string) => {
           const v = ($(id, el) as HTMLInputElement).value.trim();
@@ -4359,7 +5081,7 @@ async function renderVmBody(vm: string) {
           <button class="btn primary" id="vmfw-apply">${ic.firewall(14)} Apply</button>
           <button class="btn al-open" id="vmfw-logs">${ic.logs(14)} Access logs</button>
         </div>`);
-      $("#vmfw-logs", rulesBody).onclick = () => openAccessLogs(conn, vm);
+      $("#vmfw-logs", rulesBody).onclick = () => openAccessLogs(conn, vm, ct);
       attachRuleIpSuggest(rulesBody, () => ipCandidates);
       $("#vmfw-add", rulesBody).onclick = () => {
         readRules();
@@ -4406,15 +5128,18 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     return;
   }
   // summary: six cards — CPU, Memory, Disks, Network, Firewall, Hardware.
+  const ct = ctMode;
   try {
     const [d, s, xr, fw, nic] = await Promise.all([
       api.get<any>(`${guestBase(selectedConn!, vm)}`),
       api.get<DomainStats>(`${guestBase(selectedConn!, vm)}/stats`),
-      api.get<{ xml: string }>(`${guestBase(selectedConn!, vm)}/xml`),
+      // A container's summary reads its rootfs and NICs from the daemon's own
+      // records, not from a definition, so it needs no XML.
+      ct ? Promise.resolve({ xml: "" }) : api.get<{ xml: string }>(`${guestBase(selectedConn!, vm)}/xml`),
       api.get<{ rules: FirewallRule[]; policy: FirewallPolicy }>(
         `${guestBase(selectedConn!, vm)}/firewall`)
         .catch(() => ({ rules: [] as FirewallRule[], policy: blankPolicy() })),
-      api.get<{ interfaces: { dev: string | null; mac: string | null; model: string | null; rx_bytes: number; tx_bytes: number }[] }>(
+      api.get<{ interfaces: { dev: string | null; mac: string | null; model: string | null; network?: string | null; rx_bytes: number; tx_bytes: number }[] }>(
         `${guestBase(selectedConn!, vm)}/interfaces`)
         .catch(() => ({ interfaces: [] })),
     ]);
@@ -4449,6 +5174,12 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         label: volume || xattr(src, "file") || (kind === "cdrom" ? "empty" : "—"),
       };
     }).filter((x) => x.kind !== "cdrom" || !x.volume?.toLowerCase().endsWith(".iso"));
+    // A container's root filesystem is not a <disk>: it is one image file in a
+    // pool, which the daemon reports by path.
+    const rootfs: string = ct ? (d?.rootfs ?? "") : "";
+    if (rootfs) {
+      disks.push({ dev: "rootfs", kind: "disk", pool: "", volume: "", file: rootfs, label: rootfs.split("/").pop() ?? rootfs });
+    }
     // A NIC names the network's bridge now; `nicNetwork` maps it back to the
     // network key the rest of the page (and its titles) is keyed by.
     const nics = [...xml.matchAll(/<interface\b[^>]*type=['"](?:network|bridge)['"][\s\S]*?<\/interface>/g)].map((m) => {
@@ -4474,6 +5205,10 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     // table; file-backed disks have no volume record, so they show path only.
     const volUsage = new Map<string, { capacity: number; allocation: number }>();
     const backingPools = new Set(disks.map((x) => x.pool).filter(Boolean) as string[]);
+    // The rootfs names a path, not a pool: look in every pool for it, by path
+    // or by the name the daemon gives it (`ct-<uuid>.raw`).
+    if (rootfs) for (const p of treePools[conn] ?? []) backingPools.add(p.name);
+    const rootfsVol = ct ? `ct-${d?.uuid ?? vm}.raw` : "";
     for (const pool of backingPools) {
       try {
         const vols = await api.get<VolumeSummary[]>(
@@ -4481,6 +5216,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         for (const v of vols) {
           const u = { capacity: v.capacity ?? 0, allocation: v.allocation ?? 0 };
           volUsage.set(`${pool}/${v.name}`, u);
+          if (rootfs && (v.path === rootfs || v.name === rootfsVol)) volUsage.set(`file:${rootfs}`, u);
         }
       } catch { /* a missing pool just leaves its disks without usage data */ }
     }
@@ -4492,7 +5228,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     const selDisk = disks.find((x) => x.dev === diskSel);
     const selUsage = selDisk?.pool && selDisk?.volume
       ? volUsage.get(`${selDisk.pool}/${selDisk.volume}`)
-      : undefined;
+      : selDisk?.file ? volUsage.get(`file:${selDisk.file}`) : undefined;
     // A cdrom has no allocation meaning; a file disk has no usage record.
     const selAlloc = selUsage?.allocation ?? 0;
     const selCap = selUsage?.capacity ?? 0;
@@ -4506,7 +5242,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     const nicList = (nic.interfaces ?? []).map((x, i) => ({
       key: x.dev || x.mac || `nic${i}`,
       dev: x.dev || x.mac || `nic${i}`,
-      model: x.model || nics[i]?.model || "virtio",
+      model: x.model || nics[i]?.model || (ct ? "veth" : "virtio"),
       rx: x.rx_bytes ?? 0,
       tx: x.tx_bytes ?? 0,
     }));
@@ -4523,7 +5259,8 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     if (!isLive()) {
       const shown = range().key;
       const nicMac = (nic.interfaces ?? []).find((x, i) => (x.dev || x.mac || `nic${i}`) === selNic?.key)?.mac;
-      const q: Record<string, string> = { conn, name: vm };
+      // `ct` checks the container's permission; the series are the same.
+      const q: Record<string, string> = ct ? { conn, name: vm, ct: "true" } : { conn, name: vm };
       const none = Promise.resolve(null);
       try {
         const [hv, hd, hn] = await Promise.all([
@@ -4542,7 +5279,14 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     const netMax = Math.max(1, ...rx.map((v) => v ?? 0), ...tx.map((v) => v ?? 0));
 
     // Every hardware device in one full-width strip, in domain order.
-    const hwStrip = [
+    const hwStrip = ct ? [
+      { icon: ic.container(), label: "Container", sum: `${s.vcpus} vCPU` },
+      { icon: ic.lock(), label: "Isolation", sum: d?.privileged ? "privileged (host root)" : "user namespace" },
+      { icon: ic.disk(), label: "Root filesystem", sum: rootfs.split("/").pop() || "—" },
+      ...(nic.interfaces ?? []).map((x) => ({
+        icon: ic.network(), label: "Network", sum: x.network ? displayName(treeNets[conn], x.network) : (x.mac ?? "—"),
+      })),
+    ] : [
       { icon: ic.cpu(), label: "BIOS", sum: bios },
       { icon: ic.vm(), label: "Graphics", sum: display },
       ...devices.map((x) => ({
@@ -4625,7 +5369,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         </div>
         <div class="metric-foot">
           <span>${selNic?.dev ?? "—"}</span>
-          <span>${esc(selNic?.model ?? "virtio")}</span>
+          <span>${esc(selNic?.model ?? (ct ? "veth" : "virtio"))}</span>
         </div>
       </div>
 
@@ -4852,6 +5596,7 @@ async function deleteVolume(pool: string, name: string) {
 async function adminDeleteResource(kind: AdminResource["kind"], conn: string, pool: string, name: string, after: () => void) {
   const shown = kind === "volume" ? shownVolume(pool, name) : name;
   if (kind === "vm") await deleteVmOn(conn, name, after);
+  else if (kind === "ct") await deleteCtOn(conn, name, after);
   else if (kind === "network") await deleteNetworkOn(conn, name, shown, after);
   else if (kind === "pool") await deletePoolOn(conn, name, shown, after);
   else await deleteVolumeOn(conn, pool, name, after);
@@ -6229,6 +6974,11 @@ function resourceCards(): string {
         <b>Virtual Machine</b>
         <small>Full hardware editor: CPU, memory, disks and more</small>
       </button>
+      <button class="create-resource-card" data-create="ct">
+        <span class="metric-ic">${ic.container()}</span>
+        <b>Container</b>
+        <small>From a template: CPU, memory, root disk and network</small>
+      </button>
       <button class="create-resource-card" data-create="network">
         <span class="metric-ic">${ic.network()}</span>
         <b>Network</b>
@@ -6250,6 +7000,7 @@ function bindResourceCards(el: Element, close: () => void) {
       const kind = (b as HTMLElement).dataset.create!;
       close();
       if (kind === "vm") openCreateVm();
+      else if (kind === "ct") withDaemon((conn) => void openCreateCt(conn));
       else if (kind === "network") withDaemon((conn) => openCreateNetwork(conn));
       else withDaemon((conn) => openCreatePool(conn));
     };
@@ -7058,6 +7809,7 @@ function startPolling() {
       else if (selectedPool) renderPoolPage();
       else if (connTab === "dashboard") loadDashboard();
       else if (connTab === "vms") loadVms();
+      else if (connTab === "containers") loadCts();
       else if (connTab === "networks") loadNetworks();
       else if (connTab === "storage") loadPools();
       // The shell is a live session, not data to re-read; nothing to poll.

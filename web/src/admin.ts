@@ -37,8 +37,8 @@ export interface AdminCtx {
   reloadConnections(): Promise<void>;
   openConnectionDialog(id?: string): void;
   deleteConnection(id: string): Promise<void>;
-  /// Open a guest, network or pool in the main view.
-  openResource(kind: "vm" | "network" | "pool", conn: string, name: string): void;
+  /// Open a guest, container, network or pool in the main view.
+  openResource(kind: "vm" | "ct" | "network" | "pool", conn: string, name: string): void;
   /// Go to another admin section (through the router, so the URL follows).
   go(section: AdminSection, tab?: AdminTab): void;
   /// The section's open tab, from the URL.
@@ -47,6 +47,7 @@ export interface AdminCtx {
   /// `after` runs once the resource exists (to repaint this page).
   createVm(conn: string, owner: string, after: () => void): void;
   createNetwork(conn: string, owner: string, after: () => void): void;
+  createCt(conn: string, owner: string, after: () => void): void;
   /// Define a storage pool on `conn` (pools are admin-defined and not owned).
   createPool(conn: string, after: () => void): void;
   /// Delete one resource, using the same confirmation and running-guest stop
@@ -70,6 +71,7 @@ const LABEL: Record<AdminSection, string> = {
   permissions: "Permissions",
   daemons: "Daemons",
   vms: "VMs",
+  containers: "Containers",
   networks: "Networks",
   pools: "Storage Pools",
   quotas: "Quotas",
@@ -86,6 +88,7 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
   permissions: ic.perms,
   daemons: ic.server,
   vms: ic.vms,
+  containers: ic.container,
   networks: ic.network,
   pools: ic.storage,
   quotas: ic.quota,
@@ -98,7 +101,7 @@ const ICON: Record<AdminSection, (s?: number) => string> = {
 /// live suite against ADMIN_SECTIONS), in the order they are listed.
 export const ADMIN_GROUPS: { label: string; sections: AdminSection[] }[] = [
   { label: "Access", sections: ["users", "groups", "roles", "permissions", "keys"] },
-  { label: "Infrastructure", sections: ["daemons", "vms", "networks", "pools", "ips"] },
+  { label: "Infrastructure", sections: ["daemons", "vms", "containers", "networks", "pools", "ips"] },
   { label: "Limits", sections: ["quotas"] },
   { label: "Audit", sections: ["activity"] },
 ];
@@ -530,7 +533,7 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
     // value stays the id: that is what the server stores and matches on.
     const shown = `/nodes/${c.name}`;
     out.push({ path: node, label: shown });
-    for (const k of ["vms", "networks", "storage", "bridges"]) {
+    for (const k of ["vms", "containers", "networks", "storage", "bridges"]) {
       out.push({ path: `${node}/${k}`, label: `${shown}/${k}` });
     }
     try {
@@ -548,6 +551,12 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
       for (const n of nets) out.push({ path: `${node}/networks/${n.name}`, label: `${shown}/networks/${n.title || n.name}` });
       for (const p of pools) out.push({ path: `${node}/storage/${p.name}`, label: `${shown}/storage/${p.title || p.name}` });
       for (const b of bridges) out.push({ path: `${node}/bridges/${b}`, label: `${shown}/bridges/${b}` });
+      // Containers apart: a daemon that refuses to list them still offers
+      // everything above.
+      const cts = await api.get<{ name: string; title?: string | null }[]>(`/proxy/${c.id}/containers`).catch(() => []);
+      for (const v of cts) {
+        out.push({ path: `${node}/containers/${v.name}`, label: `${shown}/containers/${v.title || v.name}` });
+      }
     } catch {
       // Offline daemon: its whole-daemon paths are still offered.
     }
@@ -684,11 +693,16 @@ const daemons_: Painter = async (ctx, area) => {
 /// owner stays, since "what does this user have" is the other common ask.
 let resOwner = "";
 
-const KIND_SECTION: Record<"vm" | "network" | "pool", AdminSection> = {
-  vm: "vms", network: "networks", pool: "pools",
+const KIND_SECTION: Record<"vm" | "ct" | "network" | "pool", AdminSection> = {
+  vm: "vms", ct: "containers", network: "networks", pool: "pools",
 };
 
-function resourcePage(kind: "vm" | "network" | "pool"): Painter {
+/// What the section's create button makes, as its label reads.
+const KIND_NOUN: Record<"vm" | "ct" | "network" | "pool", string> = {
+  vm: "VM", ct: "Container", network: "Network", pool: "Storage pool",
+};
+
+function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
   return async (ctx, area, gen) => {
     const conns = ctx.connections();
     const conn = ctx.tab() && conns.some((c) => c.id === ctx.tab()) ? ctx.tab()! : conns[0]?.id;
@@ -706,7 +720,7 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
       ${conns.map((c) => `<button class="tab ${c.id === conn ? "active" : ""}" data-res-tab="${esc(c.id)}">
           ${c.online === false ? ic.offline(14) : ic.server(14)} ${esc(c.name)} <span class="tab-count">${counts.get(c.id) ?? 0}</span></button>`).join("")}
       <div class="tabbar-actions">
-        <button class="btn primary" id="res-new">${ic.plus(14)} ${kind === "vm" ? "VM" : kind === "network" ? "Network" : "Storage pool"}${kind === "pool" ? "" : " for user"}</button>
+        <button class="btn primary" id="res-new">${ic.plus(14)} ${KIND_NOUN[kind]}${kind === "pool" ? "" : " for user"}</button>
       </div>
     </div>`;
 
@@ -729,13 +743,13 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
         `<td class="tname row-link" data-open-res="${i}">${esc(r.title || r.name)}</td>`;
 
       let table: string;
-      if (kind === "vm") {
+      if (kind === "vm" || kind === "ct") {
         table = `<table class="grid">
           <tr><th>Name</th><th>Owner</th><th>State</th><th>vCPUs</th><th>Memory</th><th class="col-actions"></th></tr>
           ${shown.map((r, i) => `<tr class="${r.suspended ? "suspended" : ""}">
-            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}</td>
+            ${name(r, i)}<td>${esc(r.owner_name ?? "—")}</td><td>${state(r)}${r.privileged ? ` <span class="state bad">Privileged</span>` : ""}</td>
             <td>${r.vcpus ?? "—"}</td><td>${r.memory_mb ? fmtBytes(r.memory_mb * 1048576) : "—"}</td>
-            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No VMs${resOwner ? " for this owner" : ""}.</td></tr>`}
+            <td class="col-actions">${actions(r, i)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No ${kind === "ct" ? "containers" : "VMs"}${resOwner ? " for this owner" : ""}.</td></tr>`}
         </table>`;
       } else if (kind === "network") {
         table = `<table class="grid">
@@ -797,12 +811,12 @@ function resourcePage(kind: "vm" | "network" | "pool"): Painter {
       if (create) {
         create.onclick = () => {
           if (kind === "pool") ctx.createPool(conn, () => ctx.go(section, conn));
-          else createFor(ctx, kind as "vm" | "network", conn, () => ctx.go(section, conn));
+          else createFor(ctx, kind, conn, () => ctx.go(section, conn));
         };
       }
       bind(area, "data-open-res", (i) => {
         const r = shown[Number(i)];
-        ctx.openResource(r.kind as "vm" | "network" | "pool", r.conn, r.name);
+        ctx.openResource(r.kind as "vm" | "ct" | "network" | "pool", r.conn, r.name);
       });
       bind(area, "data-del-res", (i) => {
         const r = shown[Number(i)];
@@ -846,16 +860,16 @@ async function changeOwner(ctx: AdminCtx, r: AdminResource, back: AdminSection) 
 }
 
 /// Hand a resource to `owner` (used by the create-for-user forms).
-export async function assignOwner(conn: string, kind: "vm" | "network", name: string, owner: string) {
+export async function assignOwner(conn: string, kind: "vm" | "ct" | "network", name: string, owner: string) {
   await api.put("/resources", { kind, conn, pool: "", name, owner });
 }
 
-/// Create a VM or network *for* someone: pick the owner, then the normal
-/// create form opens over the admin page -- on the daemon tab you were on --
-/// and the result is handed to them. Admins are not held to their limits.
-function createFor(ctx: AdminCtx, kind: "vm" | "network", conn: string, after: () => void) {
+/// Create a VM, container or network *for* someone: pick the owner, then the
+/// normal create form opens over the admin page -- on the daemon tab you were
+/// on -- and the result is handed to them. Admins are not held to their limits.
+function createFor(ctx: AdminCtx, kind: "vm" | "ct" | "network", conn: string, after: () => void) {
   const el = ctx.openModal(
-    kind === "vm" ? "Create VM for a user" : "Create network for a user",
+    `Create ${kind === "vm" ? "VM" : kind === "ct" ? "container" : "network"} for a user`,
     `<label class="field"><span>Owner</span><select id="cf-user">
        ${users.filter((u) => !u.admin).concat(users.filter((u) => u.admin))
          .map((u) => option(u.id, u.username, false)).join("")}
@@ -867,6 +881,7 @@ function createFor(ctx: AdminCtx, kind: "vm" | "network", conn: string, after: (
     const owner = ctx.$("#cf-user", el).value;
     el.remove();
     if (kind === "vm") ctx.createVm(conn, owner, after);
+    else if (kind === "ct") ctx.createCt(conn, owner, after);
     else ctx.createNetwork(conn, owner, after);
   };
 }
@@ -1338,7 +1353,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
               `<tr class="row-open" tabindex="0" data-go="daemons"><td class="tname">Daemon offline</td><td>${esc(c.name)}</td>
                 <td class="task-msg">${esc(c.offline_error ?? "not answering")}</td></tr>`),
             ...suspended.map((r) =>
-              `<tr class="row-open" tabindex="0" data-go="${r.kind === "vm" ? "vms" : "networks"}"><td class="tname">Suspended ${r.kind === "vm" ? "VM" : r.kind}</td>
+              `<tr class="row-open" tabindex="0" data-go="${r.kind === "vm" || r.kind === "ct" ? KIND_SECTION[r.kind] : "networks"}"><td class="tname">Suspended ${r.kind === "vm" ? "VM" : r.kind === "ct" ? "container" : r.kind}</td>
                 <td>${esc(r.title || r.name)} · ${esc(r.conn_name)}</td><td>owned by ${esc(r.owner_name ?? "—")}</td></tr>`),
             ...act.entries.filter((e) => e.status === "failed").slice(0, 5).map((e) =>
               `<tr class="row-open" tabindex="0" data-go="activity"><td class="tname">Failed: ${esc(e.label)}</td>
@@ -1363,23 +1378,24 @@ const dashboard_: Painter = async (ctx, area, gen) => {
     }).join("")}</div>`
       : `<div class="empty">No user has limits. Set them under Limits › Quotas.</div>`;
   } else if (dashTab === "ownership") {
-    const byOwner = new Map<string, { name: string; vms: number; nets: number; vols: number; vcpus: number; mem: number }>();
+    const byOwner = new Map<string, { name: string; vms: number; cts: number; nets: number; vols: number; vcpus: number; mem: number }>();
     for (const r of res) {
       if (r.kind === "pool") continue;
       const k = r.owner ?? "";
-      const o = byOwner.get(k) ?? { name: r.owner_name ?? "—", vms: 0, nets: 0, vols: 0, vcpus: 0, mem: 0 };
+      const o = byOwner.get(k) ?? { name: r.owner_name ?? "—", vms: 0, cts: 0, nets: 0, vols: 0, vcpus: 0, mem: 0 };
       if (r.kind === "vm") { o.vms++; o.vcpus += r.vcpus ?? 0; o.mem += r.memory_mb ?? 0; }
+      else if (r.kind === "ct") { o.cts++; o.vcpus += r.vcpus ?? 0; o.mem += r.memory_mb ?? 0; }
       else if (r.kind === "network") o.nets++;
       else o.vols++;
       byOwner.set(k, o);
     }
     body = `<table class="grid">
-      <tr><th>Owner</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Networks</th><th>Volumes</th></tr>
+      <tr><th>Owner</th><th>VMs</th><th>Containers</th><th>vCPUs</th><th>Memory</th><th>Networks</th><th>Volumes</th></tr>
       ${[...byOwner.entries()].sort((a, b) => b[1].vms - a[1].vms).map(([id, o]) => `
         <tr class="row-open" tabindex="0" data-owner="${esc(id)}">
-          <td class="tname">${esc(o.name)}</td><td>${o.vms}</td><td>${o.vcpus}</td><td>${mem(o.mem)}</td>
+          <td class="tname">${esc(o.name)}</td><td>${o.vms}</td><td>${o.cts}</td><td>${o.vcpus}</td><td>${mem(o.mem)}</td>
           <td>${o.nets}</td><td>${o.vols}</td>
-        </tr>`).join("") || `<tr><td colspan="6" class="empty">Nothing on any daemon yet.</td></tr>`}
+        </tr>`).join("") || `<tr><td colspan="7" class="empty">Nothing on any daemon yet.</td></tr>`}
     </table>`;
   } else {
     body = `<table class="grid">
@@ -1431,6 +1447,7 @@ const SECTIONS: Record<AdminSection, Painter> = {
   permissions: permissions_,
   daemons: daemons_,
   vms: resourcePage("vm"),
+  containers: resourcePage("ct"),
   networks: resourcePage("network"),
   pools: resourcePage("pool"),
   quotas: quotas_,

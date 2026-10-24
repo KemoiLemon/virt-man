@@ -3,11 +3,13 @@
 //   /                              datacenter dashboard
 //   /guests                        datacenter guests tab
 //   /servers                       old Servers tab: the admin Daemons page now
+//   /containers                    datacenter containers tab
 //   /networks, /storage            datacenter networks and storage tabs
 //   /<node>                        server dashboard
-//   /<node>/vms|networks|storage|firewall|shell
+//   /<node>/vms|containers|networks|storage|firewall|shell
 //   /<node>/vms/<vm>               guest summary
 //   /<node>/vms/<vm>/<tab>         console | hardware | options | network | xml
+//   /<node>/containers/<ct>[/<tab>] console | hardware | options | network | xml
 //   /<node>/networks/<net>         network page
 //   /<node>/storage/<pool>         pool page
 //   /admin/<section>[/<tab>]       administration (/admin/dashboard/usage, ...)
@@ -18,14 +20,17 @@
 // those, or is shared by another node, is addressed by its connection id
 // instead: a reload of /users would otherwise get JSON, not the app.
 
-export type DcTab = "dashboard" | "guests" | "networks" | "storage";
-export type ConnTab = "dashboard" | "vms" | "networks" | "storage" | "firewall" | "shell";
+export type DcTab = "dashboard" | "guests" | "containers" | "networks" | "storage";
+export type ConnTab = "dashboard" | "vms" | "containers" | "networks" | "storage" | "firewall" | "shell";
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
+/// A container's Hardware tab edits its resources (CPU, memory, swap, root
+/// disk), not devices; its console is a text terminal.
+export type CtTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 export type AdminSection =
   | "dashboard" | "users" | "groups" | "roles" | "permissions" | "daemons"
-  | "vms" | "networks" | "pools" | "quotas" | "ips" | "keys" | "activity";
+  | "vms" | "containers" | "networks" | "pools" | "quotas" | "ips" | "keys" | "activity";
 /// A tabbed section's tab. For the dashboard it is one of ADMIN_TABS; for the
-/// VMs, Networks and Storage Pools sections it is a daemon (connection id),
+/// VMs, Containers, Networks and Storage Pools sections it is a daemon (connection id),
 /// written in the URL by its node segment like every other server link.
 export type AdminTab = string;
 /// Sections with fixed tabs. Every admin page follows the rest of the app's
@@ -34,16 +39,17 @@ export const ADMIN_TABS: Partial<Record<AdminSection, AdminTab[]>> = {
   dashboard: ["overview", "usage", "ownership", "activity"],
 };
 /// Sections tabbed by daemon: one tab per server.
-export const DAEMON_TABBED: AdminSection[] = ["vms", "networks", "pools"];
+export const DAEMON_TABBED: AdminSection[] = ["vms", "containers", "networks", "pools"];
 export const ADMIN_SECTIONS: AdminSection[] = [
   "dashboard", "users", "groups", "roles", "permissions", "daemons",
-  "vms", "networks", "pools", "quotas", "ips", "keys", "activity",
+  "vms", "containers", "networks", "pools", "quotas", "ips", "keys", "activity",
 ];
 
 export type Route =
   | { view: "dc"; tab: DcTab }
   | { view: "conn"; conn: string; tab: ConnTab }
   | { view: "vm"; conn: string; vm: string; tab: VmTab }
+  | { view: "ct"; conn: string; ct: string; tab: CtTab }
   | { view: "net"; conn: string; net: string }
   | { view: "pool"; conn: string; pool: string }
   | { view: "admin"; section: AdminSection; tab?: AdminTab };
@@ -58,16 +64,17 @@ export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
   "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
   "groups", "acl", "resources", "ips", "usage", "shares",
-  "servers", "guests", "networks", "storage", "admin",
+  "servers", "guests", "containers", "networks", "storage", "admin",
 ]);
 
 /// Top-level paths that are a Datacenter tab. They are in RESERVED (the server
 /// answers nothing there), which is what keeps `parsePath` from reading one as
 /// a node segment: a server named "networks" is addressed by its id instead.
-const DC_TABS: DcTab[] = ["guests", "networks", "storage"];
+const DC_TABS: DcTab[] = ["guests", "containers", "networks", "storage"];
 
-const CONN_TABS: ConnTab[] = ["vms", "networks", "storage", "firewall", "shell"];
+const CONN_TABS: ConnTab[] = ["vms", "containers", "networks", "storage", "firewall", "shell"];
 const VM_TABS: VmTab[] = ["hardware", "options", "network", "console", "xml"];
+const CT_TABS: CtTab[] = ["hardware", "options", "network", "console", "xml"];
 
 /// The path segment for a node: its name when that is unambiguous, else its id.
 export function nodeSegment(id: string, nodes: NodeRef[]): string {
@@ -102,6 +109,8 @@ export function routeToPath(r: Route, nodes: NodeRef[]): string {
       return r.tab === "dashboard" ? node : `${node}/${r.tab}`;
     case "vm":
       return `${node}/vms/${enc(r.vm)}${r.tab === "summary" ? "" : `/${r.tab}`}`;
+    case "ct":
+      return `${node}/containers/${enc(r.ct)}${r.tab === "summary" ? "" : `/${r.tab}`}`;
     case "net":
       return `${node}/networks/${enc(r.net)}`;
     case "pool":
@@ -159,6 +168,10 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
     const t = tab === "firewall" ? "network" : tab;
     const vmTab = VM_TABS.includes(t as VmTab) ? (t as VmTab) : "summary";
     return { view: "vm", conn, vm: name, tab: vmTab };
+  }
+  if (section === "containers") {
+    const ctTab = CT_TABS.includes(tab as CtTab) ? (tab as CtTab) : "summary";
+    return { view: "ct", conn, ct: name, tab: ctTab };
   }
   if (section === "networks") return { view: "net", conn, net: name };
   if (section === "storage") return { view: "pool", conn, pool: name };

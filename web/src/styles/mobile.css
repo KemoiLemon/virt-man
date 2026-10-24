@@ -147,7 +147,7 @@
      it is suppressed there and ONLY there. The XML and log panes, and every
      field, keep the native callout, so copy/paste still works in them. */
   .tree-row, .dhead, .tab,
-  [data-open], [data-vm-open], [data-dc-vm], [data-net-open], [data-dash-net],
+  [data-open], [data-vm-open], [data-dc-vm], [data-dc-ct], [data-net-open], [data-dash-net],
   [data-pool-open], [data-dash-pool], [data-open-conn-row], [data-dc-dash-conn],
   tr.row-open,
   /* Admin page: its table rows and cards own the long press (adminRowMenu). */

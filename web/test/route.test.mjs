@@ -34,8 +34,16 @@ test("every view round-trips through its path", () => {
     { view: "vm", conn: "c1", vm: "web1", tab: "options" },
     { view: "vm", conn: "c1", vm: "web1", tab: "network" },
     { view: "vm", conn: "c1", vm: "web1", tab: "xml" },
+    { view: "dc", tab: "containers" },
     { view: "dc", tab: "networks" },
     { view: "dc", tab: "storage" },
+    { view: "conn", conn: "c1", tab: "containers" },
+    { view: "ct", conn: "c1", ct: "web", tab: "summary" },
+    { view: "ct", conn: "c1", ct: "web", tab: "console" },
+    { view: "ct", conn: "c1", ct: "web", tab: "hardware" },
+    { view: "ct", conn: "c1", ct: "web", tab: "network" },
+    { view: "ct", conn: "c1", ct: "web", tab: "options" },
+    { view: "ct", conn: "c1", ct: "web", tab: "xml" },
     { view: "net", conn: "c2", net: "default" },
     { view: "pool", conn: "c2", pool: "ISOs" },
   ];
@@ -61,6 +69,20 @@ test("unknown paths fall back to the nearest view that exists", () => {
   assert.deepEqual(r.parsePath("/nosuchview", nodes), { view: "dc", tab: "dashboard" });
   assert.deepEqual(r.parsePath("/Main/nosuchview/web", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
   assert.deepEqual(r.parsePath("/Main/nosuchview/web/hardware", nodes), { view: "conn", conn: "c1", tab: "dashboard" });
+});
+
+// A container is its own view, named by its UUID like a VM, with the same
+// set of tabs; a mistyped tab lands on its summary, and a VM path never opens
+// a container (the two are different daemon routes).
+test("a container has its own paths, named by UUID", () => {
+  const id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+  assert.equal(r.routeToPath({ view: "ct", conn: "c1", ct: id, tab: "summary" }, nodes), `/Main/containers/${id}`);
+  assert.equal(r.routeToPath({ view: "ct", conn: "c1", ct: id, tab: "hardware" }, nodes), `/Main/containers/${id}/hardware`);
+  assert.equal(r.routeToPath({ view: "conn", conn: "c1", tab: "containers" }, nodes), "/Main/containers");
+  assert.equal(r.routeToPath({ view: "dc", tab: "containers" }, nodes), "/containers");
+  assert.deepEqual(r.parsePath(`/Main/containers/${id}/nonsense`, nodes),
+    { view: "ct", conn: "c1", ct: id, tab: "summary" });
+  assert.deepEqual(r.parsePath(`/Main/vms/${id}`, nodes), { view: "vm", conn: "c1", vm: id, tab: "summary" });
 });
 
 test("names with spaces and slashes are encoded, and decode back", () => {
@@ -121,6 +143,11 @@ test("a node named like a datacenter tab is addressed by id", () => {
   assert.equal(r.nodeSegment("c9", ns), "c9");
   assert.deepEqual(r.parsePath("/networks", ns), { view: "dc", tab: "networks" });
   assert.deepEqual(r.parsePath("/c9", ns), { view: "conn", conn: "c9", tab: "dashboard" });
+  // The Containers tab is one too.
+  const cs = [{ id: "c7", name: "containers" }];
+  assert.equal(r.nodeSegment("c7", cs), "c7");
+  assert.ok(r.RESERVED.has("containers"));
+  assert.deepEqual(r.parsePath("/containers", cs), { view: "dc", tab: "containers" });
 });
 
 // The VM Firewall tab became part of the Network tab; a bookmark to the old
@@ -175,6 +202,8 @@ test("admin resource pages are tabbed by daemon", () => {
     // No daemons at all: the section still opens.
     assert.deepEqual(r.parsePath(`/admin/${section}`, []), { view: "admin", section });
   }
+  assert.ok(r.DAEMON_TABBED.includes("containers"), "containers are tabbed by daemon too");
+  assert.equal(r.routeToPath({ view: "admin", section: "containers", tab: "c2" }, nodes), "/admin/containers/lab%20box");
   // Resources split by kind; an old link lands on VMs.
   assert.deepEqual(r.parsePath("/admin/resources", nodes), { view: "admin", section: "vms", tab: "c1" });
 });
