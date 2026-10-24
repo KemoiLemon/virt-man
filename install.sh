@@ -53,12 +53,16 @@ say "package manager: $PM"
 # (firewall), iproute2 (bridge addressing and taps), dnsmasq-base (the DHCP and
 # DNS server; the -base package has the binary without the distro's service,
 # which would bind :53 on every interface), swtpm (TPM guests need it),
-# util-linux, and openssl for the TLS certificate.
-apt_daemon=(qemu-system-x86 qemu-utils ovmf nftables iproute2 dnsmasq-base swtpm util-linux openssl)
+# util-linux, and openssl for the TLS certificate. Containers: LXC's own
+# tools (lxc-start/-stop/-console; no libvirt), e2fsprogs for the ext4 rootfs
+# image, and the decompressors and GNU tar a template is unpacked with.
+apt_daemon=(qemu-system-x86 qemu-utils ovmf nftables iproute2 dnsmasq-base swtpm util-linux openssl
+  lxc e2fsprogs tar xz-utils zstd gzip)
 apt_web=(nodejs npm)
 apt_build=(build-essential pkg-config curl ca-certificates)
 # Alpine has no swtpm-tools package; `swtpm` carries the emulator binary.
-apk_daemon=(qemu-system-x86_64 qemu-img ovmf nftables iproute2 dnsmasq swtpm util-linux-misc openssl)
+apk_daemon=(qemu-system-x86_64 qemu-img ovmf nftables iproute2 dnsmasq swtpm util-linux-misc openssl
+  lxc e2fsprogs e2fsprogs-extra losetup tar xz zstd gzip)
 apk_web=(nodejs npm)
 apk_build=(build-base pkgconf curl ca-certificates bash sudo)
 
@@ -87,6 +91,17 @@ case "$PM" in
     apk add -q "${pkgs[@]}"
     ;;
 esac
+
+# The lxc package's own services are not ours: lxc-net brings up lxcbr0 with
+# a second dnsmasq, and lxc.service autostarts whatever is in /var/lib/lxc.
+# The daemon runs containers from its own store on its own bridges.
+if [[ $what != web ]]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now lxc-net.service lxc.service >/dev/null 2>&1 || true
+  elif command -v rc-update >/dev/null 2>&1; then
+    rc-update del lxc default >/dev/null 2>&1 || true
+  fi
+fi
 
 # ------------------------------------------------------------------ rust
 rust_ok() {

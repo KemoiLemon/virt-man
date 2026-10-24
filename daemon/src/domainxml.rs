@@ -561,10 +561,16 @@ fn read(xml: &str, old: Option<&Domain>) -> Result<Domain, String> {
 
 fn parse_memory(root: Node) -> Result<u32, String> {
     let mem = child(root, "memory").ok_or("the domain has no <memory>")?;
+    memory_mib(mem)
+}
+
+/// A libvirt size element (`<memory>`, `<swap_hard_limit>`) in whole MiB.
+pub(crate) fn memory_mib(mem: Node) -> Result<u32, String> {
+    let tag = mem.tag_name().name();
     let unit = mem.attribute("unit").unwrap_or("KiB");
     let value: u64 = text(mem)
         .parse()
-        .map_err(|_| "<memory> must be a number".to_string())?;
+        .map_err(|_| format!("<{tag}> must be a number"))?;
     let kib = match unit {
         "KiB" | "kib" | "Ki" | "k" => value,
         "MiB" | "mib" | "M" | "m" => value.saturating_mul(1024),
@@ -573,14 +579,14 @@ fn parse_memory(root: Node) -> Result<u32, String> {
         other => return Err(format!("memory unit '{other}' is not supported")),
     };
     if kib == 0 {
-        return Err("<memory> must be positive".into());
+        return Err(format!("<{tag}> must be positive"));
     }
     if kib % 1024 != 0 {
-        return Err("<memory> must be a whole number of MiB".into());
+        return Err(format!("<{tag}> must be a whole number of MiB"));
     }
     let mib = kib / 1024;
     if mib > 1_048_576 {
-        return Err("<memory> exceeds the supported limit".into());
+        return Err(format!("<{tag}> exceeds the supported limit"));
     }
     Ok(mib as u32)
 }
@@ -763,20 +769,7 @@ fn parse_interface(n: Node) -> Result<Interface, String> {
         .map(normalize_mac)
         .transpose()?;
     let bandwidth = match child(n, "bandwidth") {
-        Some(b) => {
-            let mut bw = Bandwidth::default();
-            for dir in b.children().filter(Node::is_element) {
-                let rate = parse_rate(dir)?;
-                match dir.tag_name().name() {
-                    "inbound" => bw.inbound = (!rate.is_empty()).then_some(rate),
-                    "outbound" => bw.outbound = (!rate.is_empty()).then_some(rate),
-                    other => {
-                        return Err(format!("<bandwidth> element <{other}> is not supported"));
-                    }
-                }
-            }
-            bw
-        }
+        Some(b) => parse_bandwidth(b)?,
         None => Bandwidth::default(),
     };
     for e in n.children().filter(Node::is_element) {
@@ -796,6 +789,23 @@ fn parse_interface(n: Node) -> Result<Interface, String> {
         mac,
         bandwidth,
     })
+}
+
+/// A `<bandwidth>` element. Shared with container definitions (`ctxml`),
+/// whose NICs are shaped by the same host `tc` plan.
+pub(crate) fn parse_bandwidth(b: Node) -> Result<Bandwidth, String> {
+    let mut bw = Bandwidth::default();
+    for dir in b.children().filter(Node::is_element) {
+        let rate = parse_rate(dir)?;
+        match dir.tag_name().name() {
+            "inbound" => bw.inbound = (!rate.is_empty()).then_some(rate),
+            "outbound" => bw.outbound = (!rate.is_empty()).then_some(rate),
+            other => {
+                return Err(format!("<bandwidth> element <{other}> is not supported"));
+            }
+        }
+    }
+    Ok(bw)
 }
 
 fn parse_rate(n: Node) -> Result<Rate, String> {
@@ -1356,27 +1366,9 @@ fn render_interface(i: &Interface) -> String {
         s.push_str(&format!("      <mac address=\"{}\"/>\n", esc(mac)));
     }
     if i.bandwidth != Bandwidth::default() {
-        s.push_str("      <bandwidth>");
-        for (tag, rate) in [
-            ("inbound", &i.bandwidth.inbound),
-            ("outbound", &i.bandwidth.outbound),
-        ] {
-            if let Some(r) = rate {
-                s.push_str(&format!("<{tag}"));
-                for (name, value) in [
-                    ("average", r.average),
-                    ("peak", r.peak),
-                    ("burst", r.burst),
-                    ("floor", r.floor),
-                ] {
-                    if let Some(v) = value {
-                        s.push_str(&format!(" {name}=\"{v}\""));
-                    }
-                }
-                s.push_str("/>");
-            }
-        }
-        s.push_str("</bandwidth>\n");
+        s.push_str("      ");
+        s.push_str(&render_bandwidth(&i.bandwidth));
+        s.push('\n');
     }
     s.push_str("    </interface>\n");
     s
@@ -1445,6 +1437,32 @@ fn render_hostdev(h: &Hostdev) -> String {
             "    <hostdev mode=\"subsystem\" type=\"usb\" managed=\"yes\">\n      <source><vendor id=\"0x{vendor:04x}\"/><product id=\"0x{product:04x}\"/></source>\n    </hostdev>\n"
         ),
     }
+}
+
+/// A `<bandwidth>` element, on one line; empty for no limits.
+pub(crate) fn render_bandwidth(b: &Bandwidth) -> String {
+    if *b == Bandwidth::default() {
+        return String::new();
+    }
+    let mut s = String::from("<bandwidth>");
+    for (tag, rate) in [("inbound", &b.inbound), ("outbound", &b.outbound)] {
+        if let Some(r) = rate {
+            s.push_str(&format!("<{tag}"));
+            for (name, value) in [
+                ("average", r.average),
+                ("peak", r.peak),
+                ("burst", r.burst),
+                ("floor", r.floor),
+            ] {
+                if let Some(v) = value {
+                    s.push_str(&format!(" {name}=\"{v}\""));
+                }
+            }
+            s.push_str("/>");
+        }
+    }
+    s.push_str("</bandwidth>");
+    s
 }
 
 /// XML text and attribute escaping; safe in both positions.

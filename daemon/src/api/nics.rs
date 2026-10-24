@@ -90,7 +90,7 @@ fn interface_xml(bridge: &str, model: &str, mac: Option<&str>) -> String {
 
 /// A NIC change alters the guest's MAC set, which scopes its firewall rules.
 /// Re-apply so a new NIC is covered and a removed one stops being matched.
-async fn reapply_firewall(fw: &FirewallState) -> Option<String> {
+pub(crate) async fn reapply_firewall(fw: &FirewallState) -> Option<String> {
     let _g = fw.lock.lock().await;
     let store = match crate::firewall::load(&fw.path) {
         Ok(s) => s,
@@ -219,7 +219,7 @@ async fn set_bandwidth(
 
 /// The NIC change itself succeeded; a firewall re-apply failure is reported
 /// alongside rather than turning it into an error the caller would retry.
-fn with_warning(mut v: Value, fw_err: Option<String>) -> Value {
+pub(crate) fn with_warning(mut v: Value, fw_err: Option<String>) -> Value {
     if let Some(e) = fw_err {
         v["warning"] = json!(format!("firewall not re-applied: {e}"));
     }

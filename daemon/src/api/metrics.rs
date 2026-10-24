@@ -41,13 +41,21 @@ async fn metrics(
         "mem_total_kib": super::host::meminfo_kib(&meminfo, "MemTotal").unwrap_or(0),
         "mem_available_kib": super::host::meminfo_kib(&meminfo, "MemAvailable").unwrap_or(0),
     });
-    let domains = manager
+    let mut domains = manager
         .list()
         .map_err(ApiError::internal)?
         .iter()
         .map(|cfg| domain(&manager, cfg))
         .collect::<Result<Vec<_>, String>>()
         .map_err(ApiError::internal)?;
+    // Containers ride in the same list, marked `kind: ct`. A failed read
+    // fails the whole answer rather than leaving them out: the collector
+    // deletes the history of a guest missing from it.
+    if let Some(cts) = crate::lxc::global() {
+        for e in cts.list().map_err(ApiError::internal)? {
+            domains.push(container(cts, &e));
+        }
+    }
     Ok(Json(json!({
         "sampled_at_ms": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -150,6 +158,51 @@ fn domain(manager: &Manager, cfg: &VmConfig) -> Result<Value, String> {
         "nics": nics,
         "disks": disks,
     }))
+}
+
+/// One container as the collector reads it, in a VM's shape: its veths as
+/// NICs and its rootfs image as the one disk, `rootfs`.
+fn container(cts: &crate::lxc::Manager, e: &crate::lxc::Entry) -> Value {
+    use std::os::unix::fs::MetadataExt;
+    let stats = cts.stats(e);
+    let nics: Vec<Value> = cts
+        .interfaces(e)
+        .into_iter()
+        .filter_map(|i| {
+            Some(json!({
+                "name": i.dev.unwrap_or_default(),
+                "mac": i.mac?,
+                "rx_bytes": i.rx_bytes,
+                "tx_bytes": i.tx_bytes,
+            }))
+        })
+        .collect();
+    let (capacity, allocation) = match std::fs::metadata(&e.def.rootfs) {
+        Ok(m) => (Some(m.len()), Some(m.blocks().saturating_mul(512))),
+        Err(_) => (None, None),
+    };
+    let (read_bytes, write_bytes) = cts.io(e.id());
+    json!({
+        "uuid": e.id(),
+        "kind": "ct",
+        "name": e.def.name(),
+        "state": stats.state,
+        "cpu_time_ns": stats.cpu_time_ns,
+        "vcpus": u32::from(stats.vcpus),
+        "memory_kib": stats.memory_kib,
+        "max_memory_kib": stats.max_memory_kib,
+        "rss_kib": stats.rss_kib,
+        "usable_kib": stats.usable_kib,
+        "nics": nics,
+        "disks": [{
+            "dev": "rootfs",
+            "target": "rootfs",
+            "capacity": capacity,
+            "allocation": allocation,
+            "read_bytes": read_bytes,
+            "write_bytes": write_bytes,
+        }],
+    })
 }
 
 #[cfg(test)]

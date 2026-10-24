@@ -162,14 +162,17 @@ async fn start(
     Ok(Json(serde_json::to_value(job).unwrap_or_default()))
 }
 
-/// The digest a download must match before it is written.
+/// The digest a download must match before it is written. Distributions
+/// publish SHA-256; Proxmox-style template indexes (TurnKey) publish SHA-512.
 #[derive(Clone, Debug)]
 pub enum Expect {
     Sha256(String),
+    Sha512(String),
 }
 
-/// Start a fetch into `pool` as `name`: spooled, complete, verified against
-/// its published digest, and never overwriting an existing volume.
+/// Start a fetch into `pool` as `name`. Shared by `POST /pools/{p}/fetch` and
+/// the template download, so a template is exactly as safe as an ISO: spooled,
+/// complete, verified, never overwriting.
 pub async fn begin(
     pools: Pools,
     pool: String,
@@ -286,7 +289,9 @@ async fn run(
     let spool = super::volumes::spool_dir().join(format!("virtman-fetch-{id}.part"));
     let r = download(id, url, &spool).await;
     let out = match r {
-        Ok((size, digest)) => finish(pools, id, &spool, size, &digest, expect).await,
+        Ok((size, digest, digest512)) => {
+            finish(pools, id, &spool, size, &digest, &digest512, expect).await
+        }
         Err(e) => Err(e),
     };
     let _ = tokio::fs::remove_file(&spool).await;
@@ -297,7 +302,7 @@ async fn download(
     id: &str,
     url: reqwest::Url,
     spool: &std::path::Path,
-) -> Result<(u64, String), String> {
+) -> Result<(u64, String, String), String> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
         .user_agent(concat!("virt-man-daemon/", env!("CARGO_PKG_VERSION")))
@@ -318,6 +323,7 @@ async fn download(
         .await
         .map_err(|e| format!("spool: {e}"))?;
     let mut hasher = Sha256::new();
+    let mut hasher512 = sha2::Sha512::new();
     let mut got = 0u64;
     let started = std::time::Instant::now();
     let mut stream = resp.bytes_stream();
@@ -331,6 +337,7 @@ async fn download(
             .await
             .map_err(|e| format!("spool: {e}"))?;
         hasher.update(&chunk);
+        hasher512.update(&chunk);
         got += chunk.len() as u64;
         let secs = started.elapsed().as_secs_f64();
         let alive = update(id, |j| {
@@ -343,7 +350,11 @@ async fn download(
     }
     file.flush().await.map_err(|e| format!("spool: {e}"))?;
     complete(got, total)?;
-    Ok((got, super::volumes::to_hex(&hasher.finalize())))
+    Ok((
+        got,
+        super::volumes::to_hex(&hasher.finalize()),
+        super::volumes::to_hex(&hasher512.finalize()),
+    ))
 }
 
 /// A body that stopped short of its declared length is a truncated download,
@@ -362,12 +373,16 @@ async fn finish(
     spool: &std::path::Path,
     size: u64,
     digest: &str,
+    digest512: &str,
     expect: Option<Expect>,
 ) -> Result<String, String> {
     update(id, |j| j.phase = Phase::Verifying);
     match expect {
         Some(Expect::Sha256(want)) if want != digest => {
             return Err(format!("sha256 mismatch: expected {want}, got {digest}"));
+        }
+        Some(Expect::Sha512(want)) if want != digest512 => {
+            return Err(format!("sha512 mismatch: expected {want}, got {digest512}"));
         }
         _ => {}
     }

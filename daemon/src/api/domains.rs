@@ -122,7 +122,7 @@ async fn get_xml(
 /// The SPA's options form rewrites `<name>` to the display name it typed. The
 /// identity is the UUID, so a display name is put back to the id (the display
 /// name is `<title>`); a different UUID is another guest and is refused.
-fn pin_name(xml: &str, id: &str) -> Result<String, String> {
+pub(crate) fn pin_name(xml: &str, id: &str) -> Result<String, String> {
     let Some(open) = xml.find("<name>") else {
         return Ok(xml.to_string());
     };

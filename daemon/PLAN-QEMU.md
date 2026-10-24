@@ -4,8 +4,8 @@
 
 The daemon controls VMs directly through QEMU and QMP. It does **not** use an
 external VM manager: no daemon, socket, connection, network or storage driver is
-read, and the daemon packages do not depend on one. Container support is
-removed entirely; there is no replacement runtime.
+read, and the daemon packages do not depend on one. Containers are a separate
+runtime on LXC's own tools (`src/lxc.rs`, see `AGENTS.md`), not libvirt's.
 
 Direct QEMU is the only VM path. Host networking, IPAM, the firewall, storage
 pools and UUID identity are the daemon's own (see `PLAN-NETWORKING.md` and the
@@ -78,7 +78,6 @@ definition, socket or helper is part of this path.
 ## Not in scope
 
 - imported definitions, pools, networks or firewall rules;
-- containers and templates: removed, with no replacement runtime;
 - migration between hosts;
 - guest IPv6 networking: network, IPAM and firewall are IPv4-only.
 

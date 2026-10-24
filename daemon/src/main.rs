@@ -1,14 +1,18 @@
 mod api;
 mod auth;
 mod config;
+mod ct;
+mod ctxml;
 mod disks;
 mod domainxml;
 mod firewall;
 mod firmware;
 mod hostnet;
 mod ipam;
+mod lxc;
 mod netxml;
 mod pools;
+mod pty;
 mod qemu;
 mod qemu_network;
 mod rfb;
@@ -40,6 +44,10 @@ async fn run() -> Result<(), String> {
 
     let cfg = config::Config::load()?;
     let qemu_manager = qemu::Manager::new(cfg.data_dir.clone(), cfg.qemu_state_root.clone())?;
+    // Containers are read by the IPAM snapshot below, so the manager is
+    // installed before the networks start.
+    let cts = lxc::Manager::new(&cfg.data_dir);
+    lxc::install(cts.clone());
     let auth = auth::Auth::from_file(&cfg.token_path)?;
 
     // The daemon's own network definitions: the store is the source of truth,
@@ -76,7 +84,13 @@ async fn run() -> Result<(), String> {
         let owners = ipam.clone();
         ipam::flows::listen(ipam.flows.clone(), move |ip| owners.owner(ip));
     }
-    let app = api::build(auth, ipam, pools, qemu_manager);
+    // The networks are up, so the bridges their NICs join exist. Off the
+    // runtime: each start waits on `lxc-start`.
+    {
+        let cts = cts.clone();
+        tokio::task::spawn_blocking(move || cts.autostart());
+    }
+    let app = api::build(auth, ipam, pools, qemu_manager, cts);
 
     // Unix socket listener.
     let sock_path = cfg.unix_socket_path();

@@ -443,13 +443,27 @@ fn record_leases(ipam: &Ipam, id: &str) -> Result<(), String> {
 }
 
 /// Read the guests and keep only what this daemon acts on: the MACs, the
-/// bridge each is plugged into, and who it is. The QEMU manager's definitions
-/// are the only source. A failed read is an error, not an empty host: forgetting
-/// every guest would prune every reservation.
+/// bridge each is plugged into, and who it is. The QEMU manager's and the LXC
+/// manager's definitions are the only sources. A failed read is an error, not
+/// an empty host: forgetting every guest would prune every reservation.
 async fn snapshot(ipam: &Ipam, qemu: &crate::qemu::Manager) -> Result<(), String> {
-    let guests = qemu_nics(qemu)?.into_iter().collect();
+    let mut guests: HashMap<String, GuestNic> = qemu_nics(qemu)?.into_iter().collect();
+    if let Some(cts) = crate::lxc::global() {
+        guests.extend(container_nics(cts)?);
+    }
     *ipam.guests.lock().expect("guests poisoned") = guests;
     Ok(())
+}
+
+/// A container's veths, keyed by MAC like a VM's NICs: a container on a
+/// network gets a permanent address the same way, and its firewall rules are
+/// scoped to these MACs.
+fn container_nics(cts: &crate::lxc::Manager) -> Result<Vec<(String, GuestNic)>, String> {
+    Ok(cts
+        .nics()?
+        .into_iter()
+        .map(|(mac, uuid, name, bridge)| (mac, GuestNic { uuid, name, bridge }))
+        .collect())
 }
 
 /// A direct-QEMU VM's bridge NICs, keyed by MAC. A user-mode NIC has no host

@@ -53,6 +53,7 @@ pub fn routes(state: FirewallState) -> Router {
             get(get_network).put(put_network),
         )
         .route("/domains/{name}/firewall", get(get_vm).put(put_vm))
+        .route("/containers/{name}/firewall", get(get_ct).put(put_ct))
         .with_state(state)
 }
 
@@ -123,6 +124,56 @@ async fn known_guest(ipam: &Ipam, manager: &Manager, name: &str) -> bool {
     ipam.has_vm(name) || manager.xml(name).is_ok()
 }
 
+/// A container's id, from its id or its title. Its rules are keyed by the
+/// id, like a VM's, and scoped to its veths' MACs from the same IPAM snapshot.
+fn container_key(cts: &crate::lxc::Manager, seg: &str) -> Result<String, ApiError> {
+    cts.resolve(seg)
+        .map(|e| e.id().to_string())
+        .ok_or_else(|| ApiError::not_found(format!("no container '{seg}'")))
+}
+
+async fn get_ct(
+    State(state): State<FirewallState>,
+    Extension(cts): Extension<crate::lxc::Manager>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let id = container_key(&cts, &name)?;
+    get_vm(State(state), Path(id)).await
+}
+
+async fn put_ct(
+    State(state): State<FirewallState>,
+    Extension(cts): Extension<crate::lxc::Manager>,
+    Path(name): Path<String>,
+    Json(req): Json<VmReq>,
+) -> Result<Json<Value>, ApiError> {
+    let id = container_key(&cts, &name)?;
+    let _guard = state.lock.lock().await;
+    let mut store = load_store(&state)?;
+    save_guest_rules(&mut store, &id, &req)?;
+    save_store(&state, &store)?;
+    apply_store(&state.ipam, &store)
+        .await
+        .map_err(apply_failed)?;
+    Ok(Json(json!({"name": id, "saved": true, "applied": true})))
+}
+
+/// Validate a guest's rules into the store, keyed by its id.
+fn save_guest_rules(store: &mut FirewallStore, id: &str, req: &VmReq) -> Result<(), ApiError> {
+    let mut fw = VmFirewall::default();
+    for r in &req.rules {
+        fw.rules
+            .push(firewall::validate_rule(r).map_err(ApiError::bad_request)?);
+    }
+    fw.policy = req.policy;
+    if fw.is_empty() {
+        store.vms.remove(id);
+    } else {
+        store.vms.insert(id.to_string(), fw);
+    }
+    Ok(())
+}
+
 async fn put_network(
     State(state): State<FirewallState>,
     Path(name): Path<String>,
@@ -188,18 +239,7 @@ async fn put_vm(
         return Err(ApiError::not_found(format!("QEMU VM '{name}'")));
     }
 
-    let mut fw = VmFirewall::default();
-    for r in &req.rules {
-        fw.rules
-            .push(firewall::validate_rule(r).map_err(ApiError::bad_request)?);
-    }
-    fw.policy = req.policy;
-
-    if fw.is_empty() {
-        store.vms.remove(&name);
-    } else {
-        store.vms.insert(name.clone(), fw);
-    }
+    save_guest_rules(&mut store, &name, &req)?;
     save_store(&state, &store)?;
     apply_store(&state.ipam, &store)
         .await
@@ -310,7 +350,7 @@ pub async fn apply_store(ipam: &Ipam, store: &FirewallStore) -> Result<(), Strin
     // Forwarding is only turned on once the NAT rules exist: with a bare
     // bridge and no masquerade, a forwarded packet would leave with a private
     // source address. It is never turned off — the sysctl is host-wide and
-    // shared with libvirt's LXC driver, Docker and anything else on the host.
+    // shared with Docker and anything else on the host.
     if nets.iter().any(|n| n.active && n.mode == Mode::Nat) {
         crate::hostnet::enable_ip_forward()?;
     }

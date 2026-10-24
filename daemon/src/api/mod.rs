@@ -1,5 +1,7 @@
 pub mod capture;
 pub mod console;
+pub mod containers;
+pub mod ct_console;
 pub mod domains;
 pub mod fetch;
 pub mod firewall;
@@ -11,6 +13,7 @@ pub mod nics;
 pub mod pools;
 pub mod qemu;
 pub mod shell;
+pub mod templates;
 pub mod volumes;
 
 use axum::Extension;
@@ -52,6 +55,10 @@ impl ApiError {
     pub fn internal(message: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 /// Run a manager call that waits on a process off the async workers.
@@ -88,6 +95,7 @@ pub fn build(
     ipam: crate::ipam::server::Ipam,
     pools: crate::pools::Pools,
     qemu_manager: crate::qemu::Manager,
+    cts: crate::lxc::Manager,
 ) -> Router {
     let fw = firewall::FirewallState::new(ipam.clone());
     let authed = Router::new()
@@ -110,7 +118,16 @@ pub fn build(
         .merge(pools::routes())
         .merge(volumes::routes())
         .merge(fetch::routes())
-        .merge(qemu::routes(qemu_manager.clone(), ipam.clone(), fw))
+        .merge(qemu::routes(qemu_manager.clone(), ipam.clone(), fw.clone()))
+        .merge(containers::routes(
+            cts.clone(),
+            pools.clone(),
+            ipam.clone(),
+            fw,
+            qemu_manager.clone(),
+        ))
+        .merge(ct_console::routes())
+        .merge(templates::routes())
         .layer(middleware::from_fn(crate::auth::require_token));
 
     // console authenticates via ?token= (browsers can't set WS headers), so it
@@ -124,19 +141,25 @@ pub fn build(
         // The direct-QEMU manager: a volume list and a volume delete ask it
         // which guests hold a disk.
         .layer(Extension(qemu_manager))
+        // LXC containers: the console and the firewall resolve them by id or
+        // title through this.
+        .layer(Extension(cts))
 }
 
-/// What this daemon runs: VMs on direct QEMU.
+/// What this daemon runs: VMs on direct QEMU, containers on LXC's own tools.
 async fn feature_status() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"vms": "qemu"}))
+    Json(serde_json::json!({"vms": "qemu", "containers": "lxc"}))
 }
 
 #[cfg(test)]
 mod feature_tests {
     #[tokio::test]
-    async fn feature_status_reports_direct_qemu_vms_only() {
+    async fn feature_status_reports_qemu_vms_and_lxc_containers() {
         let status = super::feature_status().await.0;
-        assert_eq!(status, serde_json::json!({"vms": "qemu"}));
+        assert_eq!(
+            status,
+            serde_json::json!({"vms": "qemu", "containers": "lxc"})
+        );
     }
 }
 

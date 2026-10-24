@@ -344,15 +344,19 @@ pub fn referencing_domains(
 }
 
 /// Every guest definition the in-use checks must see: the direct-QEMU
-/// manager's stored XMLs. The in-use checks use only this backend's own
-/// definitions, so a disk no manager VM holds is removable.
+/// manager's stored XMLs, and each container's rootfs image as a `<disk>`. A
+/// disk neither manager holds is removable.
 pub fn guest_definitions(manager: &crate::qemu::Manager) -> Vec<(String, String)> {
-    manager
+    let mut out: Vec<(String, String)> = manager
         .list()
         .unwrap_or_default()
         .into_iter()
         .map(|c| (c.id, c.xml))
-        .collect()
+        .collect();
+    if let Some(cts) = crate::lxc::global() {
+        out.extend(cts.disk_definitions());
+    }
+    out
 }
 
 #[cfg(test)]

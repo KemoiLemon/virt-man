@@ -22,7 +22,9 @@ name to import and no migration mode: UUIDs exist from creation.
   canonical UUID is refused on create.
 - **Volume**: a file name inside its pool, not a UUID. The pool UUID plus the
   name is what the API addresses, and in-use checks follow the file path.
-- **Containers**: none. There is no container identity to carry.
+- **Containers**: like a VM, the UUID is `<name>`, `<uuid>` and the key in
+  `containers.json`; `<title>` is the display name. The rootfs volume is
+  `ct-<uuid>.raw`, and the rootfs mount and uid range are keyed by the UUID.
 
 ## Keeping the web metadata attached
 

@@ -62,17 +62,7 @@ fn key_of(pools: &Pools, pool: &str) -> Result<String, ApiError> {
 /// What a volume holds, in Proxmox's content-type words, so the pool page can
 /// split ISO images, container templates and disk images.
 fn content_of(name: &str) -> &'static str {
-    let n = name.to_ascii_lowercase();
-    if n.ends_with(".iso") {
-        "iso"
-    } else if [".tar.xz", ".tar.zst", ".tar.gz", ".tgz", ".tar"]
-        .iter()
-        .any(|s| n.ends_with(s))
-    {
-        "vztmpl"
-    } else {
-        "images"
-    }
+    super::templates::content_of(name)
 }
 
 async fn list(
