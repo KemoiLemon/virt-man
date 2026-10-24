@@ -65,6 +65,12 @@ export const HW_CATALOG: HwType[] = [
     icon: "disk",
     fields: [
       {
+        // UI only: a volume's title is the nickname, and it lives outside the
+        // domain XML. The editor fills the placeholder with the drive's own
+        // name and saves the value through the volume title API.
+        key: "title", label: "Nickname", type: "text",
+      },
+      {
         key: "mode", label: "Source", type: "select", value: "existing",
         options: [
           { value: "existing", label: "Existing Volume" },
@@ -477,6 +483,11 @@ export function deviceSummary(d: HwDevice, resolve?: (kind: "pool" | "network", 
   const named = (kind: "pool" | "network", name: string) => resolve?.(kind, name) || name;
   switch (d.kind) {
     case "disk": {
+      // A nickname wins over the file name, which is what it exists for: the
+      // name on disk is generated and unreadable, the nickname is the label
+      // the user chose.
+      const title = f("title");
+      if (title) return `${title} (${f("bus") || "virtio"})`;
       const path = f("path");
       if (path) return `${path.split("/").pop()} (${f("bus") || "virtio"})`;
       if ((d.fields.mode ?? "existing") === "new") {

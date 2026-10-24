@@ -320,6 +320,16 @@ test("a summary shows the pool and network nickname, not their UUID", () => {
   assert.equal(hw.deviceSummary(disk), "8f0d-uuid/a.qcow2 (virtio)");
 });
 
+test("a disk nickname names it in the hardware list and stays out of the XML", () => {
+  // The nickname is the backing volume's title, not a domain element: libvirt
+  // has nowhere to put it, so the form must never write it into <disk>.
+  const disk = { kind: "disk", fields: { title: "Data", pool: "p", volume: "a.qcow2", bus: "virtio" } };
+  assert.equal(hw.deviceSummary(disk), "Data (virtio)");
+  const xml = hw.deviceXml(disk, 1);
+  assert.match(xml, /volume="a\.qcow2"/, "the volume still carries the disk");
+  assert.doesNotMatch(xml, /Data/, "the nickname is not part of the definition");
+});
+
 test("Format is offered for a path-backed disk, not only a new volume", () => {
   // `deviceXml` writes `fields.format` as the driver type for a path-backed
   // disk as well, so hiding the field (as this used to, behind mode=new) meant

@@ -5937,7 +5937,7 @@ async function createPendingVolumes(
     const sizeGb = Math.max(MIN_DISK_GIB, Number.isFinite(size) ? size : 1);
     const format = (d.fields.format ?? "qcow2") === "raw" ? "raw" : "qcow2";
     const name = nicknameBased
-      ? `${vmName}-disk${newUuid().slice(0, 8)}.${format}`
+      ? `${vmName}-disk${d.fields.new_suffix || newUuid().slice(0, 8)}.${format}`
       : `${vmName}-disk${i + 1}-${sizeGb}gb.${format}`;
     set(`creating ${unitValue(sizeGb, "GiB", "GiB")} GiB volume ${name}`);
     const vol = await api.post<{ name: string; path: string }>(
@@ -5950,6 +5950,27 @@ async function createPendingVolumes(
     // every libvirt, and an unresolvable disk keeps the guest from starting.
     if (vol.path) d.fields.path = vol.path;
     delete d.fields.mode;
+  }
+}
+
+/// Save the nicknames typed into a disk form. The nickname is the backing
+/// volume's title, so it must be written after any new volume exists.
+///
+/// Only a value the editor actually read or the user typed is written: a disk
+/// whose page was never opened carries no `title_loaded`, and writing its empty
+/// field would clear a title that is merely unknown to this form.
+async function applyDiskTitles(conn: string, devices: HwDevice[]) {
+  for (const d of devices) {
+    if (d.kind !== "disk" || d.fields.title_loaded !== "1") continue;
+    const title = (d.fields.title ?? "").trim();
+    if (title === (d.fields.title_original ?? "").trim()) continue;
+    const pool = (d.fields.pool ?? "").trim();
+    const name = (d.fields.volume ?? "").trim();
+    // A path outside every pool has no title to set.
+    if (!pool || !name) continue;
+    await api.put(
+      `/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}/title`,
+      { title });
   }
 }
 
@@ -6167,6 +6188,66 @@ async function openHardwareEditor(opts: {
     }
     return null;
   };
+
+  /// The name a new volume will get. The nickname field shows it greyed so an
+  /// empty field still says which drive it is; the save reuses `new_suffix`
+  /// for the file, so the hint names the file that actually appears.
+  function pendingDiskName(d: HwDevice, index: number): string {
+    const format = (d.fields.format ?? "qcow2") === "raw" ? "raw" : "qcow2";
+    // The chooser's draft has no size yet; its field shows the catalogue's
+    // default, so the preview must use the same number.
+    const fallback = hwType("disk")?.fields.find((f) => f.key === "size_gb")?.value ?? "";
+    const raw = d.fields.size_gb ?? fallback;
+    const size = raw === "" ? 1 : Number(raw);
+    const sizeGb = Math.max(MIN_DISK_GIB, Number.isFinite(size) ? size : 1);
+    const guest = editing
+      ? (isUuid(opts.vm!) ? opts.vm! : general.name.trim() || opts.vm!)
+      : (general.name.trim() || "vm");
+    if (editing) return `${guest}-disk${index + 1}-${sizeGb}gb.${format}`;
+    // Two guests may share a display name, so a new guest's disks carry a
+    // random suffix. It is chosen once, here, and reused by the create.
+    if (!d.fields.new_suffix) d.fields.new_suffix = newUuid().slice(0, 8);
+    return `${guest}-disk${d.fields.new_suffix}.${format}`;
+  }
+
+  /// The drive's own name, for an empty nickname field: the volume name, or
+  /// the file name for a disk that only has a path.
+  function diskDefaultName(d: HwDevice, index: number): string {
+    if ((d.fields.mode ?? "existing") === "new") return pendingDiskName(d, index);
+    const name = (d.fields.volume ?? "").trim();
+    if (name) return name;
+    const path = (d.fields.path ?? "").trim();
+    return path ? path.split("/").pop() ?? path : "";
+  }
+
+  /// Whether there is a volume whose title can carry the nickname. A disk
+  /// attached by a path outside every pool has file names only, so offering
+  /// the field would promise storage that does not exist.
+  function diskTitleWritable(d: HwDevice): boolean {
+    if (!(d.fields.pool ?? "").trim()) return false;
+    return (d.fields.mode ?? "existing") === "new" || !!(d.fields.volume ?? "").trim();
+  }
+
+  /// Read a disk's nickname from its volume, and remember the value the server
+  /// already has, so a save writes only what this form changed.
+  async function loadDiskTitle(d: HwDevice) {
+    if (d.kind !== "disk" || d.fields.title_loaded === "1") return;
+    let pool = (d.fields.pool ?? "").trim();
+    let name = (d.fields.volume ?? "").trim();
+    if (!name) {
+      const path = (d.fields.path ?? "").trim();
+      if (!path) return;
+      const owner = await poolOwning(path);
+      if (!owner) return;
+      pool = owner.pool;
+      name = owner.name;
+    }
+    const v = (await volumes(pool)).find((x) => x.name === name);
+    if (!v) return;
+    d.fields.title = v.title ?? "";
+    d.fields.title_original = d.fields.title;
+    d.fields.title_loaded = "1";
+  }
   // Pools that contain at least one ISO. The cdrom pool dropdown hides
   // every other pool, so a pool with no bootable media never appears.
   let isoPoolsCache: string[] | null = null;
@@ -6301,15 +6382,32 @@ async function openHardwareEditor(opts: {
       }
       // After the pool is settled, so the path is looked up in the right one.
       if (d.kind === "disk" || d.kind === "cdrom") await resolveDevicePath(d);
+      if (d.kind === "disk") {
+        if ((d.fields.mode ?? "existing") === "new") {
+          // Nothing to read yet: the volume is made at save time.
+          if (d.fields.title_loaded !== "1") {
+            d.fields.title_loaded = "1";
+            d.fields.title_original = "";
+          }
+        } else {
+          await loadDiskTitle(d);
+        }
+      }
       // The value reader is the device's own fields, with each field's declared
       // default standing in for one it does not carry.
       const fieldVal = (k: string) =>
         d.fields[k] ?? t.fields.find((x) => x.key === k)?.value ?? "";
       const showAdv = showAdvanced[d.kind] ?? false;
       const fields = await Promise.all(t.fields
+        .filter((f) => !(f.key === "title" && d.kind === "disk" && !diskTitleWritable(d)))
         .filter((f) => visibleField(f, fieldVal, showAdv))
         .map(async (f) => {
         const val = d.fields[f.key] ?? f.value ?? "";
+        if (f.key === "title" && d.kind === "disk") {
+          return `<label class="field"><span>${esc(f.label)}</span>
+            <input data-field="title" type="text" value="${esc(val)}"
+              placeholder="${esc(diskDefaultName(d, i))}"></label>`;
+        }
         if (f.type === "select") {
           let list: string[] = (f.options ?? []).map((o) => o.value);
           if (f.key === "pool") list = d.kind === "cdrom" ? await isoPools() : pools.map((p) => p.name);
@@ -6529,6 +6627,16 @@ async function openHardwareEditor(opts: {
             val = String(clampGib(convert(Number(val), unit, "GiB"), cap.disk));
           }
           devices[i].fields[key] = val;
+          if (devices[i].kind === "disk") {
+            if (key === "title") devices[i].fields.title_loaded = "1";
+            // A different source is a different drive, so its nickname is
+            // read again from the volume it now points at.
+            else if (key === "mode" || key === "pool" || key === "volume") {
+              delete devices[i].fields.title;
+              delete devices[i].fields.title_original;
+              delete devices[i].fields.title_loaded;
+            }
+          }
           // A NIC attaches by the network's bridge, so the two fields are one
           // setting: pick a network and its bridge follows, or the save would
           // write the bridge of the network that was chosen before.
@@ -6592,14 +6700,36 @@ async function openHardwareEditor(opts: {
         if (draft[key] !== undefined) return draft[key];
         return t.fields.find((x) => x.key === key)?.value ?? "";
       };
+      // What an empty nickname field stands for. An existing volume is named
+      // by the dropdown's first entry even before the user touches it; a new
+      // one is named by the file the save will create.
+      let diskTitleDefault = "";
+      let diskTitleAvailable = true;
+      if (kind === "disk") {
+        if ((draft.mode ?? "existing") === "new") {
+          diskTitleAvailable = !!((draft.pool ?? pools[0]?.name ?? "").trim());
+          diskTitleDefault = pendingDiskName({ kind, fields: draft }, devices.length);
+        } else {
+          const list = await volumes(draft.pool ?? pools[0]?.name ?? "");
+          diskTitleAvailable = !!draft.volume || list.length > 0;
+          diskTitleDefault = draft.volume ?? list[0]?.name ?? "";
+        }
+      }
       // `visibleField` keeps the form to the fields relevant to the current
       // choices (e.g. an existing-volume disk shows pool+volume, a new-volume
       // disk shows pool+size+format, and an optional extra stays behind the
       // "advanced" toggle). The chooser reads from `draft`, so an option stays
       // hidden until the user is editing it.
-      const visible = t.fields.filter((f) => visibleField(f, fieldValue, addAdvanced));
+      const visible = t.fields
+        .filter((f) => !(f.key === "title" && kind === "disk" && !diskTitleAvailable))
+        .filter((f) => visibleField(f, fieldValue, addAdvanced));
       const fields = await Promise.all(visible.map(async (f) => {
         const val = draft[f.key] ?? f.value ?? "";
+        if (f.key === "title" && kind === "disk") {
+          return `<label class="field"><span>${esc(f.label)}</span>
+            <input data-af="title" type="text" value="${esc(val)}"
+              placeholder="${esc(diskTitleDefault)}"></label>`;
+        }
         if (f.type === "select") {
           let list: string[] = (f.options ?? []).map((o) => o.value);
           if (f.key === "pool") list = kind === "cdrom" ? await isoPools() : pools.map((p) => p.name);
@@ -6690,6 +6820,16 @@ async function openHardwareEditor(opts: {
             ? String(clampGib(convert(Number((n as HTMLInputElement).value),
               (draft.size_unit as StorageUnit) || STORAGE_DEFAULT, "GiB"), cap.disk))
             : (n as HTMLInputElement).value;
+          if (kind === "disk") {
+            if (key === "title") draft.title_loaded = "1";
+            // A different source is a different drive, so its nickname is
+            // read again from the volume it now points at.
+            else if (key === "mode" || key === "pool" || key === "volume") {
+              delete draft.title;
+              delete draft.title_original;
+              delete draft.title_loaded;
+            }
+          }
           // Keep a gl device and 3D acceleration in step; see the device page.
           if (kind === "video") {
             if (key === "device" && draft.device.endsWith("-gl")) draft.accel3d = "yes";
@@ -6783,6 +6923,8 @@ async function openHardwareEditor(opts: {
         set("rebuilding domain definition");
         // Create any "new volume" disks before the XML references them.
         await createPendingVolumes(conn, target, devices, set);
+        // Nicknames are volume titles, so they need the volume to exist.
+        await applyDiskTitles(conn, devices);
         // Strip the devices this editor owns, then splice the current set back
         // in, so libvirt-added devices we do not model survive the round trip.
         const stripped = baseXml
@@ -6893,6 +7035,7 @@ async function openHardwareEditor(opts: {
       form.disk_path = disk.path;
       // Create any additional "new volume" disks before defining the domain.
       await createPendingVolumes(conn, form.name, devices, set, made, true);
+      await applyDiskTitles(conn, devices);
       set("defining domain");
       // Defined shut off: creating a guest must not also boot it, so a
       // mis-sized or mis-configured VM cannot start eating resources before
@@ -6925,6 +7068,12 @@ async function openHardwareEditor(opts: {
       });
   };
 
+  // Read each disk's nickname before the first paint, so the hardware list
+  // names drives the way their owner does. Opening a disk page does this too,
+  // but the sidebar would otherwise show the generated file name until then.
+  for (const d of devices) {
+    if (d.kind === "disk") await loadDiskTitle(d);
+  }
   void render();
 }
 
