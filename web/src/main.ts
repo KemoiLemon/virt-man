@@ -6262,6 +6262,8 @@ async function openHardwareEditor(opts: {
     }
     const v = (await volumes(pool)).find((x) => x.name === name);
     if (!v) return;
+    // Display only: the list row shows the size beside the nickname.
+    d.fields.cap_gib = String(v.capacity / 2 ** 30);
     d.fields.title = v.title ?? "";
     d.fields.title_original = d.fields.title;
     d.fields.title_loaded = "1";
@@ -6281,6 +6283,9 @@ async function openHardwareEditor(opts: {
     return out;
   };
   newDisk.pool = pools[0]?.name ?? "";
+  // The list rows read the nickname and size, so load them before the first
+  // paint rather than when each disk's page is opened.
+  if (editing) await Promise.all(devices.map(loadDiskTitle));
 
   // New VMs start with an empty CD/DVD drive and a network NIC, so both a
   // boot ISO and connectivity are one click away instead of buried in
