@@ -209,11 +209,18 @@ table.grid tr.row-open:hover td:first-child { color: var(--accent); }
    real layout classes, so they take the space the content will take. */
 /* display:contents so the placeholders become items of the caller's grid. */
 .skeleton { display: contents; pointer-events: none; }
+/* A highlight sweeps across each bar, and the whole placeholder fades up as it
+   appears, so loading reads as in progress rather than as a grey flash. */
 .sk {
   display: block; max-width: 100%;
-  background: var(--line);
-  animation: sk-pulse 1.2s ease-in-out infinite;
+  background: linear-gradient(100deg, var(--line) 30%, var(--line2) 50%, var(--line) 70%);
+  background-size: 250% 100%;
+  animation: sk-sweep 1.3s ease-in-out infinite;
 }
+.skeleton > * { animation: vm-rise .3s ease-out both; }
+.skeleton > :nth-child(2) { animation-delay: .06s; }
+.skeleton > :nth-child(3) { animation-delay: .12s; }
+.skeleton > :nth-child(4) { animation-delay: .18s; }
 .sk-ic { width: 19px; height: 19px; flex: 0 0 19px; }
 .sk-col { display: flex; flex-direction: column; gap: 6px; }
 .sk-rows { border: 1px solid var(--line); }
@@ -223,7 +230,7 @@ table.grid tr.row-open:hover td:first-child { color: var(--accent); }
 }
 .sk-row:last-child { border-bottom: none; }
 .skeleton .dhead { gap: 10px; }
-@keyframes sk-pulse { 50% { opacity: .45; } }
+@keyframes sk-sweep { from { background-position: 150% 0; } to { background-position: -50% 0; } }
 @media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
 
 /* ---------------------------------------------------------- chart range */

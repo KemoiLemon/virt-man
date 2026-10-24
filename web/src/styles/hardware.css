@@ -3,6 +3,7 @@
    form fills the pane on the right. */
 
 .hw-modal { width: 860px; max-width: 96vw; height: 620px; max-height: 92vh; }
+.hw-modal .modal-body, .add-hw-modal .modal-body { flex: 1 1 auto; min-height: 0; }
 .hw-body { flex: 1; display: grid; grid-template-columns: 210px 1fr; min-height: 0; }
 
 .hw-side {

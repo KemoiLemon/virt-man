@@ -1,9 +1,8 @@
 import { openCropDialog } from "./crop";
-import { api, cacheFirst, effectiveLimit, remainingLimits, uploadWithProgress } from "./api";
+import { api, cacheFirst, effectiveLimit, pendingReads, pollWindow, remainingLimits, uploadWithProgress } from "./api";
 import type { AdminResource, ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, StagedUpload, UsageCounts, User, VolumeSummary } from "./api";
 import { adminRowMenu, adminTitle, adminTree, assignOwner, limitSpecs, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole, detachConsole } from "./console";
-import { setSpeed, speed, speedOptions } from "./console-speed";
 // The text console (xterm.js) is loaded when a container console or a host
 // shell opens: it would otherwise more than double the bundle every page load
 // pays for.
@@ -28,6 +27,8 @@ import { DIR_LABEL, GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmt
 import type { FlowDir, Group, Kind, LogFilter } from "./access";
 import type { DomainStats, HostStats } from "./stats";
 import { runTask } from "./task";
+import { initIndicators } from "./indicator";
+import { morphChildren } from "./morph";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
 import { addDisplay, autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
@@ -66,6 +67,34 @@ function relTime(ms: number): string {
 /// Single HTML injection point. Every template's dynamic parts are escaped via
 /// esc() at the call site; DOMPurify is the sanitizing backstop the XSS rule
 /// requires.
+/// Run a CSS animation class on `el` from the start: take the class off, force
+/// a reflow so the browser forgets it, put it back, and remove it when the
+/// animation is over so it can be replayed.
+function replay(el: Element, cls: string, ms: number) {
+  el.classList.remove(cls);
+  void (el as HTMLElement).offsetWidth;
+  el.classList.add(cls);
+  window.setTimeout(() => el.classList.remove(cls), ms);
+}
+
+/// Entering or leaving the admin page swaps the sidebar and the content, which
+/// would otherwise cut: slide them in from the side they came from.
+function swapAnim(toAdmin: boolean) {
+  const dir = toAdmin ? "swap-right" : "swap-left";
+  for (const id of ["tree", "content"]) {
+    const el = document.getElementById(id);
+    if (el) {
+      el.classList.remove("swap-right", "swap-left");
+      replay(el, dir, 450);
+    }
+  }
+  const b = document.getElementById("admin-btn");
+  if (b) replay(b, "turn", 450);
+}
+
+/// The path each container was last painted at; see `setHtml`.
+const painted = new WeakMap<Element, string>();
+
 function setHtml(el: Element, html: string) {
   // A poll repaints the whole pane, so a table that is its own horizontal
   // scroller would jump back to column 1 every second. Keep each table's
@@ -76,8 +105,23 @@ function setHtml(el: Element, html: string) {
   const scrollLeft = newView
     ? []
     : [...el.querySelectorAll("table.grid")].map((t) => t.scrollLeft);
+  const hadSkeleton = !!el.querySelector(".skeleton");
+  const clean = DOMPurify.sanitize(html);
+  // The same view painted again (the poll, an edit) is patched in place, so
+  // what the browser is doing with the nodes survives; a different view
+  // (another path) starts from scratch, since nothing in it corresponds.
   // pi-lens-ignore: no-inner-html, no-inner-html-js
-  el.innerHTML = DOMPurify.sanitize(html);
+  if (el.firstChild && painted.get(el) === location.pathname) {
+    const next = el.cloneNode(false) as Element;
+    // pi-lens-ignore: no-inner-html, no-inner-html-js
+    next.innerHTML = clean;
+    morphChildren(el, next);
+  } else {
+    // pi-lens-ignore: no-inner-html, no-inner-html-js
+    el.innerHTML = clean;
+  }
+  painted.set(el, location.pathname);
+  if (hadSkeleton && !el.querySelector(".skeleton")) replay(el, "sk-reveal", 900);
   [...el.querySelectorAll("table.grid")].forEach((t, i) => {
     if (scrollLeft[i]) t.scrollLeft = scrollLeft[i];
   });
@@ -2143,9 +2187,11 @@ function openAdmin(section: AdminSection = adminSection ?? "dashboard", tab?: Ad
   // Staying in a section keeps its tab; entering one starts at its first.
   if (tab) adminTab = tab;
   else if (section !== adminSection || !adminTab) adminTab = ADMIN_TABS[section]?.[0];
+  const entering = !adminSection;
   adminSection = section;
   renderTree();
   renderAdmin();
+  if (entering) swapAnim(true);
 }
 
 /// The return button: back to the view the admin page was opened from, or
@@ -2154,6 +2200,7 @@ function leaveAdmin() {
   applyRoute(lastNonAdminRoute ?? { view: "dc", tab: "dashboard" });
   adminSection = null;
   renderCurrent();
+  swapAnim(false);
 }
 
 /// The admin button stays where it is and becomes a return button while the
@@ -4483,20 +4530,13 @@ async function renderVmBody(vm: string) {
     return;
   }
   if (vmTab === "console") {
-    const zoomLabel = (z: number) => (z === 0 ? "Fit" : `${Math.round(z * 100)}%`);
+    const zoomLabel = (z: number) => (z === 0 ? "Fit" : "100%");
     setHtml(body, `
       <div class="console-bar">
         <span class="console-group">
-          <button class="btn icon" id="con-zoom-out" title="Zoom Out">${ic.zoomOut()}</button>
-          <button class="btn" id="con-zoom-reset" title="Fit to Window">${zoomLabel(consoleZoom)}</button>
-          <button class="btn icon" id="con-zoom-in" title="Zoom in">${ic.zoomIn()}</button>
-          <button class="btn icon" id="con-fit" title="Fit to Window">${ic.fit()}</button>
+          <button class="btn" id="con-zoom-reset" title="Switch between Fit and 100%">${zoomLabel(consoleZoom)}</button>
         </span>
         <span class="console-group" style="margin-left:auto">
-          <label class="console-speed" title="${esc(speed().hint)}">
-            <span class="console-speed-label">Speed</span>
-            <select id="con-speed" aria-label="Console Speed">${speedOptions()}</select>
-          </label>
           <button class="btn icon" id="con-type" title="Type text into the guest">${ic.clipboard()}</button>
           <button class="btn" id="con-cad" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
         </span>
@@ -4511,17 +4551,6 @@ async function renderVmBody(vm: string) {
       if (h) h.textContent = t;
     };
 
-    // The speed picker is a local preference, not a console capability: it
-    // persists and stays usable even when the viewer cannot attach, because
-    // the choice still applies to the session that eventually does connect.
-    const speedSel = $("#con-speed") as HTMLSelectElement | null;
-    if (speedSel) {
-      speedSel.onchange = () => {
-        const s = setSpeed(speedSel.value);
-        setHint(`${s.label}: ${s.hint}`);
-      };
-    }
-
     try {
       const g = await api.get<{ graphics: { kind: string } | null }>(`${guestBase(selectedConn!, vm)}/graphics`);
       const kind = g.graphics?.kind ?? "vnc";
@@ -4530,7 +4559,7 @@ async function renderVmBody(vm: string) {
       // SPICE is not RFB and has no usable browser client, so hand the guest
       // over to virt-viewer instead of pretending to render it here.
       if (kind !== "vnc") {
-        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad", "#con-type"]) {
+        for (const id of ["#con-zoom-reset", "#con-cad", "#con-type"]) {
           const el = $(id);
           if (el) el.disabled = true;
         }
@@ -4553,19 +4582,12 @@ async function renderVmBody(vm: string) {
           m.textContent = msg ?? "";
           m.classList.toggle("hidden", !msg);
         }
-      }, (z) => {
-        // A pinch changes the zoom without going near the toolbar, so the
-        // label and the Ctrl+wheel stepping base have to follow it rather than
-        // sit on whatever the last button click left behind.
-        consoleZoom = z;
-        const b = $("#con-zoom-reset");
-        if (b) b.textContent = zoomLabel(z);
       });
 
       if (!con) {
         // The daemon refused to attach. Leave the toolbar visible but inert
         // rather than silently dead, and say why.
-        for (const id of ["#con-zoom-in", "#con-zoom-out", "#con-fit", "#con-zoom-reset", "#con-cad", "#con-type"]) {
+        for (const id of ["#con-zoom-reset", "#con-cad", "#con-type"]) {
           const el = $(id);
           if (el) el.disabled = true;
         }
@@ -4574,33 +4596,17 @@ async function renderVmBody(vm: string) {
       }
 
       setHint(isCoarsePointer()
-        ? "Tap to click, drag to drag, two-finger to scroll, pinch to zoom."
-        : "Click the screen to grab input. Ctrl+wheel zooms.");
+        ? "Tap to click, long-press to right-click, two fingers to scroll."
+        : "Click the screen to grab input.");
 
-      const setZoomLabel = () => {
-        const b = $("#con-zoom-reset");
-        if (b) b.textContent = zoomLabel(con.getZoom());
-      };
-      const nudge = (dir: 1 | -1) => {
-        // Stepping from Fit starts at 1:1 so the first click is predictable.
-        const base = con.getZoom() || 1;
-        const next = Math.min(4, Math.max(0.25, +(base + dir * 0.25).toFixed(2)));
+      const toggleFit = () => {
+        const next = con.getZoom() === 0 ? 1 : 0;
         con.setZoom(next);
         consoleZoom = next;
-        setZoomLabel();
+        const b = $("#con-zoom-reset");
+        if (b) b.textContent = zoomLabel(next);
       };
-      $("#con-zoom-in").onclick = () => nudge(1);
-      $("#con-zoom-out").onclick = () => nudge(-1);
-      const fit = () => { con.setZoom(0); consoleZoom = 0; setZoomLabel(); };
-      $("#con-fit").onclick = fit;
-      $("#con-zoom-reset").onclick = fit;
-
-      // Ctrl+wheel zooms locally instead of scrolling the guest.
-      $("#console-stage").addEventListener("wheel", (e: WheelEvent) => {
-        if (!e.ctrlKey) return;
-        e.preventDefault();
-        nudge(e.deltaY < 0 ? 1 : -1);
-      }, { passive: false });
+      $("#con-zoom-reset").onclick = toggleFit;
 
       $("#con-cad").onclick = () => void con.sendCtrlAltDel();
       $("#con-type").onclick = () => void typeIntoGuest(con);
@@ -4612,7 +4618,6 @@ async function renderVmBody(vm: string) {
       consoleResizeObserver?.disconnect();
       consoleResizeObserver = ro;
 
-      setZoomLabel();
     } catch (e) {
       const m = $("#console-msg");
       if (m) m.textContent = (e as Error).message;
@@ -5639,6 +5644,22 @@ setHtml(el, `
       <div class="modal-foot">${foot}</div>
     </div>`);
   document.body.appendChild(el);
+  // Every dialog is closed by calling `el.remove()`, so the exit animation
+  // lives here instead of at each call site. The dialog is inert while it
+  // fades, so it takes no clicks or focus; with no matchMedia (jsdom) or a
+  // reduced-motion preference it goes at once.
+  const removeNow = el.remove.bind(el);
+  let closing = false;
+  el.remove = () => {
+    if (closing) return;
+    const animate = el.isConnected && typeof matchMedia === "function"
+      && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!animate) return removeNow();
+    closing = true;
+    el.inert = true;
+    el.classList.add("closing");
+    setTimeout(removeNow, 140);
+  };
   (el.querySelector(".x") as HTMLElement).onclick = () => el.remove();
   el.onclick = (e) => { if (e.target === el) el.remove(); };
   // The global Escape handler dispatches this; askText/askConfirm add their
@@ -7968,38 +7989,49 @@ function busyScrolling(): boolean {
 
 function startPolling() {
   if (pollTimer) window.clearInterval(pollTimer);
+  // One round at a time: a tick that finds reads still undelivered does
+  // nothing. `api.ts` delivers a round at most once a second, and the tick is
+  // finer than that so the next round starts as soon as the last one has
+  // landed, which keeps the cadence at the delivery pace instead of at every
+  // other tick.
   pollTimer = window.setInterval(() => {
-    if (!user) return;
+    if (!user || pendingReads() > 0) return;
     // A repaint replaces the node the browser is scrolling, which detaches the
     // touch gesture: a drag over a table would stop dead mid-flick.
     if (busyScrolling()) return;
-    void refreshHealth();
-    // The admin page reads on demand; re-reading every daemon's resources
-    // each second would be the costliest poll in the app for no gain.
-    if (adminSection) return;
-    // A down server's views show the offline panel; polling its daemon would
-    // only fail again and paint the raw error over it.
-    if (isOffline(selectedConn)) return;
-    // Keep the sidebar's guest states live regardless of the open pane.
-    void refreshTreeVms();
-    if (!selectedConn && !selectedVm && dcTab === "dashboard") {
-      loadDcDashboard();
-    } else if (selectedConn && !selectedVm) {
-      // Resource pages poll their own data; only repaint when they are the
-      // view actually on screen.
-      if (selectedNet) renderNetPage();
-      else if (selectedPool) renderPoolPage();
-      else if (connTab === "dashboard") loadDashboard();
-      else if (connTab === "vms") loadVms();
-      else if (connTab === "containers") loadCts();
-      else if (connTab === "networks") loadNetworks();
-      else if (connTab === "storage") loadPools();
-      // The shell is a live session, not data to re-read; nothing to poll.
-      else if (connTab === "firewall") loadFilters();
-    } else if (selectedConn && selectedVm && vmTab === "summary") {
-      renderVmBody(selectedVm);
-    }
-  }, 1000);
+    pollWindow(pollRound);
+  }, 250);
+}
+
+/// One poll round: the reads it starts are delivered together at the next
+/// update slot (`api.ts`), so the views repaint once.
+function pollRound() {
+  void refreshHealth();
+  // The admin page reads on demand; re-reading every daemon's resources
+  // each second would be the costliest poll in the app for no gain.
+  if (adminSection) return;
+  // A down server's views show the offline panel; polling its daemon would
+  // only fail again and paint the raw error over it.
+  if (isOffline(selectedConn)) return;
+  // Keep the sidebar's guest states live regardless of the open pane.
+  void refreshTreeVms();
+  if (!selectedConn && !selectedVm && dcTab === "dashboard") {
+    loadDcDashboard();
+  } else if (selectedConn && !selectedVm) {
+    // Resource pages poll their own data; only repaint when they are the
+    // view actually on screen.
+    if (selectedNet) renderNetPage();
+    else if (selectedPool) renderPoolPage();
+    else if (connTab === "dashboard") loadDashboard();
+    else if (connTab === "vms") loadVms();
+    else if (connTab === "containers") loadCts();
+    else if (connTab === "networks") loadNetworks();
+    else if (connTab === "storage") loadPools();
+    // The shell is a live session, not data to re-read; nothing to poll.
+    else if (connTab === "firewall") loadFilters();
+  } else if (selectedConn && selectedVm && vmTab === "summary") {
+    renderVmBody(selectedVm);
+  }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -8008,4 +8040,5 @@ function cssId(s: string): string {
   return s.replace(/[^a-zA-Z0-9]/g, "_");
 }
 
+initIndicators();
 boot();

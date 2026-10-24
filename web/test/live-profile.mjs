@@ -403,23 +403,31 @@ check("roles list the built-ins with their privileges, fixed", () => {
 });
 click(document.querySelector("#add-role"));
 await wait(300);
-check("the role editor offers Yes/No choices for every enforced privilege", () => {
+check("the role editor offers a switch for every enforced privilege", () => {
   const privs = [...topModal().querySelectorAll("[data-priv]")].map((c) => c.dataset.priv);
   for (const want of ["VM.Allocate", "VM.Audit", "VM.PowerMgmt", "Network.Use", "Bridge.Use", "Datastore.AllocateSpace"]) {
     assert.ok(privs.includes(want), `${want} offered`);
   }
 });
 topModal().querySelector("#r-name").value = "ProbeRole";
-click(topModal().querySelector('[data-priv="VM.Audit"][data-value="yes"]'));
-click(topModal().querySelector('[data-priv="VM.Console"][data-value="yes"]'));
-check("subsystem master Yes selects all its privileges", () => {
-  click(topModal().querySelector('[data-master="VM"][data-value="yes"]'));
-  for (const b of topModal().querySelectorAll('[data-priv^="VM."][data-value="yes"]')) {
-    assert.equal(b.getAttribute("aria-pressed"), "true");
+// A switch: click it only when it is not already in the wanted state.
+const flip = (sel, on) => {
+  const sw = topModal().querySelector(sel);
+  if (sw.checked !== on) click(sw);
+};
+flip('[data-priv="VM.Audit"]', true);
+flip('[data-priv="VM.Console"]', true);
+check("subsystem master switch selects all its privileges", () => {
+  flip('[data-master="VM"]', true);
+  for (const b of topModal().querySelectorAll('[data-priv^="VM."]')) {
+    assert.equal(b.checked, true);
   }
-  click(topModal().querySelector('[data-master="VM"][data-value="no"]'));
-  click(topModal().querySelector('[data-priv="VM.Audit"][data-value="yes"]'));
-  click(topModal().querySelector('[data-priv="VM.Console"][data-value="yes"]'));
+  flip('[data-master="VM"]', false);
+  for (const b of topModal().querySelectorAll('[data-priv^="VM."]')) {
+    assert.equal(b.checked, false);
+  }
+  flip('[data-priv="VM.Audit"]', true);
+  flip('[data-priv="VM.Console"]', true);
 });
 click(topModal().querySelector("#r-save"));
 await wait(1500);

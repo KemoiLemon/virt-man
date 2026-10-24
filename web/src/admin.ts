@@ -423,6 +423,27 @@ function openGroup(ctx: AdminCtx, g: GroupDef | null) {
 // ------------------------------------------------------------------- roles
 
 /// Privileges grouped by their prefix, for a readable editor.
+/// Role editor wording for the privilege names, which are the ACL's own
+/// identifiers. An unknown one falls back to its name split into words.
+const GROUP_TITLES: Record<string, string> = {
+  Sys: "System", VM: "Virtual Machines", CT: "Containers", Network: "Networks",
+  Datastore: "Storage", Bridge: "Bridges", Permissions: "Permissions",
+};
+const PRIV_TITLES: Record<string, string> = {
+  "Sys.Audit": "View Servers", "Sys.Modify": "Manage Servers",
+  "VM.Audit": "View", "VM.Allocate": "Create & Delete", "VM.Config": "Edit Configuration",
+  "VM.PowerMgmt": "Power Control", "VM.Console": "Open Console",
+  "CT.Audit": "View", "CT.Allocate": "Create & Delete", "CT.Config": "Edit Configuration",
+  "CT.PowerMgmt": "Power Control", "CT.Console": "Open Console", "CT.Privileged": "Run Privileged",
+  "Network.Audit": "View", "Network.Allocate": "Create & Delete", "Network.Config": "Edit",
+  "Network.Use": "Attach VMs",
+  "Datastore.Audit": "View", "Datastore.AllocateSpace": "Create Volumes", "Datastore.Allocate": "Manage Pools",
+  "Bridge.Use": "Use Bridges", "Permissions.Modify": "Manage Users & Permissions",
+};
+const groupTitle = (g: string) => GROUP_TITLES[g] ?? g;
+const privTitle = (p: string) =>
+  PRIV_TITLES[p] ?? p.split(".")[1].replace(/([a-z])([A-Z])/g, "$1 $2");
+
 function privGroups(): [string, string[]][] {
   const by = new Map<string, string[]>();
   for (const p of privileges) {
@@ -467,35 +488,32 @@ function openRole(ctx: AdminCtx, r: RoleDef | null) {
     r ? `Role — ${esc(r.name)}` : "New Role",
     `<label class="field"><span>Name</span><input id="r-name" value="${esc(r?.name ?? "")}" ${ro ? "disabled" : ""} placeholder="BackupOperator"></label>
      ${privGroups().map(([grp, ps]) => `
-       <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">${esc(grp)}
-         <span class="perm-choice"><button type="button" data-master="${esc(grp)}" data-value="yes" ${ro ? "disabled" : ""}>Yes</button><button type="button" data-master="${esc(grp)}" data-value="no" ${ro ? "disabled" : ""}>No</button></span>
-       </div>
-       <table class="grid"><tbody>${ps.map((p) => `<tr><td>${esc(p.split(".")[1])}</td><td class="col-actions"><span class="perm-choice">
-         <button type="button" data-priv="${esc(p)}" data-value="yes" ${ro ? "disabled" : ""}>Yes</button><button type="button" data-priv="${esc(p)}" data-value="no" ${ro ? "disabled" : ""}>No</button>
-       </span></td></tr>`).join("")}</tbody></table>`).join("")}`,
+       <div class="perm-box">
+       <table class="grid"><tbody>
+       <tr class="perm-head"><td>${esc(groupTitle(grp))}</td><td class="col-actions"><input type="checkbox" class="switch" data-master="${esc(grp)}" aria-label="${esc(groupTitle(grp))}" ${ro ? "disabled" : ""}></td></tr>
+       ${ps.map((p) => `<tr><td>${esc(privTitle(p))}</td><td class="col-actions"><input type="checkbox" class="switch" data-priv="${esc(p)}" aria-label="${esc(privTitle(p))}" ${ro ? "disabled" : ""}></td></tr>`).join("")}</tbody></table>
+       </div>`).join("")}`,
     ro ? `<button class="btn primary" id="r-cancel">Close</button>`
       : `<button class="btn" id="r-cancel">Cancel</button><button class="btn primary" id="r-save">Save</button>`,
   );
   const selected = new Set(r?.privs ?? []);
   const sync = () => {
-    el.querySelectorAll<HTMLButtonElement>("[data-priv]").forEach((b) => {
-      b.setAttribute("aria-pressed", String((b.dataset.value === "yes") === selected.has(b.dataset.priv!)));
+    el.querySelectorAll<HTMLInputElement>("[data-priv]").forEach((b) => {
+      b.checked = selected.has(b.dataset.priv!);
     });
     for (const [group, ps] of privGroups()) {
-      const all = ps.every((p) => selected.has(p));
-      const none = ps.every((p) => !selected.has(p));
-      el.querySelectorAll<HTMLButtonElement>(`[data-master="${group}"]`).forEach((b) => {
-        b.setAttribute("aria-pressed", String(b.dataset.value === "yes" ? all : none));
+      el.querySelectorAll<HTMLInputElement>(`[data-master="${group}"]`).forEach((b) => {
+        b.checked = ps.every((p) => selected.has(p));
       });
     }
   };
-  el.querySelectorAll<HTMLButtonElement>("[data-priv]").forEach((b) => b.onclick = () => {
-    if (b.dataset.value === "yes") selected.add(b.dataset.priv!); else selected.delete(b.dataset.priv!);
+  el.querySelectorAll<HTMLInputElement>("[data-priv]").forEach((b) => b.onchange = () => {
+    if (b.checked) selected.add(b.dataset.priv!); else selected.delete(b.dataset.priv!);
     sync();
   });
-  el.querySelectorAll<HTMLButtonElement>("[data-master]").forEach((b) => b.onclick = () => {
+  el.querySelectorAll<HTMLInputElement>("[data-master]").forEach((b) => b.onchange = () => {
     for (const p of privGroups().find(([group]) => group === b.dataset.master)?.[1] ?? []) {
-      if (b.dataset.value === "yes") selected.add(p); else selected.delete(p);
+      if (b.checked) selected.add(p); else selected.delete(p);
     }
     sync();
   });
@@ -1334,7 +1352,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
         ${card(ic.key(20), keys.length, "API KEYS", "", "keys")}
       </div>
       <div class="sumgrid">
-        ${panel(ic.server(), "Daemons", `${online}/${conns.length}`, conns.length ? (online / conns.length) * 100 : 0,
+        ${panel(ic.server(), "Daemons", String(conns.length), conns.length ? (online / conns.length) * 100 : 0,
           `${online} online`, `${conns.length - online} offline`, "daemons")}
         ${panel(ic.vms(), "VMs", String(vms.length), vms.length ? (running / vms.length) * 100 : 0,
           `${running} running`, `${ownedByUsers} owned by users`, "vms")}

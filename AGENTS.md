@@ -147,6 +147,23 @@ returned"). Every path that leaves a resource page must also run
 runs `DOMPurify.sanitize` *and* `enhanceSelects`. Assigning `innerHTML`
 directly skips both, so the listbox silently stops working.
 
+**A repaint of the same view patches the DOM, it does not replace it.**
+(`web/src/morph.ts`, used by `setHtml` when the container was last painted at
+the same `location.pathname`.) The 1 s poll used to rebuild whole panes, which
+killed hover, CSS transitions, scroll and focus. Now a node that is still there
+is the same node. Rules that follow from it:
+
+- **A kept node is wiped of its handlers before you bind again** (`on*`
+  properties and anything added with `addEventListener`, which `morph.ts`
+  records), so bind after every `setHtml` as before. A listener that must
+  outlive repaints goes through `addPermanentListener`.
+- **Form controls read as the template says**, except the focused one, which
+  keeps its value and focus.
+- **Nodes the app inserts itself** (`.select-trigger`, `.sel-bar`) are skipped by
+  the diff; a new kind needs adding to `owned()`.
+- A different path starts from scratch (`innerHTML`), since nothing in it
+  corresponds to the old view.
+
 **Icons: one file per glyph** (`web/src/icons.ts`). Icons are Phosphor *fill*,
 each imported as `@phosphor-icons/core/assets/fill/<name>-fill.svg?raw`; the
 package's JS entry carries every icon in every weight, so importing from it

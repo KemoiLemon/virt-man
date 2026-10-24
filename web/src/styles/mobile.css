@@ -75,7 +75,6 @@
   .limit-grid { grid-template-columns: 1fr 1fr; }
   .admin-filters .field { flex: 1 1 100%; }
   .card-grid { grid-template-columns: 1fr; }
-  .create-resource-grid { grid-template-columns: 1fr 1fr; }
   /* The hardware table's label column is minmax(150px,210px): there is no room
      for a label beside a control, so they stack. */
   .hwtable .hwrow { grid-template-columns: 20px 1fr; }

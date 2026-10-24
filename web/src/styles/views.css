@@ -2,14 +2,14 @@
    Ported from vm-man (ui/dashboard.css, ui/base.css). */
 
 /* ------------------------------------------------------- resource tree */
-.restree { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 0; }
+.restree { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 0; position: relative; }
 .tree-row {
   width: 100%; display: flex; align-items: center; gap: 9px;
   padding: 7px 12px; background: none; border: 0; color: var(--fg);
   font: inherit; font-size: 12px; text-align: left; cursor: pointer;
 }
 .tree-row:hover { background: var(--hover); }
-.tree-row.sel { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
+.tree-row.sel { background: var(--panel2); }
 .tree-root { font-weight: 600; border-bottom: 1px solid var(--line); }
 .tree-group { padding-left: 10px; }
 .tree-vm { padding-left: 26px; }
@@ -42,7 +42,7 @@ table.grid td.tname:hover { color: var(--accent); }
 
 /* ------------------------------------------------------------- tab bar */
 .tabbar {
-  flex: 0 0 auto; display: flex; gap: 0; overflow-x: auto;
+  flex: 0 0 auto; display: flex; gap: 0; overflow-x: auto; position: relative;
   border-bottom: 1px solid var(--line); background: var(--panel);
 }
 .tab {
@@ -52,7 +52,7 @@ table.grid td.tname:hover { color: var(--accent); }
 }
 .tab .ico { width: 14px; height: 14px; }
 .tab:hover { color: var(--fg); background: var(--hover); }
-.tab.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--panel2); }
+.tab.active { color: var(--accent); background: var(--panel2); }
 /* View actions sit on the tab bar itself, flush with the trailing edge so
    they line up with the cards and tables below (the detail pane supplies the
    outer gutter). */
@@ -228,6 +228,12 @@ table.grid + .actions { margin-top: 12px; }
   display: inline-block; margin: 0 5px 3px 0; padding: 1px 6px;
   border: 1px solid var(--line); font-size: 11px; color: var(--dim);
 }
+/* One category of privileges. The modal body's gap spaces the categories. */
+.perm-head td {
+  font-weight: 700; font-size: 14px; letter-spacing: 1px;
+  color: var(--accent); background: var(--panel2);
+  border-bottom: 2px solid var(--line2); padding-top: 12px; padding-bottom: 12px;
+}
 .perm-choice { display: inline-flex; gap: 0; }
 .perm-choice button {
   min-width: 42px; padding: 3px 8px; border: 1px solid var(--line);
@@ -337,3 +343,84 @@ th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
 .al-foot .dsub { margin-bottom: 0; font-size: 12px; }
 .al-pager { display: flex; align-items: center; gap: 6px; }
 .al-live.on { border-color: var(--bad); color: var(--bad); }
+
+/* ------------------------------------------------------------------ motion
+   Short eases on hover and appearance. One block so it is easy to find and
+   to switch off: it is all gated by prefers-reduced-motion at the bottom. */
+.btn, .tab, .tree-row, .hw-item, .hwrow, .add-hw-type, .hw-add, .select-trigger,
+.select-option, .ctxmenu-item, .side-profile, .admin-card-link, .create-resource-card,
+.storage-card, .x, .toast-close, .row-link, table.grid td, input, select, textarea {
+  transition: background-color .14s ease, border-color .14s ease, color .14s ease,
+              box-shadow .14s ease, transform .14s ease;
+}
+.tree-ic, .storage-card-icon, .metric-ic, .card-ic, .ico { transition: color .14s ease; }
+
+/* The sidebar's rows slide in by a hair on hover and settle back after. Only
+   where there is a real hover: on a touch screen it would stick after a tap. */
+.tree-row > * { transition: transform .14s ease; }
+@media (hover: hover) {
+  .tree-row:hover > * { transform: translateX(2px); }
+  .create-resource-card:hover, .storage-card[data-open]:hover { transform: translateY(-1px); }
+  .btn:not(:disabled):hover { transform: translateY(-1px); }
+  .btn:not(:disabled):active { transform: translateY(1px); }
+}
+
+/* Dialogs, menus and listboxes ease in rather than appearing. */
+@keyframes vm-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes vm-pop-in { from { opacity: 0; transform: translateY(6px) scale(.985); } to { opacity: 1; transform: none; } }
+.modal-back.open { animation: vm-fade-in .14s ease-out; }
+.modal-back.open > .modal { animation: vm-pop-in .16s ease-out; }
+@keyframes vm-fade-out { to { opacity: 0; } }
+@keyframes vm-pop-out { to { opacity: 0; transform: translateY(6px) scale(.985); } }
+.modal-back.closing { animation: vm-fade-out .14s ease-in forwards; }
+.modal-back.closing > .modal { animation: vm-pop-out .14s ease-in forwards; }
+.ctxmenu, .select-popover { animation: vm-pop-in .12s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+
+/* Tabs: a preview underline rises from the bottom edge on hover, the icon lifts,
+   and a press dips the label. The active tab keeps its solid underline. A tab
+   bar is rebuilt on navigation, so nothing here relies on the active state
+   animating in: only hover and press are animated. */
+.tab { position: relative; }
+.tab::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 2px;
+  background: var(--accent); opacity: .5;
+  transform: scaleY(0); transform-origin: center bottom;
+  transition: transform .18s ease;
+  pointer-events: none;
+}
+.tab.active::after { display: none; }
+.tab .ico { transition: transform .18s ease, color .14s ease; }
+@media (hover: hover) {
+  .tab:not(.active):hover::after { transform: scaleY(1); }
+  .tab:hover .ico { transform: translateY(-1px) scale(1.12); }
+}
+.tab:active { transform: translateY(1px); }
+
+/* The sliding selection bars (see indicator.ts); the script animates them. */
+.sel-bar { position: absolute; background: var(--accent); pointer-events: none; }
+.sel-bar.v { left: 0; width: 3px; }
+.sel-bar.h { bottom: 0; height: 2px; }
+
+/* Real content replacing a skeleton rises into place, one block after the
+   next, instead of snapping in. */
+@keyframes vm-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.sk-reveal > * { animation: vm-rise .32s ease-out both; }
+.sk-reveal > :nth-child(2) { animation-delay: .05s; }
+.sk-reveal > :nth-child(3) { animation-delay: .1s; }
+.sk-reveal > :nth-child(4) { animation-delay: .15s; }
+.sk-reveal > :nth-child(n+5) { animation-delay: .2s; }
+
+/* Entering and leaving the admin page: the sidebar and the content slide in
+   from the side the user is heading to, and the admin button turns over. */
+@keyframes vm-swap-right { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+@keyframes vm-swap-left { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+@keyframes vm-turn { from { opacity: .3; transform: rotate(-90deg) scale(.6); } to { opacity: 1; transform: none; } }
+#content.swap-right { animation: vm-swap-right .34s cubic-bezier(.2, .8, .2, 1) both; }
+#content.swap-left { animation: vm-swap-left .34s cubic-bezier(.2, .8, .2, 1) both; }
+#tree.swap-right { animation: vm-swap-right .3s cubic-bezier(.2, .8, .2, 1) both; }
+#tree.swap-left { animation: vm-swap-left .3s cubic-bezier(.2, .8, .2, 1) both; }
+#admin-btn.turn .ico { animation: vm-turn .4s cubic-bezier(.2, .8, .2, 1) both; }

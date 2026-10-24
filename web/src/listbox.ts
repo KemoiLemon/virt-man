@@ -5,6 +5,7 @@
 // Because the select keeps owning the value, every existing
 // `(el as HTMLSelectElement).value` read/write in the app works unchanged.
 
+import { addPermanentListener } from "./morph";
 import { chevronSvg } from "./icons";
 import { visualHeight } from "./touch";
 
@@ -164,7 +165,7 @@ function enhance(select: Enhanced) {
       openSelect(select, trigger);
     }
   };
-  select.addEventListener("change", () => syncSelect(select));
+  addPermanentListener(select, "change", () => syncSelect(select));
 }
 
 /** Enhance every native select under `root`. Safe to call after re-renders.

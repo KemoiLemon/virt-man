@@ -30,7 +30,8 @@ function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   if (hasBody) headers["Content-Type"] = "application/json";
   const win = method === "GET" ? cacheWindow : null;
   if (win) headers["X-Virt-Man-Cache"] = "1";
-  return fetch(url, {
+  const governed = method === "GET" && !win && (pollSpan || inWave);
+  const p = fetch(url, {
     method,
     credentials: "same-origin",
     headers,
@@ -38,6 +39,94 @@ function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   }).then((res) => {
     if (win && res.headers.has("X-Virt-Man-Cached")) win.stale = true;
     return handle<T>(res);
+  });
+  return governed ? govern(p) : p;
+}
+
+// ---------------------------------------------------------------- update pace
+//
+// Background reads (the poll) used to repaint the page whenever each answer
+// landed, and a page that needs a second read after the first adds another.
+// Several answers a few milliseconds apart were several visible updates. Now
+// an answer is held until the next slot, and slots are at least `gap` apart, so
+// the page changes at most once per gap: everything that has arrived by then is
+// delivered in one go (one frame), and anything later waits for the next slot
+// instead of following right behind.
+//
+// Which reads are background is decided by where they start, not by guessing
+// what the user is doing: a read issued inside `pollWindow` (the poll round
+// itself), or while a wave of answers is being delivered (a loader asking for
+// the next thing it needs), is held. Everything else, a click's reads
+// included, goes straight through.
+
+let gap = 1000;
+/// Tests shorten the pace; the app never calls this.
+export function setUpdateGap(ms: number) { gap = ms; }
+
+let pollSpan = false;
+/// Run `round` (which starts the poll's reads) so that its reads are paced.
+/// Like `cacheFirst`, it covers the synchronous span, which is what every
+/// loader's leading read happens in; a follow-up read is caught by `inWave`.
+export function pollWindow(round: () => void) {
+  pollSpan = true;
+  try {
+    round();
+  } finally {
+    pollSpan = false;
+  }
+}
+
+/// True while a wave's answers are being delivered, which is when the code
+/// waiting on them runs and asks for what it needs next.
+let inWave = false;
+/// Governed reads not yet delivered (on the network, or answered and held for
+/// the next slot), with when each started.
+const unsettled = new Map<number, number>();
+let nextId = 0;
+let held: Array<() => void> = [];
+let lastRelease = 0;
+let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+/// A read this old no longer counts as in progress (a daemon that never
+/// answers must not stop the poll from asking again).
+const STUCK_MS = 10_000;
+
+/// Paced reads not yet delivered. The poll starts a new round only when there
+/// are none: a round that is still on the network or waiting for its slot is
+/// not stacked on, or one delivery would carry several rounds and a chart
+/// would take several points at once.
+export function pendingReads(): number {
+  const now = Date.now();
+  let n = 0;
+  for (const t of unsettled.values()) if (now - t < STUCK_MS) n++;
+  return n;
+}
+
+function releaseHeld() {
+  releaseTimer = null;
+  lastRelease = Date.now();
+  const wave = held;
+  held = [];
+  inWave = true;
+  for (const f of wave) f();
+  // The waiting code runs as microtasks after this task body; one task later
+  // it has finished and asked for whatever it needed next.
+  setTimeout(() => { inWave = false; }, 0);
+}
+
+function hold(deliver: () => void) {
+  held.push(deliver);
+  if (releaseTimer !== null) return;
+  releaseTimer = setTimeout(releaseHeld, Math.max(0, lastRelease + gap - Date.now()));
+}
+
+function govern<T>(p: Promise<T>): Promise<T> {
+  const id = nextId++;
+  unsettled.set(id, Date.now());
+  return new Promise<T>((resolve, reject) => {
+    p.then(
+      (v) => hold(() => { unsettled.delete(id); resolve(v); }),
+      (e) => hold(() => { unsettled.delete(id); reject(e); }),
+    );
   });
 }
 
