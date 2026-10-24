@@ -1352,7 +1352,7 @@ const dashboard_: Painter = async (ctx, area, gen) => {
         ${card(ic.key(20), keys.length, "API KEYS", "", "keys")}
       </div>
       <div class="sumgrid">
-        ${panel(ic.server(), "Daemons", String(conns.length), conns.length ? (online / conns.length) * 100 : 0,
+        ${panel(ic.server(), "Daemons", `${online}/${conns.length}`, conns.length ? (online / conns.length) * 100 : 0,
           `${online} online`, `${conns.length - online} offline`, "daemons")}
         ${panel(ic.vms(), "VMs", String(vms.length), vms.length ? (running / vms.length) * 100 : 0,
           `${running} running`, `${ownedByUsers} owned by users`, "vms")}

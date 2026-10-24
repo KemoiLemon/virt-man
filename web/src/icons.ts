@@ -66,7 +66,9 @@ import ZoomOut from "@phosphor-icons/core/assets/fill/magnifying-glass-minus-fil
 // Colour is set once in CSS (`.ico > svg`), never per icon.
 const VIEWBOX = "0 0 256 256";
 type Icon = string;
-const d = (raw: string): Icon => /\sd="([^"]+)"/.exec(raw)?.[1] ?? "";
+// Some glyphs (hard-drives, the server icon) are several paths; keeping only the
+// first drew half of them, a lone bar sitting above the centre.
+const d = (raw: string): Icon => [...raw.matchAll(/\sd="([^"]+)"/g)].map((m) => m[1]).join(" ");
 
 function render(raw: Icon, size: number): string {
   return `<span class="ico" style="width:${size}px;height:${size}px" aria-hidden="true">` +
