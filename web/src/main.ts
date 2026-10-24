@@ -6078,6 +6078,9 @@ async function openHardwareEditor(opts: {
   const newDisk = {
     pool: "", size_gb: 10, format: "qcow2" as "raw" | "qcow2",
     mode: "new" as "new" | "existing", volume: "",
+    // The boot disk's nickname, for the volume this form creates. An existing
+    // volume keeps the title it already has.
+    title: "", suffix: "",
   };
 
   // Create VM keeps its modal; editing an existing guest renders the editor
@@ -6342,7 +6345,7 @@ async function openHardwareEditor(opts: {
         key: "disk", icon: ic.disk(), label: "Hard Disk",
         sum: newDisk.mode === "existing"
           ? (newDisk.volume || "choose a volume")
-          : `${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} ${newDisk.format}`,
+          : newDisk.title.trim() || `${unitValue(newDisk.size_gb, "GiB", diskUnit)} ${diskUnit} ${newDisk.format}`,
       }]),
       { key: "display", icon: ic.vm(), label: "Display", sum: general.graphics.toUpperCase() },
       { key: "firmware", icon: ic.cpu(), label: "BIOS", sum: general.firmware === "uefi" ? "UEFI (OVMF)" : "BIOS (SeaBIOS)" },
@@ -6516,9 +6519,15 @@ async function openHardwareEditor(opts: {
             ${held.length ? `<p class="hint">In use, not offered: ${held.map((v) => esc(`${v.name} (${v.used_by!.join(", ")})`)).join("; ")}.</p>` : ""}
           </div>`;
         }
+        if (!newDisk.suffix) newDisk.suffix = newUuid().slice(0, 8);
+        const bootName = `${general.name.trim() || "vm"}-${newDisk.suffix}.qcow2`;
         return `<div class="hw-page active">
           <h3 class="hw-title">Hard Disk</h3>
-          ${mode}${pool}
+          ${mode}
+          <label class="field"><span>Nickname</span>
+            <input id="g-disk-title" value="${esc(newDisk.title)}"
+              placeholder="${esc(bootName)}"></label>
+          ${pool}
           <label class="field"><span>Disk Size</span>
             <div class="unit-row">
               <input id="g-size" type="number" min="${unitValue(MIN_DISK_GIB, "GiB", diskUnit)}" step="any"
@@ -6604,6 +6613,7 @@ async function openHardwareEditor(opts: {
     });
     bind("#g-fw", (v) => { general.firmware = v as "uefi" | "bios"; });
     bind("#g-pool", (v) => { newDisk.pool = v; newDisk.volume = ""; });
+    bind("#g-disk-title", (v) => { newDisk.title = v; });
     bind("#g-disk-mode", (v) => { newDisk.mode = v === "existing" ? "existing" : "new"; });
     bind("#g-volume", (v) => { newDisk.volume = v; });
     bind("#g-size", (v) => {
@@ -7023,10 +7033,15 @@ async function openHardwareEditor(opts: {
         set(`creating ${unitValue(newDisk.size_gb, "GiB", "GiB")} GiB volume`);
         disk = await api.post<{ name: string; path: string }>(
           `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes`,
-          { xml: volumeXml({ name: `${general.name.trim()}-${newUuid().slice(0, 8)}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
+          { xml: volumeXml({ name: `${general.name.trim()}-${newDisk.suffix || newUuid().slice(0, 8)}.qcow2`, capacity_gb: newDisk.size_gb, format: newDisk.format }) });
         // Only a volume made here is deleted again if the create is refused;
         // a chosen one was the user's before and stays theirs.
         made.push({ pool: newDisk.pool, name: disk.name });
+        if (newDisk.title.trim()) {
+          await api.put(
+            `/proxy/${conn}/pools/${encodeURIComponent(newDisk.pool)}/volumes/${encodeURIComponent(disk.name)}/title`,
+            { title: newDisk.title.trim() });
+        }
       }
       // Refer to the disk by its absolute path rather than by pool+volume: the
       // reference form cannot be resolved by every libvirt, and a disk libvirt
