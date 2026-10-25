@@ -27,6 +27,7 @@ export const hooks: {
   loadVolumes: AnyFn;
   deleteCtOn: AnyFn;
   dcCreate: AnyFn;
+  openCreateCt: AnyFn;
 } = {
   renderTree: () => {},
   renderOffline: () => {},
@@ -48,4 +49,5 @@ export const hooks: {
   loadVolumes: () => {},
   deleteCtOn: () => {},
   dcCreate: () => {},
+  openCreateCt: () => {},
 };

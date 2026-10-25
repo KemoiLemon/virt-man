@@ -1,5 +1,5 @@
 import { api, pendingReads, pollWindow } from "./api";
-import type { ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
+import type { ContainerSummary, Connection, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
 import { adminRowMenu, adminTitle, adminTree, assignOwner, renderAdminSection, type AdminCtx } from "./admin";
 import { attachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
@@ -9,9 +9,8 @@ import { holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
 import { ADMIN_TABS, parsePath, type AdminSection, type AdminTab } from "./route";
 import { BOOT_LABEL, bootChoices, bootTargets, deviceSummary, devicesFromXml, hwType } from "./hardware";
-import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
-import type { StorageUnit, Unit } from "./units";
-import { enhanceSelects } from "./listbox";
+import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, convert, unitOptions, unitValue } from "./units";
+import type { Unit } from "./units";
 import { poolUsed } from "./pool-usage";
 import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
@@ -23,10 +22,9 @@ import { runTask } from "./task";
 import { initIndicators } from "./indicator";
 import { closeContextMenu, contextMenuOpen, openContextMenu, type CtxItem } from "./ctxmenu";
 import { attachSuggest } from "./suggest";
-import { esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeXml } from "./xml";
-import type { NetworkForm, PoolForm } from "./xml";
+import { esc, networkFormFromXml, nextFreeIp } from "./xml";
 
-import { shownNet, shownPool, state, summaryDiskSel, summaryNetSel, treeCts, treeNets, treePools, treeVms, volumeNames } from "./state";
+import { shownNet, state, summaryDiskSel, summaryNetSel, treeCts, treeNets, treePools, treeVms, volumeNames } from "./state";
 import { bridgeNetwork, capLabel, displayName, emptyState, nameOf, nicNetwork, relTime, unescapeXml } from "./util";
 
 import { askConfirm, askMultiline, askText, openModal, toast } from "./dialogs";
@@ -40,7 +38,9 @@ import { bindFetches, bindUploads, fetchesSection, openFetch, openUpload, pollFe
 import { $, EXIT_MS, initTheme, noteTreeSel, replay, setHtml, toggleTheme } from "./dom";
 import { openHardwareEditor } from "./hardware-editor";
 import { openCreateVm } from "./create-vm";
-import { MIN_DISK_GIB, clampGib } from "./vm-form";
+import { openConnectionDialog, stopPendingPoll } from "./connection-dialog";
+import { dcCreate, openAddResource, openCreatePool, openCreateResource, openCreateVolume, withDaemon } from "./create-resource";
+import { openCreateNetwork, openEditNetwork } from "./network-form";
 
 // Moved modules cannot import the views (a cycle), so they reach them through
 // `hooks`. Wrappers, so nothing here depends on declaration order.
@@ -64,6 +64,7 @@ hooks.loadPools = () => loadPools();
 hooks.loadVolumes = (pool: string) => loadVolumes(pool);
 hooks.deleteCtOn = (...a) => deleteCtOn(...(a as Parameters<typeof deleteCtOn>));
 hooks.dcCreate = (...a) => dcCreate(...(a as Parameters<typeof dcCreate>));
+hooks.openCreateCt = (...a) => openCreateCt(...(a as Parameters<typeof openCreateCt>));
 // transfers.ts repaints the pool page through its own hook.
 transferHooks.renderPoolPage = renderPoolPage;
 // Likewise profile.ts: wrappers, so nothing here depends on declaration order.
@@ -3645,203 +3646,6 @@ async function netActionOn(conn: string, action: "start" | "stop", name: string)
   }
 }
 
-async function openEditNetwork(name: string) {
-  if (!state.selectedConn) return;
-  let xml = "";
-  try {
-    xml = (await api.get<{ xml: string }>(`/proxy/${state.selectedConn}/networks/${encodeURIComponent(name)}/xml`)).xml;
-  } catch (e) {
-    return toast((e as Error).message, "bad");
-  }
-  // `name` is the libvirt name (a UUID, for any network made or migrated
-  // since UUIDs); the form edits the display name. Carried separately so an
-  // edit keeps the libvirt name and changes only the title.
-  openNetworkForm(networkFormFromXml(xml), networkUuid(xml), state.selectedConn, undefined, name);
-}
-
-/// `conn` defaults to the selected server. The admin page passes its own
-/// (with an owner and a callback), so creating a network for a user happens
-/// over the admin page instead of navigating away from it.
-function openCreateNetwork(conn = state.selectedConn, forUser?: { owner: string; after: () => void }) {
-  openNetworkForm(
-    { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "", dns: "", hosts: [] },
-    "",
-    conn,
-    forUser,
-  );
-}
-
-/// One network form for create and edit. Fields appear and disappear with the
-/// forward mode: bridge mode offers a bridge picker and no IP/DHCP/DNS (the
-/// bridge owns addressing); NAT offers IP, DHCP and DNS forwarders; isolated
-/// offers IP/DHCP but no bridge.
-function openNetworkForm(
-  initial: NetworkForm,
-  uuid: string,
-  conn: string | null = state.selectedConn,
-  forUser?: { owner: string; after: () => void },
-  libvirtName = "",
-) {
-  if (!conn) return;
-  const el = openModal(
-    uuid ? `Edit Network — ${esc(initial.name)}` : "Create Network",
-    `<div class="grid2">
-      <label class="field"><span>Name</span><input id="net-name" value="${esc(initial.name)}"></label>
-      <label class="field"><span>Mode</span><select id="net-mode">
-        <option value="nat" ${initial.forward === "nat" ? "selected" : ""}>NAT</option>
-        <option value="bridge" ${initial.forward === "bridge" ? "selected" : ""}>Bridge</option>
-        <option value="none" ${initial.forward === "none" ? "selected" : ""}>Isolated</option>
-      </select></label>
-      <label class="field" data-net-field="bridge"><span>Bridge</span><select id="net-bridge">
-        <option value="">Select a Bridge…</option>
-        ${initial.bridge ? `<option value="${esc(initial.bridge)}" selected>${esc(initial.bridge)}</option>` : ""}
-      </select></label>
-      <label class="field" data-net-field="ip"><span>Network (CIDR)</span><span style="display:flex;gap:7px;align-items:center"><input id="net-ip" placeholder="IP-Less Network" value="${esc(initial.ip)}" readonly><button class="btn icon field-btn" id="net-ip-reroll" type="button" title="Pick Another Subnet">${ic.reroll()}</button><button class="btn icon field-btn" id="net-ip-clear" type="button" title="No Subnet">${ic.trash()}</button></span></label>
-      <label class="field" data-net-field="dns"><span>DNS servers (NAT, comma separated)</span><input id="net-dns" placeholder="1.1.1.1, 8.8.8.8" value="${esc(initial.dns)}"></label>
-    </div>`,
-    `<button class="btn primary" id="net-save">${uuid ? "Save" : "Create"}</button>`,
-  );
-
-  const modeEl = () => $("#net-mode", el) as HTMLSelectElement;
-  const mode = () => modeEl().value as NetworkForm["forward"];
-  // A network with a subnet is served by this daemon from the start; one
-  // without is left alone. Only NAT needs a subnet (it must route and hand out
-  // addresses); an isolated network is usually a private segment the operator
-  // routes themselves, so clearing the subnet is a first-class choice there --
-  // which is what a dummy/private routed network wants.
-  const sync = () => {
-    const m = mode();
-    el.querySelectorAll("[data-net-field]").forEach((f: Element) => {
-      const field = (f as HTMLElement).dataset.netField!;
-      let show: boolean;
-      if (m === "bridge") {
-        show = field === "bridge";
-      } else if (m === "nat") {
-        show = field !== "bridge";
-      } else {
-        // Isolated: DNS forwards nowhere. Nothing else to hide -- a cleared
-        // subnet is expressed by the field being empty, not by hiding it, so
-        // the trash/re-roll pair can put one back.
-        show = field !== "bridge" && field !== "dns";
-      }
-      (f as HTMLElement).hidden = !show;
-    });
-    // The trash offers to clear a subnet, so it is shown only when there is a
-    // value to clear and the network may have none (isolated). Re-rolling is
-    // the way back from an emptied field, so it is always available and the
-    // two swap places. NAT gets no trash: it cannot run without a subnet.
-    const clear = el.querySelector("#net-ip-clear") as HTMLButtonElement | null;
-    if (clear) clear.hidden = m !== "none" || $("#net-ip", el).value === "";
-  };
-  modeEl().addEventListener("change", sync);
-
-  // Bridge mode picks from the host's real bridge devices.
-  const bridgeSelect = $("#net-bridge", el) as HTMLSelectElement;
-  api.get<string[]>(`/proxy/${conn}/networks/bridges`)
-    .then((bridges) => {
-      const current = initial.bridge;
-      bridgeSelect.replaceChildren();
-      const ph = document.createElement("option");
-      ph.value = "";
-      ph.textContent = "Select a Bridge…";
-      bridgeSelect.append(ph);
-      for (const b of bridges) {
-        const o = document.createElement("option");
-        o.value = b;
-        o.textContent = b;
-        o.selected = b === current;
-        bridgeSelect.append(o);
-      }
-      enhanceSelects(bridgeSelect);
-    })
-    .catch(() => {}); // no bridges: the picker shows just the placeholder
-
-  // The subnet is the daemon's to choose, for an existing network as much as
-  // for a new one: an address typed here is how two networks end up on one
-  // /24, or on the host's own LAN. The field is read-only and the re-roll is
-  // the only way to change it -- it asks the daemon for another range, which
-  // re-checks every subnet in use, so the form cannot be talked into a
-  // collision. Bridge mode takes its addressing from the bridge.
-  const ipInput = $("#net-ip", el) as HTMLInputElement;
-  const reroll = $("#net-ip-reroll", el) as HTMLButtonElement;
-  const clear = $("#net-ip-clear", el) as HTMLButtonElement;
-  const suggest = () => {
-    if (mode() === "bridge") return;
-    // Cleared first so a request that fails leaves no stale address behind
-    // for the form to submit as if it were this network's own.
-    ipInput.value = "";
-    sync();
-    api.get<{ subnet: string }>(`/proxy/${conn}/networks/suggest-subnet`)
-      .then((r) => {
-        ipInput.value = r.subnet;
-        sync();
-      })
-      .catch(() => toast("Could not get a subnet from the server", "bad"));
-  };
-  // Clearing is offered only where a network may have no subnet at all
-  // (isolated), and re-rolling is what brings one back -- so the two buttons
-  // swap places rather than either being permanently unavailable.
-  clear.addEventListener("click", () => {
-    ipInput.value = "";
-    sync();
-  });
-  reroll.addEventListener("click", suggest);
-  // A new network starts from a suggestion; an edit keeps the subnet it has
-  // until someone re-rolls it, and a mode change never silently re-addresses
-  // a network that is already running.
-  if (!uuid) suggest();
-  $("#net-mode", el).addEventListener("change", () => {
-    if (!uuid || (mode() === "nat" && !ipInput.value)) suggest();
-  });
-
-  $("#net-save", el).onclick = async () => {
-    const form: NetworkForm = {
-      name: $("#net-name", el).value,
-      forward: mode(),
-      bridge: (bridgeSelect as HTMLSelectElement).value,
-      // An empty value means no subnet at all: the daemon must not serve the
-      // network, and libvirt gets no <ip>. That is how an isolated network the
-      // operator routes themselves (a dummy interface, a private routed
-      // segment) is expressed -- the trash button clears it.
-      ip: $("#net-ip", el).value,
-      // The DHCP range is no longer a form field: the daemon's own DHCP hands
-      // out the whole subnet (every address permanent), so a range here would
-      // only be a second, conflicting answer. Kept from the definition on an
-      // edit so an existing range is not silently dropped.
-      dhcp_start: initial.dhcp_start,
-      dhcp_end: initial.dhcp_end,
-      dns: $("#net-dns", el).value,
-      hosts: initial.hosts ?? [],
-    };
-    if (!form.name) return toast("Name is required", "bad");
-    if (form.forward === "bridge" && !form.bridge) {
-      return toast("Select a bridge", "bad");
-    }
-    el.remove();
-    // Editing keeps the network's libvirt name and identity; a new network
-    // is named by a fresh UUID, with the name typed here as its title.
-    const id = uuid || newUuid();
-    const libvirt = uuid ? (libvirtName || initial.name) : id;
-    const xml = networkXml(form, id, libvirt);
-    const owner = uuid ? null : forUser?.owner ?? null;
-    void runTask(`${uuid ? "Update" : "Create"} network ${form.name}`, async () => {
-      if (uuid) await api.putXml(`/proxy/${conn}/networks/${encodeURIComponent(libvirt)}/xml`, xml);
-      else await api.postXml(`/proxy/${conn}/networks`, xml);
-      if (owner) await assignOwner(conn, "network", libvirt, owner);
-    }, { done: `Network ${form.name} ${uuid ? "updated" : "created"}`, notify: toast })
-      .then(() => {
-        void refreshTreeVms();
-        if (forUser) forUser.after();
-        else if (state.selectedConn === conn && !state.selectedVm) void renderConn();
-        // Made on a server that is not the selected one (the Datacenter's
-        // Networks tab): repaint the view actually on screen.
-        else if (!state.selectedConn) renderDc();
-      });
-  };
-
-  sync();
-}
-
 /// One pool card. `conn` is the owning server, carried on the card for the
 /// same reason a network card carries it: the Datacenter lists every server's
 /// pools at once. `volumeTable` is for the server's own Storage tab, which
@@ -5062,310 +4866,6 @@ async function typeIntoGuest(con: { typeText(t: string): Promise<void> }) {
     () => con.typeText(text),
     { done: "Text typed into the guest", notify: toast },
   );
-}
-
-/// Add a server, or edit an existing one when `editId` is given. Daemons
-/// autoconnect, so editing (not a manual connection test) is the useful
-/// per-row action.
-function openConnectionDialog(editId?: string) {
-  const existing = editId ? state.connections.find((c) => c.id === editId) : undefined;
-  const el = openModal(
-    existing ? `Edit Server — ${esc(existing.name)}` : "Add Server",
-    `
-    <label class="field"><span>Name</span><input id="conn-name" value="${esc(existing?.name ?? "")}"></label>
-    <label class="field"><span>URL (https://host:8443)</span><input id="conn-url" placeholder="https://host:8443" value="${esc(existing?.url ?? "")}"></label>
-    <label class="field"><span>Auth Token</span>
-      <input id="conn-token" placeholder="${existing ? "leave blank to keep the current token" : "paste existing token, or leave blank to generate one"}">
-    </label>
-    <p class="hint" id="conn-fp">${existing?.fingerprint ? `Pinned certificate: ${esc(existing.fingerprint)}` : ""}</p>`,
-    `<button class="btn" id="conn-save">Save</button>`,
-  );
-  $("#conn-save", el).onclick = async () => {
-    try {
-      const body: any = {
-        name: $("#conn-name", el).value,
-        url: $("#conn-url", el).value.trim(),
-      };
-      const typedToken = $("#conn-token", el).value.trim();
-      // Never ask the server to mint a token on edit: a blank field means
-      // "keep the current one", not "replace it with a new one". Creating
-      // with a blank field still generates one server-side, which is also what
-      // makes the install script carry that same token.
-      if (typedToken) body.token = typedToken;
-      else if (!existing) body.token = "";
-
-      if (existing) {
-        await api.put(`/connections/${existing.id}`, body);
-        toast("Server updated");
-        el.remove();
-        await reloadConnections();
-        return;
-      }
-
-      const created = await api.post<CreateConnectionResult>("/connections", body);
-      el.remove();
-      await reloadConnections();
-      if (created.daemon_unreachable) {
-        const statusEl = offerInstallScript(created.install_script ?? "");
-        void pollUntilCertPinned(created.id, statusEl);
-        return;
-      }
-      toast("Server added");
-    } catch (e) {
-      toast((e as Error).message, "bad");
-    }
-  };
-}
-
-async function reloadConnections() {
-  state.connections = await api.get<Connection[]>("/connections");
-  renderTree();
-  if (!state.selectedConn) renderView();
-  void refreshTreeVms();
-}
-
-/// Show the generated installer for a daemon that was saved while unreachable.
-/// Returns the status line element so the poller can update it in place.
-function offerInstallScript(script: string): HTMLElement | null {
-  const el = openModal(
-    "Daemon Not Reachable",
-    `
-    <label class="field"><span>Install Script</span>
-      <textarea id="install-script" rows="14" readonly spellcheck="false">${esc(script)}</textarea>
-    </label>
-    <p class="hint" id="pending-status">Waiting for the daemon…</p>`,
-    `<button class="btn" id="dl-script">Download Script</button>`,
-  );
-  $("#dl-script", el).onclick = () => {
-    const blob = new Blob([script], { type: "application/x-sh" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "install-virt-man-daemon.sh";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-  return $("#pending-status", el);
-}
-
-/// Poll a pending daemon every second until its cert can be fetched, then pin
-/// it. The generated install script may still be running.
-function pollUntilCertPinned(connId: string, statusEl: HTMLElement | null) {
-  stopPendingPoll();
-  state.pendingPoll = window.setInterval(async () => {
-    try {
-      const r = await api.get<{ cert: string; fingerprint: string }>(`/connections/${connId}/cert`);
-      stopPendingPoll();
-      const conn = state.connections.find((c) => c.id === connId);
-      if (conn) await api.put(`/connections/${connId}`, { name: conn.name, url: conn.url, cert: r.cert });
-      toast("Daemon connected — certificate pinned");
-      await reloadConnections();
-    } catch {
-      if (statusEl) statusEl.textContent = "Waiting for the daemon…";
-    }
-  }, 1000);
-}
-
-function stopPendingPoll() {
-  if (state.pendingPoll !== null) {
-    window.clearInterval(state.pendingPoll);
-    state.pendingPoll = null;
-  }
-}
-
-/// Modal listing the saved daemons; resolves to the chosen connection id, or
-/// null when dismissed. Used before creating a guest from the Datacenter.
-function pickDaemon(): Promise<string | null> {
-  return new Promise((resolve) => {
-    if (!state.connections.length) {
-      toast("Add a server first", "bad");
-      resolve(null);
-      return;
-    }
-    const el = openModal(
-      "Create Guest — Select Daemon",
-      `<div class="create-resource-grid">
-        ${state.connections.map((c) => `
-          <button class="create-resource-card" data-pick-conn="${c.id}">
-            <span class="metric-ic">${ic.server()}</span>
-            <b>${esc(c.name)}</b>
-            <small>${esc(c.url)}</small>
-          </button>`).join("")}
-      </div>`,
-      `<button class="btn" id="pick-cancel">Cancel</button>`,
-    );
-    $("#pick-cancel", el).onclick = () => { el.remove(); resolve(null); };
-    el.querySelectorAll("[data-pick-conn]").forEach((b: Element) => {
-      (b as HTMLElement).onclick = () => {
-        const id = (b as HTMLElement).dataset.pickConn!;
-        el.remove();
-        resolve(id);
-      };
-    });
-  });
-}
-
-/// The resource kinds offered by both the sidebar's Add Resource button and
-/// the server dashboard's Create Resource button. Daemons are deliberately not
-/// one of them: adding a server is an administrative act, and the only place
-/// that offers it is the admin page's Daemons section.
-function resourceCards(): string {
-  return `<div class="create-resource-grid">
-      <button class="create-resource-card" data-create="vm">
-        <span class="metric-ic">${ic.vm()}</span>
-        <b>Virtual Machine</b>
-        <small>Full hardware editor: CPU, memory, disks and more</small>
-      </button>
-      <button class="create-resource-card" data-create="ct">
-        <span class="metric-ic">${ic.container()}</span>
-        <b>Container</b>
-        <small>From a template: CPU, memory, root disk and network</small>
-      </button>
-      <button class="create-resource-card" data-create="network">
-        <span class="metric-ic">${ic.network()}</span>
-        <b>Network</b>
-        <small>NAT, bridge or isolated with DHCP and DNS</small>
-      </button>
-      <button class="create-resource-card" data-create="pool">
-        <span class="metric-ic">${ic.storage()}</span>
-        <b>Storage Pool</b>
-        <small>Directory-backed pool</small>
-      </button>
-    </div>`;
-}
-
-/// Wire a resource chooser's cards to their create flows. Every kind offered
-/// needs a daemon, so it is picked first when none is open.
-function bindResourceCards(el: Element, close: () => void) {
-  el.querySelectorAll("[data-create]").forEach((b: Element) => {
-    (b as HTMLElement).onclick = () => {
-      const kind = (b as HTMLElement).dataset.create!;
-      close();
-      if (kind === "vm") openCreateVm();
-      else if (kind === "ct") withDaemon((conn) => void openCreateCt(conn));
-      else if (kind === "network") withDaemon((conn) => openCreateNetwork(conn));
-      else withDaemon((conn) => openCreatePool(conn));
-    };
-  });
-}
-
-/// Run a create flow against a daemon, asking which one when none is selected.
-/// Choosing a daemon here is a choice about the resource, not a navigation: the
-/// id goes into the flow and `state.selectedConn` is deliberately left alone, so the
-/// Datacenter page the user is standing on stays on screen behind the form.
-function withDaemon(run: (conn: string) => void) {
-  if (state.selectedConn) {
-    run(state.selectedConn);
-    return;
-  }
-  void pickDaemon().then((id) => {
-    if (id) run(id);
-  });
-}
-
-function dcCreate(run: (conn: string) => void) {
-  withDaemon(run);
-}
-
-/// Sidebar "Add Resource": daemon, VM, network or storage pool.
-function openAddResource() {
-  const el = openModal(
-    "Add Resource",
-    resourceCards(),
-    `<button class="btn" id="ar-cancel">Cancel</button>`,
-  );
-  $("#ar-cancel", el).onclick = () => el.remove();
-  bindResourceCards(el, () => el.remove());
-}
-
-/// Dashboard "Create Resource": pick VM / Network / Storage Pool, then hand
-/// off to the existing create flows.
-function openCreateResource() {
-  if (!state.selectedConn) return;
-  const el = openModal(
-    "Create Resource",
-    resourceCards(),
-    `<button class="btn" id="cr-cancel">Cancel</button>`,
-  );
-  $("#cr-cancel", el).onclick = () => el.remove();
-  bindResourceCards(el, () => el.remove());
-}
-
-/// Define a storage pool on `conn`. `after` is the admin panel's repaint, which
-/// also keeps the flow on the admin page; without it the pool's own server view
-/// is refreshed as before.
-function openCreatePool(conn = state.selectedConn, after?: () => void) {
-  if (!conn) return;
-  const el = openModal(
-    "Create Storage Pool",
-    `<div class="grid2">
-      <label class="field"><span>Name</span><input id="pool-name"></label>
-      <label class="field"><span>Target Path</span><input id="pool-target" placeholder="/var/lib/libvirt/images"></label>
-    </div>`,
-    `<button class="btn primary" id="pool-create">Create</button>`,
-  );
-  $("#pool-create", el).onclick = async () => {
-    const form: PoolForm = {
-      name: $("#pool-name", el).value,
-      type: "dir",
-      target: $("#pool-target", el).value,
-      source: "",
-      source_format: "auto",
-    };
-    if (!form.name || !form.target) return toast("Name and target are required", "bad");
-    el.remove();
-    void runTask(`Create pool ${form.name}`, async () => {
-      // Named by a fresh UUID; a pool has no <title>, so its display name
-      // goes as ?title= and the daemon keeps it.
-      await api.postXml(`/proxy/${conn}/pools?title=${encodeURIComponent(form.name)}`,
-        poolXml(form, newUuid()));
-    }, { done: `Pool ${form.name} created`, notify: toast })
-      .then(() => {
-        if (after) { after(); return; }
-        void refreshTreeVms();
-        if (state.selectedConn === conn) renderConn(); else renderDc();
-      });
-  };
-}
-
-function openCreateVolume(pool: string) {
-  if (!state.selectedConn) return;
-  let unit: StorageUnit = STORAGE_DEFAULT;
-  const el = openModal(
-    `New Volume in ${esc(shownPool(pool))}`,
-    `<div class="grid2">
-      <label class="field"><span>Name</span><input id="vol-name"></label>
-      <label class="field"><span>Size</span>
-        <div class="unit-row">
-          <input id="vol-size" type="number" value="${unitValue(10, "GiB", unit)}"
-            min="${unitValue(MIN_DISK_GIB, "GiB", unit)}" step="any">
-          <select id="vol-size-unit">${unitOptions(STORAGE_UNITS, unit)}</select>
-        </div></label>
-      <label class="field"><span>Format</span><select id="vol-format"><option>qcow2</option><option>raw</option></select></label>
-    </div>`,
-    `<button class="btn primary" id="vol-create">Create</button>`,
-  );
-  // Convert the number in place when the unit changes, so the size it means
-  // stays the same; the canonical GiB value is read at create time.
-  ($("#vol-size-unit", el) as HTMLSelectElement).onchange = () => {
-    const next = ($("#vol-size-unit", el) as HTMLSelectElement).value as StorageUnit;
-    const input = $("#vol-size", el) as HTMLInputElement;
-    if (input.value.trim() !== "") input.value = unitValue(Number(input.value), unit, next);
-    unit = next;
-  };
-  $("#vol-create", el).onclick = async () => {
-    const name = $("#vol-name", el).value;
-    const raw = ($("#vol-size", el) as HTMLInputElement).value.trim();
-    const size = raw === "" ? 0 : clampGib(convert(Number(raw), unit, "GiB"), null);
-    const format = ($("#vol-format", el) as HTMLSelectElement).value as "raw" | "qcow2";
-    if (!name || !(size > 0)) return toast("Name and size required", "bad");
-    el.remove();
-    void runTask(`Create volume ${name}`, async () => {
-      await api.post(`/proxy/${state.selectedConn}/pools/${encodeURIComponent(pool)}/volumes`, {
-        xml: volumeXml({ name, capacity_gb: size, format }),
-      });
-    }, { done: `Volume ${name} created`, notify: toast });
-  };
 }
 
 // ---------------------------------------------------------------- tasks
