@@ -330,8 +330,9 @@ export async function renderVmBody(vm: string) {
           displayName(treeNets[state.selectedConn!], bootNet?.name ?? bootNames.networkName),
         );
       }
-      const machine = pick(/machine='([^']*)'/);
-      const arch = pick(/arch='([^']*)'/);
+      // The daemon writes double-quoted attributes; older definitions used single.
+      const machine = pick(/machine=['"]([^'"]*)['"]/);
+      const arch = pick(/arch=['"]([^'"]*)['"]/);
       const onPoweroff = pick(/<on_poweroff>([^<]*)<\/on_poweroff>/);
       const onReboot = pick(/<on_reboot>([^<]*)<\/on_reboot>/);
       const onCrash = pick(/<on_crash>([^<]*)<\/on_crash>/);
