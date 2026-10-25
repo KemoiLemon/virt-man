@@ -21,6 +21,11 @@ export const hooks: {
   renderVmBody: AnyFn;
   renderNetPage: AnyFn;
   renderPoolPage: AnyFn;
+  refreshTreeVms: AnyFn;
+  loadNetworks: AnyFn;
+  loadPools: AnyFn;
+  loadVolumes: AnyFn;
+  deleteCtOn: AnyFn;
 } = {
   renderTree: () => {},
   renderOffline: () => {},
@@ -36,4 +41,9 @@ export const hooks: {
   renderVmBody: () => {},
   renderNetPage: () => {},
   renderPoolPage: () => {},
+  refreshTreeVms: () => {},
+  loadNetworks: () => {},
+  loadPools: () => {},
+  loadVolumes: () => {},
+  deleteCtOn: () => {},
 };
