@@ -1,25 +1,25 @@
-import { api } from "./api";
-import type { DomainSummary, NetworkSummary, PoolSummary } from "./api";
-import { ic } from "./icons";
-import { skeleton } from "./skeleton";
-import { holdFocus } from "./focus";
-import { poolUsed } from "./pool-usage";
-import { addHostSample, fmtBytes, pct, sparkline } from "./stats";
-import type { HostStats, Timing } from "./stats";
-import { isLive, loadHistory, range, rangeSelect } from "./history";
-import { esc } from "./xml";
-import { state, treeVms } from "./state";
-import { emptyState } from "./util";
-import { act, deleteVm } from "./actions";
-import { hooks } from "./hooks";
-import { beginRender, clearResourceSelection, fastLoad, leaveCurrentView, syncUrl } from "./nav";
-import { $, setHtml } from "./dom";
-import { openHardwareEditor } from "./hardware-editor";
-import { openCreateVm } from "./create-vm";
-import { openCreatePool, openCreateResource } from "./create-resource";
-import { openCreateNetwork } from "./network-form";
-import { canAdmin, isOffline, renderOffline } from "./boot";
-import { renderTree } from "./tree";
+import { api } from "../api";
+import type { DomainSummary, NetworkSummary, PoolSummary } from "../api";
+import { ic } from "../icons";
+import { skeleton } from "../skeleton";
+import { holdFocus } from "../focus";
+import { poolUsed } from "../pool-usage";
+import { addHostSample, fmtBytes, pct, sparkline } from "../stats";
+import type { HostStats, Timing } from "../stats";
+import { isLive, loadHistory, range, rangeSelect } from "../history";
+import { esc } from "../xml";
+import { state, treeVms } from "../app/state";
+import { emptyState } from "../app/util";
+import { act, deleteVm } from "../app/actions";
+import { hooks } from "../app/hooks";
+import { beginRender, clearResourceSelection, fastLoad, leaveCurrentView, syncUrl } from "../app/nav";
+import { $, setHtml } from "../app/dom";
+import { openHardwareEditor } from "../forms/hardware-editor";
+import { openCreateVm } from "../forms/create-vm";
+import { openCreatePool, openCreateResource } from "../forms/create-resource";
+import { openCreateNetwork } from "../forms/network-form";
+import { canAdmin, isOffline, renderOffline } from "../app/boot";
+import { renderTree } from "../app/tree";
 import { loadNetworks } from "./network-page";
 import { loadPools } from "./pool-page";
 import { loadCts, openCreateCt } from "./containers";
@@ -131,7 +131,7 @@ function renderShellTab(body: Element, conn: string) {
     }
   };
   void (async () => {
-    state.terminal ??= await import("./terminal");
+    state.terminal ??= await import("../terminal");
     await state.terminal.attachDaemonShell($("#shell-stage"), `/proxy/${conn}/shell`, msg);
   })();
 }

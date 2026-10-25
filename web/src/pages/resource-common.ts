@@ -1,8 +1,8 @@
-import { hooks } from "./hooks";
-import { state } from "./state";
-import { clearResourceSelection } from "./nav";
-import { toast } from "./dialogs";
-import { renderTree, selectNetRow, selectPoolRow } from "./tree";
+import { hooks } from "../app/hooks";
+import { state } from "../app/state";
+import { clearResourceSelection } from "../app/nav";
+import { toast } from "../app/dialogs";
+import { renderTree, selectNetRow, selectPoolRow } from "../app/tree";
 
 /// A network's IPAM, from the daemon (`GET /networks/{name}/ipam`).
 export interface IpamInfo {

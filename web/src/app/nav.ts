@@ -2,14 +2,14 @@
 // a renderer claims the content pane. The view renderers themselves are
 // reached through `hooks`, because they import this module. Importing it also
 // installs the chart-range and popstate listeners.
-import { cacheFirst } from "./api";
-import type { ContainerSummary, DomainSummary } from "./api";
-import { detachConsole } from "./console";
+import { cacheFirst } from "../api";
+import type { ContainerSummary, DomainSummary } from "../api";
+import { detachConsole } from "../console";
 import { $, setHtml } from "./dom";
-import { bindChartHover, setRange } from "./history";
+import { bindChartHover, setRange } from "../history";
 import { hooks } from "./hooks";
-import { parsePath, routeToPath, type CtTab, type Route } from "./route";
-import { skeleton } from "./skeleton";
+import { parsePath, routeToPath, type CtTab, type Route } from "../route";
+import { skeleton } from "../skeleton";
 import { state, treeCts, treeNets, treePools, treeVms } from "./state";
 import { nameOf, uuidOf } from "./util";
 

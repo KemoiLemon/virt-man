@@ -1,9 +1,9 @@
 // Pure helpers shared by the views: formatting, and the names a guest, network
 // or pool goes by. Nothing here reads app state, so it can be imported from
 // anywhere without creating a cycle.
-import { ic } from "./icons";
-import type { NetworkSummary } from "./api";
-import { esc } from "./xml";
+import { ic } from "../icons";
+import type { NetworkSummary } from "../api";
+import { esc } from "../xml";
 
 /// Title-case a status/type token for display. The API keeps lowercase values
 /// (the frontend compares against them), so capitalizing happens only here.

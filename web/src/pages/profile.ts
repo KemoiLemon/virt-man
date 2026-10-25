@@ -2,15 +2,15 @@
 // It calls back into main.ts for three things (the sidebar profile button, the
 // role label and the show-once secret dialog); those come in through
 // `profileHooks`, set once at start-up, so this module never imports main.ts.
-import { api, effectiveLimit } from "./api";
-import type { User } from "./api";
-import { limitSpecs } from "./admin";
-import { openCropDialog } from "./crop";
-import { $, setHtml } from "./dom";
-import { askText, openModal, toast } from "./dialogs";
-import { ic } from "./icons";
-import { state } from "./state";
-import { esc } from "./xml";
+import { api, effectiveLimit } from "../api";
+import type { User } from "../api";
+import { limitSpecs } from "../admin";
+import { openCropDialog } from "../crop";
+import { $, setHtml } from "../app/dom";
+import { askText, openModal, toast } from "../app/dialogs";
+import { ic } from "../icons";
+import { state } from "../app/state";
+import { esc } from "../xml";
 
 export const profileHooks = {
   renderProfileBtn: (): void => {},
@@ -136,7 +136,7 @@ export function openProfile() {
   };
 
   const refreshKeys = async () => {
-    const keys = await api.get<import("./api").ApiKey[]>("/me/keys");
+    const keys = await api.get<import("../api").ApiKey[]>("/me/keys");
     const box = $("#pf-keys", el);
     setHtml(box, keys.map((k) => `<div class="task-row"><span class="task-dot done"></span><span class="task-msg">${esc(k.name)} · ${esc(k.prefix)}…</span><button class="btn danger icon" data-kid="${k.id}">${ic.trash()}</button></div>`).join("") || `<div class="empty">No API keys.</div>`);
     box.querySelectorAll("[data-kid]").forEach((b: Element) => {
@@ -154,7 +154,7 @@ export function openProfile() {
     // only null aborts; empty means "let the server name it".
     if (name === null) return;
     try {
-      const k = await api.post<import("./api").ApiKey>("/me/keys", { name: name.trim() });
+      const k = await api.post<import("../api").ApiKey>("/me/keys", { name: name.trim() });
       refreshKeys();
       // Shown once and never again, so it gets a dismissable dialog rather
       // than a toast on a timer.
@@ -175,7 +175,7 @@ async function loadProfileLimits(el: Element) {
   type Used = { vms: number; vcpus: number; memory_mb: number; storage_bytes: number; networks: number; forwards?: number };
   let u: {
     admin: boolean;
-    quota: import("./api").Quota;
+    quota: import("../api").Quota;
     total: Used;
     daemons: (Used & { conn: string; name: string; online: boolean })[];
   };
@@ -197,12 +197,12 @@ async function loadProfileLimits(el: Element) {
   }
   const title = `<div class="section-title">Resource Limits</div>`;
   const q = u.quota ?? { shared: false, default: {}, daemons: {} };
-  const any = (l: import("./api").Limit) => [l.vms, l.vcpus, l.memory_mb, l.storage_gb, l.networks, l.forwards].some((x) => x != null);
+  const any = (l: import("../api").Limit) => [l.vms, l.vcpus, l.memory_mb, l.storage_gb, l.networks, l.forwards].some((x) => x != null);
   if (!any(q.default) && !Object.values(q.daemons ?? {}).some(any)) {
     setHtml(box, "");
     return;
   }
-  const block = (name: string, used: Used, cap: import("./api").Limit, note = "") => `
+  const block = (name: string, used: Used, cap: import("../api").Limit, note = "") => `
     <div class="pf-limit">
       <div class="pf-limit-head"><b>${esc(name)}</b>${note ? `<span class="dim-note">${esc(note)}</span>` : ""}</div>
       ${limitSpecs(used, cap)}

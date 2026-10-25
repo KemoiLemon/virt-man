@@ -1,19 +1,19 @@
-import { api } from "./api";
-import type { PoolSummary, VolumeSummary } from "./api";
-import { ic } from "./icons";
-import { poolUsed } from "./pool-usage";
-import { fmtBytes } from "./stats";
-import { esc } from "./xml";
-import { state, treePools, volumeNames } from "./state";
-import { displayName, emptyState } from "./util";
-import { deletePool, deleteVolume, renameVolume } from "./actions";
-import { hooks } from "./hooks";
-import { beginRender, stillCurrent, syncUrl } from "./nav";
+import { api } from "../api";
+import type { PoolSummary, VolumeSummary } from "../api";
+import { ic } from "../icons";
+import { poolUsed } from "../pool-usage";
+import { fmtBytes } from "../stats";
+import { esc } from "../xml";
+import { state, treePools, volumeNames } from "../app/state";
+import { displayName, emptyState } from "../app/util";
+import { deletePool, deleteVolume, renameVolume } from "../app/actions";
+import { hooks } from "../app/hooks";
+import { beginRender, stillCurrent, syncUrl } from "../app/nav";
 import { bindFetches, bindUploads, fetchesSection, openFetch, openUpload, pollFetches, pollUploads, uploadsSection } from "./transfers";
-import { $, setHtml } from "./dom";
-import { openCreatePool, openCreateVolume } from "./create-resource";
-import { isOffline, renderOffline } from "./boot";
-import { selectPoolRow } from "./tree";
+import { $, setHtml } from "../app/dom";
+import { openCreatePool, openCreateVolume } from "../forms/create-resource";
+import { isOffline, renderOffline } from "../app/boot";
+import { selectPoolRow } from "../app/tree";
 import { backToConn, leaveMissing } from "./resource-common";
 
 /// Dedicated storage page: one pool's capacity plus full volume management.

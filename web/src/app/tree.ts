@@ -1,8 +1,8 @@
-import { api } from "./api";
-import type { ContainerSummary, DomainSummary, NetworkSummary, PoolSummary } from "./api";
-import { ic } from "./icons";
-import { holdFocus } from "./focus";
-import { esc } from "./xml";
+import { api } from "../api";
+import type { ContainerSummary, DomainSummary, NetworkSummary, PoolSummary } from "../api";
+import { ic } from "../icons";
+import { holdFocus } from "../focus";
+import { esc } from "../xml";
 import { state, treeCts, treeNets, treePools, treeVms } from "./state";
 import { capLabel, displayName, nameOf } from "./util";
 import { openModal, toast } from "./dialogs";

@@ -1,13 +1,13 @@
-import { api } from "./api";
-import { ic } from "./icons";
-import { skeleton } from "./skeleton";
-import { holdFocus } from "./focus";
-import { DIR_LABEL, GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmtWhen, forLive, liveApplies, logQuery, sortMark, toggleSort, withGroup } from "./access";
-import type { FlowDir, Group, Kind, LogFilter } from "./access";
-import { esc } from "./xml";
-import { openModal } from "./dialogs";
-import { $, setHtml } from "./dom";
-import { busyScrolling } from "./scroll-busy";
+import { api } from "../api";
+import { ic } from "../icons";
+import { skeleton } from "../skeleton";
+import { holdFocus } from "../focus";
+import { DIR_LABEL, GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmtWhen, forLive, liveApplies, logQuery, sortMark, toggleSort, withGroup } from "../access";
+import type { FlowDir, Group, Kind, LogFilter } from "../access";
+import { esc } from "../xml";
+import { openModal } from "../app/dialogs";
+import { $, setHtml } from "../app/dom";
+import { busyScrolling } from "../app/scroll-busy";
 
 /// Access log: every connection this server's guests made, two weeks back.
 /// `vm` pre-selects one guest (the VM Network tab); from the Firewall page it

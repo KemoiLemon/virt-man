@@ -2,8 +2,8 @@
 // tab slide animations, the `$` lookup and the theme toggle. Importing this
 // module also installs the tab-slide click handler.
 import DOMPurify from "dompurify";
-import { enhanceSelects } from "./listbox";
-import { morphChildren } from "./morph";
+import { enhanceSelects } from "../listbox";
+import { morphChildren } from "../morph";
 import { state } from "./state";
 
 export const $ = (sel: string, root: ParentNode = document): any =>

@@ -2,12 +2,12 @@
 // Each `*On` takes the connection explicitly so the admin panel can reuse the
 // same function as the resource's own view; the views they repaint afterwards
 // are reached through `hooks`.
-import { api } from "./api";
-import type { AdminResource, Connection } from "./api";
+import { api } from "../api";
+import type { AdminResource, Connection } from "../api";
 import { askConfirm, askText, toast } from "./dialogs";
 import { hooks } from "./hooks";
 import { guestList, renderView } from "./nav";
-import { runTask } from "./task";
+import { runTask } from "../task";
 import { shownNet, shownPool, shownVolume, state, volumeNames } from "./state";
 import { displayName, isUuid } from "./util";
 

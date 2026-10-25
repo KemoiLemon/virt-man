@@ -1,14 +1,14 @@
-import { api } from "./api";
-import { assignOwner } from "./admin";
-import { ic } from "./icons";
-import { enhanceSelects } from "./listbox";
-import { runTask } from "./task";
-import { esc, networkFormFromXml, networkUuid, networkXml, newUuid } from "./xml";
-import type { NetworkForm } from "./xml";
-import { state } from "./state";
-import { openModal, toast } from "./dialogs";
-import { hooks } from "./hooks";
-import { $ } from "./dom";
+import { api } from "../api";
+import { assignOwner } from "../admin";
+import { ic } from "../icons";
+import { enhanceSelects } from "../listbox";
+import { runTask } from "../task";
+import { esc, networkFormFromXml, networkUuid, networkXml, newUuid } from "../xml";
+import type { NetworkForm } from "../xml";
+import { state } from "../app/state";
+import { openModal, toast } from "../app/dialogs";
+import { hooks } from "../app/hooks";
+import { $ } from "../app/dom";
 
 export async function openEditNetwork(name: string) {
   if (!state.selectedConn) return;

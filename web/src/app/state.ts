@@ -3,8 +3,8 @@
 // module imports `state` and reads `state.selectedConn` like it did the bare
 // variable. State private to one section (the sidebar, uploads, fetches) stays
 // in that section's own module.
-import type { Connection, ContainerSummary, DomainSummary, NetworkSummary, PoolSummary, User } from "./api";
-import type { AdminSection, AdminTab, ConnTab, DcTab } from "./route";
+import type { Connection, ContainerSummary, DomainSummary, NetworkSummary, PoolSummary, User } from "../api";
+import type { AdminSection, AdminTab, ConnTab, DcTab } from "../route";
 import { displayName } from "./util";
 
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
@@ -72,7 +72,7 @@ export const state = {
   /// The text console (xterm.js), loaded when a container console or a host
   /// shell opens: it would otherwise more than double the bundle every page
   /// load pays for.
-  terminal: null as typeof import("./terminal") | null,
+  terminal: null as typeof import("../terminal") | null,
   /// Set while a URL is being restored (boot, Back/Forward): the address-bar
   /// write is then a replaceState, not a push.
   restoringRoute: false,

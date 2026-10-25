@@ -1,11 +1,11 @@
-import { api } from "./api";
-import type { Connection, CreateConnectionResult } from "./api";
-import { esc } from "./xml";
-import { state } from "./state";
-import { openModal, toast } from "./dialogs";
-import { hooks } from "./hooks";
-import { renderView } from "./nav";
-import { $ } from "./dom";
+import { api } from "../api";
+import type { Connection, CreateConnectionResult } from "../api";
+import { esc } from "../xml";
+import { state } from "../app/state";
+import { openModal, toast } from "../app/dialogs";
+import { hooks } from "../app/hooks";
+import { renderView } from "../app/nav";
+import { $ } from "../app/dom";
 
 /// Add a server, or edit an existing one when `editId` is given. Daemons
 /// autoconnect, so editing (not a manual connection test) is the useful

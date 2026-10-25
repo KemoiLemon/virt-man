@@ -2,25 +2,25 @@ import { closeTayne, tayneOpen } from "./tayne";
 import { initIndicators } from "./indicator";
 import { closeContextMenu, contextMenuOpen } from "./ctxmenu";
 
-import { state } from "./state";
+import { state } from "./app/state";
 
-import { hooks } from "./hooks";
-import { profileHooks } from "./profile";
-import { transferHooks } from "./transfers";
-import { dcCreate } from "./create-resource";
-import { boot, canAdmin, isOffline, renderOffline, roleLabel } from "./boot";
-import { closeAdmin, openAdmin, showSecret } from "./admin-window";
-import { renderProfileBtn } from "./menus"; // also installs the contextmenu/long-press listeners
-import { openCommandPalette } from "./palette";
-import { refreshTreeVms, renderTree, selectCtRow, selectNetRow, selectPoolRow, selectVmRow } from "./tree";
-import { loadDcDashboard, renderDc } from "./datacenter";
-import { loadNetworks, renderNetPage } from "./network-page";
-import { loadPools, loadVolumes, renderPoolPage } from "./pool-page";
-import { afterCtDelete, deleteCt, deleteCtOn, openCreateCt, openTemplates, renameCt } from "./containers";
-import { loadDashboard, renderConn } from "./connection";
-import { renderVm, renderVmBody, syncVmActions } from "./vm-page";
-import { openFirewallEditor } from "./firewall-editor";
-import { startPolling } from "./polling"; // also installs the scroll/pointer listeners
+import { hooks } from "./app/hooks";
+import { profileHooks } from "./pages/profile";
+import { transferHooks } from "./pages/transfers";
+import { dcCreate } from "./forms/create-resource";
+import { boot, canAdmin, isOffline, renderOffline, roleLabel } from "./app/boot";
+import { closeAdmin, openAdmin, showSecret } from "./app/admin-window";
+import { renderProfileBtn } from "./app/menus"; // also installs the contextmenu/long-press listeners
+import { openCommandPalette } from "./app/palette";
+import { refreshTreeVms, renderTree, selectCtRow, selectNetRow, selectPoolRow, selectVmRow } from "./app/tree";
+import { loadDcDashboard, renderDc } from "./pages/datacenter";
+import { loadNetworks, renderNetPage } from "./pages/network-page";
+import { loadPools, loadVolumes, renderPoolPage } from "./pages/pool-page";
+import { afterCtDelete, deleteCt, deleteCtOn, openCreateCt, openTemplates, renameCt } from "./pages/containers";
+import { loadDashboard, renderConn } from "./pages/connection";
+import { renderVm, renderVmBody, syncVmActions } from "./pages/vm-page";
+import { openFirewallEditor } from "./pages/firewall-editor";
+import { startPolling } from "./app/polling"; // also installs the scroll/pointer listeners
 
 // Moved modules cannot import the views (a cycle), so they reach them through
 // `hooks`. Wrappers, so nothing here depends on declaration order.

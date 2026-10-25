@@ -1,13 +1,13 @@
-import { api } from "./api";
-import type { FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary } from "./api";
-import { ic } from "./icons";
-import { skeleton } from "./skeleton";
-import { attachSuggest } from "./suggest";
-import { esc } from "./xml";
-import { shownNet, state, treeVms } from "./state";
-import { displayName } from "./util";
-import { openModal, toast } from "./dialogs";
-import { $, setHtml } from "./dom";
+import { api } from "../api";
+import type { FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary } from "../api";
+import { ic } from "../icons";
+import { skeleton } from "../skeleton";
+import { attachSuggest } from "../suggest";
+import { esc } from "../xml";
+import { shownNet, state, treeVms } from "../app/state";
+import { displayName } from "../app/util";
+import { openModal, toast } from "../app/dialogs";
+import { $, setHtml } from "../app/dom";
 import { openAccessLogs } from "./access-logs";
 import type { IpamHost, IpamInfo } from "./resource-common";
 

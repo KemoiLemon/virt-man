@@ -3,14 +3,14 @@
 // navigating away mid-transfer is safe. Their state is private to this module;
 // the one thing it needs from the app, repainting the pool page, comes in
 // through `transferHooks` (set once at start-up) to avoid an import cycle.
-import { api, uploadWithProgress } from "./api";
-import type { StagedUpload } from "./api";
-import { $, setHtml } from "./dom";
-import { openModal, toast } from "./dialogs";
-import { ic } from "./icons";
-import { shownPool, state } from "./state";
-import { avgRateKib, fmtBytes, fmtRate } from "./stats";
-import { autoVolumeName, esc, volumeNameFromFile } from "./xml";
+import { api, uploadWithProgress } from "../api";
+import type { StagedUpload } from "../api";
+import { $, setHtml } from "../app/dom";
+import { openModal, toast } from "../app/dialogs";
+import { ic } from "../icons";
+import { shownPool, state } from "../app/state";
+import { avgRateKib, fmtBytes, fmtRate } from "../stats";
+import { autoVolumeName, esc, volumeNameFromFile } from "../xml";
 
 export const transferHooks = {
   renderPoolPage: (): Promise<void> | void => {},

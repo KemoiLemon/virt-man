@@ -21,31 +21,34 @@ argv and QMP calls, or an LXC config, without handing it to another manager.
 ### Where the SPA code lives
 
 `web/src/main.ts` is only imports, hook wiring, the global keys listener and
-`initIndicators(); boot();`. The rest is in these modules (`web/src/`):
+`initIndicators(); boot();`. The rest is in these modules, in three folders under `web/src/` (`app/` shell
+and shared plumbing, `pages/` views, `forms/` dialogs and forms). The older flat
+modules (`admin.ts`, `api.ts`, `console.ts`, `route.ts`, ...) stay beside
+`main.ts`, because `test:build` bundles them by path:
 
 | Module | Holds |
 | --- | --- |
-| `state.ts` | the shared `state` object, tree caches, `shown*` helpers |
-| `util.ts` | pure helpers |
-| `dom.ts` | `$`, `setHtml`, page/tab slide animations, theme |
-| `dialogs.ts` | `toast`, `openModal`, `askText`, `askMultiline`, `askConfirm` |
-| `nav.ts` | `syncUrl`, `currentRoute`, `applyRoute`, `renderCurrent`, `beginRender`/`stillCurrent`, `clearResourceSelection`, `leaveCurrentView`, `fastLoad`, drawer |
-| `hooks.ts` | callbacks that break import cycles |
-| `boot.ts` | boot, auth, app shell, offline panel, `canAdmin` |
-| `admin-window.ts` | `openAdmin`, `closeAdmin`, `adminCtx` |
-| `tree.ts`, `sidebar.ts` | sidebar tree and `select*Row`; sidebar chrome |
-| `menus.ts`, `palette.ts` | `vmMenu`/`netMenu`/`poolMenu`/`serverMenu`/`rootMenu`, `menuAt`, context-menu and long-press listeners; Ctrl+K palette |
-| `actions.ts` | delete/rename |
-| `vm-page.ts`, `connection.ts`, `datacenter.ts`, `pool-page.ts`, `network-page.ts`, `containers.ts` | the view renderers (`renderVm`, `renderVmBody`, server view, ...) |
-| `polling.ts`, `scroll-busy.ts` | the 1 s poll; scroll-busy gate |
-| `transfers.ts`, `profile.ts` | uploads and URL downloads; profile |
-| `access-logs.ts`, `firewall-editor.ts`, `hardware-editor.ts` | access logs, firewall and hardware editors |
-| `create-vm.ts`, `create-resource.ts`, `network-form.ts`, `connection-dialog.ts`, `vm-form.ts`, `resource-common.ts` | create/edit forms and their shared helpers |
+| `app/state.ts` | the shared `state` object, tree caches, `shown*` helpers |
+| `app/util.ts` | pure helpers |
+| `app/dom.ts` | `$`, `setHtml`, page/tab slide animations, theme |
+| `app/dialogs.ts` | `toast`, `openModal`, `askText`, `askMultiline`, `askConfirm` |
+| `app/nav.ts` | `syncUrl`, `currentRoute`, `applyRoute`, `renderCurrent`, `beginRender`/`stillCurrent`, `clearResourceSelection`, `leaveCurrentView`, `fastLoad`, drawer |
+| `app/hooks.ts` | callbacks that break import cycles |
+| `app/boot.ts` | boot, auth, app shell, offline panel, `canAdmin` |
+| `app/admin-window.ts` | `openAdmin`, `closeAdmin`, `adminCtx` |
+| `app/tree.ts`, `app/sidebar.ts` | sidebar tree and `select*Row`; sidebar chrome |
+| `app/menus.ts`, `app/palette.ts` | `vmMenu`/`netMenu`/`poolMenu`/`serverMenu`/`rootMenu`, `menuAt`, context-menu and long-press listeners; Ctrl+K palette |
+| `app/actions.ts` | delete/rename |
+| `pages/vm-page.ts`, `pages/connection.ts`, `pages/datacenter.ts`, `pages/pool-page.ts`, `pages/network-page.ts`, `pages/containers.ts` | the view renderers (`renderVm`, `renderVmBody`, server view, ...) |
+| `app/polling.ts`, `app/scroll-busy.ts` | the 1 s poll; scroll-busy gate |
+| `pages/transfers.ts`, `pages/profile.ts` | uploads and URL downloads; profile |
+| `pages/access-logs.ts`, `pages/firewall-editor.ts`, `forms/hardware-editor.ts` | access logs, firewall and hardware editors |
+| `forms/create-vm.ts`, `forms/create-resource.ts`, `forms/network-form.ts`, `forms/connection-dialog.ts`, `forms/vm-form.ts`, `pages/resource-common.ts` | create/edit forms and their shared helpers |
 
 - A moved module **never imports `main.ts`**.
 - A view needed across an import cycle is reached through `hooks`, which
   `main.ts` wires once.
-- Shared reassignable state lives on `state` in `state.ts`; state private to one
+- Shared reassignable state lives on `state` in `app/state.ts`; state private to one
   section stays in its module.
 
 ## Agent tools
@@ -173,11 +176,11 @@ These are not style preferences. Violating them produces broken builds or
 silently broken UI.
 
 **No native OS chrome.** `<select>` is `display:none` behind a themed`.select-trigger`/`.select-popover` listbox (`web/src/listbox.ts`). Never use
-`window.prompt`/`confirm`/`alert` — use `askText`/`askConfirm` in `dialogs.ts`.
+`window.prompt`/`confirm`/`alert` — use `askText`/`askConfirm` in `app/dialogs.ts`.
 The browser's right-click menu is replaced on resource surfaces: every sidebar
 row, and in the content pane the cards, dashboard rows, tabs and page header
 open a `.ctxmenu` (`web/src/ctxmenu.ts`). One builder per resource (`vmMenu`,
-`netMenu`, `poolMenu`, `serverMenu`, `rootMenu` in `menus.ts`) serves every
+`netMenu`, `poolMenu`, `serverMenu`, `rootMenu` in `app/menus.ts`) serves every
 surface, so a guest offers the same actions wherever it is right-clicked.
 Every item carries an icon. Plain text, form fields and the XML and log panes
 keep the native menu, so copy/paste still works there. Add Resource lives in
@@ -221,7 +224,7 @@ response paints over the view they switched to ("the network page just
 returned"). Every path that leaves a resource page must also run
 `clearResourceSelection()`, or the poll re-renders the page they left.
 
-**`setHtml()` is the only way HTML enters the DOM** (`web/src/dom.ts`). It
+**`setHtml()` is the only way HTML enters the DOM** (`web/src/app/dom.ts`). It
 runs `DOMPurify.sanitize` *and* `enhanceSelects`. Assigning `innerHTML`
 directly skips both, so the listbox silently stops working.
 
@@ -356,7 +359,7 @@ The card builders (`netCard`, `poolCard`) are shared with a server's own tabs,
 which is why they take the owning connection as an argument.
 
 **The admin panel creates and deletes resources too.** (`web/src/admin.ts`,
-`web/src/admin-window.ts` `adminCtx`.) The VM, Network and Storage Pools sections are
+`web/src/app/admin-window.ts` `adminCtx`.) The VM, Network and Storage Pools sections are
 each tabbed by daemon, and each row carries a delete action; Storage Pools also
 has a create button (pools are administrator-defined and own no user, so no
 "for user" step). Every action goes through the resource's *own* form or delete
@@ -458,7 +461,7 @@ Things that bite:
   (`guard::after`), and renames carry it and the grants. Anything made outside
   the app belongs to the first administrator.
 - **The admin panel is a window, not a view** (`web/src/admin.ts`,
-  `admin-window.ts` `openAdmin`/`closeAdmin`). The admin button opens a modal that grows from it
+  `app/admin-window.ts` `openAdmin`/`closeAdmin`). The admin button opens a modal that grows from it
   over the page that was open; that page keeps its place, polling and URL, and
   the window has no URL of its own. The button toggles it. Sections are listed
   in the window's `.admin-nav` (`ADMIN_GROUPS`; a new section must go in one)

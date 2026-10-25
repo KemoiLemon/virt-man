@@ -1,4 +1,4 @@
-import { hooks } from "./hooks";
+import { hooks } from "../app/hooks";
 import { openHardwareEditor } from "./hardware-editor";
 
 /// Back-compat entry point used by the VMs tab button. It no longer switches

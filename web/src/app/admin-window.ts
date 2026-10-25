@@ -1,21 +1,21 @@
-import { api } from "./api";
-import type { User } from "./api";
-import { adminTitle, adminTree, renderAdminSection, type AdminCtx } from "./admin";
-import { ic } from "./icons";
-import { skeleton } from "./skeleton";
-import { holdFocus } from "./focus";
-import { ADMIN_TABS, type AdminSection, type AdminTab } from "./route";
-import { esc } from "./xml";
+import { api } from "../api";
+import type { User } from "../api";
+import { adminTitle, adminTree, renderAdminSection, type AdminCtx } from "../admin";
+import { ic } from "../icons";
+import { skeleton } from "../skeleton";
+import { holdFocus } from "../focus";
+import { ADMIN_TABS, type AdminSection, type AdminTab } from "../route";
+import { esc } from "../xml";
 import { state } from "./state";
 import { relTime } from "./util";
 import { askConfirm, openModal, toast } from "./dialogs";
 import { adminDeleteResource, deleteConnection } from "./actions";
 import { hooks } from "./hooks";
 import { $, EXIT_MS, replay, setHtml } from "./dom";
-import { openHardwareEditor } from "./hardware-editor";
-import { openConnectionDialog } from "./connection-dialog";
-import { openCreatePool } from "./create-resource";
-import { openCreateNetwork } from "./network-form";
+import { openHardwareEditor } from "../forms/hardware-editor";
+import { openConnectionDialog } from "../forms/connection-dialog";
+import { openCreatePool } from "../forms/create-resource";
+import { openCreateNetwork } from "../forms/network-form";
 import { canAdmin, loadConnections, renderApp } from "./boot";
 
 // ----------------------------------------------------------- admin window

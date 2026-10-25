@@ -1,17 +1,17 @@
-import { api } from "./api";
-import type { Connection, User } from "./api";
-import { ic } from "./icons";
-import { parsePath } from "./route";
-import { esc } from "./xml";
+import { api } from "../api";
+import type { Connection, User } from "../api";
+import { ic } from "../icons";
+import { parsePath } from "../route";
+import { esc } from "../xml";
 import { state, treeNets, treePools } from "./state";
 import { displayName } from "./util";
 import { toast } from "./dialogs";
 import { hooks } from "./hooks";
 import { applyRoute, beginRender, closeDrawer, fastLoad, guestList, renderCurrent, renderView, syncUrl, toggleDrawer } from "./nav";
 import { bindSideResize } from "./sidebar";
-import { pollUploads } from "./transfers";
+import { pollUploads } from "../pages/transfers";
 import { $, initTheme, setHtml, toggleTheme } from "./dom";
-import { stopPendingPoll } from "./connection-dialog";
+import { stopPendingPoll } from "../forms/connection-dialog";
 
 /// The open view's server is down: keep its header (so it is clear which
 /// server and page this is, and the tree still lines up) and show one offline

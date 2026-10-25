@@ -1,14 +1,14 @@
-import { pendingReads, pollWindow } from "./api";
+import { pendingReads, pollWindow } from "../api";
 import { state } from "./state";
 import { busyScrolling } from "./scroll-busy";
 import { isOffline, refreshHealth } from "./boot";
 import { refreshTreeVms } from "./tree";
-import { loadDcDashboard } from "./datacenter";
-import { loadNetworks, renderNetPage } from "./network-page";
-import { loadPools, renderPoolPage } from "./pool-page";
-import { loadCts } from "./containers";
-import { loadDashboard, loadFilters, loadVms } from "./connection";
-import { renderVmBody } from "./vm-page";
+import { loadDcDashboard } from "../pages/datacenter";
+import { loadNetworks, renderNetPage } from "../pages/network-page";
+import { loadPools, renderPoolPage } from "../pages/pool-page";
+import { loadCts } from "../pages/containers";
+import { loadDashboard, loadFilters, loadVms } from "../pages/connection";
+import { renderVmBody } from "../pages/vm-page";
 
 // ---------------------------------------------------------------- polling
 

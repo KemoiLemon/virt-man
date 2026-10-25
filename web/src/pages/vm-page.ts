@@ -1,26 +1,26 @@
-import { api } from "./api";
-import type { ContainerSummary, FirewallPolicy, FirewallRule, NetworkSummary, VolumeSummary } from "./api";
-import { attachConsole } from "./console";
-import { ic } from "./icons";
-import { skeleton } from "./skeleton";
-import { holdFocus } from "./focus";
-import { isCoarsePointer } from "./touch";
-import { BOOT_LABEL, bootChoices, bootTargets, deviceSummary, devicesFromXml, hwType } from "./hardware";
-import { addDiskSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
-import type { Timing } from "./stats";
-import { isLive, loadHistory, range, rangeSelect } from "./history";
-import type { DomainStats } from "./stats";
-import { runTask } from "./task";
-import { esc, nextFreeIp } from "./xml";
-import { state, summaryDiskSel, summaryNetSel, treeNets, treePools } from "./state";
-import { bridgeNetwork, capLabel, displayName, nicNetwork, unescapeXml } from "./util";
-import { askConfirm, askMultiline, openModal, toast } from "./dialogs";
-import { act, deleteVm } from "./actions";
-import { beginRender, closeConsole, fastLoad, guestBase, guestList, stillCurrentVm, syncUrl } from "./nav";
-import { $, setHtml } from "./dom";
-import { openHardwareEditor } from "./hardware-editor";
-import { isOffline, renderOffline } from "./boot";
-import { canShareVm, downloadVv, openShareVm, refreshTreeVms, renderTree } from "./tree";
+import { api } from "../api";
+import type { ContainerSummary, FirewallPolicy, FirewallRule, NetworkSummary, VolumeSummary } from "../api";
+import { attachConsole } from "../console";
+import { ic } from "../icons";
+import { skeleton } from "../skeleton";
+import { holdFocus } from "../focus";
+import { isCoarsePointer } from "../touch";
+import { BOOT_LABEL, bootChoices, bootTargets, deviceSummary, devicesFromXml, hwType } from "../hardware";
+import { addDiskSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "../stats";
+import type { Timing } from "../stats";
+import { isLive, loadHistory, range, rangeSelect } from "../history";
+import type { DomainStats } from "../stats";
+import { runTask } from "../task";
+import { esc, nextFreeIp } from "../xml";
+import { state, summaryDiskSel, summaryNetSel, treeNets, treePools } from "../app/state";
+import { bridgeNetwork, capLabel, displayName, nicNetwork, unescapeXml } from "../app/util";
+import { askConfirm, askMultiline, openModal, toast } from "../app/dialogs";
+import { act, deleteVm } from "../app/actions";
+import { beginRender, closeConsole, fastLoad, guestBase, guestList, stillCurrentVm, syncUrl } from "../app/nav";
+import { $, setHtml } from "../app/dom";
+import { openHardwareEditor } from "../forms/hardware-editor";
+import { isOffline, renderOffline } from "../app/boot";
+import { canShareVm, downloadVv, openShareVm, refreshTreeVms, renderTree } from "../app/tree";
 import { deleteCt, renderCtHardware, renderCtOptions } from "./containers";
 import type { IpamHost, IpamInfo } from "./resource-common";
 import { openAccessLogs } from "./access-logs";
@@ -146,7 +146,7 @@ export async function renderVmBody(vm: string) {
       <div class="console-stage term-stage" id="console-stage" tabindex="0">
         <div class="console-msg" id="console-msg">connecting…</div>
       </div>`);
-    state.terminal ??= await import("./terminal");
+    state.terminal ??= await import("../terminal");
     if (!stillCurrentVm(conn, vm, "console")) return;
     await state.terminal.attachTextConsole($("#console-stage"), guestBase(conn, vm, true), (msg: string | null) => {
       const m = $("#console-msg");

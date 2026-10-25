@@ -1,9 +1,9 @@
 // Toasts and the themed replacements for the browser's modal dialogs. No
 // native prompt/confirm/alert is ever used (see AGENTS.md "No native OS chrome").
 import { $, setHtml } from "./dom";
-import { enterLayer } from "./focus";
-import { closeSvg, ic } from "./icons";
-import { esc } from "./xml";
+import { enterLayer } from "../focus";
+import { closeSvg, ic } from "../icons";
+import { esc } from "../xml";
 
 // Toasts stack bottom-right in a column instead of overlapping at the
 // bottom-centre, and each one is dismissible.
