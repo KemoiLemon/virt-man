@@ -74,7 +74,9 @@ try {
     return w.document;
   };
   const noCards = (d) => d.querySelectorAll(".create-card, .net-create-card").length === 0;
-  const modalTitle = (d) => d.querySelector(".modal-back.open .modal-head, .modal-back.open h3, .modal-back.open .modal-title")?.textContent.trim() ?? "";
+  // The topmost dialog: the admin window itself is a modal underneath it.
+  const top = (d) => [...d.querySelectorAll(".modal-back.open")].at(-1);
+  const modalTitle = (d) => top(d)?.querySelector(".modal-head, h3, .modal-title")?.textContent.trim() ?? "";
 
   // No servers at all. Servers are managed on the admin Daemons page now (an
   // old /servers link lands there). The sidebar tree shows one ghost row where
@@ -88,7 +90,7 @@ try {
   // Adding a daemon is the admin page's job, and there is no "generate new
   // token" checkbox: a blank token field does that on create, and means
   // "keep it" on edit, so a checkbox beside it was two controls for one value.
-  const connDialog = d.querySelector(".modal-back.open");
+  const connDialog = top(d);
   check("…with no generate-token checkbox, only the token field",
     !!connDialog?.querySelector("#conn-token") && !connDialog?.querySelector("#conn-gen")
       && !/generate new token/i.test(connDialog?.textContent ?? ""),

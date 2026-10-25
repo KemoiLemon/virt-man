@@ -119,6 +119,7 @@ interface ArrowGroup {
 export const ARROW_GROUPS: ArrowGroup[] = [
   { root: ".ctxmenu", item: ".ctxmenu-item", axis: "v" },
   { root: "#tree", item: ".tree-row", axis: "v" },
+  { root: ".admin-nav", item: ".tree-row", axis: "v" },
   { root: ".tabbar", item: ".tab", axis: "both" },
   { root: ".hw-side", item: ".hw-item", axis: "v" },
   { root: ".card-grid", item: "[data-open]", axis: "both" },

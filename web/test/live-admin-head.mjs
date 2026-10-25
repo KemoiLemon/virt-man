@@ -47,8 +47,8 @@ const page = async (path) => {
 
 for (const [section, id] of Object.entries(WANT)) {
   const w = await page(`/admin/${section}`);
-  const head = w.document.querySelector("#content .dhead");
-  const title = head?.querySelector(".dtitle");
+  const head = w.document.querySelector(".admin-win .modal-head");
+  const title = head?.querySelector("#admin-title");
   const btn = w.document.querySelector(`#${id}`);
   const inHead = !!(btn && head && head.contains(btn));
 

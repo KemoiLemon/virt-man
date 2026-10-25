@@ -83,34 +83,18 @@ function replay(el: Element, cls: string, ms: number) {
   timers.set(cls, window.setTimeout(() => el.classList.remove(cls), ms));
 }
 
-/// Entering or leaving the admin page swaps the sidebar and the content, which
-/// would otherwise cut: slide them in from the side they came from.
-function swapAnim(toAdmin: boolean) {
-  const dir = toAdmin ? "swap-right" : "swap-left";
-  for (const id of ["tree", "content"]) {
-    const el = document.getElementById(id);
-    if (el) {
-      el.classList.remove("swap-right", "swap-left");
-      replay(el, dir, 450);
-    }
-  }
-  const b = document.getElementById("admin-btn");
-  if (b) replay(b, "turn", 450);
-}
-
 /// Choosing a different sidebar row slides the page in from the direction of
 /// travel: a row further down brings the page up from below, a row further up
 /// brings it down from above, after the old page has slid out. Keyed on what is selected, not its position, so a
 /// guest appearing above the selection (the poll) does not look like a move.
 let lastSel: { key: string; idx: number; admin: boolean } | null = null;
-function noteTreeSel(tree: Element, admin: boolean) {
+function noteTreeSel(tree: Element, admin: boolean, content: HTMLElement | null = document.getElementById("content")) {
   const sel = tree.querySelector<HTMLElement>(".tree-row.sel");
   if (!sel) return;
   const idx = [...tree.querySelectorAll(".tree-row")].indexOf(sel);
   const key = JSON.stringify({ ...sel.dataset });
   const prev = lastSel;
   lastSel = { key, idx, admin };
-  const content = document.getElementById("content");
   if (!prev || !content || prev.admin !== admin || prev.key === key) return;
   const down = idx > prev.idx;
   // The page being left slides out the other way first: a copy of it laid over
@@ -145,13 +129,19 @@ function noteTreeSel(tree: Element, admin: boolean) {
 /// what was already there would fade out the old page just before it is
 /// replaced.
 document.addEventListener("click", (e) => {
-  const tab = (e.target as Element | null)?.closest?.("#content .tabbar .tab") as HTMLElement | null;
+  const tab = (e.target as Element | null)?.closest?.("#content .tabbar .tab, .admin-main .tabbar .tab") as HTMLElement | null;
   const bar = tab?.closest<HTMLElement>(".tabbar");
   if (!tab || !bar || tab.classList.contains("active")) return;
   const tabs = [...bar.querySelectorAll(".tab")];
   const from = tabs.findIndex((t) => t.classList.contains("active"));
   if (from < 0) return;
   const cls = tabs.indexOf(tab) > from ? "tab-in-right" : "tab-in-left";
+  // The admin pane is patched in place, so no new nodes arrive for the observer
+  // below to slide; renderAdmin slides what is under the bar once it has painted.
+  if (tab.closest(".admin-main")) {
+    adminTabDir = cls === "tab-in-right" ? 1 : -1;
+    return;
+  }
   const host = bar.parentElement!;
   const slide = (n: Element) => {
     // Already sliding: let it finish rather than restart it.
@@ -163,7 +153,7 @@ document.addEventListener("click", (e) => {
     replay(n, cls, 400);
   };
   const obs = new MutationObserver((muts) => {
-    const nb = bar.isConnected ? bar : host.isConnected ? host.querySelector(":scope > .tabbar") : document.querySelector("#content .tabbar");
+    const nb = bar.isConnected ? bar : host.isConnected ? host.querySelector(":scope > .tabbar") : bar.closest("#content, .admin-main")?.querySelector(".tabbar") ?? null;
     if (!nb) return;
     const below = new Set<Element>();
     for (let n = nb.nextElementSibling; n; n = n.nextElementSibling) below.add(n);
@@ -179,7 +169,7 @@ document.addEventListener("click", (e) => {
     }
     if (done) obs.disconnect();
   });
-  obs.observe(host.isConnected ? host : document.getElementById("content")!, { childList: true, subtree: true });
+  obs.observe(host.isConnected ? host : (document.querySelector(".admin-main") ?? document.getElementById("content"))!, { childList: true, subtree: true });
   window.setTimeout(() => obs.disconnect(), 3000);
 }, true);
 
@@ -269,14 +259,23 @@ let summaryDiskSel: Record<string, string> = {};
 /// Which NIC the summary's Network card is graphing, per VM.
 let summaryNetSel: Record<string, string> = {};
 let dcTab: DcTab = "dashboard";
-/// The admin page's open section, or null when it is not the view. A view of
-/// its own with its own sidebar, rather than a modal, so it has a URL and
-/// works as a page on a phone.
+/// The admin window's open section, or null when it is closed. A window over
+/// the page that was open, not a view: the page underneath keeps its place,
+/// and the URL still names that page.
 let adminSection: AdminSection | null = null;
-/// The open tab of a tabbed admin section (the dashboard), part of the URL.
+/// The open tab of a tabbed admin section (the dashboard).
 let adminTab: AdminTab | undefined;
-/// Where the return button goes: the last view before the admin page.
-let lastNonAdminRoute: Route | null = null;
+let adminEl: HTMLElement | null = null;
+/// Bumped per admin paint and on close, so a read that lands late is dropped.
+let adminGen = 0;
+/// The entrance to play once the section just chosen has painted: +1 slides in
+/// from below (a row further down), -1 from above. Null for a same-section repaint.
+let adminEnter: 1 | -1 | null = null;
+/// Which way an admin tab switch went (1 = to the right); see renderAdmin.
+let adminTabDir: 1 | -1 | null = null;
+let adminIdx: number | null = null;
+/// An /admin link, opened over the datacenter once the first render is done.
+let pendingAdmin: { section: AdminSection; tab?: AdminTab } | null = null;
 let pollTimer: number | null = null;
 /// Retries for a daemon saved while unreachable: re-fetches its cert every
 /// second until it is up, then pins it.
@@ -348,7 +347,6 @@ async function fastLoad(load: () => Promise<unknown>) {
 /// The view on screen, as a route. Derived from the selection state rather
 /// than stored beside it, so the two cannot disagree.
 function currentRoute(): Route {
-  if (adminSection) return { view: "admin", section: adminSection, tab: adminTab };
   if (!selectedConn) return { view: "dc", tab: dcTab };
   // URLs name a guest, network or pool by its UUID, which never changes or
   // repeats; the selection itself stays the libvirt name, which every daemon
@@ -492,13 +490,13 @@ function closeDrawer() {
 function applyRoute(r: Route) {
   leaveCurrentView();
   clearResourceSelection();
-  // A non-admin who follows an /admin link lands on the datacenter.
-  adminSection = r.view === "admin" && canAdmin() ? r.section : null;
-  adminTab = r.view === "admin" ? r.tab : undefined;
+  closeAdmin();
   selectedConn = r.view === "dc" || r.view === "admin" ? null : r.conn;
   if (r.view === "admin") {
-    // Refused (not an admin): the datacenter, rather than a dead page.
-    if (!adminSection) dcTab = "dashboard";
+    // An old /admin link: the window over the datacenter. A non-admin just
+    // gets the datacenter.
+    dcTab = "dashboard";
+    if (canAdmin()) pendingAdmin = { section: r.section, tab: r.tab };
     return;
   }
   if (r.view === "dc") dcTab = r.tab;
@@ -521,10 +519,14 @@ function renderCurrent() {
   } finally {
     restoringRoute = false;
   }
+  if (pendingAdmin) {
+    const p = pendingAdmin;
+    pendingAdmin = null;
+    openAdmin(p.section, p.tab);
+  }
 }
 
 function renderView() {
-  if (adminSection) return renderAdmin();
   if (selectedConn && isOffline(selectedConn)) return renderOffline();
   if (!selectedConn) renderDc();
   else if (selectedVm) void renderVm();
@@ -1074,7 +1076,7 @@ setHtml(app, `
   $("#theme-btn").onclick = toggleTheme;
   bindSideResize($("#side-resize"));
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
-  if ($("#admin-btn")) $("#admin-btn").onclick = () => (adminSection ? leaveAdmin() : openAdmin());
+  if ($("#admin-btn")) $("#admin-btn").onclick = () => (adminSection ? closeAdmin() : openAdmin());
 
   renderProfileBtn();
   renderCurrent();
@@ -1183,17 +1185,6 @@ function renderTree() {
   const tree = $("#tree");
   if (!tree) return;
   syncAdminButton();
-  if (adminSection) {
-    const restore = holdFocus(tree, ".tree-row.sel");
-    setHtml(tree, adminTree(adminSection));
-    restore();
-    noteTreeSel(tree, true);
-    tree.querySelectorAll("[data-admin-section]").forEach((row: Element) => {
-      (row as HTMLElement).onclick = () => openAdmin((row as HTMLElement).dataset.adminSection as AdminSection);
-    });
-    return;
-  }
-
   const serverRows = connections
     .map((c) => {
       const selected = c.id === selectedConn && !selectedVm && !selectedNet && !selectedPool;
@@ -1737,7 +1728,7 @@ function adminTreeMenu(row: HTMLElement | null): CtxItem[] | null {
       },
     });
   }
-  items.push({ label: "Return", icon: ic.ret(), separator: true, run: () => leaveAdmin() });
+  items.push({ label: "Close", icon: ic.close(), separator: true, run: () => closeAdmin() });
   return items;
 }
 
@@ -1791,11 +1782,11 @@ function contentMenuItems(target: Element): CtxItem[] | null {
 function menuAt(target: Element | null, x: number, y: number): boolean {
   if (!target?.closest) return false;
   let items: CtxItem[] | null = null;
-  if (adminSection) {
-    // The admin page has its own actions: a section in the sidebar offers
+  if (target.closest(".admin-win")) {
+    // The admin window has its own actions: a section in its sidebar offers
     // open and its common action; a row offers exactly its own buttons.
-    if (target.closest(".list-pane")) items = adminTreeMenu(target.closest<HTMLElement>("[data-admin-section]"));
-    else if (target.closest("#content") && !target.closest("input, textarea, select, .cmd, pre, .select-popover")) {
+    if (target.closest(".admin-nav")) items = adminTreeMenu(target.closest<HTMLElement>("[data-admin-section]"));
+    else if (target.closest("#admin-area") && !target.closest("input, textarea, select, .cmd, pre, .select-popover")) {
       items = adminRowMenu(target);
     }
   } else if (target.closest(".list-pane")) {
@@ -1895,12 +1886,10 @@ async function refreshTreeVms() {
     renderTree();
     // The Datacenter view lists the same guests, so keep it in step; without
     // this its Guests table stays empty until another action redraws it.
-    // Not on the admin page: it has no server selected either, and
-    // repainting the datacenter over it threw the user off it.
     // Its dashboard repaints itself in place from the same tree: rebuilding the
     // pane would paint the skeleton over the user's scroll position every time
     // a pool's allocation ticks, which is what made a poll reset the page.
-    if (!selectedConn && !selectedVm && !adminSection) {
+    if (!selectedConn && !selectedVm) {
       if (dcTab === "dashboard") void loadDcDashboard();
       else renderDc();
     }
@@ -2369,43 +2358,83 @@ async function loadDcDashboard() {
   });
 }
 
-// ----------------------------------------------------------- admin page
+// ----------------------------------------------------------- admin window
 
-/// Open the admin page at `section` (or where it was last).
+/// Open the admin window at `section` (or where it was last). It grows out of
+/// the admin button over whatever page is open, which stays where it is.
 function openAdmin(section: AdminSection = adminSection ?? "dashboard", tab?: AdminTab) {
   if (!canAdmin()) return;
-  if (!adminSection) lastNonAdminRoute = currentRoute();
-  leaveCurrentView();
-  clearResourceSelection();
-  selectedConn = null;
   // Staying in a section keeps its tab; entering one starts at its first.
   if (tab) adminTab = tab;
   else if (section !== adminSection || !adminTab) adminTab = ADMIN_TABS[section]?.[0];
-  const entering = !adminSection;
   adminSection = section;
-  renderTree();
+  if (!adminEl) createAdminWindow();
+  renderAdminNav();
   renderAdmin();
-  if (entering) swapAnim(true);
+  syncAdminButton();
 }
 
-/// The return button: back to the view the admin page was opened from, or
-/// the datacenter when /admin was the first page loaded.
-function leaveAdmin() {
-  applyRoute(lastNonAdminRoute ?? { view: "dc", tab: "dashboard" });
-  adminSection = null;
-  renderCurrent();
-  swapAnim(false);
+function createAdminWindow() {
+  const el = openModal(
+    `<span class="dhead-ic">${ic.admin(18)}</span><span id="admin-title"></span><span class="dhead-actions" id="admin-head"></span>`,
+    `<nav class="admin-nav" aria-label="Administration"></nav>
+     <div class="detail admin-main"><div id="admin-area"></div></div>`,
+    "",
+  );
+  el.classList.add("admin-back");
+  const win = el.querySelector<HTMLElement>(".modal")!;
+  win.classList.add("admin-win");
+  // Grow from the button. offset* is layout, unaffected by the animation's own
+  // scale, which getBoundingClientRect would read.
+  const btn = $("#admin-btn");
+  if (btn) {
+    const b = btn.getBoundingClientRect();
+    win.style.transformOrigin = `${b.left + b.width / 2 - win.offsetLeft}px ${b.top + b.height / 2 - win.offsetTop}px`;
+    replay(btn, "turn", 450);
+  }
+  const remove = el.remove;
+  el.remove = () => {
+    if (adminEl === el) {
+      adminEl = null;
+      adminSection = null;
+      adminGen++;
+      syncAdminButton();
+    }
+    remove();
+  };
+  adminEl = el;
+  adminIdx = null; // a fresh window has no previous section to slide from
+  adminEnter = null;
 }
 
-/// The admin button stays where it is and becomes a return button while the
-/// admin page is open.
+function closeAdmin() {
+  adminEl?.remove();
+}
+
+/// The admin button stays where it is and shows whether the window is open.
 function syncAdminButton() {
   const b = $("#admin-btn");
   if (!b) return;
-  b.title = adminSection ? "Return" : "Administration";
+  b.title = adminSection ? "Close Administration" : "Administration";
   b.setAttribute("aria-label", b.title);
   b.classList.toggle("on", !!adminSection);
-  setHtml(b, adminSection ? ic.ret() : ic.admin());
+  setHtml(b, ic.admin());
+}
+
+function renderAdminNav() {
+  const nav = adminEl?.querySelector<HTMLElement>(".admin-nav");
+  if (!nav || !adminSection) return;
+  const restore = holdFocus(nav, ".tree-row.sel");
+  setHtml(nav, adminTree(adminSection));
+  restore();
+  // Which way the move went, for the entrance. Only a change of section in an
+  // open window moves; a repaint of the same one is patched in place.
+  const idx = [...nav.querySelectorAll(".tree-row")].findIndex((r) => r.classList.contains("sel"));
+  if (adminIdx !== null && adminIdx !== idx) adminEnter = idx > adminIdx ? 1 : -1;
+  adminIdx = idx;
+  nav.querySelectorAll<HTMLElement>("[data-admin-section]").forEach((row) => {
+    row.onclick = () => openAdmin(row.dataset.adminSection as AdminSection);
+  });
 }
 
 const adminCtx: AdminCtx = {
@@ -2422,7 +2451,7 @@ const adminCtx: AdminCtx = {
   openConnectionDialog: (id) => openConnectionDialog(id),
   deleteConnection: (id) => deleteConnection(id),
   openResource: (kind, conn, name) => {
-    adminSection = null;
+    closeAdmin();
     if (kind === "vm") selectVmRow(conn, name);
     else if (kind === "ct") selectCtRow(conn, name);
     else if (kind === "network") selectNetRow(conn, name);
@@ -2438,43 +2467,77 @@ const adminCtx: AdminCtx = {
   refreshMe: async () => {
     user = await api.get<User>("/auth/me");
     await loadConnections();
-    if (!canAdmin()) adminSection = null;
+    if (!canAdmin()) closeAdmin();
     renderApp();
   },
   head: (html) => {
     const slot = $("#admin-head");
     if (slot) setHtml(slot, html);
   },
-  stillCurrent: (gen) => stillCurrent(gen),
+  stillCurrent: (gen) => gen === adminGen && !!adminEl?.isConnected,
 };
 
 let shownAdmin: AdminSection | null = null;
 function renderAdmin() {
-  if (!adminSection) return;
-  const gen = beginRender();
-  syncUrl();
-  const content = $("#content");
-  // Moving between sections or tabs keeps the page and the old section on
-  // screen until the new one is ready, then patches it in; rebuilding the shell
-  // blanked the pane for the length of the read.
-  let area = content.querySelector("#admin-area") as HTMLElement | null;
-  if (!area) {
-    setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.admin(20)}</span>
-      <span class="dtitle">${esc(adminTitle(adminSection))}</span>
-      <span class="dhead-actions" id="admin-head"></span></div>
-    <div id="admin-area"></div>`);
-    area = $("#admin-area", content);
-  } else {
-    const title = content.querySelector(".dtitle");
-    if (title) title.textContent = adminTitle(adminSection);
-    // The old section's buttons must not outlive it: they would act on the
-    // wrong page until the new one paints its own.
-    if (shownAdmin !== adminSection) content.querySelector("#admin-head")?.replaceChildren();
-  }
+  if (!adminSection || !adminEl) return;
+  const gen = ++adminGen;
+  // Moving between sections or tabs keeps the old section on screen until the
+  // new one is ready, then patches it in; rebuilding blanked the pane for the
+  // length of the read.
+  const title = adminEl.querySelector("#admin-title");
+  if (title) title.textContent = adminTitle(adminSection);
+  // The old section's buttons must not outlive it: they would act on the
+  // wrong page until the new one paints its own.
+  if (shownAdmin !== adminSection) adminEl.querySelector("#admin-head")?.replaceChildren();
   shownAdmin = adminSection;
-  void renderAdminSection(adminCtx, area!, adminSection, gen);
+  const area = adminEl.querySelector<HTMLElement>("#admin-area")!;
+  // Stays pending until a slide plays: a render superseded mid-read (a quick
+  // second click, a re-click of the same row) must hand the slide on, not eat it.
+  const enter = adminEnter;
+  const main = area.closest<HTMLElement>(".admin-main")!;
+  // A new section shows its outline at once and slides in once it has loaded,
+  // however long the read takes. The slide is one Web Animation that replaces
+  // any still running, so quick clicks cannot stack or fight over classes.
+  if (enter) {
+    setHtml(area, skeleton("table"));
+    main.scrollTop = 0;
+  }
+  const tabDir = enter ? null : adminTabDir;
+  // Starts on the first paint of real content, in the same microtask checkpoint
+  // as the paint, so no frame shows the page at its final place before the slide
+  // begins. (Waiting for the painter to finish let one through whenever it kept
+  // awaiting after painting.)
+  let played = false;
+  const play = () => {
+    obs.disconnect();
+    if (played || gen !== adminGen) return;
+    played = true;
+    if (enter) adminEnter = null;
+    if (tabDir) adminTabDir = null;
+    if (!(enter || tabDir) || !main.animate) return;
+    if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    // The skeleton's rise-in (setHtml adds it as the content replaces the
+    // outline) would run beside the slide on the same transform; the slide wins.
+    area.classList.remove("sk-reveal");
+    const frames = (from: string) => [{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }];
+    const opts = { duration: 280, easing: "cubic-bezier(.2, .8, .2, 1)" };
+    if (enter) {
+      main.getAnimations().forEach((a) => a.cancel());
+      main.animate(frames(`translateY(${enter * 26}px)`), opts);
+      return;
+    }
+    // A tab switch slides only what is under the tab bar, from the tab's side.
+    const bar = area.querySelector(".tabbar");
+    const moved = [...(bar?.parentElement?.children ?? [])].filter((n) => n !== bar && bar!.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
+    if (!moved.length) return;
+    main.style.overflowX = "hidden";
+    window.setTimeout(() => (main.style.overflowX = ""), opts.duration + 50);
+    moved.forEach((n) => { n.getAnimations().forEach((a) => a.cancel()); n.animate(frames(`translateX(${tabDir! * 26}px)`), opts); });
+  };
+  const obs = new MutationObserver(() => { if (!area.querySelector(".skeleton")) play(); });
+  if (enter || tabDir) obs.observe(area, { childList: true, subtree: true, characterData: true });
+  void renderAdminSection(adminCtx, area, adminSection, gen).then(play);
 }
-
 
 /// Present a secret that the server will never show again.
 function showSecret(title: string, secret: string) {
@@ -4094,7 +4157,7 @@ async function openCreateCt(conn = selectedConn, forUser?: { owner: string; afte
       else if (selectedConn === conn && connTab === "containers" && !selectedVm) void loadCts();
       // Created from the Datacenter (or a server that is not open): the view
       // on screen needs the repaint, and it stays where it is.
-      else if (!selectedConn && !adminSection) renderDc();
+      else if (!selectedConn) renderDc();
     });
   };
 }
@@ -4129,7 +4192,6 @@ async function deleteCtOn(conn: string, name: string, after: () => void) {
 /// the server's Containers tab (the container's own page lands there too) or
 /// the Datacenter.
 function afterCtDelete(conn: string) {
-  if (adminSection) return;
   if (!selectedConn) { renderDc(); return; }
   if (selectedConn !== conn || selectedVm || selectedNet || selectedPool) return;
   renderConn();
@@ -4433,7 +4495,7 @@ function openNetworkForm(
         else if (selectedConn === conn && !selectedVm) void renderConn();
         // Made on a server that is not the selected one (the Datacenter's
         // Networks tab): repaint the view actually on screen.
-        else if (!selectedConn && !adminSection) renderDc();
+        else if (!selectedConn) renderDc();
       });
   };
 
@@ -7316,7 +7378,7 @@ async function openHardwareEditor(opts: {
         // Created on a server that is not the app's selected one (the
         // Datacenter's tab, which lists every server's guests): the view that
         // is showing needs the repaint, not the server that was never open.
-        else if (!selectedConn && !adminSection) renderDc();
+        else if (!selectedConn) renderDc();
       });
   };
 
@@ -8209,9 +8271,6 @@ function startPolling() {
 /// update slot (`api.ts`), so the views repaint once.
 function pollRound() {
   void refreshHealth();
-  // The admin page reads on demand; re-reading every daemon's resources
-  // each second would be the costliest poll in the app for no gain.
-  if (adminSection) return;
   // A down server's views show the offline panel; polling its daemon would
   // only fail again and paint the raw error over it.
   if (isOffline(selectedConn)) return;
