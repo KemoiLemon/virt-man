@@ -31,6 +31,7 @@ function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   const win = method === "GET" ? cacheWindow : null;
   if (win) headers["X-Virt-Man-Cache"] = "1";
   const governed = method === "GET" && !win && (pollSpan || inWave);
+  if (governed && batching) return govern(batched<T>(url));
   const p = fetch(url, {
     method,
     credentials: "same-origin",
@@ -41,6 +42,47 @@ function request<T>(method: string, url: string, body?: unknown): Promise<T> {
     return handle<T>(res);
   });
   return governed ? govern(p) : p;
+}
+
+// ---------------------------------------------------------------- batching
+//
+// A poll round starts its reads in one synchronous span, and a round used to
+// be ten-odd HTTP requests per server. They are collected for one microtask and
+// sent as a single `POST /batch`, which the server fans out through its own
+// router, so the answers (and their permission errors) are the individual ones.
+
+let batching = true;
+/// Tests that mock `fetch` per URL turn this off; the app never does.
+export function setBatching(on: boolean) { batching = on; }
+
+let batchQ: Array<{ url: string; resolve: (v: any) => void; reject: (e: unknown) => void }> = [];
+
+function batched<T>(url: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    batchQ.push({ url, resolve, reject });
+    if (batchQ.length === 1) queueMicrotask(flushBatch);
+  });
+}
+
+async function flushBatch() {
+  const q = batchQ;
+  batchQ = [];
+  try {
+    const res = await fetch("/batch", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: q.map((x) => x.url) }),
+    });
+    const out = await handle<Array<{ status: number; body: any }>>(res);
+    q.forEach((x, i) => {
+      const r = out[i];
+      if (r && r.status >= 200 && r.status < 300) x.resolve(r.status === 204 ? undefined : r.body);
+      else x.reject(new ApiError(r?.status ?? 500, r?.body?.error ?? "request failed"));
+    });
+  } catch (e) {
+    for (const x of q) x.reject(e);
+  }
 }
 
 // ---------------------------------------------------------------- update pace

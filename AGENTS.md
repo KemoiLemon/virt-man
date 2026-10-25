@@ -324,6 +324,13 @@ removes the definition and cleans up storage. The delete response carries
 `stopped` so the UI can say a running guest was stopped. The SPA wraps the
 guest delete in `runTask` because that stop can take seconds.
 
+**The poll's reads travel as one `POST /batch`.** (`web/server/src/api/batch.rs`,
+`web/src/api.ts` `batched`.) A round used to be ten-odd requests per server per
+second. Paced (poll) GETs started in the same tick are sent together; the server
+runs each through its own router with the caller's credentials, so auth, ACL and
+the proxy cache apply per path. A test that stubs `fetch` per URL must either
+`setBatching(false)` or answer `/batch` by dispatching its `paths`.
+
 **Pages paint from cache, then from the daemon.** A remote daemon costs a
 round trip per read, so opening a view used to show nothing until it answered.
 Three layers, each measured with 30 ms of RTT added to the daemon hop (`tc

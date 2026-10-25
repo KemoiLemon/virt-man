@@ -9,7 +9,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { api, setUpdateGap, pollWindow, pendingReads } = await import("./_build/api.js");
+const { api, setUpdateGap, setBatching, pollWindow, pendingReads } = await import("./_build/api.js");
+setBatching(false); // these mock fetch per URL
 setUpdateGap(120);
 
 const answer = (ms, status = 200) => new Promise((r) =>

@@ -2,6 +2,7 @@ pub mod access;
 pub mod activity;
 pub mod admin;
 pub mod auth;
+pub mod batch;
 pub mod connections;
 pub mod health;
 pub mod history;
@@ -105,6 +106,7 @@ pub fn build(state: AppState) -> axum::Router<AppState> {
     axum::Router::<AppState>::new()
         .merge(health::routes())
         .merge(auth::routes(&state))
+        .merge(batch::routes(&state))
         .merge(users::routes(&state))
         .merge(roles::routes(&state))
         .merge(shares::routes(&state))
