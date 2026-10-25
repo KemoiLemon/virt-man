@@ -122,6 +122,28 @@ function noteTreeSel(tree: Element, admin: boolean, content: HTMLElement | null 
   replay(content, down ? "nav-down" : "nav-up", 500);
 }
 
+/// The old tab's page slides out the opposite way before the new one comes in
+/// (the same two beats as a sidebar move): a copy of the pane laid over it,
+/// clipped to what is under the tab bar so the bar itself stays put.
+function slideOutBelow(bar: HTMLElement, out: "out-left" | "out-right") {
+  const box = bar.closest<HTMLElement>("#content, .admin-main");
+  if (!box || document.querySelector(".nav-ghost")) return;
+  const r = box.getBoundingClientRect();
+  const ghost = box.cloneNode(true) as HTMLElement;
+  ghost.removeAttribute("id");
+  ghost.classList.remove("nav-up", "nav-down", "swap-left", "swap-right", "sk-reveal");
+  ghost.classList.add("nav-ghost", out);
+  Object.assign(ghost.style, {
+    left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`,
+    clipPath: `inset(${bar.getBoundingClientRect().bottom - r.top}px 0 0 0)`,
+  });
+  ghost.style.overflowY = getComputedStyle(box).overflowY;
+  // Inside the admin window, or the window (above the page layer) would hide it.
+  (box.closest(".modal-back") ?? document.body).appendChild(ghost);
+  ghost.scrollTop = box.scrollTop;
+  window.setTimeout(() => ghost.remove(), 200);
+}
+
 /// Switching tabs slides the new page in sideways, from the side of the tab
 /// that was chosen. Only what is under the tab bar moves, and only what is new:
 /// the observer starts before the tab's own handler runs and slides the nodes
@@ -136,6 +158,7 @@ document.addEventListener("click", (e) => {
   const from = tabs.findIndex((t) => t.classList.contains("active"));
   if (from < 0) return;
   const cls = tabs.indexOf(tab) > from ? "tab-in-right" : "tab-in-left";
+  slideOutBelow(bar, cls === "tab-in-right" ? "out-left" : "out-right");
   // The admin pane is patched in place, so no new nodes arrive for the observer
   // below to slide; renderAdmin slides what is under the bar once it has painted.
   if (tab.closest(".admin-main")) {
@@ -152,7 +175,7 @@ document.addEventListener("click", (e) => {
     n.classList.remove("tab-in-right", "tab-in-left", "sk-reveal");
     n.parentElement?.classList.remove("sk-reveal");
     n.querySelectorAll(".sk-reveal").forEach((r) => r.classList.remove("sk-reveal"));
-    replay(n, cls, 400);
+    replay(n, cls, 600);
   };
   const obs = new MutationObserver((muts) => {
     const nb = bar.isConnected ? bar : host.isConnected ? host.querySelector(":scope > .tabbar") : bar.closest("#content, .admin-main")?.querySelector(".tabbar") ?? null;
@@ -2525,6 +2548,7 @@ function renderAdmin() {
     area.classList.remove("sk-reveal");
     const frames = (from: string) => [{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }];
     const opts = { duration: 280, easing: "cubic-bezier(.2, .8, .2, 1)" };
+    const tabOpts = { ...opts, delay: 180, fill: "both" as const };
     if (enter) {
       main.getAnimations().forEach((a) => a.cancel());
       main.animate(frames(`translateY(${enter * 26}px)`), opts);
@@ -2535,8 +2559,8 @@ function renderAdmin() {
     const moved = [...(bar?.parentElement?.children ?? [])].filter((n) => n !== bar && bar!.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
     if (!moved.length) return;
     main.style.overflowX = "hidden";
-    window.setTimeout(() => (main.style.overflowX = ""), opts.duration + 50);
-    moved.forEach((n) => { n.getAnimations().forEach((a) => a.cancel()); n.animate(frames(`translateX(${tabDir! * 26}px)`), opts); });
+    window.setTimeout(() => (main.style.overflowX = ""), tabOpts.delay + opts.duration + 50);
+    moved.forEach((n) => { n.getAnimations().forEach((a) => a.cancel()); n.animate(frames(`translateX(${tabDir! * 26}px)`), tabOpts); });
   };
   const obs = new MutationObserver(() => { if (!area.querySelector(".skeleton")) play(); });
   if (enter || tabDir) obs.observe(area, { childList: true, subtree: true, characterData: true });
