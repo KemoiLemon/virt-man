@@ -35,6 +35,7 @@ export const hooks: {
   selectCtRow: AnyFn;
   selectNetRow: AnyFn;
   selectPoolRow: AnyFn;
+  syncVmActions: AnyFn;
 } = {
   renderTree: () => {},
   renderOffline: () => {},
@@ -64,4 +65,5 @@ export const hooks: {
   selectCtRow: () => {},
   selectNetRow: () => {},
   selectPoolRow: () => {},
+  syncVmActions: () => {},
 };

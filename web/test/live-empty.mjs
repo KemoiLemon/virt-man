@@ -112,8 +112,8 @@ try {
   // server ghost, which is not the row that regressed.
   check("…and carries the real row's indent class, not just its kind's",
     /\.tree-res\s*\{[^}]*padding-left/.test(css)
-      && /ghostRow\("tree-res tree-net"/.test(readFileSync("src/main.ts", "utf8"))
-      && /ghostRow\("tree-res tree-pool"/.test(readFileSync("src/main.ts", "utf8")));
+      && /ghostRow\("tree-res tree-net"/.test(readFileSync("src/tree.ts", "utf8"))
+      && /ghostRow\("tree-res tree-pool"/.test(readFileSync("src/tree.ts", "utf8")));
   let empty;
 
   d = await open("/");
