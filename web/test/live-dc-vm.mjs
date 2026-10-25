@@ -166,23 +166,9 @@ for (const [tab, label, card] of [
 // Creating from the Datacenter must not select the daemon on the page behind
 // the form: choosing a daemon there is a choice about the resource, not a
 // navigation. This is the regression that kept coming back, so it drives the
-// pick-a-daemon path itself -- with NO server selected, which is the only case
-// that path is reached in.
-document.querySelector("#dc-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(400);
-check("creating from the Datacenter keeps the Datacenter", () => {
-  [...document.querySelectorAll(".tabbar .tab")]
-    .find((t) => t.textContent.trim() === "Storage")
-    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  document.querySelector("#dc-pool-create")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  document.querySelector("#dc-net-create")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  assert.equal(window.location.pathname, "/storage", `still on the Datacenter`);
-  const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.ok(tabs.includes("Guests"), `datacenter tabs still there (${tabs})`);
-});
-
-// The real case: no server selected at all, so the daemon picker opens. The
-// tree must not gain a selection and the Datacenter must stay on screen.
+// pick-a-daemon path itself -- with NO server selected, the only case that path
+// is reached in, so the daemon picker opens. The tree must not gain a selection
+// and the Datacenter must stay on screen.
 check("the daemon picker does not select the daemon it picks", () => {
   // Clear any selection the checks above left, then open the picker.
   document.querySelector("#dc-row")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

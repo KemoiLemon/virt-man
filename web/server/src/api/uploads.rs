@@ -73,11 +73,7 @@ pub struct UploadJob {
     /// Average bytes/second of the daemon leg, recomputed as bytes leave.
     /// Average rather than instantaneous: a per-chunk rate jitters far too much
     /// to read, and this is what "how fast is this going" actually means.
-    pub speed_bps: f64,
-    /// The daemon's own measurements, known once it has answered.
-    pub daemon_recv_bps: f64,
-    pub daemon_write_bps: f64,
-    /// Who started it. The transfer outlives the browser request, so the
+    pub speed_bps: f64,    /// Who started it. The transfer outlives the browser request, so the
     /// activity entry is written from the background task.
     pub user_id: String,
     pub username: String,
@@ -114,10 +110,7 @@ fn view(j: &UploadJob) -> Value {
         "sha256": j.sha256,
         "error": j.error,
         "at_ms": j.at_ms,
-        "speed_bps": j.speed_bps,
-        "daemon_recv_bps": j.daemon_recv_bps,
-        "daemon_write_bps": j.daemon_write_bps,
-    })
+        "speed_bps": j.speed_bps,    })
 }
 
 /// Directory holding staged bodies.
@@ -237,10 +230,7 @@ fn job_from_files(body: &std::path::Path, meta: &std::path::Path, id: &str) -> O
         // treated as expired and silently dropped.
         finished_ms: 0,
         started_ms: 0,
-        speed_bps: 0.0,
-        daemon_recv_bps: 0.0,
-        daemon_write_bps: 0.0,
-        user_id: m.user_id,
+        speed_bps: 0.0,        user_id: m.user_id,
         username: m.username,
         abort: None,
     })
@@ -365,10 +355,7 @@ async fn stage(
         at_ms: now_ms(),
         finished_ms: 0,
         started_ms: 0,
-        speed_bps: 0.0,
-        daemon_recv_bps: 0.0,
-        daemon_write_bps: 0.0,
-        user_id: user.id.clone(),
+        speed_bps: 0.0,        user_id: user.id.clone(),
         username: user.username.clone(),
         abort: None,
     };
@@ -562,10 +549,7 @@ async fn push(
         // Clear a previous failure so the UI shows the retry honestly.
         j.phase = Phase::Uploading;
         j.sent = 0;
-        j.speed_bps = 0.0;
-        j.daemon_recv_bps = 0.0;
-        j.daemon_write_bps = 0.0;
-        j.error = None;
+        j.speed_bps = 0.0;        j.error = None;
         j.started_ms = now_ms();
     }
 
@@ -849,10 +833,7 @@ mod tests {
             at_ms: 1,
             finished_ms,
             started_ms: 0,
-            speed_bps: 0.0,
-            daemon_recv_bps: 0.0,
-            daemon_write_bps: 0.0,
-            user_id: "u1".into(),
+            speed_bps: 0.0,            user_id: "u1".into(),
             username: "alice".into(),
             abort: None,
         }

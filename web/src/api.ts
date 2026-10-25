@@ -541,11 +541,7 @@ export interface StagedUpload {
   error: string | null;
   at_ms: number;
   /// Average bytes/second of the daemon leg, measured by the server.
-  speed_bps: number;
-  /// The daemon's own receive and write rates, known once it has answered.
-  daemon_recv_bps: number;
-  daemon_write_bps: number;
-}
+  speed_bps: number;}
 
 // Daemon calls go through the proxy.
 export function daemonUrl(connId: string, path: string): string {
