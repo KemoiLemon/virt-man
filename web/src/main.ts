@@ -1,17 +1,13 @@
-import { api, cacheFirst, pendingReads, pollWindow, remainingLimits } from "./api";
+import { api, pendingReads, pollWindow, remainingLimits } from "./api";
 import type { AdminResource, ContainerSummary, Connection, CreateConnectionResult, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, Limit, NetworkSummary, PoolSummary, Quota, UsageCounts, User, VolumeSummary } from "./api";
 import { adminRowMenu, adminTitle, adminTree, assignOwner, renderAdminSection, type AdminCtx } from "./admin";
-import { attachConsole, detachConsole } from "./console";
-// The text console (xterm.js) is loaded when a container console or a host
-// shell opens: it would otherwise more than double the bundle every page load
-// pays for.
-let terminal: typeof import("./terminal") | null = null;
+import { attachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import { ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
-import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type CtTab, type Route } from "./route";
+import { ADMIN_TABS, parsePath, type AdminSection, type AdminTab } from "./route";
 import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice, HwField } from "./hardware";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
@@ -20,7 +16,7 @@ import { enhanceSelects } from "./listbox";
 import { poolUsed } from "./pool-usage";
 import { addDiskSample, addHostSample, addNetSample, addSample, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
-import { bindChartHover, isLive, loadHistory, range, rangeSelect, setRange } from "./history";
+import { isLive, loadHistory, range, rangeSelect } from "./history";
 import { DIR_LABEL, GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmtWhen, forLive, liveApplies, logQuery, sortMark, toggleSort, withGroup } from "./access";
 import type { FlowDir, Group, Kind, LogFilter } from "./access";
 import type { DomainStats, HostStats } from "./stats";
@@ -32,175 +28,38 @@ import { addDisplay, domainXml, esc, networkFormFromXml, networkUuid, networkXml
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
 import { shownNet, shownPool, shownVolume, state, summaryDiskSel, summaryNetSel, treeCts, treeNets, treePools, treeVms, volumeNames } from "./state";
-import { bridgeNetwork, capLabel, displayName, emptyState, isUuid, nameOf, nicNetwork, relTime, unescapeXml, uuidOf, withTitle } from "./util";
+import { bridgeNetwork, capLabel, displayName, emptyState, isUuid, nameOf, nicNetwork, relTime, unescapeXml, withTitle } from "./util";
 
 import { askConfirm, askMultiline, askText, openModal, toast } from "./dialogs";
+import { hooks } from "./hooks";
+import { applyRoute, beginRender, clearResourceSelection, closeConsole, closeDrawer, fastLoad, guestBase, guestList, leaveCurrentView, renderCurrent, renderView, showPageSkeleton, stillCurrent, stillCurrentVm, syncUrl, toggleDrawer } from "./nav";
 import { bindSideResize } from "./sidebar";
 import { avatarHtml, openProfile, profileHooks } from "./profile";
 import { bindFetches, bindUploads, fetchesSection, openFetch, openUpload, pollFetches, pollUploads, transferHooks, uploadsSection } from "./transfers";
 import { $, EXIT_MS, initTheme, noteTreeSel, replay, setHtml, toggleTheme } from "./dom";
 
-// transfers.ts cannot import main.ts (a cycle), so it repaints the pool page
-// through this hook.
+// Moved modules cannot import the views (a cycle), so they reach them through
+// `hooks`. Wrappers, so nothing here depends on declaration order.
+hooks.renderTree = () => renderTree();
+hooks.renderOffline = () => renderOffline();
+hooks.isOffline = (conn) => isOffline(conn);
+hooks.canAdmin = () => canAdmin();
+hooks.openAdmin = (...a) => openAdmin(...(a as Parameters<typeof openAdmin>));
+hooks.closeAdmin = () => closeAdmin();
+hooks.renderDc = () => renderDc();
+hooks.loadDcDashboard = () => loadDcDashboard();
+hooks.renderConn = () => renderConn();
+hooks.loadDashboard = () => loadDashboard();
+hooks.renderVm = () => renderVm();
+hooks.renderVmBody = (vm: string) => renderVmBody(vm);
+hooks.renderNetPage = () => renderNetPage();
+hooks.renderPoolPage = () => renderPoolPage();
+// transfers.ts repaints the pool page through its own hook.
 transferHooks.renderPoolPage = renderPoolPage;
 // Likewise profile.ts: wrappers, so nothing here depends on declaration order.
 profileHooks.renderProfileBtn = () => renderProfileBtn();
 profileHooks.roleLabel = (admin) => roleLabel(admin);
 profileHooks.showSecret = (title, secret) => showSecret(title, secret);
-
-/// Tear down a live console: its WebSocket and the stage resize observer.
-function closeConsole() {
-  state.consoleResizeObserver?.disconnect();
-  state.consoleResizeObserver = null;
-  detachConsole();
-  terminal?.detachTextConsole();
-}
-
-/// Navigate away from whatever is on screen. Every path that changes the
-/// selected VM or view goes through here, so a console session can never be
-/// left streaming in the background.
-function leaveCurrentView() {
-  if (state.vmTab === "console") closeConsole();
-  // A shell belongs to the page that opened it: leaving the server closes it,
-  // whether the user switched tabs, opened a guest, or went to the admin page.
-  // The renderConn guard covers the tab-bar clicks that do not come through
-  // here.
-  if (state.connTab === "shell") terminal?.detachTextConsole();
-}
-
-/// Never wrap a view that shows live statistics (CPU, memory, rates): a cached
-/// figure is a wrong figure, and a chart that jumps on page open looks broken.
-/// Those views wait on their skeleton for a fresh read.
-///
-/// Open a view fast: paint from the web server's last known answers, then
-/// re-read for real if any of them were cached. A remote daemon costs a round
-/// trip per read, so without this every page sat on its skeleton until the
-/// daemon answered. Only for entering a view: the 1s poll wants fresh data,
-/// and a view that holds user input must not be painted twice (it would drop
-/// what they typed in between).
-async function fastLoad(load: () => Promise<unknown>) {
-  let stale = true;
-  try {
-    stale = await cacheFirst(load);
-  } catch {
-    // The cached pass failed; the real read below reports the error.
-  }
-  if (stale) await load();
-}
-
-/// The view on screen, as a route. Derived from the selection state rather
-/// than stored beside it, so the two cannot disagree.
-function currentRoute(): Route {
-  if (!state.selectedConn) return { view: "dc", tab: state.dcTab };
-  // URLs name a guest, network or pool by its UUID, which never changes or
-  // repeats; the selection itself stays the libvirt name, which every daemon
-  // route accepts too. A resource the lists have not loaded yet keeps its
-  // name in the URL until they do.
-  const c = state.selectedConn;
-  if (state.selectedVm && state.ctMode) {
-    return { view: "ct", conn: c, ct: uuidOf(treeCts[c], state.selectedVm), tab: state.vmTab as CtTab };
-  }
-  if (state.selectedVm) return { view: "vm", conn: c, vm: uuidOf(treeVms[c], state.selectedVm), tab: state.vmTab };
-  if (state.selectedNet) return { view: "net", conn: c, net: uuidOf(treeNets[c], state.selectedNet) };
-  if (state.selectedPool) return { view: "pool", conn: c, pool: uuidOf(treePools[c], state.selectedPool) };
-  return { view: "conn", conn: c, tab: state.connTab };
-}
-
-/// The daemon path for the open guest: `/domains/<vm>` or `/containers/<ct>`.
-function guestBase(conn: string, name: string, ct = state.ctMode): string {
-  return `/proxy/${conn}/${ct ? "containers" : "domains"}/${encodeURIComponent(name)}`;
-}
-
-/// The list the open guest belongs to.
-function guestList(conn: string, ct = state.ctMode): (DomainSummary | ContainerSummary)[] | undefined {
-  return ct ? treeCts[conn] : treeVms[conn];
-}
-
-
-/// Put the current view in the address bar, so a reload returns to it. Called
-/// by every view renderer, which is the one place all navigation passes
-/// through: the tree, cards, tabs, the context menu and the palette included.
-/// A new view pushes a history entry (Back works); re-rendering the same view
-/// (the 1s poll) does not.
-function syncUrl() {
-  const path = routeToPath(currentRoute(), state.connections);
-  if (location.pathname === path) return;
-  state.tableScrollReset = true;
-  // A real navigation scrolled the drawer away with the page it belonged to.
-  // Closing it HERE and nowhere else is deliberate: this function is the one
-  // funnel every way of navigating passes through (tree, cards, tabs, context
-  // menu, palette, Back/Forward), and the early return above -- which exists so
-  // the 1s poll adds no history -- is also what keeps that poll from shutting a
-  // drawer the user just opened. A closer in each call site would go stale the
-  // first time someone adds a way to navigate.
-  closeDrawer();
-  // Restoring a URL (boot, Back/Forward) may normalise it -- a deleted node
-  // falls back to "/". That must replace the entry: pushing would add a
-  // duplicate at boot and discard the forward history on Back.
-  if (state.restoringRoute) history.replaceState(null, "", path);
-  else history.pushState(null, "", path);
-}
-
-// ----------------------------------------------------------- phone shell
-// The sidebar is an off-canvas drawer below 820px; mobile.css does the layout
-// and this is the only state that drives it.
-
-function toggleDrawer(open: boolean) {
-  document.body.classList.toggle("nav-open", open);
-}
-
-function closeDrawer() {
-  toggleDrawer(false);
-}
-
-/// Adopt the view named by the URL. Used at start-up and on Back/Forward.
-function applyRoute(r: Route) {
-  leaveCurrentView();
-  clearResourceSelection();
-  closeAdmin();
-  state.selectedConn = r.view === "dc" || r.view === "admin" ? null : r.conn;
-  if (r.view === "admin") {
-    // An old /admin link: the window over the datacenter. A non-admin just
-    // gets the datacenter.
-    state.dcTab = "dashboard";
-    if (canAdmin()) state.pendingAdmin = { section: r.section, tab: r.tab };
-    return;
-  }
-  if (r.view === "dc") state.dcTab = r.tab;
-  else if (r.view === "conn") state.connTab = r.tab === "shell" && !canAdmin() ? "dashboard" : r.tab;
-  else if (r.view === "vm") { state.selectedVm = nameOf(treeVms[r.conn], r.vm); state.vmTab = r.tab; }
-  else if (r.view === "ct") { state.selectedVm = nameOf(treeCts[r.conn], r.ct); state.ctMode = true; state.vmTab = r.tab; }
-  else if (r.view === "net") state.selectedNet = nameOf(treeNets[r.conn], r.net);
-  else state.selectedPool = nameOf(treePools[r.conn], r.pool);
-}
-
-/// Render whatever the selection state names. The view renderers do the
-/// actual work (and sync the URL).
-function renderCurrent() {
-  renderTree();
-  // The renderers call syncUrl synchronously, before their first await, so
-  // the flag covers exactly their URL write.
-  state.restoringRoute = true;
-  try {
-    renderView();
-  } finally {
-    state.restoringRoute = false;
-  }
-  if (state.pendingAdmin) {
-    const p = state.pendingAdmin;
-    state.pendingAdmin = null;
-    openAdmin(p.section, p.tab);
-  }
-}
-
-function renderView() {
-  if (state.selectedConn && isOffline(state.selectedConn)) return renderOffline();
-  if (!state.selectedConn) renderDc();
-  else if (state.selectedVm) void renderVm();
-  else if (state.selectedNet) { showPageSkeleton(); void fastLoad(renderNetPage); }
-  else if (state.selectedPool) { showPageSkeleton(); void renderPoolPage(); }
-  else renderConn();
-}
 
 /// The open view's server is down: keep its header (so it is clear which
 /// server and page this is, and the tree still lines up) and show one offline
@@ -219,61 +78,6 @@ function renderOffline() {
   setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.offline(20)}</span><span class="dtitle">${esc(title)}</span>
     ${state.selectedVm || state.selectedNet || state.selectedPool ? `<span class="badge">${esc(c?.name ?? "")}</span>` : ""}</div>
     ${offlinePanel(state.selectedConn)}`);
-}
-
-// Chart range dropdowns: one delegated handler, since the dashboards re-render
-// every second. Only the charts' own views carry the bar, so re-running the
-// current view's poll body repaints exactly them.
-document.addEventListener("change", (e) => {
-  const sel = (e.target as Element | null)?.closest?.(".range-sel") as HTMLSelectElement | null;
-  if (!sel || !setRange(sel.value)) return;
-  if (!state.selectedConn) void loadDcDashboard();
-  else if (state.selectedVm) void renderVmBody(state.selectedVm);
-  else void loadDashboard();
-});
-bindChartHover();
-
-window.addEventListener("popstate", () => {
-  if (!state.user) return;
-  applyRoute(parsePath(location.pathname, state.connections));
-  renderCurrent();
-});
-
-/// Whether the given guest's tab is still what the pane shows. A tab body that
-/// awaits must check before painting, or a late answer overwrites the view the
-/// user switched to (same rule as `stillCurrent` for whole-pane renders).
-function stillCurrentVm(conn: string, vm: string, tab: typeof state.vmTab): boolean {
-  return state.selectedConn === conn && state.selectedVm === vm && state.vmTab === tab && !!$("#vm-body");
-}
-
-/// Replace the pane with a placeholder while a resource page's first read is
-/// in flight, so a click answers at once instead of leaving the previous page
-/// up until the daemon replies.
-function showPageSkeleton() {
-  const content = $("#content");
-  if (content) setHtml(content, skeleton("page"));
-}
-
-/// Claim ownership of the content pane. Call at the top of anything that
-/// paints it after an await, then check `stillCurrent(gen)` just before the
-/// paint.
-function beginRender(): number {
-  return ++state.renderGen;
-}
-
-function stillCurrent(gen: number): boolean {
-  return gen === state.renderGen;
-}
-
-/// Clear whichever resource the content pane is showing. Every path that
-/// leaves a resource page must run this: the poll re-renders whichever of
-/// state.selectedVm/state.selectedNet/state.selectedPool is still set, so a stale selection
-/// resurrects that page about a second after the user navigates away.
-function clearResourceSelection() {
-  state.selectedVm = null;
-  state.ctMode = false;
-  state.selectedNet = null;
-  state.selectedPool = null;
 }
 
 // ------------------------------------------------------- command palette
@@ -2457,7 +2261,7 @@ async function renderConn() {
   // Switching away from the Shell tab must close its session. Most navigation
   // goes through leaveCurrentView; the tab-bar handler re-renders directly, so
   // this is the funnel that covers it.
-  if (state.connTab !== "shell") terminal?.detachTextConsole();
+  if (state.connTab !== "shell") state.terminal?.detachTextConsole();
   // Server view owns the pane: invalidates any in-flight resource render.
   beginRender();
   syncUrl();
@@ -2509,7 +2313,7 @@ async function renderConnBody() {
   if (state.connTab === "shell") {
     // Re-rendering replaces the whole body, stage included; drop any live
     // session first, or its read loop outlives the element it painted into.
-    terminal?.detachTextConsole();
+    state.terminal?.detachTextConsole();
     renderShellTab(body, state.selectedConn);
   } else if (state.connTab === "dashboard") {
     setHtml(body, `<div id="dash">${skeleton("dashboard")}</div>`);
@@ -2551,8 +2355,8 @@ function renderShellTab(body: Element, conn: string) {
     }
   };
   void (async () => {
-    terminal ??= await import("./terminal");
-    await terminal.attachDaemonShell($("#shell-stage"), `/proxy/${conn}/shell`, msg);
+    state.terminal ??= await import("./terminal");
+    await state.terminal.attachDaemonShell($("#shell-stage"), `/proxy/${conn}/shell`, msg);
   })();
 }
 
@@ -4301,9 +4105,9 @@ async function renderVmBody(vm: string) {
       <div class="console-stage term-stage" id="console-stage" tabindex="0">
         <div class="console-msg" id="console-msg">connecting…</div>
       </div>`);
-    terminal ??= await import("./terminal");
+    state.terminal ??= await import("./terminal");
     if (!stillCurrentVm(conn, vm, "console")) return;
-    await terminal.attachTextConsole($("#console-stage"), guestBase(conn, vm, true), (msg: string | null) => {
+    await state.terminal.attachTextConsole($("#console-stage"), guestBase(conn, vm, true), (msg: string | null) => {
       const m = $("#console-msg");
       if (m) {
         m.textContent = msg ?? "";

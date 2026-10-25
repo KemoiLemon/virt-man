@@ -69,6 +69,10 @@ export const state = {
   /// Console view settings, kept across tab switches and reconnects.
   consoleZoom: 0, // 0 = fit to the stage
   consoleResizeObserver: null as ResizeObserver | null,
+  /// The text console (xterm.js), loaded when a container console or a host
+  /// shell opens: it would otherwise more than double the bundle every page
+  /// load pays for.
+  terminal: null as typeof import("./terminal") | null,
   /// Set while a URL is being restored (boot, Back/Forward): the address-bar
   /// write is then a replaceState, not a push.
   restoringRoute: false,
