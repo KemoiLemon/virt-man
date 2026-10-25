@@ -63,7 +63,7 @@ export interface NodeRef {
 export const RESERVED = new Set([
   "assets", "auth", "avatars", "proxy", "users", "activity", "connections",
   "roles", "keys", "me", "health", "uploads", "history", "access-logs", "favicon.svg", "icons.svg",
-  "groups", "acl", "resources", "ips", "usage", "shares", "batch",
+  "groups", "acl", "resources", "ips", "usage", "shares",
   "servers", "guests", "containers", "networks", "storage", "admin",
 ]);
 

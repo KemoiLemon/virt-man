@@ -65,12 +65,9 @@ async fn run() -> Result<(), String> {
     tokio::spawn(rekey::watch(state.clone()));
 
     let index = cfg.dist_dir.join("index.html");
-    let api_app = api::build(state.clone()).with_state(state);
-    // `/batch` dispatches its reads through the API itself (not the static
-    // fallback), so give it the router before the fallback is attached.
-    api::batch::set_inner(api_app.clone());
-    let app = api_app
-        .fallback_service(ServeDir::new(&cfg.dist_dir).fallback(ServeFile::new(index)));
+    let app = api::build(state.clone())
+        .fallback_service(ServeDir::new(&cfg.dist_dir).fallback(ServeFile::new(index)))
+        .with_state(state);
 
     let addr = cfg.addr()?;
     tracing::info!("virt-man-web listening on {addr}");

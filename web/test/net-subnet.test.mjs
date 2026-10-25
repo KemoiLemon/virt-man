@@ -62,16 +62,8 @@ async function boot(subnets = ["10.42.7.0/24", "10.99.12.0/24"]) {
     json: () => Promise.resolve(body),
     text: () => Promise.resolve(JSON.stringify(body)),
   });
-  window.fetch = async (input, init = {}) => {
+  window.fetch = (input, init = {}) => {
     const url = typeof input === "string" ? input : input.url;
-    // A poll round arrives as one /batch; answer each path as its own request.
-    if (url === "/batch") {
-      const out = await Promise.all(JSON.parse(init.body).paths.map(async (p) => {
-        const r = await window.fetch(p);
-        return { status: r.status, body: await r.json() };
-      }));
-      return json(out);
-    }
     const path = url.replace(/^https?:\/\/[^/]+/, "");
     const method = (init.method ?? "GET").toUpperCase();
     if (url.includes("/auth/status")) return json({ needs_setup: false, auth_disabled: false });
