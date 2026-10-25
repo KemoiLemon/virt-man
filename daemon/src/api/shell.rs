@@ -53,6 +53,15 @@ fn live(id: &str) -> Option<Arc<Session>> {
     map.get(id).filter(|s| !s.is_closed()).cloned()
 }
 
+/// How long an ended session stays readable, so the page still receives what
+/// the program printed last (a `login` that fails says why) and the `closed`
+/// flag, instead of a 404 for a session that had already gone.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn open_count(map: &HashMap<String, Arc<Session>>) -> usize {
+    map.values().filter(|s| !s.is_closed()).count()
+}
+
 #[derive(Deserialize)]
 struct ConnectReq {
     /// The browser's initial terminal size. A pty left at 0x0 makes `login`'s
@@ -67,7 +76,7 @@ struct ConnectReq {
 /// Open a login session: start `login(1)` in a pty and hand back its id. The
 /// prompt and the password are entirely between the terminal and `login`.
 async fn connect(Json(req): Json<ConnectReq>) -> Result<Json<Value>, ApiError> {
-    if sessions().lock().expect("shell sessions").len() >= MAX_SESSIONS {
+    if open_count(&sessions().lock().expect("shell sessions")) >= MAX_SESSIONS {
         return Err(ApiError::conflict(format!(
             "too many shells are already open (limit {MAX_SESSIONS}); close one first"
         )));
@@ -84,14 +93,17 @@ async fn connect(Json(req): Json<ConnectReq>) -> Result<Json<Value>, ApiError> {
         cols,
         rows,
         move || {
-            sessions().lock().expect("shell sessions").remove(&gone);
+            std::thread::spawn(move || {
+                std::thread::sleep(LINGER);
+                sessions().lock().expect("shell sessions").remove(&gone);
+            });
         },
     )
     .map_err(ApiError::internal)?;
     let mut map = sessions().lock().expect("shell sessions");
     // Two connects can pass the check above together; the loser is closed
     // rather than left running unlisted.
-    if map.len() >= MAX_SESSIONS {
+    if open_count(&map) >= MAX_SESSIONS {
         session.close();
         return Err(ApiError::conflict("too many shells are already open"));
     }
@@ -113,7 +125,13 @@ struct ReadQ {
 }
 
 async fn read(Path(id): Path<String>, Query(q): Query<ReadQ>) -> Result<Json<Value>, ApiError> {
-    let s = live(&id).ok_or_else(|| ApiError::not_found("no shell session; connect first"))?;
+    // Not `live`: an ended session is still read once more, to deliver its tail.
+    let s = sessions()
+        .lock()
+        .expect("shell sessions")
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("no shell session; connect first"))?;
     s.read(q.after).await.map(Json).map_err(ApiError::internal)
 }
 

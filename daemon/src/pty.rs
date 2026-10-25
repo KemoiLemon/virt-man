@@ -267,10 +267,19 @@ pub fn spawn(
 fn pump(s: &Session) {
     let (fd, pid) = (s.fd, s.pid);
     let mut buf = vec![0u8; 16 * 1024];
+    // Why the loop ended, for the log: a session that dies the instant it
+    // starts is otherwise indistinguishable from one the page closed.
+    let mut why = "the program exited or hung up the terminal";
+    let mut detail = String::new();
+    let mut exited: Option<i32> = None;
+    let mut gap: Option<Instant> = None;
     'pump: loop {
-        if s.closed.load(Ordering::Relaxed)
-            || s.last_read.lock().expect("pty idle").elapsed() > IDLE
-        {
+        if s.closed.load(Ordering::Relaxed) {
+            why = "closed by the client";
+            break;
+        }
+        if s.last_read.lock().expect("pty idle").elapsed() > IDLE {
+            why = "nobody read it for the idle timeout";
             break;
         }
         let pending = std::mem::take(&mut *s.input.lock().expect("pty input"));
@@ -307,6 +316,7 @@ fn pump(s: &Session) {
         if rc > 0 && pfd.revents != 0 {
             let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
             if n > 0 {
+                gap = None;
                 s.push(&buf[..n as usize]);
             } else {
                 let e = std::io::Error::last_os_error();
@@ -318,6 +328,25 @@ fn pump(s: &Session) {
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                     );
                 if gone {
+                    // EOF/EIO means no process has the slave open *right now*.
+                    // A login that reopens its terminal (a hangup and a fresh
+                    // open) leaves a gap like that while it is still running, so
+                    // it is only the end if the program has actually exited.
+                    // Short gaps are waited out; a long one is a dead session.
+                    let mut st = 0;
+                    let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
+                    if r == 0 {
+                        let since = *gap.get_or_insert_with(Instant::now);
+                        if since.elapsed() < Duration::from_secs(3) {
+                            std::thread::sleep(Duration::from_millis(20));
+                            continue;
+                        }
+                        detail =
+                            format!("terminal gone for 3s, program still running (read {n}, {e})");
+                    } else {
+                        exited = (r == pid).then_some(st);
+                        detail = format!("read {n} ({e})");
+                    }
                     *s.error.lock().expect("pty err") = Some("the session ended".into());
                     break;
                 }
@@ -328,24 +357,26 @@ fn pump(s: &Session) {
     // Signal the whole session, not just its leader, so background jobs a
     // user started do not outlive the page that opened them.
     let _ = unsafe { libc::kill(-pid, libc::SIGHUP) };
-    reap(pid);
+    let status = exited.unwrap_or_else(|| reap(pid));
+    tracing::info!(pid, status, "pty session ended: {why} {detail}");
     s.closed.store(true, Ordering::Relaxed);
     s.ready.notify_all();
 }
 
 /// Wait briefly for the child, then force it. A program that traps SIGHUP
 /// gets half a second, not forever.
-fn reap(pid: libc::pid_t) {
+fn reap(pid: libc::pid_t) -> i32 {
     let mut status = 0;
     for _ in 0..25 {
         let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         if r == pid || r < 0 {
-            return;
+            return status;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
     let _ = unsafe { libc::waitpid(pid, &mut status, 0) };
+    status
 }
 
 /// Report why the child could not start, then die. Only a write and `_exit`,
