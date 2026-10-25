@@ -289,6 +289,7 @@ pub struct Domain {
     pub id: String,
     pub uuid: String,
     pub title: String,
+    pub description: String,
     pub arch: String,
     pub machine: String,
     pub domain_type: String,
@@ -416,6 +417,12 @@ fn read(xml: &str, old: Option<&Domain>) -> Result<Domain, String> {
         Some(t) => text(t),
         None => old.map(|o| o.title.clone()).unwrap_or_default(),
     };
+    // Absent means cleared: the Options form drops the element to clear the
+    // notes, so falling back to the old value would make them unclearable.
+    let description = match child(root, "description") {
+        Some(t) => text(t),
+        None => String::new(),
+    };
 
     let memory_mib = parse_memory(root)?;
     let vcpus = match child(root, "vcpu") {
@@ -450,6 +457,7 @@ fn read(xml: &str, old: Option<&Domain>) -> Result<Domain, String> {
     let mut d = Domain {
         id,
         uuid,
+        description,
         title,
         arch,
         machine,
@@ -1231,6 +1239,9 @@ pub fn render(d: &Domain) -> String {
     if !d.title.is_empty() {
         s.push_str(&format!("  <title>{}</title>\n", esc(&d.title)));
     }
+    if !d.description.is_empty() {
+        s.push_str(&format!("  <description>{}</description>\n", esc(&d.description)));
+    }
     s.push_str(&format!(
         "  <memory unit=\"KiB\">{}</memory>\n  <vcpu>{}</vcpu>\n  <os>\n    <type arch=\"{}\" machine=\"{}\">hvm</type>\n",
         d.memory_mib * 1024,
@@ -1607,6 +1618,15 @@ mod tests {
   </devices>
 </domain>"#
         )
+    }
+
+    #[test]
+    fn description_survives_a_save_and_clears_when_dropped() {
+        let with = spa_bios().replace("</title>", "</title><description>a &amp; b\nline 2</description>");
+        let d = parse(&with).unwrap();
+        assert_eq!(d.description, "a & b\nline 2");
+        assert_eq!(parse(&render(&d)).unwrap().description, d.description);
+        assert_eq!(parse(&spa_bios()).unwrap().description, "");
     }
 
     #[test]
