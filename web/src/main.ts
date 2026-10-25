@@ -34,7 +34,7 @@ import { attachSuggest } from "./suggest";
 import { addDisplay, autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
-import { state } from "./state";
+import { state, summaryDiskSel, summaryNetSel, treeCts, treeNets, treePools, treeVms, volumeNames } from "./state";
 import { bridgeNetwork, capLabel, displayName, emptyState, isUuid, nameOf, nicNetwork, relTime, unescapeXml, uuidOf, withTitle } from "./util";
 
 /// Single HTML injection point. Every template's dynamic parts are escaped via
@@ -147,8 +147,8 @@ document.addEventListener("click", (e) => {
   // The admin pane is patched in place, so no new nodes arrive for the observer
   // below to slide; renderAdmin slides what is under the bar once it has painted.
   if (tab.closest(".admin-main")) {
-    adminTabDir = cls === "tab-in-right" ? 1 : -1;
-    adminTabAt = clickedAt;
+    state.adminTabDir = cls === "tab-in-right" ? 1 : -1;
+    state.adminTabAt = clickedAt;
     return;
   }
   const host = bar.parentElement!;
@@ -194,8 +194,8 @@ function setHtml(el: Element, html: string) {
   // scroller would jump back to column 1 every second. Keep each table's
   // offset across a repaint of the same view. Only the content pane consumes
   // the navigation reset, so a dialog repaint cannot swallow it mid-navigation.
-  const newView = tableScrollReset && (el as HTMLElement).id === "content";
-  if (newView) tableScrollReset = false;
+  const newView = state.tableScrollReset && (el as HTMLElement).id === "content";
+  if (newView) state.tableScrollReset = false;
   const scrollLeft = newView
     ? []
     : [...el.querySelectorAll("table.grid")].map((t) => t.scrollLeft);
@@ -239,65 +239,10 @@ function setHtml(el: Element, html: string) {
 
 // ---------------------------------------------------------------- state
 
-/// Pool whose volume table is expanded; survives the 1s pool poll so the
-/// table is re-rendered in place instead of vanishing every second.
-let volumesOpen: string | null = null;
-/// Pool names last rendered, so the poll can diff and skip a full rebuild.
-// null = nothing painted yet. An empty array would mean "painted an empty
-// list", and the two used to be the same value: a server with no pools
-// compared equal to the fresh container and stayed on its skeleton forever.
-let renderedPools: string[] | null = null;
-/// Which disk the summary's Disks card is graphing, per VM, so the 1s poll
-/// does not reset the user's selection back to the first disk.
-let summaryDiskSel: Record<string, string> = {};
-/// Which NIC the summary's Network card is graphing, per VM.
-let summaryNetSel: Record<string, string> = {};
-/// The admin window's open section, or null when it is closed. A window over
-/// the page that was open, not a view: the page underneath keeps its place,
-/// and the URL still names that page.
-let adminSection: AdminSection | null = null;
-/// The open tab of a tabbed admin section (the dashboard).
-let adminTab: AdminTab | undefined;
-let adminEl: HTMLElement | null = null;
-/// Bumped per admin paint and on close, so a read that lands late is dropped.
-let adminGen = 0;
-/// The entrance to play once the section just chosen has painted: +1 slides in
-/// from below (a row further down), -1 from above. Null for a same-section repaint.
-let adminEnter: 1 | -1 | null = null;
-/// Which way an admin tab switch went (1 = to the right); see renderAdmin.
-let adminTabDir: 1 | -1 | null = null;
-let adminTabAt = 0;
-let adminIdx: number | null = null;
-/// An /admin link, opened over the datacenter once the first render is done.
-let pendingAdmin: { section: AdminSection; tab?: AdminTab } | null = null;
-let pollTimer: number | null = null;
-/// Retries for a daemon saved while unreachable: re-fetches its cert every
-/// second until it is up, then pins it.
-let pendingPoll: number | null = null;
-/// VMs per connection, so the sidebar tree can nest guests under their server
-/// without every render refetching.
-const treeVms: Record<string, DomainSummary[]> = {};
-/// Containers per connection, shown in the tree below the VMs.
-const treeCts: Record<string, ContainerSummary[]> = {};
-
-/// Networks and storage pools per connection, shown in the sidebar alongside
-/// guests so a network or pool is one click away from its management page.
-const treeNets: Record<string, NetworkSummary[]> = {};
-const treePools: Record<string, PoolSummary[]> = {};
-/// Bumped by every full-pane render. A renderer that has to await a request
-/// captures this first and bails if it has moved, so a slow response cannot
-/// paint over the view the user has since switched to. Without it the 1s poll
-/// races the user: an in-flight network fetch resolves after they clicked a
-/// VM and replaces it, which is why the page "just came back".
-let renderGen = 0;
-/// Console view settings, kept across tab switches and reconnects.
-let consoleZoom = 0; // 0 = fit to the stage
-let consoleResizeObserver: ResizeObserver | null = null;
-
 /// Tear down a live console: its WebSocket and the stage resize observer.
 function closeConsole() {
-  consoleResizeObserver?.disconnect();
-  consoleResizeObserver = null;
+  state.consoleResizeObserver?.disconnect();
+  state.consoleResizeObserver = null;
   detachConsole();
   terminal?.detachTextConsole();
 }
@@ -369,7 +314,6 @@ function guestList(conn: string, ct = state.ctMode): (DomainSummary | ContainerS
 function shownNet(name: string): string {
   return displayName(state.selectedConn ? treeNets[state.selectedConn] : undefined, name);
 }
-const volumeNames: Record<string, string> = {};
 function shownVolume(pool: string, name: string): string {
   return volumeNames[`${pool}/${name}`] || name;
 }
@@ -383,15 +327,10 @@ function shownPool(name: string): string {
 /// through: the tree, cards, tabs, the context menu and the palette included.
 /// A new view pushes a history entry (Back works); re-rendering the same view
 /// (the 1s poll) does not.
-let restoringRoute = false;
-/// A real navigation must not carry a table's scroll offset into the next
-/// view. `syncUrl` sets this when the path changes; the next `setHtml` consumes
-/// it, while the 1s poll (same path) keeps the offsets.
-let tableScrollReset = false;
 function syncUrl() {
   const path = routeToPath(currentRoute(), state.connections);
   if (location.pathname === path) return;
-  tableScrollReset = true;
+  state.tableScrollReset = true;
   // A real navigation scrolled the drawer away with the page it belonged to.
   // Closing it HERE and nowhere else is deliberate: this function is the one
   // funnel every way of navigating passes through (tree, cards, tabs, context
@@ -403,7 +342,7 @@ function syncUrl() {
   // Restoring a URL (boot, Back/Forward) may normalise it -- a deleted node
   // falls back to "/". That must replace the entry: pushing would add a
   // duplicate at boot and discard the forward history on Back.
-  if (restoringRoute) history.replaceState(null, "", path);
+  if (state.restoringRoute) history.replaceState(null, "", path);
   else history.pushState(null, "", path);
 }
 
@@ -429,7 +368,7 @@ function applyRoute(r: Route) {
     // An old /admin link: the window over the datacenter. A non-admin just
     // gets the datacenter.
     state.dcTab = "dashboard";
-    if (canAdmin()) pendingAdmin = { section: r.section, tab: r.tab };
+    if (canAdmin()) state.pendingAdmin = { section: r.section, tab: r.tab };
     return;
   }
   if (r.view === "dc") state.dcTab = r.tab;
@@ -446,15 +385,15 @@ function renderCurrent() {
   renderTree();
   // The renderers call syncUrl synchronously, before their first await, so
   // the flag covers exactly their URL write.
-  restoringRoute = true;
+  state.restoringRoute = true;
   try {
     renderView();
   } finally {
-    restoringRoute = false;
+    state.restoringRoute = false;
   }
-  if (pendingAdmin) {
-    const p = pendingAdmin;
-    pendingAdmin = null;
+  if (state.pendingAdmin) {
+    const p = state.pendingAdmin;
+    state.pendingAdmin = null;
     openAdmin(p.section, p.tab);
   }
 }
@@ -524,11 +463,11 @@ function showPageSkeleton() {
 /// paints it after an await, then check `stillCurrent(gen)` just before the
 /// paint.
 function beginRender(): number {
-  return ++renderGen;
+  return ++state.renderGen;
 }
 
 function stillCurrent(gen: number): boolean {
-  return gen === renderGen;
+  return gen === state.renderGen;
 }
 
 /// Clear whichever resource the content pane is showing. Every path that
@@ -1009,7 +948,7 @@ setHtml(app, `
   $("#theme-btn").onclick = toggleTheme;
   bindSideResize($("#side-resize"));
   if ($("#logout-btn")) $("#logout-btn").onclick = logout;
-  if ($("#admin-btn")) $("#admin-btn").onclick = () => (adminSection ? closeAdmin() : openAdmin());
+  if ($("#admin-btn")) $("#admin-btn").onclick = () => (state.adminSection ? closeAdmin() : openAdmin());
 
   renderProfileBtn();
   renderCurrent();
@@ -2295,13 +2234,13 @@ async function loadDcDashboard() {
 
 /// Open the admin window at `section` (or where it was last). It grows out of
 /// the admin button over whatever page is open, which stays where it is.
-function openAdmin(section: AdminSection = adminSection ?? "dashboard", tab?: AdminTab) {
+function openAdmin(section: AdminSection = state.adminSection ?? "dashboard", tab?: AdminTab) {
   if (!canAdmin()) return;
   // Staying in a section keeps its tab; entering one starts at its first.
-  if (tab) adminTab = tab;
-  else if (section !== adminSection || !adminTab) adminTab = ADMIN_TABS[section]?.[0];
-  adminSection = section;
-  if (!adminEl) createAdminWindow();
+  if (tab) state.adminTab = tab;
+  else if (section !== state.adminSection || !state.adminTab) state.adminTab = ADMIN_TABS[section]?.[0];
+  state.adminSection = section;
+  if (!state.adminEl) createAdminWindow();
   renderAdminNav();
   renderAdmin();
   syncAdminButton();
@@ -2327,44 +2266,44 @@ function createAdminWindow() {
   }
   const remove = el.remove;
   el.remove = () => {
-    if (adminEl === el) {
-      adminEl = null;
-      adminSection = null;
-      adminGen++;
+    if (state.adminEl === el) {
+      state.adminEl = null;
+      state.adminSection = null;
+      state.adminGen++;
       syncAdminButton();
     }
     remove();
   };
-  adminEl = el;
-  adminIdx = null; // a fresh window has no previous section to slide from
-  adminEnter = null;
+  state.adminEl = el;
+  state.adminIdx = null; // a fresh window has no previous section to slide from
+  state.adminEnter = null;
 }
 
 function closeAdmin() {
-  adminEl?.remove();
+  state.adminEl?.remove();
 }
 
 /// The admin button stays where it is and shows whether the window is open.
 function syncAdminButton() {
   const b = $("#admin-btn");
   if (!b) return;
-  b.title = adminSection ? "Close Administration" : "Administration";
+  b.title = state.adminSection ? "Close Administration" : "Administration";
   b.setAttribute("aria-label", b.title);
-  b.classList.toggle("on", !!adminSection);
+  b.classList.toggle("on", !!state.adminSection);
   setHtml(b, ic.admin());
 }
 
 function renderAdminNav() {
-  const nav = adminEl?.querySelector<HTMLElement>(".admin-nav");
-  if (!nav || !adminSection) return;
+  const nav = state.adminEl?.querySelector<HTMLElement>(".admin-nav");
+  if (!nav || !state.adminSection) return;
   const restore = holdFocus(nav, ".tree-row.sel");
-  setHtml(nav, adminTree(adminSection));
+  setHtml(nav, adminTree(state.adminSection));
   restore();
   // Which way the move went, for the entrance. Only a change of section in an
   // open window moves; a repaint of the same one is patched in place.
   const idx = [...nav.querySelectorAll(".tree-row")].findIndex((r) => r.classList.contains("sel"));
-  if (adminIdx !== null && adminIdx !== idx) adminEnter = idx > adminIdx ? 1 : -1;
-  adminIdx = idx;
+  if (state.adminIdx !== null && state.adminIdx !== idx) state.adminEnter = idx > state.adminIdx ? 1 : -1;
+  state.adminIdx = idx;
   nav.querySelectorAll<HTMLElement>("[data-admin-section]").forEach((row) => {
     row.onclick = () => openAdmin(row.dataset.adminSection as AdminSection);
   });
@@ -2396,7 +2335,7 @@ const adminCtx: AdminCtx = {
   createCt: (conn, owner, after) => void openCreateCt(conn, { owner, after }),
   createPool: (conn, after) => openCreatePool(conn, after),
   deleteResource: (kind, conn, pool, name, after) => void adminDeleteResource(kind, conn, pool, name, after),
-  tab: () => adminTab,
+  tab: () => state.adminTab,
   refreshMe: async () => {
     state.user = await api.get<User>("/auth/me");
     await loadConnections();
@@ -2407,26 +2346,26 @@ const adminCtx: AdminCtx = {
     const slot = $("#admin-head");
     if (slot) setHtml(slot, html);
   },
-  stillCurrent: (gen) => gen === adminGen && !!adminEl?.isConnected,
+  stillCurrent: (gen) => gen === state.adminGen && !!state.adminEl?.isConnected,
 };
 
 let shownAdmin: AdminSection | null = null;
 function renderAdmin() {
-  if (!adminSection || !adminEl) return;
-  const gen = ++adminGen;
+  if (!state.adminSection || !state.adminEl) return;
+  const gen = ++state.adminGen;
   // Moving between sections or tabs keeps the old section on screen until the
   // new one is ready, then patches it in; rebuilding blanked the pane for the
   // length of the read.
-  const title = adminEl.querySelector("#admin-title");
-  if (title) title.textContent = adminTitle(adminSection);
+  const title = state.adminEl.querySelector("#admin-title");
+  if (title) title.textContent = adminTitle(state.adminSection);
   // The old section's buttons must not outlive it: they would act on the
   // wrong page until the new one paints its own.
-  if (shownAdmin !== adminSection) adminEl.querySelector("#admin-head")?.replaceChildren();
-  shownAdmin = adminSection;
-  const area = adminEl.querySelector<HTMLElement>("#admin-area")!;
+  if (shownAdmin !== state.adminSection) state.adminEl.querySelector("#admin-head")?.replaceChildren();
+  shownAdmin = state.adminSection;
+  const area = state.adminEl.querySelector<HTMLElement>("#admin-area")!;
   // Stays pending until a slide plays: a render superseded mid-read (a quick
   // second click, a re-click of the same row) must hand the slide on, not eat it.
-  const enter = adminEnter;
+  const enter = state.adminEnter;
   const main = area.closest<HTMLElement>(".admin-main")!;
   // A new section shows its outline at once and slides in once it has loaded,
   // however long the read takes. The slide is one Web Animation that replaces
@@ -2435,7 +2374,7 @@ function renderAdmin() {
     setHtml(area, skeleton("table"));
     main.scrollTop = 0;
   }
-  const tabDir = enter ? null : adminTabDir;
+  const tabDir = enter ? null : state.adminTabDir;
   // Starts on the first paint of real content, in the same microtask checkpoint
   // as the paint, so no frame shows the page at its final place before the slide
   // begins. (Waiting for the painter to finish let one through whenever it kept
@@ -2443,10 +2382,10 @@ function renderAdmin() {
   let played = false;
   const play = () => {
     obs.disconnect();
-    if (played || gen !== adminGen) return;
+    if (played || gen !== state.adminGen) return;
     played = true;
-    if (enter) adminEnter = null;
-    if (tabDir) adminTabDir = null;
+    if (enter) state.adminEnter = null;
+    if (tabDir) state.adminTabDir = null;
     if (!(enter || tabDir) || !main.animate) return;
     if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     // The skeleton's rise-in (setHtml adds it as the content replaces the
@@ -2454,7 +2393,7 @@ function renderAdmin() {
     area.classList.remove("sk-reveal");
     const frames = (from: string) => [{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }];
     const opts = { duration: 280, easing: "cubic-bezier(.2, .8, .2, 1)" };
-    const tabOpts = { ...opts, duration: 380, delay: Math.max(0, EXIT_MS - (Date.now() - adminTabAt)), fill: "both" as const };
+    const tabOpts = { ...opts, duration: 380, delay: Math.max(0, EXIT_MS - (Date.now() - state.adminTabAt)), fill: "both" as const };
     if (enter) {
       main.getAnimations().forEach((a) => a.cancel());
       main.animate(frames(`translateY(${enter * 26}px)`), opts);
@@ -2470,7 +2409,7 @@ function renderAdmin() {
   };
   const obs = new MutationObserver(() => { if (!area.querySelector(".skeleton")) play(); });
   if (enter || tabDir) obs.observe(area, { childList: true, subtree: true, characterData: true });
-  void renderAdminSection(adminCtx, area, adminSection, gen).then(play);
+  void renderAdminSection(adminCtx, area, state.adminSection, gen).then(play);
 }
 
 /// Present a secret that the server will never show again.
@@ -2509,12 +2448,12 @@ function backToConn() {
 function leaveMissing(tab: "networks" | "storage", message: string) {
   clearResourceSelection();
   state.connTab = tab;
-  restoringRoute = true;
+  state.restoringRoute = true;
   try {
     renderTree();
     renderConn();
   } finally {
-    restoringRoute = false;
+    state.restoringRoute = false;
   }
   toast(message, "bad");
 }
@@ -2935,7 +2874,7 @@ async function renderConnBody() {
     await fastLoad(loadNetworks);
   } else if (state.connTab === "storage") {
     setHtml(body, `<div id="pools-list">${skeleton("cards")}</div>`);
-    renderedPools = null; // fresh container: force a full render on first load
+    state.renderedPools = null; // fresh container: force a full render on first load
     await loadPools();
   } else {
     setHtml(body, `<div id="filters-list">${skeleton("table")}</div>`);
@@ -4476,9 +4415,9 @@ async function loadPools() {
     const list = $("#pools-list");
     if (!list) return;
     const names = pools.map((p) => p.name);
-    const shapeChanged = renderedPools?.join("|") !== names.join("|");
+    const shapeChanged = state.renderedPools?.join("|") !== names.join("|");
     if (shapeChanged) {
-      renderedPools = names;
+      state.renderedPools = names;
       // A full rebuild wipes the expanded pool's volume table, so the card is
       // the same builder the Datacenter uses and the table is a sibling.
       setHtml(list, pools.map((p) => poolCard(p, state.selectedConn!, { volumeTable: true })).join("")
@@ -4495,7 +4434,7 @@ async function loadPools() {
         (b as HTMLElement).onclick = () => {
           const pool = (b as HTMLElement).dataset.vols!;
           // Toggle: clicking the open pool collapses it, otherwise expand it.
-          volumesOpen = volumesOpen === pool ? null : pool;
+          state.volumesOpen = state.volumesOpen === pool ? null : pool;
           loadVolumes(pool);
         };
       });
@@ -4506,7 +4445,7 @@ async function loadPools() {
         (b as HTMLElement).onclick = () => deletePool((b as HTMLElement).dataset.delpool!);
       });
       // A full rebuild wiped the expanded pool's table; restore it in place.
-      if (volumesOpen) void loadVolumes(volumesOpen);
+      if (state.volumesOpen) void loadVolumes(state.volumesOpen);
       return;
     }
 
@@ -4549,7 +4488,7 @@ async function loadVolumes(pool: string) {
   const target = $(`#vols-${cssId(pool)}`);
   if (!target) return;
   // Collapsed: clear the table and stop.
-  if (volumesOpen !== pool) {
+  if (state.volumesOpen !== pool) {
     setHtml(target, "");
     return;
   }
@@ -4735,7 +4674,7 @@ async function renderVmBody(vm: string) {
     setHtml(body, `
       <div class="console-bar">
         <span class="console-group">
-          <button class="btn" id="con-zoom-reset" title="Switch between Fit and 100%">${zoomLabel(consoleZoom)}</button>
+          <button class="btn" id="con-zoom-reset" title="Switch between Fit and 100%">${zoomLabel(state.consoleZoom)}</button>
         </span>
         <span class="console-group" style="margin-left:auto">
           <button class="btn icon" id="con-shorter" title="Shorter">${ic.shorter()}</button>
@@ -4806,7 +4745,7 @@ async function renderVmBody(vm: string) {
       const toggleFit = () => {
         const next = con.getZoom() === 0 ? 1 : 0;
         con.setZoom(next);
-        consoleZoom = next;
+        state.consoleZoom = next;
         const b = $("#con-zoom-reset");
         if (b) b.textContent = zoomLabel(next);
       };
@@ -4849,8 +4788,8 @@ async function renderVmBody(vm: string) {
       $("#con-shorter").onclick = () => resizeBy(-80);
       const ro = new ResizeObserver(() => con.refit());
       ro.observe(stage);
-      consoleResizeObserver?.disconnect();
-      consoleResizeObserver = ro;
+      state.consoleResizeObserver?.disconnect();
+      state.consoleResizeObserver = ro;
 
     } catch (e) {
       const m = $("#console-msg");
@@ -6086,7 +6025,7 @@ function offerInstallScript(script: string): HTMLElement | null {
 /// it. The generated install script may still be running.
 function pollUntilCertPinned(connId: string, statusEl: HTMLElement | null) {
   stopPendingPoll();
-  pendingPoll = window.setInterval(async () => {
+  state.pendingPoll = window.setInterval(async () => {
     try {
       const r = await api.get<{ cert: string; fingerprint: string }>(`/connections/${connId}/cert`);
       stopPendingPoll();
@@ -6101,9 +6040,9 @@ function pollUntilCertPinned(connId: string, statusEl: HTMLElement | null) {
 }
 
 function stopPendingPoll() {
-  if (pendingPoll !== null) {
-    window.clearInterval(pendingPoll);
-    pendingPoll = null;
+  if (state.pendingPoll !== null) {
+    window.clearInterval(state.pendingPoll);
+    state.pendingPoll = null;
   }
 }
 
@@ -8225,13 +8164,13 @@ function busyScrolling(): boolean {
 }
 
 function startPolling() {
-  if (pollTimer) window.clearInterval(pollTimer);
+  if (state.pollTimer) window.clearInterval(state.pollTimer);
   // One round at a time: a tick that finds reads still undelivered does
   // nothing. `api.ts` delivers a round at most once a second, and the tick is
   // finer than that so the next round starts as soon as the last one has
   // landed, which keeps the cadence at the delivery pace instead of at every
   // other tick.
-  pollTimer = window.setInterval(() => {
+  state.pollTimer = window.setInterval(() => {
     if (!state.user || pendingReads() > 0) return;
     // A repaint replaces the node the browser is scrolling, which detaches the
     // touch gesture: a drag over a table would stop dead mid-flick.
