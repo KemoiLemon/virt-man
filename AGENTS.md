@@ -20,24 +20,47 @@ argv and QMP calls, or an LXC config, without handing it to another manager.
 
 ## Agent tools
 
-Use the dedicated tool, not a shell equivalent. Bash is for running things
-(builds, tests, git, servers), not for reading or editing files.
+These are Claude Code's tools. Use the dedicated one; **Bash is only for what no
+other tool does**: running builds, tests, git and servers. It is never the way
+to read, search, write or edit a file, to make a one-off script that edits
+source, or to wait.
 
 | Need | Tool | Not |
 | --- | --- | --- |
-| Read a file (or a range: `offset`/`limit`) | `Read` (absolute path) | `cat`, `head`, `tail`, `sed -n` |
-| Change part of a file | `Edit` (`old_string` must be unique and exact; `replace_all` for renames) | `sed -i`, `awk`, heredocs |
-| Create or fully replace a file | `Write` (an existing file must be `Read` first) | `echo >`, `cat <<EOF` |
-| Run a command | `Bash` (`run_in_background` for servers and watchers; no `sleep` polling) | — |
+| Read a file (or a range: `offset`/`limit`), or a log | `Read` (absolute path) | `cat`, `head`, `tail`, `sed -n` |
+| Change part of a file | `Edit` (`old_string` must be unique and exact; `replace_all` for renames) | `sed -i`, `awk`, Python or heredoc rewrites |
+| Create or fully replace a file, including a throwaway script | `Write` (an existing file must be `Read` first) | `echo >`, `cat <<EOF` |
+| Run a build, test, git or one-shot command | `Bash` | — |
+| Run a server, watcher or anything that does not exit | `Bash` with `run_in_background: true` | `cmd &`, `(cmd &)`, `nohup`, `setsid` |
+| Wait for a background task or a condition | its exit notification, or `Monitor` (load it with `ToolSearch`) with an until-loop | `sleep` polling, re-reading its log in a loop |
+| Stop a background task | `TaskStop` | `kill`, `pkill -f <name>` |
 | Broad search across many files | `Agent` with `Explore` | chains of `grep`/`find` |
+| Where a symbol is defined or used (TS and Rust) | `LSP` (load it with `ToolSearch`) | grepping for the name |
+| Design a non-trivial change before touching code | `Agent` with `Plan`, or `EnterPlanMode` | starting to edit |
+| Launch the app and see a change working | `Skill` `run` | hand-built server and browser commands |
+| Review or tidy a finished change | `Skill` `code-review`, `simplify` | eyeballing the diff |
+| Write or review Rust in `daemon/` or `web/server/` | `Skill` `rust-skills` | — |
+| A decision that is the user's, not the code's | `AskUserQuestion` | guessing, or a prose question mid-task |
+| Look up external docs or a package | `WebFetch`, `WebSearch` (load with `ToolSearch`) | `curl` |
+| Many parallel agents | `Workflow`, only when the user asks for it in their own words | spawning agents unprompted |
+
+A tool listed as deferred has no schema until `ToolSearch` loads it; calling it
+before that fails.
 
 - `Read` before `Edit`/`Write` on the same file, in the same session, or the call fails.
 - Strip the line-number prefix `Read` shows when copying text into `old_string`.
 - Independent tool calls go in one message so they run in parallel.
 - Reference code as `path:line`.
 - Prefer a narrow `Read` range over a whole file; several files here are tens of KB.
-- Long-lived processes (the loopback `virt-man-web`, watchers) must use
-  `run_in_background`; see "Live suites need a running backend" below.
+- Long-lived processes (the loopback `virt-man-web`, a stub daemon, a headless
+  browser) are Bash calls with `run_in_background: true`, so Claude Code tracks
+  them and `TaskStop` can end them. A process started any other way is
+  invisible to it and ends up orphaned. Never stop one by name:
+  `pkill -f virt-man-web` also matches the real service on `:8006`. Say what you
+  started, and stop it before you finish. See "Live suites need a running
+  backend" below.
+- Do not `git commit` or `git push` unless the user asks in that message. An
+  iterative fix is not finished work.
 
 ## Commands
 
@@ -102,13 +125,17 @@ VIRT_MAN_WEB_DATA=/tmp/vm-live VIRT_MAN_WEB_DIST=$PWD/web/dist \
 **Start it as a BACKGROUND task, never as a plain foreground command.** The
 server runs until it is killed, so a foreground invocation blocks the agent
 forever and swallows the rest of the turn — the suite it was meant to serve
-never runs. Use the background-task tool (`bg_run`) with the same env, then
-check it is listening (`curl -sf http://127.0.0.1:8799/ -o /dev/null`) before
-pointing a suite at it, and kill that task when the suites are done. The same
-applies to any watcher, dev server or long-lived process.
+never runs. Call `Bash` with `run_in_background: true` and the same env (not
+`&` or a subshell: Claude Code must own the process), then check it is
+listening (`curl -sf http://127.0.0.1:8799/ -o /dev/null`, or a `Monitor`
+until-loop) before pointing a suite at it, and end that task with `TaskStop`
+when the suites are done. The same applies to any watcher, dev server, stub
+daemon or headless browser.
 
-**Run live suites with a gap between them** (`sleep 2`). They attach real
-console sessions, and back-to-back runs collide.
+**Run live suites one after another, not together**, with a short wait between
+them. They attach real console sessions, and back-to-back runs collide. Make the
+wait a `Monitor` until-loop or the previous task's exit notification, not a
+`sleep` call.
 
 ## Hard constraints
 

@@ -71,6 +71,10 @@ export function syncIndicators() {
   const tree = document.getElementById("tree");
   if (tree) place(tree, tree.querySelector<HTMLElement>(".tree-row.sel"), "tree", true);
   document.querySelectorAll<HTMLElement>(".tabbar").forEach((bar) => {
+    // An exit copy (.nav-ghost) holds the old page's bar, with the same labels
+    // and so the same key as the live one. Tracking it moved the remembered
+    // position back to the old tab, and the live line then replayed its slide.
+    if (bar.closest(".nav-ghost")) return;
     place(bar, bar.querySelector<HTMLElement>(":scope > .tab.active"), tabKey(bar), false);
   });
 }
