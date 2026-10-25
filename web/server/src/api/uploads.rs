@@ -26,7 +26,6 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 use super::ApiError;
@@ -82,7 +81,13 @@ pub struct UploadJob {
     /// activity entry is written from the background task.
     pub user_id: String,
     pub username: String,
+    /// The daemon-leg task, so a cancel can drop its request mid-body.
+    pub abort: Option<tokio::task::AbortHandle>,
 }
+
+/// The error a cancelled daemon send is left with; the UI matches it to say
+/// "Cancelled" rather than "Failed".
+const CANCELLED: &str = "Cancelled";
 
 pub type JobRef = Arc<Mutex<UploadJob>>;
 
@@ -237,6 +242,7 @@ fn job_from_files(body: &std::path::Path, meta: &std::path::Path, id: &str) -> O
         daemon_write_bps: 0.0,
         user_id: m.user_id,
         username: m.username,
+        abort: None,
     })
 }
 
@@ -364,6 +370,7 @@ async fn stage(
         daemon_write_bps: 0.0,
         user_id: user.id.clone(),
         username: user.username.clone(),
+        abort: None,
     };
     let view_json = view(&job);
     // Written *after* the body is complete, which is what makes it a
@@ -502,9 +509,26 @@ async fn discard(
     let job = lookup(&state, &id)?;
     own_job(&state, &user, &job)?;
     {
-        let j = job.lock().expect("job lock poisoned");
-        if j.phase == Phase::Uploading || j.phase == Phase::Verifying {
-            return Err(ApiError::conflict("upload is still running"));
+        let mut j = job.lock().expect("job lock poisoned");
+        if j.phase == Phase::Verifying {
+            return Err(ApiError::conflict("upload is being verified"));
+        }
+        // Cancelling the daemon leg: dropping the task drops its request, which
+        // closes the connection. The staged copy is kept, so this is a Failed
+        // job the user can dismiss; the task cannot record it, being aborted.
+        if j.phase == Phase::Uploading {
+            if let Some(h) = j.abort.take() {
+                h.abort();
+            }
+            j.phase = Phase::Failed;
+            j.error = Some(CANCELLED.into());
+            j.finished_ms = now_ms();
+            let (uid, uname, label) = (j.user_id.clone(), j.username.clone(), format!("Upload {}", j.name));
+            drop(j);
+            if let Err(e) = super::activity::append(&state, &uid, &uname, &label, "failed", CANCELLED) {
+                tracing::warn!("could not record upload activity: {e}");
+            }
+            return Ok(Json(json!({"id": id, "cancelled": true})));
         }
     }
     // Both files go, including the sidecar: leaving it behind would make the
@@ -547,18 +571,15 @@ async fn push(
 
     let bg = state.clone();
     let job_id = id.clone();
-    tokio::spawn(async move {
+    let tracked = job.clone();
+    let handle = tokio::spawn(async move {
         let result = transfer(&bg, &job_id, job.clone()).await;
         let (label, message) = match &result {
-            Ok(hash) => {
+            Ok(()) => {
                 let j = job.lock().expect("job lock poisoned");
                 (
                     format!("Upload {}", j.name),
-                    format!(
-                        "verified sha256 {} — {} to daemon",
-                        &hash[..hash.len().min(16)],
-                        fmt_bps(j.speed_bps)
-                    ),
+                    format!("stored — {} to daemon", fmt_bps(j.speed_bps)),
                 )
             }
             Err(e) => {
@@ -581,13 +602,14 @@ async fn push(
             tracing::warn!("could not record upload activity: {e}");
         }
     });
+    tracked.lock().expect("job lock poisoned").abort = Some(handle.abort_handle());
 
     Ok(Json(json!({"id": id, "phase": Phase::Uploading})))
 }
 
-/// Stream the staged file to the daemon, then verify the daemon has the same
-/// bytes and remove the staged copy only if it does. Returns the verified hash.
-async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, String> {
+/// Stream the staged file to the daemon, and remove the staged copy once the
+/// daemon reports it stored every byte.
+async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<(), String> {
     let (conn_id, pool, name, size) = {
         let j = job.lock().expect("job lock poisoned");
         (j.conn.clone(), j.pool.clone(), j.name.clone(), j.size)
@@ -609,18 +631,11 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
         .await
         .map_err(|e| format!("open staged file: {e}"))?;
     // Count bytes as they leave, so `sent` is real progress rather than a
-    // guess, and hash them in the same pass. ReaderStream keeps the transfer
-    // chunked: a multi-GB ISO is never held in memory. Hashing here rather
-    // than re-reading the staged file afterwards removes a second full pass
-    // over it, which on a multi-GB ISO is seconds of disk I/O for nothing.
+    // guess. ReaderStream keeps the transfer chunked: a multi-GB ISO is never
+    // held in memory.
     let progress = job.clone();
-    let hasher = Arc::new(Mutex::new(Sha256::new()));
-    let hashing = hasher.clone();
     let stream = tokio_util::io::ReaderStream::new(file).inspect(move |chunk| {
         if let Ok(bytes) = chunk {
-            if let Ok(mut h) = hashing.lock() {
-                h.update(bytes);
-            }
             if let Ok(mut j) = progress.lock() {
                 j.sent += bytes.len() as u64;
                 // Average rate over the whole push. Computed here rather than
@@ -655,39 +670,18 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     if !status.is_success() {
         return Err(format!("daemon refused the upload: HTTP {status} {body}"));
     }
-    // The daemon reports the SHA-256 it computed while writing, plus its own
-    // receive and write timings — the only way to tell a slow network from
-    // slow storage. Taking the digest from here is what avoids the daemon
-    // re-reading the volume: on a cold 7.1 GiB ISO that pass cost ~41 s.
-    let mut remote = String::new();
-    if let Ok(v) = serde_json::from_str::<Value>(&body) {
-        let mut j = job.lock().expect("job lock poisoned");
-        j.daemon_recv_bps = v.get("recv_bps").and_then(Value::as_f64).unwrap_or(0.0);
-        j.daemon_write_bps = v.get("write_bps").and_then(Value::as_f64).unwrap_or(0.0);
-        remote = v
-            .get("sha256")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+    // No hashing: the daemon writes straight into the pool and renames when the
+    // body is complete, so the only check is that it stored as many bytes as
+    // were staged. A short body fails here and the staged copy is kept.
+    let stored = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("uploaded").and_then(Value::as_u64));
+    if stored != Some(size) {
+        return Err(format!(
+            "the daemon stored {} of {size} bytes; the staged copy was kept",
+            stored.map_or("an unknown number".to_string(), |n| n.to_string())
+        ));
     }
-    if remote.is_empty() {
-        // Fail closed: without the daemon's digest there is nothing to verify
-        // against, and treating that as success would accept any bad copy.
-        return Err("the daemon did not report a hash for the uploaded volume".into());
-    }
-
-    // --- verify ------------------------------------------------------------
-    {
-        let mut j = job.lock().expect("job lock poisoned");
-        j.phase = Phase::Verifying;
-    }
-    // Every byte has been streamed by now, so this is the complete digest of
-    // what we sent, computed without a second read.
-    let local = {
-        let mut h = hasher.lock().expect("hash lock poisoned");
-        to_hex(&h.finalize_reset())
-    };
-    verify(&local, &remote)?;
 
     // --- clean up ----------------------------------------------------------
     // Both files, so a completed transfer leaves nothing for the next startup
@@ -699,7 +693,6 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
     let mut j = job.lock().expect("job lock poisoned");
     j.phase = Phase::Done;
     j.finished_ms = now_ms();
-    j.sha256 = Some(local.clone());
     // ISO media is shared: it belongs to nobody, so it counts against no one's
     // storage and no ownership record is written. `owner_of` then falls back to
     // the first administrator, exactly as for an ISO copied into the pool by
@@ -728,22 +721,7 @@ async fn transfer(state: &AppState, id: &str, job: JobRef) -> Result<String, Str
             tracing::warn!("could not record upload owner: {e}");
         }
     }
-    Ok(local)
-}
-
-/// Whether the bytes the daemon stored are the bytes we sent.
-///
-/// Split out as a pure function because this is the decision the whole staging
-/// design exists to make, and it must not be reachable only through a
-/// multi-gigabyte round trip.
-fn verify(local: &str, remote: &str) -> Result<(), String> {
-    if local == remote {
-        return Ok(());
-    }
-    Err(format!(
-        "hash mismatch — the daemon stored {remote}, the staged file is {local}; \
-         the staged copy was kept"
-    ))
+    Ok(())
 }
 
 /// Human-readable transfer rate. Kept in step with the SPA's `fmtRate` (KiB/s
@@ -763,11 +741,6 @@ fn fmt_bps(bps: f64) -> String {
         };
     }
     format!("{:.1} MiB/s", kib / KIB)
-}
-
-/// Lowercase hex of a digest.
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// How long a finished transfer stays listed. Long enough to read the result of
@@ -881,6 +854,7 @@ mod tests {
             daemon_write_bps: 0.0,
             user_id: "u1".into(),
             username: "alice".into(),
+            abort: None,
         }
     }
 
@@ -976,38 +950,6 @@ mod tests {
         assert_eq!(left, ["fresh", "running"], "only the stale done job goes");
     }
 
-    /// The decision the whole staging design exists to make. Tested directly
-    /// because it is otherwise only reachable after a multi-gigabyte round
-    /// trip, and a wrong answer either loses the user's file or hides a bad
-    /// transfer.
-    #[test]
-    fn matching_hashes_verify() {
-        let h = "7d67c7f89862c3379b178f5efa34a0c1c4bb9beaa289cfada29037a387882d6b";
-        assert!(verify(h, h).is_ok());
-    }
-
-    #[test]
-    fn a_different_hash_is_a_failure_that_mentions_both_sides() {
-        let err = verify("aaaa", "bbbb").expect_err("differing hashes must not verify");
-        // Both digests must appear: the message is the only clue to which side
-        // went wrong, and it says the staged copy was kept.
-        assert!(err.contains("aaaa"), "local hash missing: {err}");
-        assert!(err.contains("bbbb"), "remote hash missing: {err}");
-        assert!(
-            err.contains("kept"),
-            "must say the staged copy was kept: {err}"
-        );
-    }
-
-    /// A truncated transfer is the exact failure the daemon used to report as
-    /// success; it must never verify.
-    #[test]
-    fn a_truncated_hash_never_matches() {
-        let full = "7d67c7f89862c3379b178f5efa34a0c1c4bb9beaa289cfada29037a387882d6b";
-        assert!(verify(full, &full[..32]).is_err());
-        assert!(verify(full, "").is_err());
-    }
-
     /// The thresholds must match the SPA's `fmtRate`, or the same transfer
     /// would read as "1.0 MiB/s" in the log and "1024 KiB/s" in the UI.
     #[test]
@@ -1040,10 +982,9 @@ mod tests {
         assert_eq!(p, std::path::Path::new("/data/uploads/abc123.part"));
     }
 
-    /// The hash of the staged bytes must equal the hash of the same bytes
-    /// written through `spool`, since that equality is the whole verification.
+    /// The staged file must hold exactly the bytes of the body.
     #[tokio::test]
-    async fn spool_writes_exactly_the_body_it_hashes() {
+    async fn spool_writes_exactly_the_body() {
         let dir = std::env::temp_dir().join("virtman-upload-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("body.part");
@@ -1055,13 +996,7 @@ mod tests {
             Err(_) => panic!("spool should succeed"),
         };
         assert_eq!(n, data.len() as u64);
-        // The same in-memory hash the push path computes, so this also pins the
-        // staged bytes to the digest that will later be compared.
-        let mut h = Sha256::new();
-        h.update(&data);
-        let want = to_hex(&h.finalize());
-        let got = to_hex(&Sha256::digest(std::fs::read(&path).unwrap()));
-        assert_eq!(got, want, "spooled bytes are exactly the body");
+        assert_eq!(std::fs::read(&path).unwrap(), data, "spooled bytes are exactly the body");
         let _ = std::fs::remove_file(&path);
     }
 

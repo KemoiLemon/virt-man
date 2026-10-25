@@ -21,7 +21,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 
 use super::ApiError;
@@ -377,17 +376,6 @@ pub(super) fn spool_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/var/tmp"))
 }
 
-/// A spool path unique to this request. Two uploads naming the same volume used
-/// to share one file, so concurrent uploads corrupted each other.
-fn spool_path(pool: &str, vol: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    spool_dir().join(format!(
-        "virtman-{pool}-{vol}-{}-{n}.upload",
-        std::process::id()
-    ))
-}
-
 /// Bytes per second, guarding the divide. A transfer fast enough to register
 /// zero elapsed time would otherwise report an infinite or NaN rate.
 fn bps(bytes: u64, secs: f64) -> f64 {
@@ -395,34 +383,6 @@ fn bps(bytes: u64, secs: f64) -> f64 {
         return 0.0;
     }
     bytes as f64 / secs
-}
-
-async fn spool_body(body: Body, tmp: &FsPath) -> Result<u64, ApiError> {
-    let mut file = tokio::fs::File::create(tmp)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut stream = body.into_data_stream();
-    let mut total = 0u64;
-    loop {
-        let chunk = match stream.next().await {
-            Some(Ok(c)) => c,
-            Some(Err(e)) => {
-                let _ = std::fs::remove_file(tmp);
-                return Err(ApiError::bad_request(e));
-            }
-            None => break,
-        };
-        if let Err(e) = file.write_all(&chunk).await {
-            let _ = std::fs::remove_file(tmp);
-            return Err(ApiError::internal(e));
-        }
-        total += chunk.len() as u64;
-    }
-    if let Err(e) = file.flush().await {
-        let _ = std::fs::remove_file(tmp);
-        return Err(ApiError::internal(e));
-    }
-    Ok(total)
 }
 
 /// Copy `src` into `dst`, hashing as it goes.
@@ -493,38 +453,7 @@ pub(super) fn place_spooled(
     overwrite: bool,
     expect_sha: Option<&str>,
 ) -> Result<(u64, String), PlaceError> {
-    let p = pools
-        .get(pool)
-        .ok_or_else(|| PlaceError::BadRequest(format!("no pool '{pool}'")))?;
-    if !p.active {
-        return Err(PlaceError::Conflict(format!("pool '{pool}' is not active")));
-    }
-    let root = pools.root(pool).map_err(PlaceError::Conflict)?;
-    let name = safe_name(name).map_err(PlaceError::BadRequest)?;
-    let target = root.join(name);
-    match std::fs::symlink_metadata(&target) {
-        Ok(m) => {
-            if !overwrite {
-                return Err(PlaceError::Conflict(format!(
-                    "a volume named '{name}' already exists"
-                )));
-            }
-            if !m.file_type().is_file() {
-                return Err(PlaceError::BadRequest(format!(
-                    "'{name}' is not a regular file"
-                )));
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(PlaceError::Internal(format!("{}: {e}", target.display()))),
-    }
-    let temp = root.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut out = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|e| PlaceError::Internal(format!("{}: {e}", temp.display())))?;
+    let (mut out, temp, target) = begin_placement(pools, pool, name, overwrite)?;
     let copied = copy_hashed(src, &mut out);
     let outcome: Result<(u64, String), PlaceError> = match copied {
         Err(e) => Err(PlaceError::Internal(format!("{}: {e}", temp.display()))),
@@ -551,6 +480,49 @@ pub(super) fn place_spooled(
         return Err(PlaceError::Internal(format!("{}: {e}", target.display())));
     }
     Ok(outcome)
+}
+
+/// Validate the target and open its 0600 dot-prefixed temp in the pool root:
+/// the checks and file `place_spooled` and a direct upload share.
+fn begin_placement(
+    pools: &Pools,
+    pool: &str,
+    name: &str,
+    overwrite: bool,
+) -> Result<(std::fs::File, std::path::PathBuf, std::path::PathBuf), PlaceError> {
+    let p = pools
+        .get(pool)
+        .ok_or_else(|| PlaceError::BadRequest(format!("no pool '{pool}'")))?;
+    if !p.active {
+        return Err(PlaceError::Conflict(format!("pool '{pool}' is not active")));
+    }
+    let root = pools.root(pool).map_err(PlaceError::Conflict)?;
+    let name = safe_name(name).map_err(PlaceError::BadRequest)?;
+    let target = root.join(name);
+    match std::fs::symlink_metadata(&target) {
+        Ok(m) => {
+            if !overwrite {
+                return Err(PlaceError::Conflict(format!(
+                    "a volume named '{name}' already exists"
+                )));
+            }
+            if !m.file_type().is_file() {
+                return Err(PlaceError::BadRequest(format!(
+                    "'{name}' is not a regular file"
+                )));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(PlaceError::Internal(format!("{}: {e}", target.display()))),
+    }
+    let temp = root.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+    let out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|e| PlaceError::Internal(format!("{}: {e}", temp.display())))?;
+    Ok((out, temp, target))
 }
 
 /// Stream a body into a volume. `?name=` creates a new raw file; otherwise the
@@ -586,36 +558,43 @@ async fn upload(
         }
     };
 
-    let tmp = spool_path(&key, &name);
-    // Measured separately because they fail differently: a slow receive means
-    // the network, a slow write means the storage. Reporting one number would
-    // hide which end is the bottleneck.
-    let recv_start = std::time::Instant::now();
-    let total = spool_body(body, &tmp).await?;
-    let recv_secs = recv_start.elapsed().as_secs_f64();
-
-    let write_start = std::time::Instant::now();
-    let placed = {
-        let pools = pools.clone();
-        let key = key.clone();
-        let name = name.clone();
-        let spool = tmp.clone();
-        tokio::task::spawn_blocking(move || {
-            place_spooled(&pools, &key, &name, &spool, create_name.is_none(), None)
-        })
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
+    // Streamed straight into a temp in the pool root and renamed when complete,
+    // so the volume appears the moment the last byte lands: no spool, no second
+    // copy, no hashing. A failed or cut-off body removes the temp and leaves an
+    // existing target as it was.
+    let started = std::time::Instant::now();
+    let (out, temp, target) =
+        begin_placement(&pools, &key, &name, create_name.is_none()).map_err(PlaceError::into_api)?;
+    let total = match write_body(body, out).await {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
     };
-    let _ = std::fs::remove_file(&tmp);
-    let (_, sha256) = placed.map_err(PlaceError::into_api)?;
-    let write_secs = write_start.elapsed().as_secs_f64();
+    if let Err(e) = std::fs::rename(&temp, &target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(ApiError::internal(format!("{}: {e}", target.display())));
+    }
     Ok(Json(json!({
         "name": name,
         "uploaded": total,
-        "sha256": sha256,
-        "recv_bps": bps(total, recv_secs),
-        "write_bps": bps(total, write_secs),
+        "recv_bps": bps(total, started.elapsed().as_secs_f64()),
     })))
+}
+
+/// Write a request body to an open file and fsync it. Returns the byte count.
+async fn write_body(body: Body, out: std::fs::File) -> Result<u64, ApiError> {
+    let mut file = tokio::fs::File::from_std(out);
+    let mut stream = body.into_data_stream();
+    let mut total = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(ApiError::bad_request)?;
+        file.write_all(&chunk).await.map_err(ApiError::internal)?;
+        total += chunk.len() as u64;
+    }
+    file.sync_all().await.map_err(ApiError::internal)?;
+    Ok(total)
 }
 
 #[cfg(test)]
