@@ -144,12 +144,14 @@ document.addEventListener("click", (e) => {
   }
   const host = bar.parentElement!;
   const slide = (n: Element) => {
-    // Already sliding: let it finish rather than restart it.
-    if (n.classList.contains("tab-in-right") || n.classList.contains("tab-in-left")) return;
+    // Already sliding, itself or through a parent: let it finish rather than
+    // restart it or stack a second slide on the same motion.
+    if (n.closest(".tab-in-right, .tab-in-left")) return;
     // The skeleton's own rise-in (.sk-reveal) would take over the moment this
     // slide ends and replay as a second animation, so the slide replaces it.
     n.classList.remove("tab-in-right", "tab-in-left", "sk-reveal");
     n.parentElement?.classList.remove("sk-reveal");
+    n.querySelectorAll(".sk-reveal").forEach((r) => r.classList.remove("sk-reveal"));
     replay(n, cls, 400);
   };
   const obs = new MutationObserver((muts) => {
@@ -202,7 +204,9 @@ function setHtml(el: Element, html: string) {
     el.innerHTML = clean;
   }
   painted.set(el, location.pathname);
-  if (hadSkeleton && !el.querySelector(".skeleton")) replay(el, "sk-reveal", 900);
+  // Not inside a tab slide: both move the same page, and the rise would start
+  // over the moment the slide's class is taken off.
+  if (hadSkeleton && !el.querySelector(".skeleton") && !el.closest(".tab-in-right, .tab-in-left")) replay(el, "sk-reveal", 900);
   [...el.querySelectorAll("table.grid")].forEach((t, i) => {
     if (scrollLeft[i]) t.scrollLeft = scrollLeft[i];
   });
