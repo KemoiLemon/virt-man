@@ -70,7 +70,9 @@ const poolUrl = `/proxy/${conn}/pools/${encodeURIComponent(pool)}`;
 // Deterministic bytes, so a failure reproduces and the expected hash can be
 // computed rather than merely echoed back by the server under test.
 const dir = mkdtempSync(join(tmpdir(), "vm-upload-"));
-const size = 400_000;
+// Large enough that the push takes more than the 1 ms the server's rate
+// counter resolves; a 400 KB body can finish inside it and report 0 B/s.
+const size = 4_000_000;
 const bytes = Buffer.alloc(size);
 for (let i = 0; i < size; i++) bytes[i] = (i * 7) % 256;
 writeFileSync(join(dir, "e2e.iso"), bytes);
@@ -101,7 +103,7 @@ await check("phase 1 stages the body on the web server", async () => {
   assert.ok(existsSync(join(uploadsDir, `${staged.id}.part`)), "body is on disk");
 });
 
-await check("phase 2 pushes to the daemon and verifies by hash", async () => {
+await check("phase 2 pushes to the daemon, which stores every byte", async () => {
   await json(`/uploads/${staged.id}/push`, { method: "POST" });
   let job = null;
   for (let i = 0; i < 100; i++) {
@@ -111,21 +113,21 @@ await check("phase 2 pushes to the daemon and verifies by hash", async () => {
   }
   assert.equal(job.phase, "done", `expected done, got ${job.phase}: ${job.error ?? ""}`);
   assert.equal(job.sent, size, "all bytes were handed to the daemon");
-  assert.equal(job.sha256, want, "the verified hash is the source hash");
+  // Nothing is hashed on the way any more; "the daemon really holds those exact
+  // bytes" below is the independent byte-for-byte proof.
+  assert.equal(job.sha256, null, "no hash is computed by the transfer");
   staged = job;
 });
 
-await check("the staged copy is deleted once both hashes match", () => {
+await check("the staged copy is deleted once the daemon has stored it", () => {
   // The requirement, measured on the filesystem rather than inferred.
   assert.ok(!existsSync(join(uploadsDir, `${staged.id}.part`)), "staged file removed");
 });
 
-await check("both legs report a measured speed", async () => {
-  // The daemon leg's rate comes from the server's own byte counter...
+await check("the daemon leg reports a measured speed", async () => {
+  // The rate comes from the server's own byte counter. (The daemon's recv_bps
+  // is no longer read back, and there is no write/verify leg to time.)
   assert.ok(staged.speed_bps > 0, `no push rate reported: ${staged.speed_bps}`);
-  // ...and the daemon reports its receive and write rates independently.
-  assert.ok(staged.daemon_recv_bps > 0, `no daemon receive rate: ${staged.daemon_recv_bps}`);
-  assert.ok(staged.daemon_write_bps > 0, `no daemon write rate: ${staged.daemon_write_bps}`);
   // A local transfer cannot exceed a generous ceiling; a unit slip (bytes as
   // KiB, or per-millisecond) would show up as an absurd number here.
   assert.ok(staged.speed_bps < 10e9, `implausible rate: ${staged.speed_bps} B/s`);
@@ -154,7 +156,7 @@ trackVolume(solo);
   await new Promise((r) => setTimeout(r, 4000));
   const job = await json(`/uploads/${st.id}`);
   assert.equal(job.phase, "done", `stranded without a client: ${job.phase} ${job.error ?? ""}`);
-  assert.equal(job.sha256, want, "and still verified");
+  assert.equal(job.sent, size, "and the daemon was handed every byte");
   await fetch(new URL(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(solo)}`, base),
     { method: "DELETE" }).catch(() => undefined);
   await fetch(new URL(`/uploads/${st.id}`, base), { method: "DELETE" }).catch(() => undefined);
@@ -249,7 +251,7 @@ await check("a refused deletion is recorded as failed with the daemon's reason",
   const mine = log.entries.find((e) => e.label.includes(missing));
   assert.ok(mine, `no audit entry for the refused delete of ${missing}`);
   assert.equal(mine.status, "failed", "a refused delete must not read as done");
-  assert.match(mine.message, /not found|no storage vol/, `reason lost: ${mine.message}`);
+  assert.match(mine.message, new RegExp(`no volume '${missing.replace(/[.]/g, "\\.")}'`), `reason lost: ${mine.message}`);
 });
 
 // Leave the daemon as we found it.
@@ -366,7 +368,7 @@ await check("a staged upload offers to send itself, not just cancel", () => {
   // holds, and an earlier run's leftover is what a bare `[data-up-push]` finds.
   const send = document.querySelector(`#pool-uploads [data-up-id="${uiStaged.id}"] [data-up-push]`);
   assert.ok(send, "staged transfer has a Send action");
-  assert.match(send.textContent, /Send to daemon/, `unhelpful label: ${send.textContent}`);
+  assert.match(send.textContent, /Send to Daemon/, `unhelpful label: ${send.textContent}`);
 });
 
 await check("the pool window shows the daemon leg's speed", async () => {
@@ -390,7 +392,7 @@ await check("the pool window shows the daemon leg's speed", async () => {
   assert.ok(sawSpeed, "no speed rendered on the transfer card");
 });
 
-await check("the bar tracks the transfer through to verified", async () => {
+await check("the bar tracks the transfer through to stored", async () => {
   // The push was already started by the speed check above; pushing again is a
   // 409 once it has completed.
   let phase = "";
@@ -405,8 +407,8 @@ await check("the bar tracks the transfer through to verified", async () => {
   await wait(1200);
   const card = document.querySelector(`#pool-uploads [data-up-id="${uiStaged.id}"]`);
   assert.ok(card, "this transfer's card is still present");
-  assert.match(card.textContent, /Verified/, `expected Verified, saw: ${card.textContent}`);
-  assert.match(card.textContent, /sha256/, "shows the verified checksum");
+  assert.match(card.textContent, /Stored/, `expected Stored, saw: ${card.textContent}`);
+  assert.doesNotMatch(card.textContent, /sha256|Verified/, "no checksum is claimed");
 });
 
 await check("a freshly loaded page rediscovers work already in progress", async () => {

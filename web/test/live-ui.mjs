@@ -169,12 +169,12 @@ check("themed dialog opens instead of native window.prompt", () => {
   click(document.querySelector("#admin-btn"));
   await wait(900);
   const openActivity = async () => {
-    click(document.querySelector('#tree [data-admin-section="activity"]'));
+    click(document.querySelector('.admin-nav [data-admin-section="activity"]'));
     await wait(900);
   };
   check("the admin page offers an Activity section", () => {
-    assert.ok(document.querySelector("#tree [data-admin-section]"), "admin page opened");
-    assert.ok(document.querySelector('#tree [data-admin-section="activity"]'), "activity section present");
+    assert.ok(document.querySelector(".admin-nav [data-admin-section]"), "admin page opened");
+    assert.ok(document.querySelector('.admin-nav [data-admin-section="activity"]'), "activity section present");
     assert.equal(document.querySelector("#tasks"), null, "the old task dock is gone");
   });
 
@@ -184,7 +184,8 @@ check("themed dialog opens instead of native window.prompt", () => {
     assert.ok(area, "admin area rendered");
     // Either recorded rows, or the explicit empty state — never a blank pane.
     assert.ok(area.querySelector("table.grid"), "activity table rendered");
-    assert.ok(area.querySelector("#act-clear"), "clear action present");
+    // Section actions live in the window header, not the area.
+    assert.ok(document.querySelector("#admin-head #act-clear"), "clear action present");
   });
 
   // An action recorded through the real API must show up in the log, which is
@@ -204,7 +205,7 @@ check("themed dialog opens instead of native window.prompt", () => {
   // role replaces that entry rather than leaving the old one behind (the
   // server keys an entry on path+ugid+role, so the old key has to be dropped).
   // Skipped when the instance has no ACL rows to edit.
-  click(document.querySelector('#tree [data-admin-section="permissions"]'));
+  click(document.querySelector('.admin-nav [data-admin-section="permissions"]'));
   await wait(1000);
   const aclRows = [...document.querySelectorAll("#admin-area table.grid tr")]
     .filter((r) => r.querySelector("[data-del-acl]"));
@@ -423,7 +424,7 @@ await (async () => {
     const tabs = [...bar.querySelectorAll(".tab")];
     assert.deepEqual(
       tabs.map((t) => t.textContent.trim()),
-      ["Dashboard", "VMs", "Networks", "Storage", "Firewall", "Shell"],
+      ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall", "Shell"],
       "all connection tabs render",
     );
     assert.equal(
@@ -526,7 +527,7 @@ await (async () => {
     const chips = [...strip.querySelectorAll(".hw-chip")];
     assert.ok(chips.length >= 3, `${chips.length} hardware chips`);
     const chipLabels = chips.map((c) => c.querySelector(".hw-chip-tx b")?.textContent.trim());
-    for (const want of ["BIOS", "Display"]) {
+    for (const want of ["BIOS", "Graphics"]) {
       assert.ok(chipLabels.includes(want), `${want} chip present (${chipLabels})`);
     }
 

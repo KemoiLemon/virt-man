@@ -91,12 +91,14 @@ await (async () => {
   // is exactly the case that used to fail.
   const guest = document.querySelector(".tree-row.tree-vm");
   const name = guest.dataset.vm;
+  // A guest is named by its UUID; the page shows the title the user typed.
+  const shown = guest.querySelector(".tree-label").textContent.trim();
   guest.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await wait(1600);
 
   check("clicking a sidebar guest from Datacenter opens that VM", () => {
     const title = document.querySelector(".dtitle")?.textContent.trim();
-    assert.equal(title, name, `VM view opened for ${name} (title: ${title})`);
+    assert.equal(title, shown, `VM view opened for ${name} (title: ${title})`);
     const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
     assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Network", "XML"], "VM tabs render");
   });
@@ -114,10 +116,10 @@ await wait(1200);
 
 // ---- Guests get their own tab ---------------------------------------------
 
-check("Datacenter has Dashboard, Guests, Networks and Storage tabs, and no Servers tab", () => {
+check("Datacenter has Dashboard, Guests, Containers, Networks and Storage tabs, and no Servers tab", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
   // Servers moved to the admin page's Daemons section.
-  assert.deepEqual(tabs, ["Dashboard", "Guests", "Networks", "Storage"], `tabs (${tabs})`);
+  assert.deepEqual(tabs, ["Dashboard", "Guests", "Containers", "Networks", "Storage"], `tabs (${tabs})`);
   // The landing dashboard has no guest cards either; guests are their own tab.
   assert.equal(document.querySelectorAll("[data-dc-vm]").length, 0,
     "guests are not listed on the Dashboard tab");
@@ -184,7 +186,16 @@ check("creating from the Datacenter keeps the Datacenter", () => {
 check("the daemon picker does not select the daemon it picks", () => {
   // Clear any selection the checks above left, then open the picker.
   document.querySelector("#dc-row")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  document.querySelector("#dc-pool-create")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  // The tabs' own create buttons exist only in an empty state, and this host has
+  // pools, so reach the picker the way a user does: Add Resource, then Storage Pool.
+  document.querySelector("#dc-row")?.dispatchEvent(new window.MouseEvent("contextmenu", {
+    bubbles: true, cancelable: true, clientX: 50, clientY: 50,
+  }));
+  [...document.querySelectorAll(".ctxmenu-item")]
+    .find((b) => b.textContent.trim() === "Add Resource")
+    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  document.querySelector('.modal-back.open [data-create="pool"]')
+    ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 });
 await wait(500);
 check("…the picker lists a daemon to choose", () => {
@@ -301,13 +312,14 @@ check("guest cards carry quick actions", () => {
 
 // Clicking a guest card must open that VM.
 const name = document.querySelector("[data-dc-vm]").dataset.dcVm;
+const cardTitle = document.querySelector("[data-dc-vm] .storage-card-title").textContent.trim();
 document.querySelector("[data-dc-vm]")
   .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1600);
 
 check("clicking a guest in the Guests tab opens its VM view", () => {
   const title = document.querySelector(".dtitle")?.textContent.trim();
-  assert.equal(title, name, `VM view for ${name} is open (title: ${title})`);
+  assert.equal(title, cardTitle, `VM view for ${name} is open (title: ${title})`);
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
   assert.deepEqual(tabs, ["Summary", "Console", "Hardware", "Options", "Network", "XML"], "VM tabs render");
   assert.ok(document.querySelector(".tree-row.tree-vm.sel"), "sidebar marks the guest selected");
@@ -352,7 +364,7 @@ check("server rows are selectable", () => {
 await wait(1400);
 check("clicking a server opens its view", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall"], `server tabs render (${tabs})`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall", "Shell"], `server tabs render (${tabs})`);
 });
 
 for (const [state, name2] of results) {

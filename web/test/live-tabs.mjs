@@ -61,7 +61,7 @@ await wait(1500);
 
 check("server view has a Dashboard tab first, then the resource tabs", () => {
   const tabs = [...document.querySelectorAll(".tabbar .tab")].map((t) => t.textContent.trim());
-  assert.deepEqual(tabs, ["Dashboard", "VMs", "Networks", "Storage", "Firewall", "Shell"], `tabs: ${tabs}`);
+  assert.deepEqual(tabs, ["Dashboard", "VMs", "Containers", "Networks", "Storage", "Firewall", "Shell"], `tabs: ${tabs}`);
   assert.ok(tabNamed("Dashboard").querySelector("svg"), "Dashboard tab has an icon");
   assert.ok(tabNamed("Firewall").querySelector("svg"), "Firewall tab has an icon");
 });
@@ -326,7 +326,7 @@ check("Options tab shows editable metadata read from the guest", () => {
   assert.ok(!document.querySelector("#opt-name"), "no resource name field");
   assert.ok(document.querySelector("#opt-title"), "nickname field");
   assert.ok(document.querySelector("#opt-desc"), "description field");
-  assert.ok(document.querySelector("#opt-boot"), "boot device selector");
+  assert.ok(document.querySelector("#opt-boot-list"), "boot device list");
   assert.ok(document.querySelector("#opt-save"), "save button");
   // Lifecycle facts must come from the real domain, not placeholders.
   const lifecycle = [...document.querySelectorAll(".hwrow-label b")].map((b) => b.textContent.trim());

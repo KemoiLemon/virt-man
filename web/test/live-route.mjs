@@ -68,8 +68,8 @@ try {
     [`/${enc(node)}/networks/gone-net-x`, (w) => w.location.pathname === `/${enc(node)}/networks` && /Networks/.test(activeTab(w))],
     [`/${enc(node)}/storage/gone-pool-x`, (w) => w.location.pathname === `/${enc(node)}/storage` && /Storage/.test(activeTab(w))],
   ];
-  if (net) reloads.push([`/${enc(node)}/networks/${enc(net)}`, (w) => title(w) === net]);
-  if (pool) reloads.push([`/${enc(node)}/storage/${enc(pool)}`, (w) => title(w) === pool]);
+  if (net) reloads.push([`/${enc(node)}/networks/${enc(net)}`, (w) => title(w) === netShown]);
+  if (pool) reloads.push([`/${enc(node)}/storage/${enc(pool)}`, (w) => title(w) === poolShown]);
   for (const [path, ok] of reloads) {
     const w = await page(path);
     check(`reload ${path}`, ok(w), `title=${title(w)} tab=${activeTab(w)} url=${w.location.pathname}`);

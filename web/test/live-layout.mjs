@@ -113,7 +113,7 @@ check("tabs have clearance above the content", () => {
 // Servers are listed on the admin Daemons page (the Datacenter tab is gone).
 document.querySelector("#admin-btn")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(600);
-document.querySelector('#tree [data-admin-section="daemons"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+document.querySelector('.admin-nav [data-admin-section="daemons"]')?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(900);
 check("servers render as a list with icon action buttons", () => {
   const rows = [...document.querySelectorAll("#admin-area table.grid tr")].filter((r) => r.querySelector("[data-edit-conn]"));
