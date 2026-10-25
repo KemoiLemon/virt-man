@@ -28,6 +28,13 @@ export const hooks: {
   deleteCtOn: AnyFn;
   dcCreate: AnyFn;
   openCreateCt: AnyFn;
+  openCommandPalette: AnyFn;
+  renderProfileBtn: AnyFn;
+  startPolling: AnyFn;
+  selectVmRow: AnyFn;
+  selectCtRow: AnyFn;
+  selectNetRow: AnyFn;
+  selectPoolRow: AnyFn;
 } = {
   renderTree: () => {},
   renderOffline: () => {},
@@ -50,4 +57,11 @@ export const hooks: {
   deleteCtOn: () => {},
   dcCreate: () => {},
   openCreateCt: () => {},
+  openCommandPalette: () => {},
+  renderProfileBtn: () => {},
+  startPolling: () => {},
+  selectVmRow: () => {},
+  selectCtRow: () => {},
+  selectNetRow: () => {},
+  selectPoolRow: () => {},
 };

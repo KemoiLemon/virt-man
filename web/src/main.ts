@@ -1,13 +1,13 @@
 import { api, pendingReads, pollWindow } from "./api";
-import type { ContainerSummary, Connection, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, User, VolumeSummary } from "./api";
-import { adminRowMenu, adminTitle, adminTree, assignOwner, renderAdminSection, type AdminCtx } from "./admin";
+import type { ContainerSummary, Connection, DomainSummary, FirewallForward, FirewallPolicy, FirewallRule, NetworkSummary, PoolSummary, VolumeSummary } from "./api";
+import { adminRowMenu, assignOwner } from "./admin";
 import { attachConsole } from "./console";
 import { closeTayne, openTayne, tayneOpen, type TayneCommand } from "./tayne";
 import { ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
-import { ADMIN_TABS, parsePath, type AdminSection, type AdminTab } from "./route";
+import type { AdminSection } from "./route";
 import { BOOT_LABEL, bootChoices, bootTargets, deviceSummary, devicesFromXml, hwType } from "./hardware";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, convert, unitOptions, unitValue } from "./units";
 import type { Unit } from "./units";
@@ -25,22 +25,23 @@ import { attachSuggest } from "./suggest";
 import { esc, networkFormFromXml, nextFreeIp } from "./xml";
 
 import { shownNet, state, summaryDiskSel, summaryNetSel, treeCts, treeNets, treePools, treeVms, volumeNames } from "./state";
-import { bridgeNetwork, capLabel, displayName, emptyState, nameOf, nicNetwork, relTime, unescapeXml } from "./util";
+import { bridgeNetwork, capLabel, displayName, emptyState, nameOf, nicNetwork, unescapeXml } from "./util";
 
 import { askConfirm, askMultiline, askText, openModal, toast } from "./dialogs";
-import { act, adminDeleteResource, deleteConnection, deleteNetwork, deletePool, deleteVm, deleteVolume, renameVm, renameVolume } from "./actions";
+import { act, deleteConnection, deleteNetwork, deletePool, deleteVm, deleteVolume, renameVm, renameVolume } from "./actions";
 import type { DomainDeleteResult } from "./actions";
 import { hooks } from "./hooks";
-import { applyRoute, beginRender, clearResourceSelection, closeConsole, closeDrawer, fastLoad, guestBase, guestList, leaveCurrentView, renderCurrent, renderView, showPageSkeleton, stillCurrent, stillCurrentVm, syncUrl, toggleDrawer } from "./nav";
-import { bindSideResize } from "./sidebar";
+import { beginRender, clearResourceSelection, closeConsole, fastLoad, guestBase, guestList, leaveCurrentView, renderView, showPageSkeleton, stillCurrent, stillCurrentVm, syncUrl } from "./nav";
 import { avatarHtml, openProfile, profileHooks } from "./profile";
 import { bindFetches, bindUploads, fetchesSection, openFetch, openUpload, pollFetches, pollUploads, transferHooks, uploadsSection } from "./transfers";
-import { $, EXIT_MS, initTheme, noteTreeSel, replay, setHtml, toggleTheme } from "./dom";
+import { $, noteTreeSel, setHtml, toggleTheme } from "./dom";
 import { openHardwareEditor } from "./hardware-editor";
 import { openCreateVm } from "./create-vm";
-import { openConnectionDialog, stopPendingPoll } from "./connection-dialog";
+import { openConnectionDialog } from "./connection-dialog";
 import { dcCreate, openAddResource, openCreatePool, openCreateResource, openCreateVolume, withDaemon } from "./create-resource";
 import { openCreateNetwork, openEditNetwork } from "./network-form";
+import { ago, boot, canAdmin, isOffline, logout, refreshHealth, renderOffline, roleLabel } from "./boot";
+import { closeAdmin, openAdmin, showSecret, syncAdminButton } from "./admin-window";
 
 // Moved modules cannot import the views (a cycle), so they reach them through
 // `hooks`. Wrappers, so nothing here depends on declaration order.
@@ -65,31 +66,19 @@ hooks.loadVolumes = (pool: string) => loadVolumes(pool);
 hooks.deleteCtOn = (...a) => deleteCtOn(...(a as Parameters<typeof deleteCtOn>));
 hooks.dcCreate = (...a) => dcCreate(...(a as Parameters<typeof dcCreate>));
 hooks.openCreateCt = (...a) => openCreateCt(...(a as Parameters<typeof openCreateCt>));
+hooks.openCommandPalette = () => openCommandPalette();
+hooks.renderProfileBtn = () => renderProfileBtn();
+hooks.startPolling = () => startPolling();
+hooks.selectVmRow = (...a) => selectVmRow(...(a as Parameters<typeof selectVmRow>));
+hooks.selectCtRow = (...a) => selectCtRow(...(a as Parameters<typeof selectCtRow>));
+hooks.selectNetRow = (...a) => selectNetRow(...(a as Parameters<typeof selectNetRow>));
+hooks.selectPoolRow = (...a) => selectPoolRow(...(a as Parameters<typeof selectPoolRow>));
 // transfers.ts repaints the pool page through its own hook.
 transferHooks.renderPoolPage = renderPoolPage;
 // Likewise profile.ts: wrappers, so nothing here depends on declaration order.
 profileHooks.renderProfileBtn = () => renderProfileBtn();
 profileHooks.roleLabel = (admin) => roleLabel(admin);
 profileHooks.showSecret = (title, secret) => showSecret(title, secret);
-
-/// The open view's server is down: keep its header (so it is clear which
-/// server and page this is, and the tree still lines up) and show one offline
-/// panel in place of the body.
-function renderOffline() {
-  if (!state.selectedConn) return;
-  beginRender();
-  syncUrl();
-  const c = state.connections.find((x) => x.id === state.selectedConn);
-  const sc = state.selectedConn;
-  const title = state.selectedVm ? displayName(guestList(sc), state.selectedVm)
-    : state.selectedNet ? displayName(treeNets[sc], state.selectedNet)
-    : state.selectedPool ? displayName(treePools[sc], state.selectedPool)
-    : c?.name ?? "";
-  const content = $("#content");
-  setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.offline(20)}</span><span class="dtitle">${esc(title)}</span>
-    ${state.selectedVm || state.selectedNet || state.selectedPool ? `<span class="badge">${esc(c?.name ?? "")}</span>` : ""}</div>
-    ${offlinePanel(state.selectedConn)}`);
-}
 
 // ------------------------------------------------------- command palette
 
@@ -276,229 +265,6 @@ document.addEventListener("keydown", (e) => {
     if (top) top.dispatchEvent(new Event("modal-escape", { bubbles: false }));
   }
 });
-
-// ---------------------------------------------------------------- boot
-
-async function boot() {
-  initTheme();
-  const status = await api.get<{ needs_setup: boolean; auth_disabled?: boolean }>("/auth/status");
-  if (status.auth_disabled) {
-    state.authDisabled = true;
-    state.user = { id: "local", username: "local", nickname: "local", avatar: null, admin: true, privs: [] };
-    await loadConnections();
-    applyRoute(parsePath(location.pathname, state.connections));
-    renderApp();
-    return;
-  }
-  if (status.needs_setup) return renderSetup();
-  try {
-    const me = await api.get<User>("/auth/me");
-    state.user = me;
-    await loadConnections();
-    applyRoute(parsePath(location.pathname, state.connections));
-    renderApp();
-  } catch {
-    renderLogin();
-  }
-}
-
-/// Fetch the saved daemon connections. Without this the sidebar tree and the
-/// Datacenter table render empty on every load until one is added or removed.
-async function loadConnections() {
-  try {
-    state.connections = await api.get<Connection[]>("/connections");
-  } catch {
-    state.connections = [];
-  }
-}
-
-// ---------------------------------------------------------------- auth screens
-
-function centerScreen(html: string) {
-  const app = $("#app");
-setHtml(app, `<div class="center-screen">${html}</div>`);
-}
-
-function renderSetup() {
-  centerScreen(`
-    <div class="auth-box">
-      <div class="auth-logo">virt-<span>man</span></div>
-      <div class="modal-body">
-        <label class="field"><span>Username</span><input id="su" autocomplete="username"></label>
-        <label class="field"><span>Password (min 8 chars)</span><input id="sp" type="password" autocomplete="new-password"></label>
-        <label class="field"><span>Nickname</span><input id="sn"></label>
-      </div>
-      <div class="modal-foot"><button class="btn primary" id="setup-btn">Create Admin</button></div>
-    </div>`);
-  $("#setup-btn").onclick = async () => {
-    try {
-      await api.post("/auth/setup", {
-        username: $("#su").value,
-        password: $("#sp").value,
-        nickname: $("#sn").value,
-      });
-      toast("Admin created");
-      boot();
-    } catch (e) {
-      toast((e as Error).message, "bad");
-    }
-  };
-}
-
-function renderLogin() {
-  centerScreen(`
-    <div class="auth-box">
-      <div class="auth-logo">virt-<span>man</span></div>
-      <div class="modal-body">
-        <label class="field"><span>Username</span><input id="lu" autocomplete="username"></label>
-        <label class="field"><span>Password</span><input id="lp" type="password" autocomplete="current-password"></label>
-      </div>
-      <div class="modal-foot"><button class="btn primary" id="login-btn">Sign In</button></div>
-    </div>`);
-  $("#login-btn").onclick = async () => {
-    try {
-      state.user = await api.post<User>("/auth/login", { username: $("#lu").value, password: $("#lp").value });
-      // boot() loads connections before rendering; the login path must too, or
-      // the sidebar tree and Datacenter table render empty until a refresh.
-      await loadConnections();
-      // Land on the page they asked for before being sent to sign in.
-      applyRoute(parsePath(location.pathname, state.connections));
-      renderApp();
-    } catch (e) {
-      toast((e as Error).message, "bad");
-    }
-  };
-  $("#lp").onkeydown = (e: KeyboardEvent) => { if (e.key === "Enter") $("#login-btn").click(); };
-}
-
-async function logout() {
-  stopPendingPoll();
-  await api.post("/auth/logout");
-  state.user = null;
-  renderLogin();
-}
-
-// ---------------------------------------------------------------- app shell
-
-function renderApp() {
-  if (!state.user) return;
-  const app = $("#app");
-setHtml(app, `
-    <div class="topbar">
-      <button class="btn icon mobile-only" id="nav-btn" title="Servers and Guests">${ic.menu()}</button>
-      <span class="brand">virt-<span>man</span></span>
-      <span class="host">web${state.authDisabled ? " · local" : ` · ${esc(state.user.nickname)}`}</span>
-      <span class="topbar-quick">
-        <button class="btn icon mobile-only" id="palette-btn" title="Commands">${ic.logs()}</button>
-        <button class="btn icon" id="theme-btn" title="Toggle Theme">${ic.theme()}</button>
-        ${canAdmin() ? `<button class="btn icon" id="admin-btn"></button>` : ""}
-        ${state.authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign Out">${ic.logout()}</button>`}
-      </span>
-    </div>
-    <div class="layout">
-      <div class="pane list-pane">
-        <div class="restree" id="tree"></div>
-        <div class="side-resize" id="side-resize"></div>
-        ${state.authDisabled ? "" : `<div class="side-profile" id="profile-btn"></div>`}
-      </div>
-      <div class="pane">
-        <div class="detail" id="content"></div>
-      </div>
-    </div>
-    <div class="nav-scrim" id="nav-scrim"></div>`);
-
-  closeDrawer();
-  $("#nav-btn").onclick = () => toggleDrawer(true);
-  $("#nav-scrim").onclick = closeDrawer;
-  $("#palette-btn").onclick = openCommandPalette;
-  $("#theme-btn").onclick = toggleTheme;
-  bindSideResize($("#side-resize"));
-  if ($("#logout-btn")) $("#logout-btn").onclick = logout;
-  if ($("#admin-btn")) $("#admin-btn").onclick = () => (state.adminSection ? closeAdmin() : openAdmin());
-
-  renderProfileBtn();
-  renderCurrent();
-  // Populate the auto-expanded tree immediately rather than waiting for the
-  // first poll tick or a server click.
-  void fastLoad(refreshTreeVms);
-  startPolling();
-  // Pick up a transfer that was already running before this page loaded, so a
-  // reload mid-upload still shows its progress instead of looking stalled.
-  void pollUploads();
-}
-
-/// The account's base role, as the server names it.
-///
-/// Matches `perm::ADMIN_ROLE` ("Administrator") and `perm::DEFAULT_ROLE`
-/// ("User") exactly, capitalization included: those are the names the ACL and
-/// the role list use, so the profile showing "administrator" was the odd one
-/// out. Written once here because the header renders in two places (the sidebar
-/// card and the profile card), and two literals would drift.
-function roleLabel(isAdmin: boolean | undefined): string {
-  return isAdmin ? "Administrator" : "User";
-}
-
-/// Whether to offer the admin page: `Permissions.Modify` at `/`, as the
-/// server reports it in /auth/me. Hiding the button is cosmetic -- the API
-/// refuses every admin call from anyone else.
-function canAdmin(): boolean {
-  return !!state.user?.admin;
-}
-
-// ---------------------------------------------------------------- downtime
-
-/// Whether the web server's probes currently reach this server's daemon.
-function isOffline(connId: string | null): boolean {
-  return !!connId && state.connections.find((c) => c.id === connId)?.online === false;
-}
-
-/// "3 min", "2 h", for how long something has been down.
-function ago(ms: number): string {
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.round(s / 60)} min`;
-  if (s < 86400) return `${Math.round(s / 3600)} h`;
-  return `${Math.round(s / 86400)} d`;
-}
-
-/// One panel for a server that cannot be reached, in place of the raw
-/// transport error each view used to print ("daemon error: error sending
-/// request … Connection refused").
-function offlinePanel(connId: string): string {
-  const c = state.connections.find((x) => x.id === connId);
-  return `<div class="offline-panel" data-offline="${esc(connId)}">
-    <span class="offline-ic">${ic.offline(28)}</span>
-    <div>
-      <b>${esc(c?.name ?? "This server")} is offline</b>
-      <p>${esc(c?.offline_error ?? "The daemon is not answering.")}${c?.offline_since_ms ? ` · for ${ago(c.offline_since_ms)}` : ""}</p>
-      <p class="muted">Retrying every few seconds; this page reloads by itself when it is back.</p>
-    </div>
-  </div>`;
-}
-
-/// Refresh reachability. When a server's state flips, repaint what shows it:
-/// the sidebar always, and the open view if it belongs to that server (a view
-/// that came back re-reads everything, instead of waiting for the user).
-async function refreshHealth() {
-  let fresh: Connection[];
-  try {
-    fresh = await api.get<Connection[]>("/connections");
-  } catch {
-    return; // the web server itself is unreachable; nothing to compare
-  }
-  const was = new Map(state.connections.map((c) => [c.id, c.online !== false] as const));
-  const flipped = fresh.filter((c) => was.has(c.id) && was.get(c.id) !== (c.online !== false));
-  state.connections = fresh;
-  if (!flipped.length) return;
-  renderTree();
-  for (const c of flipped) {
-    toast(c.online === false ? `${c.name} went offline` : `${c.name} is back online`, c.online === false ? "bad" : "ok");
-  }
-  if (!state.selectedConn || flipped.some((c) => c.id === state.selectedConn)) {
-    if (flipped.some((c) => c.online !== false)) void refreshTreeVms();
-    renderView();
-  }
-}
 
 // ---------------------------------------------------------------- tree
 
@@ -1694,207 +1460,6 @@ async function loadDcDashboard() {
       void renderConn();
     };
   });
-}
-
-// ----------------------------------------------------------- admin window
-
-/// Open the admin window at `section` (or where it was last). It grows out of
-/// the admin button over whatever page is open, which stays where it is.
-function openAdmin(section: AdminSection = state.adminSection ?? "dashboard", tab?: AdminTab) {
-  if (!canAdmin()) return;
-  // Staying in a section keeps its tab; entering one starts at its first.
-  if (tab) state.adminTab = tab;
-  else if (section !== state.adminSection || !state.adminTab) state.adminTab = ADMIN_TABS[section]?.[0];
-  state.adminSection = section;
-  if (!state.adminEl) createAdminWindow();
-  renderAdminNav();
-  renderAdmin();
-  syncAdminButton();
-}
-
-function createAdminWindow() {
-  const el = openModal(
-    `<span class="dhead-ic">${ic.admin(18)}</span><span id="admin-title"></span><span class="dhead-actions" id="admin-head"></span>`,
-    `<nav class="admin-nav" aria-label="Administration"></nav>
-     <div class="detail admin-main"><div id="admin-area"></div></div>`,
-    "",
-  );
-  el.classList.add("admin-back");
-  const win = el.querySelector<HTMLElement>(".modal")!;
-  win.classList.add("admin-win");
-  // Grow from the button. offset* is layout, unaffected by the animation's own
-  // scale, which getBoundingClientRect would read.
-  const btn = $("#admin-btn");
-  if (btn) {
-    const b = btn.getBoundingClientRect();
-    win.style.transformOrigin = `${b.left + b.width / 2 - win.offsetLeft}px ${b.top + b.height / 2 - win.offsetTop}px`;
-    replay(btn, "turn", 450);
-  }
-  const remove = el.remove;
-  el.remove = () => {
-    if (state.adminEl === el) {
-      state.adminEl = null;
-      state.adminSection = null;
-      state.adminGen++;
-      syncAdminButton();
-    }
-    remove();
-  };
-  state.adminEl = el;
-  state.adminIdx = null; // a fresh window has no previous section to slide from
-  state.adminEnter = null;
-}
-
-function closeAdmin() {
-  state.adminEl?.remove();
-}
-
-/// The admin button stays where it is and shows whether the window is open.
-function syncAdminButton() {
-  const b = $("#admin-btn");
-  if (!b) return;
-  b.title = state.adminSection ? "Close Administration" : "Administration";
-  b.setAttribute("aria-label", b.title);
-  b.classList.toggle("on", !!state.adminSection);
-  setHtml(b, ic.admin());
-}
-
-function renderAdminNav() {
-  const nav = state.adminEl?.querySelector<HTMLElement>(".admin-nav");
-  if (!nav || !state.adminSection) return;
-  const restore = holdFocus(nav, ".tree-row.sel");
-  setHtml(nav, adminTree(state.adminSection));
-  restore();
-  // Which way the move went, for the entrance. Only a change of section in an
-  // open window moves; a repaint of the same one is patched in place.
-  const idx = [...nav.querySelectorAll(".tree-row")].findIndex((r) => r.classList.contains("sel"));
-  if (state.adminIdx !== null && state.adminIdx !== idx) state.adminEnter = idx > state.adminIdx ? 1 : -1;
-  state.adminIdx = idx;
-  nav.querySelectorAll<HTMLElement>("[data-admin-section]").forEach((row) => {
-    row.onclick = () => openAdmin(row.dataset.adminSection as AdminSection);
-  });
-}
-
-const adminCtx: AdminCtx = {
-  setHtml,
-  $,
-  openModal,
-  askConfirm,
-  toast,
-  showSecret,
-  relTime,
-  me: () => state.user,
-  connections: () => state.connections,
-  reloadConnections: () => loadConnections(),
-  openConnectionDialog: (id) => openConnectionDialog(id),
-  deleteConnection: (id) => deleteConnection(id),
-  openResource: (kind, conn, name) => {
-    closeAdmin();
-    if (kind === "vm") selectVmRow(conn, name);
-    else if (kind === "ct") selectCtRow(conn, name);
-    else if (kind === "network") selectNetRow(conn, name);
-    else selectPoolRow(conn, name);
-  },
-  go: (section, tab) => openAdmin(section, tab),
-  createVm: (conn, owner, after) => void openHardwareEditor({ conn, forUser: { owner, after } }),
-  createNetwork: (conn, owner, after) => openCreateNetwork(conn, { owner, after }),
-  createCt: (conn, owner, after) => void openCreateCt(conn, { owner, after }),
-  createPool: (conn, after) => openCreatePool(conn, after),
-  deleteResource: (kind, conn, pool, name, after) => void adminDeleteResource(kind, conn, pool, name, after),
-  tab: () => state.adminTab,
-  refreshMe: async () => {
-    state.user = await api.get<User>("/auth/me");
-    await loadConnections();
-    if (!canAdmin()) closeAdmin();
-    renderApp();
-  },
-  head: (html) => {
-    const slot = $("#admin-head");
-    if (slot) setHtml(slot, html);
-  },
-  stillCurrent: (gen) => gen === state.adminGen && !!state.adminEl?.isConnected,
-};
-
-let shownAdmin: AdminSection | null = null;
-function renderAdmin() {
-  if (!state.adminSection || !state.adminEl) return;
-  const gen = ++state.adminGen;
-  // Moving between sections or tabs keeps the old section on screen until the
-  // new one is ready, then patches it in; rebuilding blanked the pane for the
-  // length of the read.
-  const title = state.adminEl.querySelector("#admin-title");
-  if (title) title.textContent = adminTitle(state.adminSection);
-  // The old section's buttons must not outlive it: they would act on the
-  // wrong page until the new one paints its own.
-  if (shownAdmin !== state.adminSection) state.adminEl.querySelector("#admin-head")?.replaceChildren();
-  shownAdmin = state.adminSection;
-  const area = state.adminEl.querySelector<HTMLElement>("#admin-area")!;
-  // Stays pending until a slide plays: a render superseded mid-read (a quick
-  // second click, a re-click of the same row) must hand the slide on, not eat it.
-  const enter = state.adminEnter;
-  const main = area.closest<HTMLElement>(".admin-main")!;
-  // A new section shows its outline at once and slides in once it has loaded,
-  // however long the read takes. The slide is one Web Animation that replaces
-  // any still running, so quick clicks cannot stack or fight over classes.
-  if (enter) {
-    setHtml(area, skeleton("table"));
-    main.scrollTop = 0;
-  }
-  const tabDir = enter ? null : state.adminTabDir;
-  // Starts on the first paint of real content, in the same microtask checkpoint
-  // as the paint, so no frame shows the page at its final place before the slide
-  // begins. (Waiting for the painter to finish let one through whenever it kept
-  // awaiting after painting.)
-  let played = false;
-  const play = () => {
-    obs.disconnect();
-    if (played || gen !== state.adminGen) return;
-    played = true;
-    if (enter) state.adminEnter = null;
-    if (tabDir) state.adminTabDir = null;
-    if (!(enter || tabDir) || !main.animate) return;
-    if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    // The skeleton's rise-in (setHtml adds it as the content replaces the
-    // outline) would run beside the slide on the same transform; the slide wins.
-    area.classList.remove("sk-reveal");
-    const frames = (from: string) => [{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }];
-    const opts = { duration: 280, easing: "cubic-bezier(.2, .8, .2, 1)" };
-    const tabOpts = { ...opts, duration: 380, delay: Math.max(0, EXIT_MS - (Date.now() - state.adminTabAt)), fill: "both" as const };
-    if (enter) {
-      main.getAnimations().forEach((a) => a.cancel());
-      main.animate(frames(`translateY(${enter * 26}px)`), opts);
-      return;
-    }
-    // A tab switch slides only what is under the tab bar, from the tab's side.
-    const bar = area.querySelector(".tabbar");
-    const moved = [...(bar?.parentElement?.children ?? [])].filter((n) => n !== bar && bar!.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
-    if (!moved.length) return;
-    main.style.overflowX = "hidden";
-    window.setTimeout(() => (main.style.overflowX = ""), EXIT_MS + tabOpts.duration + 50);
-    moved.forEach((n) => { n.getAnimations().forEach((a) => a.cancel()); n.animate(frames(`translateX(${tabDir! * 26}px)`), tabOpts); });
-  };
-  const obs = new MutationObserver(() => { if (!area.querySelector(".skeleton")) play(); });
-  if (enter || tabDir) obs.observe(area, { childList: true, subtree: true, characterData: true });
-  void renderAdminSection(adminCtx, area, state.adminSection, gen).then(play);
-}
-
-/// Present a secret that the server will never show again.
-function showSecret(title: string, secret: string) {
-  const el = openModal(
-    title,
-    `<code class="cmd secret-value" id="sv">${esc(secret)}</code>`,
-    `<button class="btn" id="sv-copy">${ic.copy(14)} Copy</button>
-     <button class="btn primary" id="sv-done">Done</button>`,
-  );
-  $("#sv-done", el).onclick = () => el.remove();
-  $("#sv-copy", el).onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(secret);
-      toast("Copied");
-    } catch {
-      toast("Could not copy — select the text instead", "bad");
-    }
-  };
 }
 
 // ---------------------------------------------------------------- resource pages
