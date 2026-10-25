@@ -3,7 +3,7 @@
 // scrolling cancels the gesture: on a phone the list stopped dead under the
 // finger, every time a refresh landed mid-flick. Cheap enough to ask every
 // tick, and a skipped tick is just one second's worth of staleness.
-// Separate from polling.ts so a view can ask without importing the pollers.
+// Separate from app/polling.ts so a view can ask without importing the pollers.
 let fingerDown = false;
 let lastScrollAt = 0;
 document.addEventListener("pointerdown", () => { fingerDown = true; }, true);

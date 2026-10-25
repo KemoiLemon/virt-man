@@ -1,5 +1,5 @@
 // Access log view: what guests connected to, from the web server's two-week
-// store (`GET /access-logs`). Pure helpers for the table; access-logs.ts owns the
+// store (`GET /access-logs`). Pure helpers for the table; pages/access-logs.ts owns the
 // dialog, since it needs setHtml/openModal.
 
 export type Group = "" | "domain" | "ip" | "proto" | "port" | "vm";

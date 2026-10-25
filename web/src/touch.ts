@@ -1,6 +1,6 @@
 // Touch gestures: the phone's input vocabulary, in one place.
 //
-// Three call sites have to agree on it. `menus.ts` opens the context menu from a
+// Three call sites have to agree on it. `app/menus.ts` opens the context menu from a
 // long press (the same menu a right-click opens, because iOS WebKit never fires
 // `contextmenu` at all), `console.ts` maps the same gestures onto guest input,
 // and both `listbox.ts` and `ctxmenu.ts` need a height that accounts for a

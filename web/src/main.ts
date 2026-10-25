@@ -58,9 +58,9 @@ hooks.selectVmRow = (...a) => selectVmRow(...(a as Parameters<typeof selectVmRow
 hooks.selectCtRow = (...a) => selectCtRow(...(a as Parameters<typeof selectCtRow>));
 hooks.selectNetRow = (...a) => selectNetRow(...(a as Parameters<typeof selectNetRow>));
 hooks.selectPoolRow = (...a) => selectPoolRow(...(a as Parameters<typeof selectPoolRow>));
-// transfers.ts repaints the pool page through its own hook.
+// pages/transfers.ts repaints the pool page through its own hook.
 transferHooks.renderPoolPage = renderPoolPage;
-// Likewise profile.ts: wrappers, so nothing here depends on declaration order.
+// Likewise pages/profile.ts: wrappers, so nothing here depends on declaration order.
 profileHooks.renderProfileBtn = () => renderProfileBtn();
 profileHooks.roleLabel = (admin) => roleLabel(admin);
 profileHooks.showSecret = (title, secret) => showSecret(title, secret);

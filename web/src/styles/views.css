@@ -452,7 +452,7 @@ th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
 
 /* ------------------------------------------------ collapsed sidebar (desktop)
    Icons only. The labels stay in the DOM, visually hidden, so a row keeps its
-   accessible name; the hover name is .side-tip (sidebar.ts). Specificity beats
+   accessible name; the hover name is .side-tip (app/sidebar.ts). Specificity beats
    density.css's per-kind indents, which load after this file. */
 .side-resize { display: none; }
 .side-tip {
@@ -462,7 +462,7 @@ th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
   animation: vm-fade-in .12s ease-out;
 }
 @media (min-width: 821px) {
-  /* Once the sidebar has been touched, sidebar.ts drives --side-w every frame. */
+  /* Once the sidebar has been touched, app/sidebar.ts drives --side-w every frame. */
   body.side-sized .layout { grid-template-columns: var(--side-w) 1fr; }
   body.side-dragging { cursor: col-resize; user-select: none; }
   .list-pane { position: relative; }
@@ -508,7 +508,7 @@ th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
 }
 
 /* ------------------------------------------------------- admin window */
-/* A window over the page, grown from the admin button (admin-window.ts sets the
+/* A window over the page, grown from the admin button (app/admin-window.ts sets the
    transform-origin from the button's position). */
 .modal.admin-win {
   width: min(1480px, 98vw); height: min(940px, 96vh);
