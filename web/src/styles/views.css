@@ -438,8 +438,8 @@ th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
 @keyframes vm-nav-up { from { opacity: 0; transform: translateY(-26px); } to { opacity: 1; transform: none; } }
 @keyframes vm-tab-in-right { from { opacity: 0; transform: translateX(26px); } to { opacity: 1; transform: none; } }
 @keyframes vm-tab-in-left { from { opacity: 0; transform: translateX(-26px); } to { opacity: 1; transform: none; } }
-.tab-in-right { animation: vm-tab-in-right .28s cubic-bezier(.2, .8, .2, 1) .18s both; }
-.tab-in-left { animation: vm-tab-in-left .28s cubic-bezier(.2, .8, .2, 1) .18s both; }
+.tab-in-right { animation: vm-tab-in-right .28s cubic-bezier(.2, .8, .2, 1) both; }
+.tab-in-left { animation: vm-tab-in-left .28s cubic-bezier(.2, .8, .2, 1) both; }
 /* The sideways travel must not make the pane scroll. */
 #content:has(.tab-in-right, .tab-in-left), .admin-main:has(.tab-in-right, .tab-in-left) { overflow-x: hidden; }
 #content.nav-down { animation: vm-nav-down .28s cubic-bezier(.2, .8, .2, 1) .18s both; }

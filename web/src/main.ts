@@ -122,12 +122,10 @@ function noteTreeSel(tree: Element, admin: boolean, content: HTMLElement | null 
   replay(content, down ? "nav-down" : "nav-up", 500);
 }
 
-/// How long the old page takes to leave; the new one's entrance waits for it.
-const EXIT_MS = 180;
-
-/// The old tab's page slides out the opposite way before the new one comes in
-/// (the same two beats as a sidebar move): a copy of the pane laid over it,
-/// clipped to what is under the tab bar so the bar itself stays put.
+/// The old tab's page slides out the opposite way while the new one slides in,
+/// so the pane is never empty: a copy of the pane laid over it, clipped to what
+/// is under the tab bar. The clip starts a few pixels below the bar, or its
+/// 1px border (on the clip edge) rides along with the copy as a stray line.
 function slideOutBelow(bar: HTMLElement, out: "out-left" | "out-right") {
   const box = bar.closest<HTMLElement>("#content, .admin-main");
   // A slide still running is left to finish: a copy of it would replay its
@@ -140,7 +138,7 @@ function slideOutBelow(bar: HTMLElement, out: "out-left" | "out-right") {
   ghost.classList.add("nav-ghost", out);
   Object.assign(ghost.style, {
     left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`,
-    clipPath: `inset(${bar.getBoundingClientRect().bottom - r.top}px 0 0 0)`,
+    clipPath: `inset(${Math.ceil(bar.getBoundingClientRect().bottom - r.top) + 3}px 0 0 0)`,
   });
   ghost.style.overflowY = getComputedStyle(box).overflowY;
   // Inside the admin window, or the window (above the page layer) would hide it.
@@ -164,15 +162,10 @@ document.addEventListener("click", (e) => {
   if (from < 0) return;
   const cls = tabs.indexOf(tab) > from ? "tab-in-right" : "tab-in-left";
   slideOutBelow(bar, cls === "tab-in-right" ? "out-left" : "out-right");
-  // The entrance waits for the exit, counted from the click, not from whenever
-  // the data lands: content that arrives late has nothing left to wait for.
-  const clickedAt = Date.now();
-  const wait = () => Math.max(0, EXIT_MS - (Date.now() - clickedAt));
   // The admin pane is patched in place, so no new nodes arrive for the observer
   // below to slide; renderAdmin slides what is under the bar once it has painted.
   if (tab.closest(".admin-main")) {
     adminTabDir = cls === "tab-in-right" ? 1 : -1;
-    adminTabAt = clickedAt;
     return;
   }
   const host = bar.parentElement!;
@@ -185,9 +178,7 @@ document.addEventListener("click", (e) => {
     n.classList.remove("tab-in-right", "tab-in-left", "sk-reveal");
     n.parentElement?.classList.remove("sk-reveal");
     n.querySelectorAll(".sk-reveal").forEach((r) => r.classList.remove("sk-reveal"));
-    (n as HTMLElement).style.animationDelay = `${wait()}ms`;
-    replay(n, cls, 600);
-    window.setTimeout(() => ((n as HTMLElement).style.animationDelay = ""), 700);
+    replay(n, cls, 400);
   };
   const obs = new MutationObserver((muts) => {
     const nb = bar.isConnected ? bar : host.isConnected ? host.querySelector(":scope > .tabbar") : bar.closest("#content, .admin-main")?.querySelector(".tabbar") ?? null;
@@ -312,7 +303,6 @@ let adminGen = 0;
 let adminEnter: 1 | -1 | null = null;
 /// Which way an admin tab switch went (1 = to the right); see renderAdmin.
 let adminTabDir: 1 | -1 | null = null;
-let adminTabAt = 0;
 let adminIdx: number | null = null;
 /// An /admin link, opened over the datacenter once the first render is done.
 let pendingAdmin: { section: AdminSection; tab?: AdminTab } | null = null;
@@ -2561,7 +2551,6 @@ function renderAdmin() {
     area.classList.remove("sk-reveal");
     const frames = (from: string) => [{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }];
     const opts = { duration: 280, easing: "cubic-bezier(.2, .8, .2, 1)" };
-    const tabOpts = { ...opts, delay: Math.max(0, EXIT_MS - (Date.now() - adminTabAt)), fill: "both" as const };
     if (enter) {
       main.getAnimations().forEach((a) => a.cancel());
       main.animate(frames(`translateY(${enter * 26}px)`), opts);
@@ -2572,8 +2561,8 @@ function renderAdmin() {
     const moved = [...(bar?.parentElement?.children ?? [])].filter((n) => n !== bar && bar!.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
     if (!moved.length) return;
     main.style.overflowX = "hidden";
-    window.setTimeout(() => (main.style.overflowX = ""), EXIT_MS + opts.duration + 50);
-    moved.forEach((n) => { n.getAnimations().forEach((a) => a.cancel()); n.animate(frames(`translateX(${tabDir! * 26}px)`), tabOpts); });
+    window.setTimeout(() => (main.style.overflowX = ""), opts.duration + 50);
+    moved.forEach((n) => { n.getAnimations().forEach((a) => a.cancel()); n.animate(frames(`translateX(${tabDir! * 26}px)`), opts); });
   };
   const obs = new MutationObserver(() => { if (!area.querySelector(".skeleton")) play(); });
   if (enter || tabDir) obs.observe(area, { childList: true, subtree: true, characterData: true });
