@@ -5,6 +5,7 @@
 // in that section's own module.
 import type { Connection, ContainerSummary, DomainSummary, NetworkSummary, PoolSummary, User } from "./api";
 import type { AdminSection, AdminTab, ConnTab, DcTab } from "./route";
+import { displayName } from "./util";
 
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 
@@ -94,3 +95,17 @@ export const treeNets: Record<string, NetworkSummary[]> = {};
 export const treePools: Record<string, PoolSummary[]> = {};
 /// Volume titles by `<pool>/<name>`, for display.
 export const volumeNames: Record<string, string> = {};
+
+/// `displayName` against the selected server's cached lists, for a caller
+/// holding only a network or pool name (a modal title, a confirm message).
+/// The name stays the identity everywhere it is sent; this is display only.
+export function shownNet(name: string): string {
+  return displayName(state.selectedConn ? treeNets[state.selectedConn] : undefined, name);
+}
+export function shownVolume(pool: string, name: string): string {
+  return volumeNames[`${pool}/${name}`] || name;
+}
+
+export function shownPool(name: string): string {
+  return displayName(state.selectedConn ? treePools[state.selectedConn] : undefined, name);
+}

@@ -32,7 +32,7 @@ import { attachSuggest } from "./suggest";
 import { addDisplay, autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
-import { state, summaryDiskSel, summaryNetSel, treeCts, treeNets, treePools, treeVms, volumeNames } from "./state";
+import { shownNet, shownPool, shownVolume, state, summaryDiskSel, summaryNetSel, treeCts, treeNets, treePools, treeVms, volumeNames } from "./state";
 import { bridgeNetwork, capLabel, displayName, emptyState, isUuid, nameOf, nicNetwork, relTime, unescapeXml, uuidOf, withTitle } from "./util";
 
 import { askConfirm, askMultiline, askText, openModal, toast } from "./dialogs";
@@ -109,20 +109,6 @@ function guestList(conn: string, ct = state.ctMode): (DomainSummary | ContainerS
   return ct ? treeCts[conn] : treeVms[conn];
 }
 
-
-/// `displayName` against the selected server's cached lists, for a caller
-/// holding only a network or pool name (a modal title, a confirm message).
-/// The name stays the identity everywhere it is sent; this is display only.
-function shownNet(name: string): string {
-  return displayName(state.selectedConn ? treeNets[state.selectedConn] : undefined, name);
-}
-function shownVolume(pool: string, name: string): string {
-  return volumeNames[`${pool}/${name}`] || name;
-}
-
-function shownPool(name: string): string {
-  return displayName(state.selectedConn ? treePools[state.selectedConn] : undefined, name);
-}
 
 /// Put the current view in the address bar, so a reload returns to it. Called
 /// by every view renderer, which is the one place all navigation passes
