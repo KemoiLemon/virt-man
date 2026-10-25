@@ -36,6 +36,11 @@ export const hooks: {
   selectNetRow: AnyFn;
   selectPoolRow: AnyFn;
   syncVmActions: AnyFn;
+  renameCt: AnyFn;
+  deleteCt: AnyFn;
+  afterCtDelete: AnyFn;
+  openFirewallEditor: AnyFn;
+  openTemplates: AnyFn;
 } = {
   renderTree: () => {},
   renderOffline: () => {},
@@ -66,4 +71,9 @@ export const hooks: {
   selectNetRow: () => {},
   selectPoolRow: () => {},
   syncVmActions: () => {},
+  renameCt: () => {},
+  deleteCt: () => {},
+  afterCtDelete: () => {},
+  openFirewallEditor: () => {},
+  openTemplates: () => {},
 };
