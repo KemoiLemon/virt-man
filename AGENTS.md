@@ -18,6 +18,27 @@ is run by LXC's own tools (`lxc-start`, not libvirt's LXC driver). The SPA still
 writes libvirt-shaped XML for both, which the daemon parses into an explicit
 argv and QMP calls, or an LXC config, without handing it to another manager.
 
+## Agent tools
+
+Use the dedicated tool, not a shell equivalent. Bash is for running things
+(builds, tests, git, servers), not for reading or editing files.
+
+| Need | Tool | Not |
+| --- | --- | --- |
+| Read a file (or a range: `offset`/`limit`) | `Read` (absolute path) | `cat`, `head`, `tail`, `sed -n` |
+| Change part of a file | `Edit` (`old_string` must be unique and exact; `replace_all` for renames) | `sed -i`, `awk`, heredocs |
+| Create or fully replace a file | `Write` (an existing file must be `Read` first) | `echo >`, `cat <<EOF` |
+| Run a command | `Bash` (`run_in_background` for servers and watchers; no `sleep` polling) | — |
+| Broad search across many files | `Agent` with `Explore` | chains of `grep`/`find` |
+
+- `Read` before `Edit`/`Write` on the same file, in the same session, or the call fails.
+- Strip the line-number prefix `Read` shows when copying text into `old_string`.
+- Independent tool calls go in one message so they run in parallel.
+- Reference code as `path:line`.
+- Prefer a narrow `Read` range over a whole file; several files here are tens of KB.
+- Long-lived processes (the loopback `virt-man-web`, watchers) must use
+  `run_in_background`; see "Live suites need a running backend" below.
+
 ## Commands
 
 ```bash

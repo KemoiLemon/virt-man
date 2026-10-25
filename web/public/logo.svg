@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="virt-man">
+  <title>virt-man</title>
+  <!-- Charcoal tile, a square coral frame (a screen), and "vm" in hard-edged
+       blocks with a prompt underscore: the app's own palette and square
+       aesthetic, abbreviated the way virt-manager is. -->
+  <rect width="256" height="256" fill="#18181a"/>
+  <rect x="20" y="20" width="216" height="216" fill="none" stroke="#fe6565" stroke-width="10"/>
+  <g transform="translate(-5 0)">
+    <polygon fill="#f2f2f3" points="56,78 80,78 90,118 100,78 124,78 102,150 78,150"/>
+    <g fill="#fe6565">
+      <rect x="138" y="78" width="72" height="16"/>
+      <rect x="138" y="78" width="16" height="72"/>
+      <rect x="166" y="78" width="16" height="72"/>
+      <rect x="194" y="78" width="16" height="72"/>
+    </g>
+    <rect x="138" y="166" width="72" height="12" fill="#f2f2f3"/>
+  </g>
+</svg>

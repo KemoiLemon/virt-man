@@ -70,11 +70,17 @@ function relTime(ms: number): string {
 /// Run a CSS animation class on `el` from the start: take the class off, force
 /// a reflow so the browser forgets it, put it back, and remove it when the
 /// animation is over so it can be replayed.
+const replayTimer = new WeakMap<Element, Map<string, number>>();
 function replay(el: Element, cls: string, ms: number) {
   el.classList.remove(cls);
   void (el as HTMLElement).offsetWidth;
   el.classList.add(cls);
-  window.setTimeout(() => el.classList.remove(cls), ms);
+  // One removal timer per element and class: replaying quickly must cancel the
+  // last one, or it strips the class from the new run and cuts it short.
+  const timers = replayTimer.get(el) ?? new Map<string, number>();
+  replayTimer.set(el, timers);
+  window.clearTimeout(timers.get(cls));
+  timers.set(cls, window.setTimeout(() => el.classList.remove(cls), ms));
 }
 
 /// Entering or leaving the admin page swaps the sidebar and the content, which
@@ -94,7 +100,7 @@ function swapAnim(toAdmin: boolean) {
 
 /// Choosing a different sidebar row slides the page in from the direction of
 /// travel: a row further down brings the page up from below, a row further up
-/// brings it down from above (the old page is simply replaced). Keyed on what is selected, not its position, so a
+/// brings it down from above, after the old page has slid out. Keyed on what is selected, not its position, so a
 /// guest appearing above the selection (the poll) does not look like a move.
 let lastSel: { key: string; idx: number; admin: boolean } | null = null;
 function noteTreeSel(tree: Element, admin: boolean) {
@@ -107,8 +113,29 @@ function noteTreeSel(tree: Element, admin: boolean) {
   const content = document.getElementById("content");
   if (!prev || !content || prev.admin !== admin || prev.key === key) return;
   const down = idx > prev.idx;
+  // The page being left slides out the other way first: a copy of it laid over
+  // the pane, since the real node is about to be repainted. It gets the real
+  // pane's scrollbar and scroll offset so it lines up exactly.
+  // A move still playing is left to finish: restarting it, or cutting its exit
+  // copy short, snaps the page back to the start. The new page just takes the
+  // place of the old one inside the motion already under way.
+  if (content.classList.contains("nav-up") || content.classList.contains("nav-down")) return;
+  const r = content.getBoundingClientRect();
+  const ghost = content.cloneNode(true) as HTMLElement;
+  // Descendant ids stay: some layout rules key on them (`#admin-area > .grid`
+  // adds a 16px top margin), and a copy without them jumps up by that much the
+  // moment it appears. The copy is appended after the real page, so an id
+  // lookup still finds the real element first.
+  ghost.removeAttribute("id");
+  ghost.classList.remove("nav-up", "nav-down", "swap-left", "swap-right", "sk-reveal");
+  ghost.classList.add("nav-ghost", down ? "out-up" : "out-down");
+  Object.assign(ghost.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  ghost.style.overflowY = getComputedStyle(content).overflowY;
+  document.body.appendChild(ghost);
+  ghost.scrollTop = content.scrollTop;
+  window.setTimeout(() => ghost.remove(), 200);
   content.classList.remove("nav-up", "nav-down");
-  replay(content, down ? "nav-down" : "nav-up", 400);
+  replay(content, down ? "nav-down" : "nav-up", 500);
 }
 
 /// Switching tabs slides the new page in sideways, from the side of the tab
@@ -127,6 +154,8 @@ document.addEventListener("click", (e) => {
   const cls = tabs.indexOf(tab) > from ? "tab-in-right" : "tab-in-left";
   const host = bar.parentElement!;
   const slide = (n: Element) => {
+    // Already sliding: let it finish rather than restart it.
+    if (n.classList.contains("tab-in-right") || n.classList.contains("tab-in-left")) return;
     // The skeleton's own rise-in (.sk-reveal) would take over the moment this
     // slide ends and replay as a second animation, so the slide replaces it.
     n.classList.remove("tab-in-right", "tab-in-left", "sk-reveal");
