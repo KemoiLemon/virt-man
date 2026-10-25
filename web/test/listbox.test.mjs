@@ -103,7 +103,7 @@ test("replacing options re-syncs the trigger label", () => {
   listbox.enhanceSelects(document);
   assert.equal(document.querySelector(".select-value").textContent, "Old pool");
 
-  // Mirrors main.ts replacing a select's options after loading form data.
+  // Mirrors the app replacing a select's options after loading form data.
   sel.innerHTML = `<option value="default">default</option><option value="ISOs">ISOs</option>`;
   sel.value = "ISOs";
   listbox.enhanceSelects(sel);

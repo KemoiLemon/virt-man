@@ -1,8 +1,8 @@
 // The administrative area: a page of its own with its own sidebar (Users,
 // Groups, Roles, Permissions, Daemons, Resources, Quotas, IPs, API keys,
-// Activity). main.ts owns the shell, routing and the poll; this module paints
-// the sidebar and one section, through helpers main.ts hands it (`AdminCtx`),
-// so it needs no import back into main.ts.
+// Activity). admin-window.ts owns the window, nav.ts the routing and polling.ts the poll;
+// this module paints the sidebar and one section, through helpers admin-window.ts
+// hands it (`AdminCtx`), so it needs no import back into the app.
 //
 // Every write here is checked by the server (`Permissions.Modify` at `/`).
 // Nothing is hidden from a non-admin by this file alone; they never get here

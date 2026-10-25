@@ -280,8 +280,8 @@ straightforward to add.
 
 ## Frontend
 
-No framework. `web/src/main.ts` renders with template strings through a single
-`setHtml()` choke point that sanitises (DOMPurify) and swaps native `<select>`
+No framework. `web/src` renders with template strings through a single
+`setHtml()` (`dom.ts`) choke point that sanitises (DOMPurify) and swaps native `<select>`
 elements for a themed listbox. For a UI of this size, a framework would be more
 machinery than the thing it manages. The bundle is ~111 kB.
 

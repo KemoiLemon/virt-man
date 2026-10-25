@@ -1,7 +1,7 @@
 // The pool page's Transfers: browser uploads staged on the web server and URL
 // downloads run by the daemon. Both are views of server-side state, polled, so
 // navigating away mid-transfer is safe. Their state is private to this module;
-// the one thing it needs from main.ts, repainting the pool page, comes in
+// the one thing it needs from the app, repainting the pool page, comes in
 // through `transferHooks` (set once at start-up) to avoid an import cycle.
 import { api, uploadWithProgress } from "./api";
 import type { StagedUpload } from "./api";

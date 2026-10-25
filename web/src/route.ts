@@ -155,7 +155,7 @@ export function parsePath(path: string, nodes: NodeRef[]): Route {
     return { view: "dc", tab: first as DcTab };
   }
   // The Datacenter's Servers tab moved to the admin page's Daemons section;
-  // an old link still lands there (main.ts sends a non-admin to "/").
+  // an old link still lands there (the app sends a non-admin to "/").
   if (parts.length === 1 && first === "servers") return { view: "admin", section: "daemons" };
   const conn = resolveNode(first, nodes);
   if (!conn) return { view: "dc", tab: "dashboard" };

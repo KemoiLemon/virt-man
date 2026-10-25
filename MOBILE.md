@@ -75,7 +75,7 @@ stale the first time someone adds a way to navigate.
 
 ### Long press is the context menu
 
-`main.ts` builds the menu in a `menuAt(target, x, y)` function; the
+`menus.ts` builds the menu in a `menuAt(target, x, y)` function; the
 `contextmenu` listener calls it, and `touch.ts`'s `attachLongPress` calls it
 too. So a long press opens exactly the same menu, built by the same builders,
 as a right-click — one code path, and nothing in `ctxmenu.ts` changed.
@@ -105,7 +105,7 @@ opened near the bottom used to land *behind* the keyboard. Both now use
 ### The console: absolute touch, deferred press
 
 The viewer gained a touch model, and the rules live in `touch.ts` as pure
-functions so `console.ts` and `main.ts` cannot drift apart on thresholds:
+functions so `console.ts` and `menus.ts` cannot drift apart on thresholds:
 
 | Gesture | Sent to the guest |
 | --- | --- |
@@ -147,7 +147,7 @@ below the breakpoint.
 
 On-screen keys are for what a touch keyboard cannot produce: `Esc`, `Tab`, the
 arrows, and the existing `Ctrl+Alt+Del`. They are built in `console.ts` rather
-than in `main.ts`'s console toolbar because tapping a toolbar button moves DOM
+than in `vm-page.ts`'s console toolbar because tapping a toolbar button moves DOM
 focus to that button, which dismisses the software keyboard — so the tap has to
 put focus back, and `console.ts` is the only place that knows where the
 keyboard's focus belongs. They report through the same `postKey` path a real

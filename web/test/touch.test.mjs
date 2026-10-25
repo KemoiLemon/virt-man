@@ -1,4 +1,4 @@
-// The touch gesture vocabulary: the thresholds and geometry that `main.ts`
+// The touch gesture vocabulary: the thresholds and geometry that `menus.ts`
 // (long press -> context menu) and `console.ts` (tap / drag / pinch) both read.
 //
 // They live in one module precisely so the two cannot disagree; if they do, a
