@@ -522,6 +522,10 @@ th.al-sort:hover, th.al-sort:focus-visible { color: var(--accent); }
   border-right: 1px solid var(--line); background: var(--panel);
 }
 .admin-main { flex: 1 1 auto; min-width: 0; }
+/* An activity message or action can be one long unbroken string (a path, an
+   error); without wrapping it sets the column's minimum width and pushes the
+   table past the window. */
+.admin-main table.grid td.task-msg, .admin-main table.grid td.tname { white-space: normal; overflow-wrap: anywhere; }
 .admin-main #admin-area > .grid:first-child, .admin-main #admin-area > .card-grid:first-child { margin-top: 0; }
 @keyframes admin-pop-in { from { opacity: 0; transform: scale(.12); } to { opacity: 1; transform: none; } }
 @keyframes admin-pop-out { to { opacity: 0; transform: scale(.12); } }

@@ -2896,7 +2896,6 @@ async function renderPoolPage() {
       <div class="dhead dhead-card">
         <span class="dhead-ic">${ic.storage(20)}</span>
         <span class="dtitle">${esc(displayName(treePools[selectedConn!], name))}</span>
-        <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
         <div class="actions" style="margin:0 0 0 auto">
           <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
           <button class="btn" id="pool-fetch">${ic.download(14)} From URL</button>
