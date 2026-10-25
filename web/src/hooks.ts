@@ -26,6 +26,7 @@ export const hooks: {
   loadPools: AnyFn;
   loadVolumes: AnyFn;
   deleteCtOn: AnyFn;
+  dcCreate: AnyFn;
 } = {
   renderTree: () => {},
   renderOffline: () => {},
@@ -46,4 +47,5 @@ export const hooks: {
   loadPools: () => {},
   loadVolumes: () => {},
   deleteCtOn: () => {},
+  dcCreate: () => {},
 };
