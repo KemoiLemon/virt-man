@@ -29,6 +29,8 @@ import List from "@phosphor-icons/core/assets/fill/list-fill.svg?raw";
 import ListSearch from "@phosphor-icons/core/assets/fill/list-magnifying-glass-fill.svg?raw";
 import Lock from "@phosphor-icons/core/assets/fill/lock-fill.svg?raw";
 import LogOut from "@phosphor-icons/core/assets/fill/sign-out-fill.svg?raw";
+import TallerIcon from "@phosphor-icons/core/assets/fill/arrows-out-line-vertical-fill.svg?raw";
+import ShorterIcon from "@phosphor-icons/core/assets/fill/arrows-in-line-vertical-fill.svg?raw";
 import Maximize from "@phosphor-icons/core/assets/fill/arrows-out-fill.svg?raw";
 import MemoryStick from "@phosphor-icons/core/assets/fill/memory-fill.svg?raw";
 import Monitor from "@phosphor-icons/core/assets/fill/desktop-fill.svg?raw";
@@ -175,6 +177,8 @@ export const ic = {
   zoomIn: svg(ZoomIn),
   zoomOut: svg(ZoomOut),
   fit: svg(Maximize),
+  taller: svg(TallerIcon),
+  shorter: svg(ShorterIcon),
   clipboard: svg(ClipboardPaste),
   copy: svg(Copy),
   type: svg(Keyboard),

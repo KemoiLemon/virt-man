@@ -319,11 +319,10 @@ check("clicking a guest in the Guests tab opens its VM view", () => {
   ?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await wait(1200);
 
-check("rename is an editable Options field, not a toolbar button", () => {
+check("Options has a nickname, not a resource name or toolbar rename", () => {
   assert.ok(!document.querySelector("#vm-rename"), "no rename button in the toolbar");
-  const name = document.querySelector("#opt-name");
-  assert.ok(name, "Options tab has a Name field");
-  assert.ok(!name.disabled, "Name field is editable");
+  assert.ok(!document.querySelector("#opt-name"), "no resource name field");
+  assert.ok(document.querySelector("#opt-title"), "Options tab has a Nickname field");
 });
 
 // Back to Datacenter > Guests, then straight into a console.

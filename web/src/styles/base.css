@@ -196,7 +196,29 @@ body {
 
 .section-title { font-size: 11px; letter-spacing: 1.5px; color: var(--dim); margin: 0 0 7px; }
 /* Firewall category titles are section headers first, but bigger and full-foreground. */
-.section-title.fw-cat { font-size: 13px; letter-spacing: 1.5px; color: var(--fg); }
+.section-title.fw-cat {
+  font-size: 15px; font-weight: 700; letter-spacing: 1.5px; color: var(--fg);
+  display: flex; align-items: center; gap: 10px;
+  padding-left: 4px;
+  margin-bottom: 10px;
+}
+/* The pool page's master Transfers card: one card, rows spaced inside it. */
+/* The network and pool page headers: title left, actions right, in a card. */
+.dhead-card {
+  flex-wrap: wrap; padding: 12px 15px; margin-bottom: 14px;
+  background: var(--panel); border: 1px solid var(--line);
+}
+#pool-transfers { gap: 10px; }
+#pool-uploads, #pool-fetches { display: flex; flex-direction: column; gap: 10px; }
+#pool-uploads:empty, #pool-fetches:empty { display: none; }
+#pool-no-transfers { color: var(--dim); }
+.xfer[hidden] { display: none; }
+.xfer {
+  display: flex; flex-direction: column; gap: 11px;
+  padding: 12px 13px; border: 1px solid var(--line); background: var(--input-bg);
+}
+/* The inner .ico is a fixed 16px span; without centring it sits top-left. */
+.cat-ic { display: grid; place-items: center; width: 18px; height: 18px; flex: 0 0 18px; color: var(--accent); }
 .cmd {
   background: var(--code-bg); border: 1px solid var(--line);
   padding: 10px; font-size: 11px; color: var(--dim);
@@ -485,10 +507,13 @@ table.grid tr:hover td { background: var(--hover); }
      pinch for page zoom and a drag for scrolling, and neither reaches the guest
      -- and a page zoom cannot be undone by the page. */
   touch-action: none;
+  min-height: 160px;
 }
 /* noVNC sizes and centres its canvas inside this box, which therefore has to
    fill the stage. */
 .console-stage .vnc-screen { width: 100%; height: 100%; }
+/* A chosen height lands inline, so fullscreen has to out-rank it. */
+.console-stage:fullscreen { height: 100% !important; border: 0; }
 /* A text console is not a guest screen: there is no letterbox, so
    the stage takes the terminal's own background instead of the VNC black. The
    terminal is sized to whole character cells, which never divide the stage

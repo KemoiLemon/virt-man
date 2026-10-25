@@ -323,11 +323,8 @@ await wait(1600);
 
 check("Options tab shows editable metadata read from the guest", () => {
   assert.equal(document.querySelector(".tabbar .tab.active")?.textContent.trim(), "Options");
-  const name = document.querySelector("#opt-name");
-  assert.ok(name, "name field present");
-  assert.ok(name.value, `name populated (${name.value})`);
-  assert.ok(!name.disabled, "name is editable — rename lives in the Options form");
-  assert.ok(document.querySelector("#opt-title"), "title field");
+  assert.ok(!document.querySelector("#opt-name"), "no resource name field");
+  assert.ok(document.querySelector("#opt-title"), "nickname field");
   assert.ok(document.querySelector("#opt-desc"), "description field");
   assert.ok(document.querySelector("#opt-boot"), "boot device selector");
   assert.ok(document.querySelector("#opt-save"), "save button");

@@ -2699,15 +2699,15 @@ async function renderNetPage() {
     const hostsUrl = `${netBase}/hosts`;
 
     setHtml(content, `
-      <div class="dhead">
+      <div class="dhead dhead-card">
         <span class="dhead-ic">${ic.network(20)}</span>
         <span class="dtitle">${esc(displayName(treeNets[selectedConn!], name))}</span>
-      </div>
-      <div class="actions" style="margin-top:12px">
-        <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
-        <button class="btn primary" id="net-edit">${ic.edit(14)} Edit</button>
-        <button class="btn" id="net-fw">${ic.firewall(14)} Firewall</button>
-        <button class="btn danger" id="net-del">${ic.trash(14)} Delete</button>
+        <div class="actions" style="margin:0 0 0 auto">
+          <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
+          <button class="btn primary" id="net-edit">${ic.edit(14)} Edit</button>
+          <button class="btn" id="net-fw">${ic.firewall(14)} Firewall</button>
+          <button class="btn danger" id="net-del">${ic.trash(14)} Delete</button>
+        </div>
       </div>
       <div class="cards">
         <div class="card"><span class="card-ic">${ic.network(20)}</span><div><b>${esc(typeLabel)}</b><i>TYPE</i></div></div>
@@ -2719,10 +2719,15 @@ async function renderNetPage() {
       </div>
 
       ${ipam ? `
-      <div class="section-title fw-cat">IPAM Allocations</div>
-      <div class="dsub" style="margin-bottom:8px">${ipam.serving
-        ? "Served by this host. A guest with no allocation gets one from the range and keeps it until the VM is deleted."
-        : "Not being served right now (the network is stopped)."}</div>
+      <div class="metric">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <div class="section-title fw-cat" style="margin:0;padding-left:2px"><span class="cat-ic">${ic.ip()}</span>IPAM Allocations</div>
+        <div class="actions" style="margin:0">
+          <button class="btn" id="ipam-settings">${ic.options(14)} DHCP &amp; DNS settings</button>
+          <button class="btn" id="ipam-add">${ic.plus(14)} Add Allocation</button>
+        </div>
+      </div>
+      ${ipam.serving ? "" : `<div class="dsub" style="margin:0">Not being served right now (the network is stopped).</div>`}
       <table class="grid" id="ipam-hosts">
         <tr><th>Name</th><th>VM</th><th>MAC Address</th><th>IP Address</th><th>Last Seen</th><th></th></tr>
         ${hosts.map((h, i) => `
@@ -2738,9 +2743,6 @@ async function renderNetPage() {
             </div></td>
           </tr>`).join("") || `<tr><td colspan="6" class="empty">No allocations yet — guests get one from the range when they first ask.</td></tr>`}
       </table>
-      <div class="actions">
-        <button class="btn" id="ipam-add">${ic.plus(14)} Add Allocation</button>
-        <button class="btn" id="ipam-settings">${ic.options(14)} DHCP &amp; DNS settings</button>
       </div>` : ""}`);
 
     const editHost = (idx: number | null) => {
@@ -2891,25 +2893,20 @@ async function renderPoolPage() {
     const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
 
     setHtml(content, `
-      <div class="dhead">
+      <div class="dhead dhead-card">
         <span class="dhead-ic">${ic.storage(20)}</span>
         <span class="dtitle">${esc(displayName(treePools[selectedConn!], name))}</span>
         <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
-      </div>
-      <div class="dsub">Storage Pool</div>
-      <div class="actions">
-        <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
-        <button class="btn" id="pool-fetch">${ic.download(14)} From URL</button>
-        <button class="btn" id="pool-newvol">${ic.plus(14)} New Volume</button>
-        <button class="btn" id="pool-tpl">${ic.container(14)} Templates</button>
-        <button class="btn danger" id="pool-del">${ic.trash(14)} Delete Pool</button>
+        <div class="actions" style="margin:0 0 0 auto">
+          <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
+          <button class="btn" id="pool-fetch">${ic.download(14)} From URL</button>
+          <button class="btn" id="pool-newvol">${ic.plus(14)} New Volume</button>
+          <button class="btn" id="pool-tpl">${ic.container(14)} Templates</button>
+          <button class="btn danger" id="pool-del">${ic.trash(14)} Delete Pool</button>
+        </div>
       </div>
       <div class="metric">
-        <div class="metric-head">
-          <span class="metric-ic">${ic.storage()}</span>
-          <b>Usage</b>
-          <span class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</span>
-        </div>
+        <div class="section-title fw-cat" style="margin:0"><span class="cat-ic">${ic.storage()}</span>Usage</div>
         <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
         <div class="metric-foot">
           <span>${fmtBytes(used)} used</span>
@@ -2917,9 +2914,14 @@ async function renderPoolPage() {
           <span>${fmtBytes(cap)} total</span>
         </div>
       </div>
-      <div id="pool-uploads">${uploadsSection(name)}</div>
-      <div id="pool-fetches">${fetchesSection(conn, name)}</div>
-      <div class="section-title fw-cat" style="margin-top:18px">Volumes</div>
+      <div class="metric" id="pool-transfers" style="margin-top:18px">
+        <div class="section-title fw-cat" style="margin:0"><span class="cat-ic">${ic.bidir()}</span>Transfers</div>
+        <div id="pool-uploads">${uploadsSection(name)}</div>
+        <div id="pool-fetches">${fetchesSection(conn, name)}</div>
+        <div class="xfer" id="pool-no-transfers"${uploadsSection(name) || fetchesSection(conn, name) ? "hidden" : ""}>No current transfers</div>
+      </div>
+      <div class="metric" style="margin-top:18px">
+      <div class="section-title fw-cat" style="margin:0"><span class="cat-ic">${ic.disk()}</span>Volumes</div>
       <table class="grid">
         <tr><th>Volume</th><th>Content</th><th>Size</th><th>Allocated</th><th class="col-actions"></th></tr>
         ${vols.map((v) => `
@@ -2929,7 +2931,8 @@ async function renderPoolPage() {
             <button class="btn icon" data-pvol-title="${esc(v.name)}" title="Edit Nickname">${ic.edit()}</button>
             <button class="btn danger icon" data-pvol-del="${esc(v.name)}">${ic.trash()}</button>
           </div></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No volumes.</td></tr>`}
-      </table>`);
+      </table>
+      </div>`);
 
     $("#pool-upload", content).onclick = () => openUpload(name);
     $("#pool-fetch", content).onclick = () => openFetch(name);
@@ -3576,10 +3579,10 @@ function openFirewallEditor(netName: string) {
 
   function render() {
     setHtml($("#fw-body", el), `
-      <div class="section-title fw-cat">Default Policies</div>
+      <div class="section-title fw-cat"><span class="cat-ic">${ic.firewall()}</span>Default Policies</div>
       ${fwPolicyRow(policy)}
 
-      <div class="section-title fw-cat">Rules</div>
+      <div class="section-title fw-cat"><span class="cat-ic">${ic.options()}</span>Rules</div>
       <table class="grid">
         <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source Port</th><th>Dest Port</th><th></th></tr>
         ${rules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
@@ -3589,7 +3592,7 @@ function openFirewallEditor(netName: string) {
         <button class="btn al-open" id="fw-logs">${ic.logs(14)} Access Logs</button>
       </div>
 
-      <div class="section-title fw-cat" style="margin-top:18px">NAT Port Forwards</div>
+      <div class="section-title fw-cat" style="margin-top:18px"><span class="cat-ic">${ic.network()}</span>NAT Port Forwards</div>
       <table class="grid">
         <tr><th>WAN</th><th>Proto</th><th>WAN Port</th><th>Internal Guest</th><th>Internal Port</th><th></th></tr>
         ${forwards.map((f) => fwFwdRow(f, lanHosts, lanLabel)).join("") || `<tr><td colspan="6" class="empty">No port forwards.</td></tr>`}
@@ -4846,6 +4849,9 @@ async function renderVmBody(vm: string) {
           <button class="btn" id="con-zoom-reset" title="Switch between Fit and 100%">${zoomLabel(consoleZoom)}</button>
         </span>
         <span class="console-group" style="margin-left:auto">
+          <button class="btn icon" id="con-shorter" title="Shorter">${ic.shorter()}</button>
+          <button class="btn icon" id="con-taller" title="Taller">${ic.taller()}</button>
+          <button class="btn icon" id="con-full" title="Fullscreen (hold Esc to leave)">${ic.fit()}</button>
           <button class="btn icon" id="con-type" title="Type text into the guest">${ic.clipboard()}</button>
           <button class="btn" id="con-cad" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
         </span>
@@ -4868,7 +4874,7 @@ async function renderVmBody(vm: string) {
       // SPICE is not RFB and has no usable browser client, so hand the guest
       // over to virt-viewer instead of pretending to render it here.
       if (kind !== "vnc") {
-        for (const id of ["#con-zoom-reset", "#con-cad", "#con-type"]) {
+        for (const id of ["#con-zoom-reset", "#con-cad", "#con-type", "#con-full", "#con-taller", "#con-shorter"]) {
           const el = $(id);
           if (el) el.disabled = true;
         }
@@ -4896,7 +4902,7 @@ async function renderVmBody(vm: string) {
       if (!con) {
         // The daemon refused to attach. Leave the toolbar visible but inert
         // rather than silently dead, and say why.
-        for (const id of ["#con-zoom-reset", "#con-cad", "#con-type"]) {
+        for (const id of ["#con-zoom-reset", "#con-cad", "#con-type", "#con-full", "#con-taller", "#con-shorter"]) {
           const el = $(id);
           if (el) el.disabled = true;
         }
@@ -4917,11 +4923,41 @@ async function renderVmBody(vm: string) {
       };
       $("#con-zoom-reset").onclick = toggleFit;
 
+      // The stage itself goes fullscreen, so the guest gets the whole monitor.
+      // Keyboard Lock (Chromium) hands Esc to the guest; holding it leaves.
+      const stageEl = $("#console-stage");
+      $("#con-full").onclick = async () => {
+        try {
+          if (document.fullscreenElement) await document.exitFullscreen();
+          else {
+            await stageEl.requestFullscreen();
+            stageEl.focus();
+            void (navigator as any).keyboard?.lock?.(["Escape"]);
+          }
+        } catch (e) {
+          toast((e as Error).message, "bad");
+        }
+      };
+      stageEl.onfullscreenchange = () => {
+        if (!document.fullscreenElement) (navigator as any).keyboard?.unlock?.();
+      };
+
       $("#con-cad").onclick = () => void con.sendCtrlAltDel();
       $("#con-type").onclick = () => void typeIntoGuest(con);
 
       // Re-fit when the pane resizes, so the guest stays centred.
       const stage = $("#console-stage");
+      try {
+        const saved = localStorage.getItem("console-height");
+        if (saved) stage.style.height = saved;
+      } catch { /* storage blocked: keep the default height */ }
+      const resizeBy = (dy: number) => {
+        const h = Math.min(4000, Math.max(160, stage.offsetHeight + dy));
+        stage.style.height = `${h}px`;
+        try { localStorage.setItem("console-height", `${h}px`); } catch { /* not saved */ }
+      };
+      $("#con-taller").onclick = () => resizeBy(80);
+      $("#con-shorter").onclick = () => resizeBy(-80);
       const ro = new ResizeObserver(() => con.refit());
       ro.observe(stage);
       consoleResizeObserver?.disconnect();
@@ -4941,10 +4977,10 @@ async function renderVmBody(vm: string) {
       ]);
       const pick = (re: RegExp, fallback = "—") => xml.match(re)?.[1] ?? fallback;
       const title = unescapeXml(pick(/<title>([^<]*)<\/title>/, ""));
-      const description = pick(/<description>([^<]*)<\/description>/, "");
+      const description = unescapeXml(pick(/<description>([^<]*)<\/description>/, ""));
       // Boot order: disk then CD, as a fresh guest boots, plus whatever else
       // has been added. libvirt tries the <boot> elements top to bottom.
-      const bootOrder: string[] = [...xml.matchAll(/<boot dev='([^']*)'\/>/g)].map((m) => m[1]);
+      const bootOrder: string[] = [...xml.matchAll(/<boot dev=["']([^"']*)["']\s*\/>/g)].map((m) => m[1]);
       if (bootOrder.length === 0) bootOrder.push("hd", "cdrom");
       const bootNames = bootTargets(xml);
       const bootDisk = xml.match(/<disk\b[^>]*device=['"]disk['"][\s\S]*?<\/disk>/)?.[0] ?? "";
@@ -4983,11 +5019,6 @@ async function renderVmBody(vm: string) {
           ${running ? `<span class="hw-locked">Changes apply after the guest is restarted.</span>` : ""}
         </div>
         <div class="hwtable">
-          <div class="hwrow">
-            <span class="hwrow-ic">${ic.vm()}</span>
-            <div class="hwrow-label"><b>Resource Name</b><i>Renamed via the dedicated endpoint</i></div>
-            <div class="hwctl"><input id="opt-name" value="${esc(vm)}" ${isUuid(vm) ? "readonly" : ""}></div>
-          </div>
           <div class="hwrow">
             <span class="hwrow-ic">${ic.edit()}</span>
             <div class="hwrow-label"><b>Nickname</b></div>
@@ -5100,27 +5131,7 @@ async function renderVmBody(vm: string) {
       $("#opt-save")?.addEventListener("click", async () => {
         const newTitle = $("#opt-title").value.trim();
         const newDesc = $("#opt-desc").value.trim();
-        const newName = $("#opt-name").value.trim();
-
-        // Rename first: the rename endpoint is the only safe way to swap the
-        // name (it keeps the UUID), and the XML write below must both target
-        // the new name and carry a matching <name> or it would undo the swap.
-        let target = vm;
-        if (newName && newName !== vm) {
-          try {
-            await api.post(
-              `${guestBase(selectedConn!, vm)}/rename`,
-              { name: newName });
-            target = newName;
-            if (selectedVm === vm) selectedVm = newName;
-            await refreshTreeVms();
-            renderTree();
-            void renderVm();
-          } catch (e) {
-            toast((e as Error).message, "bad");
-            return;
-          }
-        }
+        const target = vm;
 
         // Rewrite only the elements this form owns, leaving the rest of the
         // definition untouched.
@@ -5133,7 +5144,7 @@ async function renderVmBody(vm: string) {
         // (libvirt's implicit default is disk-then-CD, which is what this
         // starts from).
         const boots = bootOrder.map((d) => `<boot dev='${esc(d)}'/>`).join("");
-        next = next.replace(/\n?[ \t]*<boot dev='[^']*'\/>/g, "");
+        next = next.replace(/\n?[ \t]*<boot dev=["'][^"']*["']\s*\/>/g, "");
         if (boots) next = next.replace(/(<\/os>)/, `  ${boots}\n  $1`);
         const meta = [
           newTitle ? `  <title>${esc(newTitle)}</title>` : "",
@@ -5214,7 +5225,7 @@ async function renderVmBody(vm: string) {
       : "The guest is shut off: changes are saved to its definition.";
 
     setHtml(body, `
-      <div class="section-title fw-cat">Interfaces</div>
+      <div class="section-title fw-cat"><span class="cat-ic">${ic.network()}</span>Interfaces</div>
       ${liveNote ? `<div class="dsub" style="margin-bottom:8px">${liveNote}</div>` : ""}
       <table class="grid" id="vmnet-nics">
         <tr><th>Device</th><th>MAC</th><th>Network</th>${ct ? "" : "<th>Model</th>"}<th>IPAM Address</th><th>RX Limit</th><th>TX Limit</th><th class="col-actions"></th></tr>
@@ -5239,7 +5250,7 @@ async function renderVmBody(vm: string) {
         }).join("") || `<tr><td colspan="${ct ? 7 : 8}" class="empty">No network interfaces.</td></tr>`}
       </table>
       <div class="actions"><button class="btn" id="vmnet-add">${ic.plus(14)} Add Interface</button></div>
-      <div class="section-title fw-cat" style="margin-top:22px">Firewall</div>
+      <div class="section-title fw-cat" style="margin-top:22px"><span class="cat-ic">${ic.firewall()}</span>Firewall</div>
       <div id="vmnet-fw">${skeleton("table")}</div>`);
 
     const reload = () => { if (stillCurrentVm(conn, vm, "network")) void renderVmBody(vm); };
@@ -5387,9 +5398,9 @@ async function renderVmBody(vm: string) {
     void collectIpCandidates(conn).then((ips) => { ipCandidates = ips; });
     const renderRules = () => {
       setHtml(rulesBody, `
-        <div class="section-title fw-cat">Default Policies</div>
+        <div class="section-title fw-cat"><span class="cat-ic">${ic.firewall()}</span>Default Policies</div>
         ${fwPolicyRow(vmPolicy)}
-        <div class="section-title fw-cat">Rules</div>
+        <div class="section-title fw-cat"><span class="cat-ic">${ic.options()}</span>Rules</div>
         <table class="grid">
           <tr><th>Direction</th><th>Action</th><th>Proto</th><th>Source IP</th><th>Dest IP</th><th>Source Port</th><th>Dest Port</th><th></th></tr>
           ${vmRules.map(fwRuleRow).join("") || `<tr><td colspan="8" class="empty">No rules — traffic is accepted.</td></tr>`}
@@ -5714,7 +5725,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
       </div>
     </div>
 
-    <div class="section-title fw-cat">Hardware</div>
+    <div class="section-title fw-cat"><span class="cat-ic">${ic.cpu()}</span>Hardware</div>
     <div class="hw-strip">
       ${hwStrip.map((h) => `
         <div class="hw-chip">
@@ -7658,7 +7669,7 @@ const PHASE_LABEL: Record<string, string> = {
   staged: "Ready",
   uploading: "To daemon",
   verifying: "Verifying",
-  done: "Verified",
+  done: "Stored",
   failed: "Failed",
 };
 
@@ -7675,14 +7686,22 @@ function stopUploadPoll() {
   uploadTimer = null;
 }
 
+// Same race as pollFetches: the timer and every action start their own poll,
+// and an older snapshot landing last made the byte count step backwards.
+let uploadPollSeq = 0;
+let uploadPollApplied = 0;
+
 async function pollUploads() {
   if (!selectedConn) return stopUploadPoll();
+  const seq = ++uploadPollSeq;
   let jobs: StagedUpload[];
   try {
     jobs = await api.uploads();
   } catch {
     return; // transient; the running timer retries
   }
+  if (seq < uploadPollApplied) return;
+  uploadPollApplied = seq;
   activeUploads = jobs;
 
   for (const j of jobs) {
@@ -7708,39 +7727,27 @@ function uploadsSection(pool: string): string {
   const jobs = activeUploads.filter((j) => j.pool === pool);
   if (!jobs.length) return "";
   return `
-    <div class="section-title fw-cat" style="margin-top:18px">Transfers</div>
     ${jobs.map((j) => {
       const live = isLiveUpload(j);
-      const done = j.phase === "done";
       const failed = j.phase === "failed";
+      const cancelled = failed && j.error === "Cancelled";
       const p = j.size > 0 ? Math.min(100, (j.sent / j.size) * 100) : 0;
       // A finished transfer reads as full even if the byte count ran short.
       const width = live ? p : 100;
       // `speed_bps` is bytes/s; fmtRate speaks KiB/s.
       const speed = j.speed_bps > 0 ? fmtRate(j.speed_bps / 1024) : "";
-      // The daemon times its receive and its write separately, so when the two
-      // disagree the slower one names the bottleneck. Only known at the end,
-      // since that is when its response arrives.
-      const daemonRates = j.daemon_recv_bps > 0 || j.daemon_write_bps > 0
-        ? `daemon recv ${fmtRate(j.daemon_recv_bps / 1024)} · write ${fmtRate(j.daemon_write_bps / 1024)}`
-        : "";
-      return `<div class="metric" data-up-id="${esc(j.id)}">
+      return `<div class="xfer" data-up-id="${esc(j.id)}">
         <div class="metric-head">
           <span class="metric-ic">${ic.upload()}</span>
           <b>${esc(j.name)}</b>
-          <span class="metric-value">${esc(PHASE_LABEL[j.phase] ?? j.phase)}</span>
-        </div>
-        <div class="meter"><div class="meter-fill ${failed ? "hot" : ""}" style="width:${width.toFixed(1)}%"></div></div>
-        <div class="metric-foot">
-          <span>${fmtBytes(j.sent)} of ${fmtBytes(j.size)}</span>
-          <span>${speed}</span>
-          <span>${done && j.sha256 ? `sha256 ${esc(j.sha256.slice(0, 12))}…` : ""}</span>
           ${j.phase === "staged" ? `<button class="btn" data-up-push="${esc(j.id)}">Send to Daemon</button>` : ""}
-          <button class="btn icon" data-up-${live ? "cancel" : "clear"}="${esc(j.id)}"
-            title="${live ? "Cancel and discard the staged copy" : "Dismiss"}">${ic.close()}</button>
+          ${j.phase === "verifying" ? "" : `<button class="btn" data-up-${live ? "cancel" : "clear"}="${esc(j.id)}">${live ? "Cancel" : "Dismiss"}</button>`}
         </div>
-        ${done && daemonRates ? `<p class="hint">${daemonRates}</p>` : ""}
-        ${failed ? `<p class="hint">${esc(j.error ?? "transfer failed")}</p>` : ""}
+        <div class="meter"><div class="meter-fill ${failed && !cancelled ? "hot" : ""}" style="width:${width.toFixed(1)}%"></div></div>
+        <div class="metric-foot">
+          <span>${live ? `${fmtBytes(j.sent)} of ${fmtBytes(j.size)}` : fmtBytes(j.size)}</span>
+          <span>${failed ? (cancelled ? "Cancelled" : "Failed") : j.phase === "uploading" ? speed : esc(PHASE_LABEL[j.phase] ?? j.phase)}</span>
+        </div>
       </div>`;
     }).join("")}`;
 }
@@ -7752,6 +7759,7 @@ function refreshUploadBars() {
   if (!host || !selectedPool) return;
   setHtml(host, uploadsSection(selectedPool));
   bindUploads();
+  syncTransfersTitle();
 }
 
 function bindUploads() {
@@ -7838,6 +7846,9 @@ function openFetch(pool: string) {
   });
   const go = $("#fetch-go", el) as HTMLButtonElement;
   go.onclick = async () => {
+    // Same rule the daemon applies, said before the round trip.
+    const target = name.value.trim() || decodeURIComponent(url.value.trim().split(/[?#]/)[0].split("/").pop() ?? "");
+    if (!/\.iso$/i.test(target)) return toast("Only .iso files can be downloaded", "bad");
     go.disabled = true;
     try {
       await api.post(`/proxy/${conn}/pools/${encodeURIComponent(pool)}/fetch`, {
@@ -7856,13 +7867,22 @@ function openFetch(pool: string) {
   url.focus();
 }
 
+// Polls overlap (the 1 s timer plus renders and actions each fire their own),
+// and responses can land out of order; the daemon's counter only grows, so an
+// older snapshot arriving last is what made the figure step backwards.
+let fetchPollSeq = 0;
+let fetchPollApplied = 0;
+
 async function pollFetches(conn: string) {
+  const seq = ++fetchPollSeq;
   let jobs: FetchJob[];
   try {
     jobs = await api.get<FetchJob[]>(`/proxy/${conn}/fetches`);
   } catch {
     return; // transient, or the daemon is down: the next poll retries
   }
+  if (seq < fetchPollApplied) return;
+  fetchPollApplied = seq;
   fetchJobs.set(conn, jobs);
   for (const j of jobs) {
     const before = fetchSeen.get(j.id);
@@ -7887,33 +7907,37 @@ async function pollFetches(conn: string) {
   if (host && selectedPool && selectedConn === conn) {
     setHtml(host, fetchesSection(conn, selectedPool));
     bindFetches(conn);
+    syncTransfersTitle();
   }
+}
+
+/// The master Transfers card says so when neither list has a row.
+function syncTransfersTitle() {
+  const empty = document.getElementById("pool-no-transfers");
+  if (!empty) return;
+  empty.hidden = !!document.getElementById("pool-uploads")?.children.length
+    || !!document.getElementById("pool-fetches")?.children.length;
 }
 
 function fetchesSection(conn: string, pool: string): string {
   const jobs = (fetchJobs.get(conn) ?? []).filter((j) => j.pool === pool);
   if (!jobs.length) return "";
   return `
-    <div class="section-title fw-cat" style="margin-top:18px">Downloads</div>
     ${jobs.map((j) => {
       const live = liveFetch(j);
       const pctDone = j.total ? Math.min(100, (j.received / j.total) * 100) : 0;
       const width = live ? (j.total ? pctDone : 0) : 100;
-      return `<div class="metric" data-fetch-id="${esc(j.id)}">
+      return `<div class="xfer" data-fetch-id="${esc(j.id)}">
         <div class="metric-head">
           <span class="metric-ic">${ic.download()}</span>
           <b>${esc(j.name)}</b>
-          <span class="metric-value">${esc(FETCH_LABEL[j.phase] ?? j.phase)}</span>
+          <button class="btn" data-fetch-${live ? "cancel" : "clear"}="${esc(j.id)}">${live ? "Cancel" : "Dismiss"}</button>
         </div>
         <div class="meter"><div class="meter-fill ${j.phase === "failed" ? "hot" : ""}" style="width:${width.toFixed(1)}%"></div></div>
         <div class="metric-foot">
-          <span>${fmtBytes(j.received)}${j.total ? ` of ${fmtBytes(j.total)}` : ""}</span>
-          <span>${live && j.speed_bps > 0 ? fmtRate(j.speed_bps / 1024) : ""}</span>
-          <span>${j.phase === "done" && j.sha256 ? `sha256 ${esc(j.sha256.slice(0, 12))}…` : ""}</span>
-          <button class="btn icon" data-fetch-${live ? "cancel" : "clear"}="${esc(j.id)}"
-            title="${live ? "Cancel the download" : "Dismiss"}">${ic.close()}</button>
+          <span>${live ? `${fmtBytes(j.received)}${j.total ? ` of ${fmtBytes(j.total)}` : ""}` : fmtBytes(j.total ?? j.received)}</span>
+          <span>${j.phase !== "downloading" ? esc(FETCH_LABEL[j.phase] ?? j.phase) : j.speed_bps > 0 ? fmtRate(j.speed_bps / 1024) : ""}</span>
         </div>
-        <p class="hint" title="${esc(j.url)}">${esc(j.phase === "failed" ? j.error ?? "download failed" : j.url)}</p>
       </div>`;
     }).join("")}`;
 }
@@ -7941,10 +7965,14 @@ function openUpload(pool: string) {
     `Upload ISO to ${esc(shownPool(pool))}`,
     `<label class="field"><span>Volume Name</span>
        <input id="up-name" placeholder="Leave blank to use the file name"></label>
-     <label class="field"><span>File</span><input id="up-file" type="file"></label>
-     <div id="up-bar" hidden>
+     <label class="field"><span>File</span><input id="up-file" type="file" accept=".iso,application/x-iso9660-image"></label>
+     <div class="metric" id="up-bar" hidden>
+       <div class="metric-head">
+         <span class="metric-ic">${ic.upload()}</span>
+         <b id="up-status">Uploading to server</b>
+       </div>
        <div class="meter"><div class="meter-fill" id="up-fill" style="width:0%"></div></div>
-       <p class="hint" id="up-status"></p>
+       <div class="metric-foot"><span id="up-bytes" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><span id="up-rate" style="white-space:nowrap"></span></div>
      </div>`,
     `<button class="btn" id="up-cancel" hidden>Cancel</button>
      <button class="btn primary" id="up-go">Upload</button>`,
@@ -7957,6 +7985,8 @@ function openUpload(pool: string) {
   const bar = $("#up-bar", el) as HTMLElement;
   const fill = $("#up-fill", el) as HTMLElement;
   const status = $("#up-status", el) as HTMLElement;
+  const bytes = $("#up-bytes", el) as HTMLElement;
+  const rateEl = $("#up-rate", el) as HTMLElement;
   // The name we filled in from a file, so we can tell an untouched field from
   // one the user typed in: re-picking a file must not clobber a custom name.
   let autoName = "";
@@ -7972,6 +8002,8 @@ function openUpload(pool: string) {
   goBtn.onclick = async () => {
     const file = fileInput.files?.[0];
     if (!file) return toast("Pick a file to upload", "bad");
+    // `accept` is only a hint: the picker's "All files" option still bypasses it.
+    if (!/\.iso$/i.test(file.name)) return toast("Only .iso files can be uploaded", "bad");
     // Blank means "name it after the file", so the field is optional.
     const name = nameInput.value.trim() || volumeNameFromFile(file.name);
     if (!name) return toast("Name is required", "bad");
@@ -7983,6 +8015,9 @@ function openUpload(pool: string) {
     bar.hidden = false;
     cancelBtn.hidden = false;
     status.textContent = "Preparing…";
+    fill.classList.remove("hot");
+    bytes.textContent = rateEl.textContent = "";
+    bytes.title = "";
 
     // Timed from the moment the body starts leaving the browser, so the rate
     // reflects this hop only (the browser -> server leg).
@@ -7995,8 +8030,9 @@ function openUpload(pool: string) {
         fill.style.width = `${p.toFixed(1)}%`;
         // Null until it is worth showing, rather than a misleading 0 KiB/s.
         const rate = avgRateKib(sent, startedAt, Date.now());
-        const speed = rate === null ? "" : ` \u2014 ${fmtRate(rate)}`;
-        status.textContent = `Uploading to server \u2014 ${fmtBytes(sent)} of ${fmtBytes(total)} (${p.toFixed(0)}%)${speed}`;
+        status.textContent = "Uploading to server";
+        bytes.textContent = `${fmtBytes(sent)} of ${fmtBytes(total)}`;
+        rateEl.textContent = rate === null ? "" : fmtRate(rate);
       },
     );
     cancelBtn.onclick = () => cancel();
@@ -8009,7 +8045,11 @@ function openUpload(pool: string) {
       goBtn.disabled = false;
       nameInput.disabled = false;
       cancelBtn.hidden = true;
-      status.textContent = `Failed: ${(e as Error).message}`;
+      status.textContent = "Failed";
+      fill.classList.add("hot");
+      // The reason is in the toast, which stays up.
+      bytes.textContent = fmtBytes(file.size);
+      rateEl.textContent = "Error";
       return toast(`Upload failed: ${(e as Error).message}`, "bad");
     }
 
