@@ -3,11 +3,15 @@
 // module imports `state` and reads `state.selectedConn` like it did the bare
 // variable. State private to one section (the sidebar, uploads, fetches) stays
 // in that section's own module.
+import type { Connection, User } from "./api";
 import type { ConnTab, DcTab } from "./route";
 
 export type VmTab = "summary" | "hardware" | "options" | "network" | "console" | "xml";
 
 export const state = {
+  user: null as User | null,
+  authDisabled: false,
+  connections: [] as Connection[],
   selectedConn: null as string | null,
   connTab: "dashboard" as ConnTab,
   selectedVm: null as string | null,

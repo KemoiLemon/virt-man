@@ -239,9 +239,6 @@ function setHtml(el: Element, html: string) {
 
 // ---------------------------------------------------------------- state
 
-let user: User | null = null;
-let authDisabled = false;
-let connections: Connection[] = [];
 /// Pool whose volume table is expanded; survives the 1s pool poll so the
 /// table is re-rendered in place instead of vanishing every second.
 let volumesOpen: string | null = null;
@@ -392,7 +389,7 @@ let restoringRoute = false;
 /// it, while the 1s poll (same path) keeps the offsets.
 let tableScrollReset = false;
 function syncUrl() {
-  const path = routeToPath(currentRoute(), connections);
+  const path = routeToPath(currentRoute(), state.connections);
   if (location.pathname === path) return;
   tableScrollReset = true;
   // A real navigation scrolled the drawer away with the page it belonged to.
@@ -478,7 +475,7 @@ function renderOffline() {
   if (!state.selectedConn) return;
   beginRender();
   syncUrl();
-  const c = connections.find((x) => x.id === state.selectedConn);
+  const c = state.connections.find((x) => x.id === state.selectedConn);
   const sc = state.selectedConn;
   const title = state.selectedVm ? displayName(guestList(sc), state.selectedVm)
     : state.selectedNet ? displayName(treeNets[sc], state.selectedNet)
@@ -503,8 +500,8 @@ document.addEventListener("change", (e) => {
 bindChartHover();
 
 window.addEventListener("popstate", () => {
-  if (!user) return;
-  applyRoute(parsePath(location.pathname, connections));
+  if (!state.user) return;
+  applyRoute(parsePath(location.pathname, state.connections));
   renderCurrent();
 });
 
@@ -727,7 +724,7 @@ function openCommandPalette() {
   // Creation. Resource kinds that need a server are offered for the one open.
   add("add-resource", "Add resource", "VM, container, network or pool", ic.plus(), () => openAddResource());
   if (state.selectedConn) {
-    const server = connections.find((c) => c.id === state.selectedConn)?.name ?? "";
+    const server = state.connections.find((c) => c.id === state.selectedConn)?.name ?? "";
     add("create-vm", "Create VM", server, ic.vm(), () => openCreateVm());
     add("create-ct", "Create Container", server, ic.container(), () => void openCreateCt());
     add("create-net", "Create Network", server, ic.network(), () => openCreateNetwork());
@@ -756,7 +753,7 @@ function openCommandPalette() {
     ["network", "Network", ic.network()],
     ["xml", "XML", ic.xml()],
   ];
-  for (const c of connections) {
+  for (const c of state.connections) {
     for (const [tab, label, icon] of connTabs) {
       // The shell is an administrator's tool; the tab is hidden for anyone
       // else, and the daemon refuses it regardless.
@@ -801,7 +798,7 @@ function openCommandPalette() {
       add(`admin-${sec}`, `Administration — ${label}`, `/admin/${sec}`, ic.admin(), () => openAdmin(sec));
     }
   }
-  if (!authDisabled) add("logout", "Sign Out", "End this session", ic.logout(), () => void logout());
+  if (!state.authDisabled) add("logout", "Sign Out", "End this session", ic.logout(), () => void logout());
 
   openTayne(cmds);
 }
@@ -816,7 +813,7 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
     // Only inside the real app: the login/setup screens have no commands to
     // offer, and the guest owns the keyboard while the console is focused.
-    if (!user) return;
+    if (!state.user) return;
     const active = document.activeElement as HTMLElement | null;
     if (active?.closest?.(".console-stage")) return;
     e.preventDefault();
@@ -881,19 +878,19 @@ async function boot() {
   initTheme();
   const status = await api.get<{ needs_setup: boolean; auth_disabled?: boolean }>("/auth/status");
   if (status.auth_disabled) {
-    authDisabled = true;
-    user = { id: "local", username: "local", nickname: "local", avatar: null, admin: true, privs: [] };
+    state.authDisabled = true;
+    state.user = { id: "local", username: "local", nickname: "local", avatar: null, admin: true, privs: [] };
     await loadConnections();
-    applyRoute(parsePath(location.pathname, connections));
+    applyRoute(parsePath(location.pathname, state.connections));
     renderApp();
     return;
   }
   if (status.needs_setup) return renderSetup();
   try {
     const me = await api.get<User>("/auth/me");
-    user = me;
+    state.user = me;
     await loadConnections();
-    applyRoute(parsePath(location.pathname, connections));
+    applyRoute(parsePath(location.pathname, state.connections));
     renderApp();
   } catch {
     renderLogin();
@@ -904,9 +901,9 @@ async function boot() {
 /// Datacenter table render empty on every load until one is added or removed.
 async function loadConnections() {
   try {
-    connections = await api.get<Connection[]>("/connections");
+    state.connections = await api.get<Connection[]>("/connections");
   } catch {
-    connections = [];
+    state.connections = [];
   }
 }
 
@@ -955,12 +952,12 @@ function renderLogin() {
     </div>`);
   $("#login-btn").onclick = async () => {
     try {
-      user = await api.post<User>("/auth/login", { username: $("#lu").value, password: $("#lp").value });
+      state.user = await api.post<User>("/auth/login", { username: $("#lu").value, password: $("#lp").value });
       // boot() loads connections before rendering; the login path must too, or
       // the sidebar tree and Datacenter table render empty until a refresh.
       await loadConnections();
       // Land on the page they asked for before being sent to sign in.
-      applyRoute(parsePath(location.pathname, connections));
+      applyRoute(parsePath(location.pathname, state.connections));
       renderApp();
     } catch (e) {
       toast((e as Error).message, "bad");
@@ -972,32 +969,32 @@ function renderLogin() {
 async function logout() {
   stopPendingPoll();
   await api.post("/auth/logout");
-  user = null;
+  state.user = null;
   renderLogin();
 }
 
 // ---------------------------------------------------------------- app shell
 
 function renderApp() {
-  if (!user) return;
+  if (!state.user) return;
   const app = $("#app");
 setHtml(app, `
     <div class="topbar">
       <button class="btn icon mobile-only" id="nav-btn" title="Servers and Guests">${ic.menu()}</button>
       <span class="brand">virt-<span>man</span></span>
-      <span class="host">web${authDisabled ? " · local" : ` · ${esc(user.nickname)}`}</span>
+      <span class="host">web${state.authDisabled ? " · local" : ` · ${esc(state.user.nickname)}`}</span>
       <span class="topbar-quick">
         <button class="btn icon mobile-only" id="palette-btn" title="Commands">${ic.logs()}</button>
         <button class="btn icon" id="theme-btn" title="Toggle Theme">${ic.theme()}</button>
         ${canAdmin() ? `<button class="btn icon" id="admin-btn"></button>` : ""}
-        ${authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign Out">${ic.logout()}</button>`}
+        ${state.authDisabled ? "" : `<button class="btn icon" id="logout-btn" title="Sign Out">${ic.logout()}</button>`}
       </span>
     </div>
     <div class="layout">
       <div class="pane list-pane">
         <div class="restree" id="tree"></div>
         <div class="side-resize" id="side-resize"></div>
-        ${authDisabled ? "" : `<div class="side-profile" id="profile-btn"></div>`}
+        ${state.authDisabled ? "" : `<div class="side-profile" id="profile-btn"></div>`}
       </div>
       <div class="pane">
         <div class="detail" id="content"></div>
@@ -1040,14 +1037,14 @@ function roleLabel(isAdmin: boolean | undefined): string {
 /// server reports it in /auth/me. Hiding the button is cosmetic -- the API
 /// refuses every admin call from anyone else.
 function canAdmin(): boolean {
-  return !!user?.admin;
+  return !!state.user?.admin;
 }
 
 // ---------------------------------------------------------------- downtime
 
 /// Whether the web server's probes currently reach this server's daemon.
 function isOffline(connId: string | null): boolean {
-  return !!connId && connections.find((c) => c.id === connId)?.online === false;
+  return !!connId && state.connections.find((c) => c.id === connId)?.online === false;
 }
 
 /// "3 min", "2 h", for how long something has been down.
@@ -1063,7 +1060,7 @@ function ago(ms: number): string {
 /// transport error each view used to print ("daemon error: error sending
 /// request … Connection refused").
 function offlinePanel(connId: string): string {
-  const c = connections.find((x) => x.id === connId);
+  const c = state.connections.find((x) => x.id === connId);
   return `<div class="offline-panel" data-offline="${esc(connId)}">
     <span class="offline-ic">${ic.offline(28)}</span>
     <div>
@@ -1084,9 +1081,9 @@ async function refreshHealth() {
   } catch {
     return; // the web server itself is unreachable; nothing to compare
   }
-  const was = new Map(connections.map((c) => [c.id, c.online !== false] as const));
+  const was = new Map(state.connections.map((c) => [c.id, c.online !== false] as const));
   const flipped = fresh.filter((c) => was.has(c.id) && was.get(c.id) !== (c.online !== false));
-  connections = fresh;
+  state.connections = fresh;
   if (!flipped.length) return;
   renderTree();
   for (const c of flipped) {
@@ -1121,7 +1118,7 @@ function renderTree() {
   const tree = $("#tree");
   if (!tree) return;
   syncAdminButton();
-  const serverRows = connections
+  const serverRows = state.connections
     .map((c) => {
       const selected = c.id === state.selectedConn && !state.selectedVm && !state.selectedNet && !state.selectedPool;
       const vms = treeVms[c.id] ?? [];
@@ -1757,7 +1754,7 @@ async function refreshTreeVms() {
   // the tree auto-expands all three, so an unselected server still has to
   // show its resources.
   const results = await Promise.all(
-    connections.map(async (c) => {
+    state.connections.map(async (c) => {
       try {
         const [vms, nets, pools, cts] = await Promise.all([
           api.get<DomainSummary[]>(`/proxy/${c.id}/domains`),
@@ -1836,11 +1833,11 @@ async function refreshTreeVms() {
 
 function renderProfileBtn() {
   const el = $("#profile-btn");
-  if (!el || !user) return;
+  if (!el || !state.user) return;
   el.onclick = openProfile;
   setHtml(el, `
     <div class="avatar">${avatarHtml()}</div>
-    <div class="who"><b>${esc(user.nickname)}</b><span>${roleLabel(user.admin)}</span></div>`);
+    <div class="who"><b>${esc(state.user.nickname)}</b><span>${roleLabel(state.user.admin)}</span></div>`);
 }
 
 // ---------------------------------------------------------------- datacenter
@@ -1866,7 +1863,7 @@ function renderDc() {
   const quickStats = (total: number, running: number, noun: string, icon: () => string) => `<div class="cards">
         <div class="card">
           <span class="card-ic">${ic.server(20)}</span>
-          <div><b>${connections.length}</b><i>SERVERS</i></div>
+          <div><b>${state.connections.length}</b><i>SERVERS</i></div>
         </div>
         <div class="card">
           <span class="card-ic">${icon()}</span>
@@ -1881,7 +1878,7 @@ function renderDc() {
           <div><b>${total - running}</b><i>STOPPED</i></div>
         </div>
       </div>`;
-  const guestCards = connections
+  const guestCards = state.connections
     .flatMap((c) => (treeVms[c.id] ?? []).map((v) => ({ conn: c, vm: v })))
     .map(({ conn, vm }) => `
       <div class="storage-card ${vm.active ? "ok" : ""}" data-open tabindex="0" data-dc-vm="${esc(vm.name)}" data-dc-vm-conn="${conn.id}">
@@ -1909,21 +1906,21 @@ function renderDc() {
   } else if (state.dcTab === "containers") {
     // Same quick statistics as the Guests tab, over the tree's container cache;
     // each card names its own server, so its actions do too.
-    const all = connections.flatMap((c) => (treeCts[c.id] ?? []).map((v) => ({ conn: c, ct: v })));
+    const all = state.connections.flatMap((c) => (treeCts[c.id] ?? []).map((v) => ({ conn: c, ct: v })));
     const running = all.filter(({ ct }) => ct.active).length;
     body = `${quickStats(all.length, running, "CONTAINERS", ic.container)}
        <div class="section-title">Containers</div>
        ${all.length ? `<div class="card-grid">${all.map(({ conn, ct }) => ctCard(ct, conn.id, conn.name)).join("")}</div>`
          : emptyState("containers", "Create Container", "dc-ct-create")}`;
   } else if (state.dcTab === "networks") {
-    const all = connections.flatMap((c) => (treeNets[c.id] ?? []).map((n) => ({ conn: c, n })));
+    const all = state.connections.flatMap((c) => (treeNets[c.id] ?? []).map((n) => ({ conn: c, n })));
     const active = all.filter(({ n }) => n.active).length;
     body = `${quickStats(all.length, active, "NETWORKS", ic.network)}
        <div class="section-title">Networks</div>
        ${all.length ? `<div class="card-grid">${all.map(({ conn, n }) => netCard(n, conn.id, conn.name)).join("")}</div>`
          : emptyState("networks", "Create Network", "dc-net-create")}`;
   } else if (state.dcTab === "storage") {
-    const all = connections.flatMap((c) => (treePools[c.id] ?? []).map((p) => ({ conn: c, p })));
+    const all = state.connections.flatMap((c) => (treePools[c.id] ?? []).map((p) => ({ conn: c, p })));
     const active = all.filter(({ p }) => p.active).length;
     body = `${quickStats(all.length, active, "POOLS", ic.storage)}
        <div class="section-title">Storage Pools</div>
@@ -2083,7 +2080,7 @@ async function loadDcDashboard() {
   if (!body) return;
 
   const per = await Promise.all(
-    connections.map(async (c) => {
+    state.connections.map(async (c) => {
       try {
         const [h, nets, pools] = await Promise.all([
           api.get<HostStats>(`/proxy/${c.id}/host/stats`),
@@ -2097,7 +2094,7 @@ async function loadDcDashboard() {
     }),
   );
   const live = per.filter((x) => x !== null);
-  const vms = connections.flatMap((c) => treeVms[c.id] ?? []);
+  const vms = state.connections.flatMap((c) => treeVms[c.id] ?? []);
   const running = vms.filter((v) => v.active).length;
 
   // Cluster CPU: sum of busy jiffies over sum of total jiffies — a true
@@ -2157,7 +2154,7 @@ async function loadDcDashboard() {
 
   setHtml(body, `
     <div class="cards">
-      <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${connections.length}</b><i>SERVERS</i></div></div>
+      <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${state.connections.length}</b><i>SERVERS</i></div></div>
       <div class="card"><span class="card-ic">${ic.vms(20)}</span><div><b>${vms.length}</b><i>GUESTS</i></div></div>
       <div class="card ${running > 0 ? "ok" : ""}"><span class="card-ic">${ic.start(20)}</span><div><b>${running}</b><i>RUNNING</i></div></div>
       <div class="card ${activeNets > 0 ? "ok" : ""}"><span class="card-ic">${ic.network(20)}</span><div><b>${nets.length}</b><i>NETWORKS</i></div></div>
@@ -2218,7 +2215,7 @@ async function loadDcDashboard() {
       <div class="section-title">Servers</div>
       <table class="grid">
         <tr><th>Server</th><th>CPU</th><th>Memory</th><th>Disk</th></tr>
-        ${connections.map((c) => {
+        ${state.connections.map((c) => {
           const row = byId.get(c.id);
           if (!row) {
             return `<tr><td class="tname" style="cursor:pointer" tabindex="0" data-dc-dash-conn="${c.id}">${esc(c.name)} <span class="state bad">Offline</span></td><td colspan="3" class="muted">${esc(c.offline_error ?? "not answering")}</td></tr>`;
@@ -2381,8 +2378,8 @@ const adminCtx: AdminCtx = {
   toast,
   showSecret,
   relTime,
-  me: () => user,
-  connections: () => connections,
+  me: () => state.user,
+  connections: () => state.connections,
   reloadConnections: () => loadConnections(),
   openConnectionDialog: (id) => openConnectionDialog(id),
   deleteConnection: (id) => deleteConnection(id),
@@ -2401,7 +2398,7 @@ const adminCtx: AdminCtx = {
   deleteResource: (kind, conn, pool, name, after) => void adminDeleteResource(kind, conn, pool, name, after),
   tab: () => adminTab,
   refreshMe: async () => {
-    user = await api.get<User>("/auth/me");
+    state.user = await api.get<User>("/auth/me");
     await loadConnections();
     if (!canAdmin()) closeAdmin();
     renderApp();
@@ -2865,7 +2862,7 @@ async function renderPoolPage() {
 async function renderConn() {
   if (!state.selectedConn) return;
   if (isOffline(state.selectedConn)) return renderOffline();
-  const conn = connections.find((c) => c.id === state.selectedConn);
+  const conn = state.connections.find((c) => c.id === state.selectedConn);
   if (!conn) return;
   // Switching away from the Shell tab must close its session. Most navigation
   // goes through leaveCurrentView; the tab-bar handler re-renders directly, so
@@ -5828,12 +5825,12 @@ async function adminDeleteResource(kind: AdminResource["kind"], conn: string, po
 }
 
 async function deleteConnection(id: string) {
-  const c = connections.find((x) => x.id === id);
+  const c = state.connections.find((x) => x.id === id);
   if (!c) return;
   if (!(await askConfirm("Remove Server", `Remove server "${c.name}"?`, "Remove", true))) return;
   try {
     await api.del(`/connections/${id}`);
-    connections = await api.get<Connection[]>("/connections");
+    state.connections = await api.get<Connection[]>("/connections");
     if (state.selectedConn === id) state.selectedConn = null;
     renderTree();
     // Whatever is on screen: removing a daemon from the admin page stays there.
@@ -6005,7 +6002,7 @@ function askConfirm(title: string, message: string, okLabel = "Confirm", danger 
 /// autoconnect, so editing (not a manual connection test) is the useful
 /// per-row action.
 function openConnectionDialog(editId?: string) {
-  const existing = editId ? connections.find((c) => c.id === editId) : undefined;
+  const existing = editId ? state.connections.find((c) => c.id === editId) : undefined;
   const el = openModal(
     existing ? `Edit Server — ${esc(existing.name)}` : "Add Server",
     `
@@ -6055,7 +6052,7 @@ function openConnectionDialog(editId?: string) {
 }
 
 async function reloadConnections() {
-  connections = await api.get<Connection[]>("/connections");
+  state.connections = await api.get<Connection[]>("/connections");
   renderTree();
   if (!state.selectedConn) renderView();
   void refreshTreeVms();
@@ -6093,7 +6090,7 @@ function pollUntilCertPinned(connId: string, statusEl: HTMLElement | null) {
     try {
       const r = await api.get<{ cert: string; fingerprint: string }>(`/connections/${connId}/cert`);
       stopPendingPoll();
-      const conn = connections.find((c) => c.id === connId);
+      const conn = state.connections.find((c) => c.id === connId);
       if (conn) await api.put(`/connections/${connId}`, { name: conn.name, url: conn.url, cert: r.cert });
       toast("Daemon connected — certificate pinned");
       await reloadConnections();
@@ -7349,7 +7346,7 @@ function openCreateVm() {
 /// null when dismissed. Used before creating a guest from the Datacenter.
 function pickDaemon(): Promise<string | null> {
   return new Promise((resolve) => {
-    if (!connections.length) {
+    if (!state.connections.length) {
       toast("Add a server first", "bad");
       resolve(null);
       return;
@@ -7357,7 +7354,7 @@ function pickDaemon(): Promise<string | null> {
     const el = openModal(
       "Create Guest — Select Daemon",
       `<div class="create-resource-grid">
-        ${connections.map((c) => `
+        ${state.connections.map((c) => `
           <button class="create-resource-card" data-pick-conn="${c.id}">
             <span class="metric-ic">${ic.server()}</span>
             <b>${esc(c.name)}</b>
@@ -7963,24 +7960,24 @@ function openUpload(pool: string) {
 
 /// Avatar markup shared by the sidebar button and the profile card.
 function avatarHtml(): string {
-  return user?.avatar
-    ? `<img src="/avatars/${encodeURIComponent(user.avatar)}" alt="">`
-    : (user?.nickname[0] ?? "u").toUpperCase();
+  return state.user?.avatar
+    ? `<img src="/avatars/${encodeURIComponent(state.user.avatar)}" alt="">`
+    : (state.user?.nickname[0] ?? "u").toUpperCase();
 }
 
 /// Repaint every place the identity is shown, after any profile change.
 function renderIdentity() {
   renderProfileBtn();
   const host = $(".topbar .host");
-  if (host && user) {
-  host.textContent = `web${authDisabled ? " · local" : ` · ${user.nickname}`}`;
+  if (host && state.user) {
+  host.textContent = `web${state.authDisabled ? " · local" : ` · ${state.user.nickname}`}`;
   }
 }
 
 /// One profile card: avatar (click to crop), display name, username,
 /// password and API keys. Replaces the old popover + separate modal split.
 function openProfile() {
-  if (!user) return;
+  if (!state.user) return;
   const el = openModal(
     "Profile",
     `<div class="profile-id">
@@ -7989,16 +7986,16 @@ function openProfile() {
          <span class="camera-badge">${ic.camera()}</span>
        </button>
        <div class="who">
-         <b id="pf-who-name">${esc(user.nickname)}</b>
-         <span id="pf-who-user">@${esc(user.username)} · ${roleLabel(user.admin)}</span>
+         <b id="pf-who-name">${esc(state.user.nickname)}</b>
+         <span id="pf-who-user">@${esc(state.user.username)} · ${roleLabel(state.user.admin)}</span>
        </div>
      </div>
 
       <div class="grid2">
        <label class="field"><span>Display Name</span>
-          <input id="pf-nick" value="${esc(user.nickname)}"></label>
+          <input id="pf-nick" value="${esc(state.user.nickname)}"></label>
        <label class="field"><span>Username (used to sign in)</span>
-         <input id="pf-user" value="${esc(user.username)}" autocomplete="username"></label>
+         <input id="pf-user" value="${esc(state.user.username)}" autocomplete="username"></label>
      </div>
 
      <div class="section-title">Password</div>
@@ -8036,8 +8033,8 @@ function openProfile() {
   const saveBtn = $("#pf-save", el) as HTMLButtonElement;
   const closeBtn = $("#pf-close", el) as HTMLButtonElement;
   const syncDirty = () => {
-    const dirty = nickInput.value.trim() !== (user?.nickname ?? "")
-      || userInput.value.trim() !== (user?.username ?? "");
+    const dirty = nickInput.value.trim() !== (state.user?.nickname ?? "")
+      || userInput.value.trim() !== (state.user?.username ?? "");
     saveBtn.classList.toggle("hidden", !dirty);
     closeBtn.textContent = dirty ? "Cancel" : "Close";
   };
@@ -8051,9 +8048,9 @@ function openProfile() {
     const username = userInput.value.trim();
     if (!nickname) return toast("Display name is required", "bad");
     if (!username) return toast("Username is required", "bad");
-    const before = user?.username;
+    const before = state.user?.username;
     try {
-      user = await api.put<User>("/me", { nickname, username });
+      state.user = await api.put<User>("/me", { nickname, username });
       toast(username === before ? "Saved" : "Saved — sign in with the new username next time");
       renderIdentity();
       refreshProfileCard(el);
@@ -8172,18 +8169,18 @@ async function loadProfileLimits(el: Element) {
 }
 
 function refreshProfileCard(el: Element) {
-  if (!user) return;
+  if (!state.user) return;
   const name = $("#pf-who-name", el);
-  if (name) name.textContent = user.nickname;
+  if (name) name.textContent = state.user.nickname;
   const who = $("#pf-who-user", el);
-  if (who) who.textContent = `@${user.username} · ${roleLabel(user.admin)}`;
+  if (who) who.textContent = `@${state.user.username} · ${roleLabel(state.user.admin)}`;
   const av = $("#pf-avatar-btn .avatar", el);
   if (av) setHtml(av, avatarHtml());
 }
 
 /// Pick a file, crop it square, and upload it as the avatar.
 async function changeAvatar(card?: Element) {
-  if (!user) return;
+  if (!state.user) return;
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "image/png,image/jpeg,image/webp";
@@ -8196,7 +8193,7 @@ async function changeAvatar(card?: Element) {
       // JPEG: the crop is exported at the photo's own resolution, and a
       // lossless PNG of a 1024px photo is ~3 MB, past the server's 2 MB cap
       // (`web/server/src/api/profile.rs`).
-      user = await api.postRaw<User>("/me/avatar?ext=jpg", blob, "image/jpeg");
+      state.user = await api.postRaw<User>("/me/avatar?ext=jpg", blob, "image/jpeg");
       toast("Avatar updated");
       renderIdentity();
       if (card) refreshProfileCard(card);
@@ -8235,7 +8232,7 @@ function startPolling() {
   // landed, which keeps the cadence at the delivery pace instead of at every
   // other tick.
   pollTimer = window.setInterval(() => {
-    if (!user || pendingReads() > 0) return;
+    if (!state.user || pendingReads() > 0) return;
     // A repaint replaces the node the browser is scrolling, which detaches the
     // touch gesture: a drag over a table would stop dead mid-flick.
     if (busyScrolling()) return;
