@@ -20,6 +20,8 @@ import "@xterm/xterm/css/xterm.css";
 import { fitSize } from "./console-geometry";
 
 let current: { stop: () => void } | null = null;
+/// Bumped by every attach and detach, so an attach can tell it was superseded.
+let attachSeq = 0;
 
 const b64 = {
   encode(bytes: Uint8Array): string {
@@ -79,7 +81,8 @@ async function mountTerminal(
   status: (msg: string | null) => void,
   startOffset: number,
   disconnectUrl: string,
-): Promise<void> {
+  reconnecting = false,
+): Promise<"stopped" | "ended"> {
   let stopped = false;
   let ro: ResizeObserver | null = null;
   const term = new Terminal({
@@ -112,6 +115,9 @@ async function mountTerminal(
   status(null);
   stage.replaceChildren();
   term.open(stage);
+  // The status line went with the stage's children, so a later failure is
+  // written into the terminal itself, where it can be seen.
+  const say = (m: string) => term.write(`\r\n\x1b[31m${m}\x1b[0m\r\n`);
 
   // Size the terminal to the stage: xterm has no fit without its addon, and
   // the arithmetic is two lines.
@@ -167,7 +173,7 @@ async function mountTerminal(
     try {
       await post(`${base}/write`, { data: b64.encode(buf) });
     } catch (e) {
-      status((e as Error).message);
+      say((e as Error).message);
     } finally {
       sending = false;
       if (queue.length) void flush();
@@ -183,21 +189,22 @@ async function mountTerminal(
     try {
       const r = await fetch(`${base}/read?after=${offset}`, { credentials: "same-origin" });
       const data = await r.json().catch(() => ({}));
-      if (stopped) return;
+      if (stopped) return "stopped";
       if (!r.ok) throw new Error((data as { error?: string }).error ?? r.statusText);
       const d = data as { data: string; offset: number; closed: boolean; error: string | null; lost: boolean };
       if (d.data) term.write(b64.decode(d.data));
       offset = d.offset;
       if (d.closed) {
-        status(d.error ?? "The session closed. Reopen the tab to reconnect.");
-        return;
+        say(`${d.error ?? "The session closed."}${reconnecting ? " Reconnecting…" : ""}`);
+        return "ended";
       }
     } catch (e) {
-      if (stopped) return;
-      status((e as Error).message);
-      return;
+      if (stopped) return "stopped";
+      say(`${(e as Error).message}${reconnecting ? " Reconnecting…" : ""}`);
+      return "ended";
     }
   }
+  return "stopped";
 }
 
 /// Attach a terminal to a container's text console for the guest at `base`
@@ -229,27 +236,57 @@ export async function attachTextConsole(
 /// `login(1)` in the pty, so the terminal *is* the login UI: it shows the real
 /// `login:` / `Password:` prompt, and the password never passes through this
 /// code. `base` is `/proxy/<conn>/shell`. Replaces any terminal attached.
-/// Resolves once the session is mounted, or `false` when it was refused.
+/// Reconnects when the session ends on its own; resolves when the view is left,
+/// or `false` when the first connect was refused.
 export async function attachDaemonShell(
   stage: HTMLElement,
   base: string,
   status: (msg: string | null) => void,
 ): Promise<boolean> {
   detachTextConsole();
-  let r: { id: string; offset: number };
-  try {
-    r = await post<{ id: string; offset: number }>(`${base}/connect`, {});
-  } catch (e) {
-    status((e as Error).message);
-    return false;
+  const mine = ++attachSeq;
+  // Superseded: the tab was re-rendered or left, or a second attach started.
+  // Mounting then would put a second terminal on the same stage or on one that
+  // is gone.
+  const gone = () => mine !== attachSeq || !stage.isConnected;
+  let delay = 500;
+  for (let first = true; ; first = false) {
+    let r: { id: string; offset: number };
+    try {
+      r = await post<{ id: string; offset: number }>(`${base}/connect`, {});
+    } catch (e) {
+      // The first refusal is the user's to read; after a session has run, keep
+      // trying quietly (the daemon may be restarting).
+      if (first) {
+        status((e as Error).message);
+        return false;
+      }
+      await new Promise((ok) => setTimeout(ok, (delay = Math.min(delay * 2, 8000))));
+      if (gone()) return true;
+      continue;
+    }
+    const session = `${base}/${encodeURIComponent(r.id)}`;
+    if (gone()) {
+      void post(`${session}/disconnect`).catch(() => undefined);
+      return false;
+    }
+    const started = Date.now();
+    const out = await mountTerminal(stage, session, status, r.offset ?? 0, `${session}/disconnect`, true);
+    if (out === "stopped" || gone()) return true;
+    // The session ended on its own (the shell exited, or the daemon dropped
+    // it): start a fresh login, like a getty. A session that dies at once backs
+    // off, so a broken `login` is retried gently instead of in a tight loop.
+    current?.stop();
+    current = null;
+    delay = Date.now() - started > 5000 ? 500 : Math.min(delay * 2, 8000);
+    await new Promise((ok) => setTimeout(ok, delay));
+    if (gone()) return true;
   }
-  const session = `${base}/${encodeURIComponent(r.id)}`;
-  void mountTerminal(stage, session, status, r.offset ?? 0, `${session}/disconnect`);
-  return true;
 }
 
 /// Close the terminal, if one is open. Called when the view is left.
 export function detachTextConsole() {
+  attachSeq++;
   current?.stop();
   current = null;
 }
