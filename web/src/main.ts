@@ -13,7 +13,7 @@ import { closeSvg, ic } from "./icons";
 import { skeleton } from "./skeleton";
 import { enterLayer, holdFocus } from "./focus";
 import { attachLongPress, isCoarsePointer } from "./touch";
-import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type ConnTab, type CtTab, type DcTab, type Route } from "./route";
+import { ADMIN_TABS, parsePath, routeToPath, type AdminSection, type AdminTab, type CtTab, type Route } from "./route";
 import { BOOT_LABEL, HW_CATALOG, bootChoices, bootTargets, deviceSummary, deviceXml, devicesFromXml, hwType, validateDevice, withDevices } from "./hardware";
 import type { HwDevice, HwField } from "./hardware";
 import { MEMORY_DEFAULT, MEMORY_UNITS, STORAGE_DEFAULT, STORAGE_UNITS, convert, unitOptions, unitValue } from "./units";
@@ -34,6 +34,7 @@ import { attachSuggest } from "./suggest";
 import { addDisplay, autoVolumeName, domainXml, esc, networkFormFromXml, networkUuid, networkXml, newUuid, nextFreeIp, poolXml, volumeNameFromFile, volumeXml, withFirmware } from "./xml";
 import type { DomainForm, NetworkForm, PoolForm } from "./xml";
 
+import { state } from "./state";
 import { bridgeNetwork, capLabel, displayName, emptyState, isUuid, nameOf, nicNetwork, relTime, unescapeXml, uuidOf, withTitle } from "./util";
 
 /// Single HTML injection point. Every template's dynamic parts are escaped via
@@ -241,8 +242,6 @@ function setHtml(el: Element, html: string) {
 let user: User | null = null;
 let authDisabled = false;
 let connections: Connection[] = [];
-let selectedConn: string | null = null;
-let connTab: ConnTab = "dashboard";
 /// Pool whose volume table is expanded; survives the 1s pool poll so the
 /// table is re-rendered in place instead of vanishing every second.
 let volumesOpen: string | null = null;
@@ -251,21 +250,11 @@ let volumesOpen: string | null = null;
 // list", and the two used to be the same value: a server with no pools
 // compared equal to the fresh container and stayed on its skeleton forever.
 let renderedPools: string[] | null = null;
-let selectedVm: string | null = null;
-/// The open guest is a container. Containers are served by the same view as
-/// VMs (summary, console, hardware, options, network, XML); this picks the
-/// daemon's `/containers` routes instead of `/domains`, and swaps in what a
-/// container has instead (a text console, a resources editor) while hiding what
-/// it does not (graphics, reset, devices). One flag rather than a second copy
-/// of the guest view, so the two cannot drift apart.
-let ctMode = false;
-let vmTab: "summary" | "hardware" | "options" | "network" | "console" | "xml" = "summary";
 /// Which disk the summary's Disks card is graphing, per VM, so the 1s poll
 /// does not reset the user's selection back to the first disk.
 let summaryDiskSel: Record<string, string> = {};
 /// Which NIC the summary's Network card is graphing, per VM.
 let summaryNetSel: Record<string, string> = {};
-let dcTab: DcTab = "dashboard";
 /// The admin window's open section, or null when it is closed. A window over
 /// the page that was open, not a view: the page underneath keeps its place,
 /// and the URL still names that page.
@@ -298,10 +287,6 @@ const treeCts: Record<string, ContainerSummary[]> = {};
 /// guests so a network or pool is one click away from its management page.
 const treeNets: Record<string, NetworkSummary[]> = {};
 const treePools: Record<string, PoolSummary[]> = {};
-/// The network/pool currently open in the content pane (mutually exclusive
-/// with selectedVm, like the server tabs).
-let selectedNet: string | null = null;
-let selectedPool: string | null = null;
 /// Bumped by every full-pane render. A renderer that has to await a request
 /// captures this first and bails if it has moved, so a slow response cannot
 /// paint over the view the user has since switched to. Without it the 1s poll
@@ -324,12 +309,12 @@ function closeConsole() {
 /// selected VM or view goes through here, so a console session can never be
 /// left streaming in the background.
 function leaveCurrentView() {
-  if (vmTab === "console") closeConsole();
+  if (state.vmTab === "console") closeConsole();
   // A shell belongs to the page that opened it: leaving the server closes it,
   // whether the user switched tabs, opened a guest, or went to the admin page.
   // The renderConn guard covers the tab-bar clicks that do not come through
   // here.
-  if (connTab === "shell") terminal?.detachTextConsole();
+  if (state.connTab === "shell") terminal?.detachTextConsole();
 }
 
 /// Never wrap a view that shows live statistics (CPU, memory, rates): a cached
@@ -355,28 +340,28 @@ async function fastLoad(load: () => Promise<unknown>) {
 /// The view on screen, as a route. Derived from the selection state rather
 /// than stored beside it, so the two cannot disagree.
 function currentRoute(): Route {
-  if (!selectedConn) return { view: "dc", tab: dcTab };
+  if (!state.selectedConn) return { view: "dc", tab: state.dcTab };
   // URLs name a guest, network or pool by its UUID, which never changes or
   // repeats; the selection itself stays the libvirt name, which every daemon
   // route accepts too. A resource the lists have not loaded yet keeps its
   // name in the URL until they do.
-  const c = selectedConn;
-  if (selectedVm && ctMode) {
-    return { view: "ct", conn: c, ct: uuidOf(treeCts[c], selectedVm), tab: vmTab as CtTab };
+  const c = state.selectedConn;
+  if (state.selectedVm && state.ctMode) {
+    return { view: "ct", conn: c, ct: uuidOf(treeCts[c], state.selectedVm), tab: state.vmTab as CtTab };
   }
-  if (selectedVm) return { view: "vm", conn: c, vm: uuidOf(treeVms[c], selectedVm), tab: vmTab };
-  if (selectedNet) return { view: "net", conn: c, net: uuidOf(treeNets[c], selectedNet) };
-  if (selectedPool) return { view: "pool", conn: c, pool: uuidOf(treePools[c], selectedPool) };
-  return { view: "conn", conn: c, tab: connTab };
+  if (state.selectedVm) return { view: "vm", conn: c, vm: uuidOf(treeVms[c], state.selectedVm), tab: state.vmTab };
+  if (state.selectedNet) return { view: "net", conn: c, net: uuidOf(treeNets[c], state.selectedNet) };
+  if (state.selectedPool) return { view: "pool", conn: c, pool: uuidOf(treePools[c], state.selectedPool) };
+  return { view: "conn", conn: c, tab: state.connTab };
 }
 
 /// The daemon path for the open guest: `/domains/<vm>` or `/containers/<ct>`.
-function guestBase(conn: string, name: string, ct = ctMode): string {
+function guestBase(conn: string, name: string, ct = state.ctMode): string {
   return `/proxy/${conn}/${ct ? "containers" : "domains"}/${encodeURIComponent(name)}`;
 }
 
 /// The list the open guest belongs to.
-function guestList(conn: string, ct = ctMode): (DomainSummary | ContainerSummary)[] | undefined {
+function guestList(conn: string, ct = state.ctMode): (DomainSummary | ContainerSummary)[] | undefined {
   return ct ? treeCts[conn] : treeVms[conn];
 }
 
@@ -385,7 +370,7 @@ function guestList(conn: string, ct = ctMode): (DomainSummary | ContainerSummary
 /// holding only a network or pool name (a modal title, a confirm message).
 /// The name stays the identity everywhere it is sent; this is display only.
 function shownNet(name: string): string {
-  return displayName(selectedConn ? treeNets[selectedConn] : undefined, name);
+  return displayName(state.selectedConn ? treeNets[state.selectedConn] : undefined, name);
 }
 const volumeNames: Record<string, string> = {};
 function shownVolume(pool: string, name: string): string {
@@ -393,7 +378,7 @@ function shownVolume(pool: string, name: string): string {
 }
 
 function shownPool(name: string): string {
-  return displayName(selectedConn ? treePools[selectedConn] : undefined, name);
+  return displayName(state.selectedConn ? treePools[state.selectedConn] : undefined, name);
 }
 
 /// Put the current view in the address bar, so a reload returns to it. Called
@@ -442,20 +427,20 @@ function applyRoute(r: Route) {
   leaveCurrentView();
   clearResourceSelection();
   closeAdmin();
-  selectedConn = r.view === "dc" || r.view === "admin" ? null : r.conn;
+  state.selectedConn = r.view === "dc" || r.view === "admin" ? null : r.conn;
   if (r.view === "admin") {
     // An old /admin link: the window over the datacenter. A non-admin just
     // gets the datacenter.
-    dcTab = "dashboard";
+    state.dcTab = "dashboard";
     if (canAdmin()) pendingAdmin = { section: r.section, tab: r.tab };
     return;
   }
-  if (r.view === "dc") dcTab = r.tab;
-  else if (r.view === "conn") connTab = r.tab === "shell" && !canAdmin() ? "dashboard" : r.tab;
-  else if (r.view === "vm") { selectedVm = nameOf(treeVms[r.conn], r.vm); vmTab = r.tab; }
-  else if (r.view === "ct") { selectedVm = nameOf(treeCts[r.conn], r.ct); ctMode = true; vmTab = r.tab; }
-  else if (r.view === "net") selectedNet = nameOf(treeNets[r.conn], r.net);
-  else selectedPool = nameOf(treePools[r.conn], r.pool);
+  if (r.view === "dc") state.dcTab = r.tab;
+  else if (r.view === "conn") state.connTab = r.tab === "shell" && !canAdmin() ? "dashboard" : r.tab;
+  else if (r.view === "vm") { state.selectedVm = nameOf(treeVms[r.conn], r.vm); state.vmTab = r.tab; }
+  else if (r.view === "ct") { state.selectedVm = nameOf(treeCts[r.conn], r.ct); state.ctMode = true; state.vmTab = r.tab; }
+  else if (r.view === "net") state.selectedNet = nameOf(treeNets[r.conn], r.net);
+  else state.selectedPool = nameOf(treePools[r.conn], r.pool);
 }
 
 /// Render whatever the selection state names. The view renderers do the
@@ -478,11 +463,11 @@ function renderCurrent() {
 }
 
 function renderView() {
-  if (selectedConn && isOffline(selectedConn)) return renderOffline();
-  if (!selectedConn) renderDc();
-  else if (selectedVm) void renderVm();
-  else if (selectedNet) { showPageSkeleton(); void fastLoad(renderNetPage); }
-  else if (selectedPool) { showPageSkeleton(); void renderPoolPage(); }
+  if (state.selectedConn && isOffline(state.selectedConn)) return renderOffline();
+  if (!state.selectedConn) renderDc();
+  else if (state.selectedVm) void renderVm();
+  else if (state.selectedNet) { showPageSkeleton(); void fastLoad(renderNetPage); }
+  else if (state.selectedPool) { showPageSkeleton(); void renderPoolPage(); }
   else renderConn();
 }
 
@@ -490,19 +475,19 @@ function renderView() {
 /// server and page this is, and the tree still lines up) and show one offline
 /// panel in place of the body.
 function renderOffline() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   beginRender();
   syncUrl();
-  const c = connections.find((x) => x.id === selectedConn);
-  const sc = selectedConn;
-  const title = selectedVm ? displayName(guestList(sc), selectedVm)
-    : selectedNet ? displayName(treeNets[sc], selectedNet)
-    : selectedPool ? displayName(treePools[sc], selectedPool)
+  const c = connections.find((x) => x.id === state.selectedConn);
+  const sc = state.selectedConn;
+  const title = state.selectedVm ? displayName(guestList(sc), state.selectedVm)
+    : state.selectedNet ? displayName(treeNets[sc], state.selectedNet)
+    : state.selectedPool ? displayName(treePools[sc], state.selectedPool)
     : c?.name ?? "";
   const content = $("#content");
   setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.offline(20)}</span><span class="dtitle">${esc(title)}</span>
-    ${selectedVm || selectedNet || selectedPool ? `<span class="badge">${esc(c?.name ?? "")}</span>` : ""}</div>
-    ${offlinePanel(selectedConn)}`);
+    ${state.selectedVm || state.selectedNet || state.selectedPool ? `<span class="badge">${esc(c?.name ?? "")}</span>` : ""}</div>
+    ${offlinePanel(state.selectedConn)}`);
 }
 
 // Chart range dropdowns: one delegated handler, since the dashboards re-render
@@ -511,8 +496,8 @@ function renderOffline() {
 document.addEventListener("change", (e) => {
   const sel = (e.target as Element | null)?.closest?.(".range-sel") as HTMLSelectElement | null;
   if (!sel || !setRange(sel.value)) return;
-  if (!selectedConn) void loadDcDashboard();
-  else if (selectedVm) void renderVmBody(selectedVm);
+  if (!state.selectedConn) void loadDcDashboard();
+  else if (state.selectedVm) void renderVmBody(state.selectedVm);
   else void loadDashboard();
 });
 bindChartHover();
@@ -526,8 +511,8 @@ window.addEventListener("popstate", () => {
 /// Whether the given guest's tab is still what the pane shows. A tab body that
 /// awaits must check before painting, or a late answer overwrites the view the
 /// user switched to (same rule as `stillCurrent` for whole-pane renders).
-function stillCurrentVm(conn: string, vm: string, tab: typeof vmTab): boolean {
-  return selectedConn === conn && selectedVm === vm && vmTab === tab && !!$("#vm-body");
+function stillCurrentVm(conn: string, vm: string, tab: typeof state.vmTab): boolean {
+  return state.selectedConn === conn && state.selectedVm === vm && state.vmTab === tab && !!$("#vm-body");
 }
 
 /// Replace the pane with a placeholder while a resource page's first read is
@@ -551,13 +536,13 @@ function stillCurrent(gen: number): boolean {
 
 /// Clear whichever resource the content pane is showing. Every path that
 /// leaves a resource page must run this: the poll re-renders whichever of
-/// selectedVm/selectedNet/selectedPool is still set, so a stale selection
+/// state.selectedVm/state.selectedNet/state.selectedPool is still set, so a stale selection
 /// resurrects that page about a second after the user navigates away.
 function clearResourceSelection() {
-  selectedVm = null;
-  ctMode = false;
-  selectedNet = null;
-  selectedPool = null;
+  state.selectedVm = null;
+  state.ctMode = false;
+  state.selectedNet = null;
+  state.selectedPool = null;
 }
 
 const $ = (sel: string, root: ParentNode = document): any =>
@@ -679,19 +664,19 @@ function openCommandPalette() {
   const cmds: TayneCommand[] = [];
   const add = (id: string, label: string, hint: string | undefined, icon: string, run: () => void) =>
     cmds.push({ id, label, hint, icon, run });
-  const toDc = (tab: typeof dcTab) => () => {
+  const toDc = (tab: typeof state.dcTab) => () => {
     leaveCurrentView();
-    selectedConn = null;
+    state.selectedConn = null;
     clearResourceSelection();
-    dcTab = tab;
+    state.dcTab = tab;
     renderTree();
     renderDc();
   };
 
   // Actions on what is open come first: they are what you most likely want.
-  if (selectedConn && selectedVm && ctMode) {
-    const conn = selectedConn;
-    const ct = selectedVm;
+  if (state.selectedConn && state.selectedVm && state.ctMode) {
+    const conn = state.selectedConn;
+    const ct = state.selectedVm;
     const shown = displayName(treeCts[conn], ct);
     const running = (treeCts[conn] ?? []).find((v) => v.name === ct)?.active === true;
     const power = (id: string, label: string, icon: string, path: string) =>
@@ -706,9 +691,9 @@ function openCommandPalette() {
     add("ct-rename", `Rename — ${shown}`, "This container", ic.edit(), () => void renameCt(conn, ct));
     add("ct-delete", `Delete — ${shown}`, "This container", ic.trash(), () => void deleteCt(ct));
   }
-  if (selectedConn && selectedVm && !ctMode) {
-    const conn = selectedConn;
-    const vm = selectedVm;
+  if (state.selectedConn && state.selectedVm && !state.ctMode) {
+    const conn = state.selectedConn;
+    const vm = state.selectedVm;
     const running = (treeVms[conn] ?? []).find((v) => v.name === vm)?.active === true;
     const power = (id: string, label: string, icon: string, path: string) =>
       add(id, `${label} — ${vm}`, "This VM", icon, () => void treeVmPower(conn, vm, path));
@@ -725,15 +710,15 @@ function openCommandPalette() {
     }
     add("vm-delete", `Delete — ${vm}`, "This VM", ic.trash(), () => void deleteVm(vm));
   }
-  if (selectedConn && selectedNet) {
-    const net = selectedNet;
+  if (state.selectedConn && state.selectedNet) {
+    const net = state.selectedNet;
     add("net-edit", `Edit Network — ${net}`, "This network", ic.edit(), () => void openEditNetwork(net));
     add("net-fw", `Firewall rules — ${net}`, "This network", ic.firewall(), () => openFirewallEditor(net));
     add("net-delete", `Delete network — ${net}`, "This network", ic.trash(),
       () => void deleteNetwork(net).then(() => refreshTreeVms()));
   }
-  if (selectedConn && selectedPool) {
-    const pool = selectedPool;
+  if (state.selectedConn && state.selectedPool) {
+    const pool = state.selectedPool;
     add("pool-upload", `Upload ISO — ${pool}`, "This pool", ic.upload(), () => openUpload(pool));
     add("pool-volume", `New Volume — ${pool}`, "This pool", ic.disk(), () => openCreateVolume(pool));
     add("pool-templates", `Templates — ${pool}`, "This pool", ic.container(), () => void openTemplates(pool));
@@ -741,8 +726,8 @@ function openCommandPalette() {
 
   // Creation. Resource kinds that need a server are offered for the one open.
   add("add-resource", "Add resource", "VM, container, network or pool", ic.plus(), () => openAddResource());
-  if (selectedConn) {
-    const server = connections.find((c) => c.id === selectedConn)?.name ?? "";
+  if (state.selectedConn) {
+    const server = connections.find((c) => c.id === state.selectedConn)?.name ?? "";
     add("create-vm", "Create VM", server, ic.vm(), () => openCreateVm());
     add("create-ct", "Create Container", server, ic.container(), () => void openCreateCt());
     add("create-net", "Create Network", server, ic.network(), () => openCreateNetwork());
@@ -754,7 +739,7 @@ function openCommandPalette() {
   add("nav-dc", "Datacenter", "Dashboard", ic.dc(), toDc("dashboard"));
   add("nav-dc-guests", "Datacenter — Guests", "/guests", ic.vms(), toDc("guests"));
   add("nav-dc-cts", "Datacenter — Containers", "/containers", ic.container(), toDc("containers"));
-  const connTabs: [typeof connTab, string, string][] = [
+  const connTabs: [typeof state.connTab, string, string][] = [
     ["dashboard", "Dashboard", ic.datacenter()],
     ["vms", "VMs", ic.vms()],
     ["containers", "Containers", ic.container()],
@@ -763,7 +748,7 @@ function openCommandPalette() {
     ["firewall", "Firewall", ic.firewall()],
     ["shell", "Shell", ic.terminal()],
   ];
-  const vmTabs: [typeof vmTab, string, string][] = [
+  const vmTabs: [typeof state.vmTab, string, string][] = [
     ["summary", "Summary", ic.vm()],
     ["console", "Console", ic.vm()],
     ["hardware", "Hardware", ic.cpu()],
@@ -1107,7 +1092,7 @@ async function refreshHealth() {
   for (const c of flipped) {
     toast(c.online === false ? `${c.name} went offline` : `${c.name} is back online`, c.online === false ? "bad" : "ok");
   }
-  if (!selectedConn || flipped.some((c) => c.id === selectedConn)) {
+  if (!state.selectedConn || flipped.some((c) => c.id === state.selectedConn)) {
     if (flipped.some((c) => c.online !== false)) void refreshTreeVms();
     renderView();
   }
@@ -1138,7 +1123,7 @@ function renderTree() {
   syncAdminButton();
   const serverRows = connections
     .map((c) => {
-      const selected = c.id === selectedConn && !selectedVm && !selectedNet && !selectedPool;
+      const selected = c.id === state.selectedConn && !state.selectedVm && !state.selectedNet && !state.selectedPool;
       const vms = treeVms[c.id] ?? [];
       const cts = treeCts[c.id] ?? [];
       const nets = treeNets[c.id] ?? [];
@@ -1154,7 +1139,7 @@ function renderTree() {
           ? vms
               .map(
                 (v) => `
-      <button class="tree-row tree-vm ${!ctMode && selectedVm === v.name && selectedConn === c.id ? "sel" : ""}"
+      <button class="tree-row tree-vm ${!state.ctMode && state.selectedVm === v.name && state.selectedConn === c.id ? "sel" : ""}"
         data-vm="${esc(v.name)}" data-vm-conn="${c.id}">
         <span class="tree-ic ${v.active ? "on" : ""}">${ic.vm()}</span>
         <span class="tree-label">${esc(v.title || v.name)}</span>
@@ -1168,7 +1153,7 @@ function renderTree() {
       const ctRows = cts
         .map(
           (v) => `
-      <button class="tree-row tree-vm tree-ct ${ctMode && selectedVm === v.name && selectedConn === c.id ? "sel" : ""}"
+      <button class="tree-row tree-vm tree-ct ${state.ctMode && state.selectedVm === v.name && state.selectedConn === c.id ? "sel" : ""}"
         data-ct="${esc(v.name)}" data-ct-conn="${c.id}">
         <span class="tree-ic ${v.active ? "on" : ""}">${ic.container()}</span>
         <span class="tree-label">${esc(v.title || v.name)}</span>
@@ -1181,7 +1166,7 @@ function renderTree() {
         ? nets
             .map(
               (n) => `
-      <button class="tree-row tree-res tree-net ${selectedNet === n.name && selectedConn === c.id ? "sel" : ""}"
+      <button class="tree-row tree-res tree-net ${state.selectedNet === n.name && state.selectedConn === c.id ? "sel" : ""}"
         data-net="${esc(n.name)}" data-net-conn="${c.id}">
         <span class="tree-ic ${n.active ? "on" : ""}">${ic.network()}</span>
         <span class="tree-label">${esc(n.title || n.name)}</span>
@@ -1194,7 +1179,7 @@ function renderTree() {
         ? pools
             .map(
               (p) => `
-      <button class="tree-row tree-res tree-pool ${selectedPool === p.name && selectedConn === c.id ? "sel" : ""}"
+      <button class="tree-row tree-res tree-pool ${state.selectedPool === p.name && state.selectedConn === c.id ? "sel" : ""}"
         data-pool="${esc(p.name)}" data-pool-conn="${c.id}">
         <span class="tree-ic ${p.active ? "on" : ""}">${ic.storage()}</span>
         <span class="tree-label">${esc(p.title || p.name)}</span>
@@ -1217,7 +1202,7 @@ function renderTree() {
 
   const restoreTreeFocus = holdFocus(tree, ".tree-row.sel");
   setHtml(tree, `
-    <button class="tree-row tree-root ${selectedConn === null ? "sel" : ""}" id="dc-row">
+    <button class="tree-row tree-root ${state.selectedConn === null ? "sel" : ""}" id="dc-row">
       <span class="tree-ic">${ic.dc()}</span>
       <span class="tree-label">Datacenter</span>
     </button>
@@ -1227,9 +1212,9 @@ function renderTree() {
   noteTreeSel(tree, false);
   $("#dc-row").onclick = () => {
     leaveCurrentView();
-    selectedConn = null;
+    state.selectedConn = null;
     clearResourceSelection();
-    dcTab = "dashboard";
+    state.dcTab = "dashboard";
     renderTree();
     renderDc();
   };
@@ -1237,11 +1222,11 @@ function renderTree() {
     (row as HTMLElement).onclick = () => {
       // Another server keeps the tab open on this one; coming from anywhere
       // else starts at the dashboard.
-      const onServer = selectedConn !== null && !selectedVm && !selectedNet && !selectedPool;
+      const onServer = state.selectedConn !== null && !state.selectedVm && !state.selectedNet && !state.selectedPool;
       leaveCurrentView();
-      selectedConn = (row as HTMLElement).dataset.conn!;
+      state.selectedConn = (row as HTMLElement).dataset.conn!;
       clearResourceSelection();
-      if (!onServer) connTab = "dashboard";
+      if (!onServer) state.connTab = "dashboard";
       renderTree();
       renderConn();
       void refreshTreeVms();
@@ -1250,17 +1235,17 @@ function renderTree() {
   tree.querySelectorAll("[data-vm]").forEach((row: Element) => {
     const el = row as HTMLElement;
     el.onclick = () => {
-      // Set the connection first: renderVm() bails out when selectedConn is
+      // Set the connection first: renderVm() bails out when state.selectedConn is
       // null, which made guest clicks silently do nothing from the
       // Datacenter view or a different server's branch.
       // From another guest, stay on the same tab (Hardware stays Hardware).
-      const fromGuest = selectedVm !== null;
+      const fromGuest = state.selectedVm !== null;
       leaveCurrentView();
-      selectedConn = el.dataset.vmConn!;
+      state.selectedConn = el.dataset.vmConn!;
       clearResourceSelection();
-      selectedVm = el.dataset.vm!;
-      ctMode = false;
-      if (!fromGuest) vmTab = "summary";
+      state.selectedVm = el.dataset.vm!;
+      state.ctMode = false;
+      if (!fromGuest) state.vmTab = "summary";
       renderTree();
       void renderVm();
     };
@@ -1273,9 +1258,9 @@ function renderTree() {
     const el = row as HTMLElement;
     el.onclick = () => {
       leaveCurrentView();
-      selectedConn = el.dataset.netConn!;
+      state.selectedConn = el.dataset.netConn!;
       clearResourceSelection();
-      selectedNet = el.dataset.net!;
+      state.selectedNet = el.dataset.net!;
       renderTree();
       showPageSkeleton();
       void fastLoad(renderNetPage);
@@ -1285,9 +1270,9 @@ function renderTree() {
     const el = row as HTMLElement;
     el.onclick = () => {
       leaveCurrentView();
-      selectedConn = el.dataset.poolConn!;
+      state.selectedConn = el.dataset.poolConn!;
       clearResourceSelection();
-      selectedPool = el.dataset.pool!;
+      state.selectedPool = el.dataset.pool!;
       renderTree();
       showPageSkeleton();
       void renderPoolPage();
@@ -1298,37 +1283,37 @@ function renderTree() {
 // ------------------------------------------------------------- right-click
 
 /// Select a server (optionally opening one of its tabs).
-function selectServer(id: string, tab?: typeof connTab) {
+function selectServer(id: string, tab?: typeof state.connTab) {
   leaveCurrentView();
-  selectedConn = id;
+  state.selectedConn = id;
   clearResourceSelection();
-  if (tab) connTab = tab;
+  if (tab) state.connTab = tab;
   renderTree();
   renderConn();
 }
 
 /// Select a guest (optionally opening one of its tabs).
-function selectVmRow(conn: string, vm: string, tab?: typeof vmTab) {
+function selectVmRow(conn: string, vm: string, tab?: typeof state.vmTab) {
   leaveCurrentView();
-  selectedConn = conn;
-  selectedVm = vm;
-  ctMode = false;
-  selectedNet = null;
-  selectedPool = null;
-  if (tab) vmTab = tab;
+  state.selectedConn = conn;
+  state.selectedVm = vm;
+  state.ctMode = false;
+  state.selectedNet = null;
+  state.selectedPool = null;
+  if (tab) state.vmTab = tab;
   renderTree();
   void renderVm();
 }
 
 /// Select a container (optionally opening one of its tabs).
-function selectCtRow(conn: string, ct: string, tab?: typeof vmTab) {
-  const keep = selectedVm !== null ? vmTab : "summary";
+function selectCtRow(conn: string, ct: string, tab?: typeof state.vmTab) {
+  const keep = state.selectedVm !== null ? state.vmTab : "summary";
   leaveCurrentView();
-  selectedConn = conn;
+  state.selectedConn = conn;
   clearResourceSelection();
-  selectedVm = ct;
-  ctMode = true;
-  vmTab = tab ?? keep;
+  state.selectedVm = ct;
+  state.ctMode = true;
+  state.vmTab = tab ?? keep;
   renderTree();
   void renderVm();
 }
@@ -1342,7 +1327,7 @@ async function treeCtPower(conn: string, ct: string, path: string) {
     return; // act already toasted the daemon's reason
   }
   await refreshTreeVms();
-  if (selectedConn === conn && selectedVm === ct && ctMode) void renderVm();
+  if (state.selectedConn === conn && state.selectedVm === ct && state.ctMode) void renderVm();
 }
 
 /// Actions for one container, on every surface it appears: the tree, the
@@ -1372,9 +1357,9 @@ function ctMenu(connId: string, name: string): CtxItem[] {
 
 function selectNetRow(conn: string, net: string) {
   leaveCurrentView();
-  selectedConn = conn;
+  state.selectedConn = conn;
   clearResourceSelection();
-  selectedNet = net;
+  state.selectedNet = net;
   renderTree();
   showPageSkeleton();
   void fastLoad(renderNetPage);
@@ -1382,9 +1367,9 @@ function selectNetRow(conn: string, net: string) {
 
 function selectPoolRow(conn: string, pool: string) {
   leaveCurrentView();
-  selectedConn = conn;
+  state.selectedConn = conn;
   clearResourceSelection();
-  selectedPool = pool;
+  state.selectedPool = pool;
   renderTree();
   showPageSkeleton();
   void renderPoolPage();
@@ -1400,7 +1385,7 @@ async function treeVmPower(conn: string, vm: string, path: string) {
     return; // act already toasted the daemon's reason
   }
   await refreshTreeVms();
-  if (selectedConn === conn && selectedVm === vm) void renderVm();
+  if (state.selectedConn === conn && state.selectedVm === vm) void renderVm();
 }
 
 async function treeNetPower(conn: string, net: string, action: "start" | "stop") {
@@ -1410,7 +1395,7 @@ async function treeNetPower(conn: string, net: string, action: "start" | "stop")
     return;
   }
   await refreshTreeVms();
-  if (selectedConn === conn && selectedNet === net) void renderNetPage();
+  if (state.selectedConn === conn && state.selectedNet === net) void renderNetPage();
 }
 
 /// Actions for one guest. Shared by the tree, the VM cards and the datacenter
@@ -1548,7 +1533,7 @@ function vmMenu(connId: string, vmName: string): CtxItem[] {
     {
       // Renaming is libvirt-only for shut-off guests; offer it only then.
       label: "Rename", icon: ic.edit(), separator: !canShareVm(connId, vmName), disabled: running,
-      run: () => { selectedConn = connId; void renameVm(vmName); },
+      run: () => { state.selectedConn = connId; void renameVm(vmName); },
     },
     {
       label: "Delete", icon: ic.trash(), danger: true,
@@ -1566,7 +1551,7 @@ function netMenu(connId: string, netName: string): CtxItem[] {
   const active = net?.active === true;
   // The editors read the selected server; point it at this network's owner
   // first, since a dashboard row can belong to a server that is not selected.
-  const onConn = (f: () => void) => () => { selectedConn = connId; f(); };
+  const onConn = (f: () => void) => () => { state.selectedConn = connId; f(); };
   return [
     { label: "Open", icon: ic.network(), run: () => selectNetRow(connId, netName) },
     {
@@ -1587,7 +1572,7 @@ function netMenu(connId: string, netName: string): CtxItem[] {
 
 /// Actions for one storage pool (tree row, pool card, dashboard card).
 function poolMenu(connId: string, poolName: string): CtxItem[] {
-  const onConn = (f: () => void) => () => { selectedConn = connId; f(); };
+  const onConn = (f: () => void) => () => { state.selectedConn = connId; f(); };
   return [
     { label: "Open", icon: ic.storage(), run: () => selectPoolRow(connId, poolName) },
     { label: "Upload ISO", icon: ic.upload(), separator: true, run: onConn(() => openUpload(poolName)) },
@@ -1605,7 +1590,7 @@ function poolMenu(connId: string, poolName: string): CtxItem[] {
 
 /// Actions for one server (tree row, server card, dashboard row).
 function serverMenu(serverId: string): CtxItem[] {
-  const create = (f: () => void) => () => { selectedConn = serverId; renderTree(); f(); };
+  const create = (f: () => void) => () => { state.selectedConn = serverId; renderTree(); f(); };
   return [
     { label: "Dashboard", icon: ic.datacenter(), run: () => selectServer(serverId, "dashboard") },
     { label: "VMs", icon: ic.vms(), run: () => selectServer(serverId, "vms") },
@@ -1696,30 +1681,30 @@ function contentMenuItems(target: Element): CtxItem[] | null {
   );
   if (!el) return null;
   const d = el.dataset;
-  if (d.vmOpen && selectedConn) return vmMenu(selectedConn, d.vmOpen);
+  if (d.vmOpen && state.selectedConn) return vmMenu(state.selectedConn, d.vmOpen);
   if (d.dcVm && d.dcVmConn) return vmMenu(d.dcVmConn, d.dcVm);
   if (d.dcCt && d.dcCtConn) return ctMenu(d.dcCtConn, d.dcCt);
-  if (d.netOpen && selectedConn) return netMenu(selectedConn, d.netOpen);
+  if (d.netOpen && state.selectedConn) return netMenu(state.selectedConn, d.netOpen);
   if (d.dashNet && d.dashConn) return netMenu(d.dashConn, d.dashNet);
-  if (d.poolOpen && selectedConn) return poolMenu(selectedConn, d.poolOpen);
+  if (d.poolOpen && state.selectedConn) return poolMenu(state.selectedConn, d.poolOpen);
   if (d.dashPool && d.dashConn) return poolMenu(d.dashConn, d.dashPool);
   if (d.openConnRow) return serverMenu(d.openConnRow);
   if (d.dcDashConn) return serverMenu(d.dcDashConn);
   // A server tab: the server-level actions.
-  if (d.tab && selectedConn && !selectedVm) {
-    return serverMenu(selectedConn);
+  if (d.tab && state.selectedConn && !state.selectedVm) {
+    return serverMenu(state.selectedConn);
   }
-  if (d.vmtab && selectedConn && selectedVm) {
-    return ctMode ? ctMenu(selectedConn, selectedVm) : vmMenu(selectedConn, selectedVm);
+  if (d.vmtab && state.selectedConn && state.selectedVm) {
+    return state.ctMode ? ctMenu(state.selectedConn, state.selectedVm) : vmMenu(state.selectedConn, state.selectedVm);
   }
   if (d.dctab) return rootMenu();
   // The page header stands for the page's own resource.
   if (el.matches(".dhead")) {
-    if (!selectedConn) return rootMenu();
-    if (selectedVm) return ctMode ? ctMenu(selectedConn, selectedVm) : vmMenu(selectedConn, selectedVm);
-    if (selectedNet) return netMenu(selectedConn, selectedNet);
-    if (selectedPool) return poolMenu(selectedConn, selectedPool);
-    return serverMenu(selectedConn);
+    if (!state.selectedConn) return rootMenu();
+    if (state.selectedVm) return state.ctMode ? ctMenu(state.selectedConn, state.selectedVm) : vmMenu(state.selectedConn, state.selectedVm);
+    if (state.selectedNet) return netMenu(state.selectedConn, state.selectedNet);
+    if (state.selectedPool) return poolMenu(state.selectedConn, state.selectedPool);
+    return serverMenu(state.selectedConn);
   }
   return null;
 }
@@ -1821,13 +1806,13 @@ async function refreshTreeVms() {
   // flicker or fight the user's clicks on every poll.
   // A link opened before the lists loaded holds a UUID where the selection
   // wants a name; now that the lists are here, swap it for the name.
-  const sc = selectedConn;
+  const sc = state.selectedConn;
   if (sc) {
-    const was = [selectedVm, selectedNet, selectedPool];
-    if (selectedVm) selectedVm = nameOf(guestList(sc), selectedVm);
-    if (selectedNet) selectedNet = nameOf(treeNets[sc], selectedNet);
-    if (selectedPool) selectedPool = nameOf(treePools[sc], selectedPool);
-    if (was.some((x, i) => x !== [selectedVm, selectedNet, selectedPool][i])) {
+    const was = [state.selectedVm, state.selectedNet, state.selectedPool];
+    if (state.selectedVm) state.selectedVm = nameOf(guestList(sc), state.selectedVm);
+    if (state.selectedNet) state.selectedNet = nameOf(treeNets[sc], state.selectedNet);
+    if (state.selectedPool) state.selectedPool = nameOf(treePools[sc], state.selectedPool);
+    if (was.some((x, i) => x !== [state.selectedVm, state.selectedNet, state.selectedPool][i])) {
       changed = true;
       renderView();
     }
@@ -1840,8 +1825,8 @@ async function refreshTreeVms() {
     // Its dashboard repaints itself in place from the same tree: rebuilding the
     // pane would paint the skeleton over the user's scroll position every time
     // a pool's allocation ticks, which is what made a poll reset the page.
-    if (!selectedConn && !selectedVm) {
-      if (dcTab === "dashboard") void loadDcDashboard();
+    if (!state.selectedConn && !state.selectedVm) {
+      if (state.dcTab === "dashboard") void loadDcDashboard();
       else renderDc();
     }
     // Network/pool pages poll their own data; the tree refresh above is what
@@ -1867,11 +1852,11 @@ function renderDc() {
   // Real tabbar; the Users tab is hidden when the local app disables auth.
   // Actions live on the tab bar itself, right-aligned after the tabs.
   const tabs = `<div class="tabbar">
-      <button class="tab ${dcTab === "dashboard" ? "active" : ""}" data-dctab="dashboard">${ic.datacenter(14)} Dashboard</button>
-      <button class="tab ${dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
-      <button class="tab ${dcTab === "containers" ? "active" : ""}" data-dctab="containers">${ic.container(14)} Containers</button>
-      <button class="tab ${dcTab === "networks" ? "active" : ""}" data-dctab="networks">${ic.network(14)} Networks</button>
-      <button class="tab ${dcTab === "storage" ? "active" : ""}" data-dctab="storage">${ic.storage(14)} Storage</button>
+      <button class="tab ${state.dcTab === "dashboard" ? "active" : ""}" data-dctab="dashboard">${ic.datacenter(14)} Dashboard</button>
+      <button class="tab ${state.dcTab === "guests" ? "active" : ""}" data-dctab="guests">${ic.vms(14)} Guests</button>
+      <button class="tab ${state.dcTab === "containers" ? "active" : ""}" data-dctab="containers">${ic.container(14)} Containers</button>
+      <button class="tab ${state.dcTab === "networks" ? "active" : ""}" data-dctab="networks">${ic.network(14)} Networks</button>
+      <button class="tab ${state.dcTab === "storage" ? "active" : ""}" data-dctab="storage">${ic.storage(14)} Storage</button>
     </div>`;
   // Aggregate cards across every known server, from the tree's guest cache.
   const allVms = Object.values(treeVms).flat();
@@ -1919,9 +1904,9 @@ function renderDc() {
 
 
   let body: string;
-  if (dcTab === "dashboard") {
+  if (state.dcTab === "dashboard") {
     body = `<div id="dc-dash">${skeleton("dashboard")}</div>`;
-  } else if (dcTab === "containers") {
+  } else if (state.dcTab === "containers") {
     // Same quick statistics as the Guests tab, over the tree's container cache;
     // each card names its own server, so its actions do too.
     const all = connections.flatMap((c) => (treeCts[c.id] ?? []).map((v) => ({ conn: c, ct: v })));
@@ -1930,21 +1915,21 @@ function renderDc() {
        <div class="section-title">Containers</div>
        ${all.length ? `<div class="card-grid">${all.map(({ conn, ct }) => ctCard(ct, conn.id, conn.name)).join("")}</div>`
          : emptyState("containers", "Create Container", "dc-ct-create")}`;
-  } else if (dcTab === "networks") {
+  } else if (state.dcTab === "networks") {
     const all = connections.flatMap((c) => (treeNets[c.id] ?? []).map((n) => ({ conn: c, n })));
     const active = all.filter(({ n }) => n.active).length;
     body = `${quickStats(all.length, active, "NETWORKS", ic.network)}
        <div class="section-title">Networks</div>
        ${all.length ? `<div class="card-grid">${all.map(({ conn, n }) => netCard(n, conn.id, conn.name)).join("")}</div>`
          : emptyState("networks", "Create Network", "dc-net-create")}`;
-  } else if (dcTab === "storage") {
+  } else if (state.dcTab === "storage") {
     const all = connections.flatMap((c) => (treePools[c.id] ?? []).map((p) => ({ conn: c, p })));
     const active = all.filter(({ p }) => p.active).length;
     body = `${quickStats(all.length, active, "POOLS", ic.storage)}
        <div class="section-title">Storage Pools</div>
        ${all.length ? `<div class="card-grid">${all.map(({ conn, p }) => poolCard(p, conn.id, { server: conn.name })).join("")}</div>`
          : emptyState("storage pools", "Create Pool", "dc-pool-create")}`;
-  } else if (dcTab === "guests") {
+  } else if (state.dcTab === "guests") {
     // Every guest across every server, so a VM is reachable directly from here
     // instead of only through the sidebar.
     body = `${quickStats(allVms.length, runningVms, "GUESTS", ic.vms)}<div class="section-title">Guests</div>
@@ -1956,7 +1941,7 @@ function renderDc() {
 setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.dc(20)}</span><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
   restoreTabFocus();
 
-  if (dcTab === "dashboard") void loadDcDashboard();
+  if (state.dcTab === "dashboard") void loadDcDashboard();
 
   // Creating from the Datacenter is a Datacenter action: the form takes an
   // explicit connection and the view stays put, rather than switching the
@@ -1970,17 +1955,17 @@ setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.dc(20)}</span><
   bindDcPoolCards(content);
   content.querySelectorAll("[data-dctab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
-      dcTab = (b as HTMLElement).dataset.dctab as typeof dcTab;
+      state.dcTab = (b as HTMLElement).dataset.dctab as typeof state.dcTab;
       renderDc();
     };
   });
   /// Open a guest from the Datacenter cards, switching server if needed.
-  const openVm = (connId: string, vm: string, tab: typeof vmTab) => {
+  const openVm = (connId: string, vm: string, tab: typeof state.vmTab) => {
     leaveCurrentView();
-    selectedConn = connId;
-    selectedVm = vm;
-    ctMode = false;
-    vmTab = tab;
+    state.selectedConn = connId;
+    state.selectedVm = vm;
+    state.ctMode = false;
+    state.vmTab = tab;
     renderTree();
     void renderVm();
   };
@@ -2009,15 +1994,15 @@ setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.dc(20)}</span><
     const el = b as HTMLElement;
     el.onclick = (e) => {
       e.stopPropagation();
-      // The editor reads through selectedConn, so point at the owning server.
-      selectedConn = el.dataset.conn!;
+      // The editor reads through state.selectedConn, so point at the owning server.
+      state.selectedConn = el.dataset.conn!;
       void openHardwareEditor({ vm: el.dataset.dcHwedit! });
     };
   });
 }
 
 /// A rendered Datacenter pool card's buttons. Each acts on the owned server
-/// through `selectedConn`, so pointing it there is harmless (the card was not
+/// through `state.selectedConn`, so pointing it there is harmless (the card was not
 /// in that server's page); Volumes opens the pool's page there, which is the
 /// one action that must genuinely switch views.
 function bindDcPoolCards(root: Element) {
@@ -2036,7 +2021,7 @@ function bindDcPoolCards(root: Element) {
   root.querySelectorAll<HTMLElement>("[data-upload]").forEach((b) => {
     b.onclick = (e) => {
       e.stopPropagation();
-      selectedConn = b.dataset.uploadConn!;
+      state.selectedConn = b.dataset.uploadConn!;
       renderTree();
       openUpload(b.dataset.upload!);
     };
@@ -2044,7 +2029,7 @@ function bindDcPoolCards(root: Element) {
   root.querySelectorAll<HTMLElement>("[data-delpool]").forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
-      selectedConn = b.dataset.delpoolConn!;
+      state.selectedConn = b.dataset.delpoolConn!;
       renderTree();
       await deletePool(b.dataset.delpool!);
       renderDc();
@@ -2064,7 +2049,7 @@ function bindDcNetCards(root: Element) {
   root.querySelectorAll<HTMLElement>("[data-net-toggle]").forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
-      selectedConn = b.dataset.netConn!;
+      state.selectedConn = b.dataset.netConn!;
       renderTree();
       await netAction(b.dataset.netAction === "start" ? "start" : "stop", b.dataset.netToggle!);
       renderDc();
@@ -2073,7 +2058,7 @@ function bindDcNetCards(root: Element) {
   root.querySelectorAll<HTMLElement>("[data-net-edit]").forEach((b) => {
     b.onclick = (e) => {
       e.stopPropagation();
-      selectedConn = b.dataset.netConn!;
+      state.selectedConn = b.dataset.netConn!;
       renderTree();
       openEditNetwork(b.dataset.netEdit!);
     };
@@ -2081,7 +2066,7 @@ function bindDcNetCards(root: Element) {
   root.querySelectorAll<HTMLElement>("[data-delnet]").forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
-      selectedConn = b.dataset.delnetConn!;
+      state.selectedConn = b.dataset.delnetConn!;
       renderTree();
       await deleteNetwork(b.dataset.delnet!);
       renderDc();
@@ -2300,9 +2285,9 @@ async function loadDcDashboard() {
   bindDashOpeners(body);
   body.querySelectorAll("[data-dc-dash-conn]").forEach((r: Element) => {
     (r as HTMLElement).onclick = () => {
-      selectedConn = (r as HTMLElement).dataset.dcDashConn!;
-      selectedVm = null;
-      connTab = "dashboard";
+      state.selectedConn = (r as HTMLElement).dataset.dcDashConn!;
+      state.selectedVm = null;
+      state.connTab = "dashboard";
       renderTree();
       void renderConn();
     };
@@ -2514,9 +2499,9 @@ function showSecret(title: string, secret: string) {
 
 /// Return to the selected server's dashboard from a network/pool page.
 function backToConn() {
-  selectedNet = null;
-  selectedPool = null;
-  connTab = "dashboard";
+  state.selectedNet = null;
+  state.selectedPool = null;
+  state.connTab = "dashboard";
   renderTree();
   renderConn();
 }
@@ -2526,7 +2511,7 @@ function backToConn() {
 /// URL rather than stacking it in history, instead of a raw libvirt error.
 function leaveMissing(tab: "networks" | "storage", message: string) {
   clearResourceSelection();
-  connTab = tab;
+  state.connTab = tab;
   restoringRoute = true;
   try {
     renderTree();
@@ -2563,23 +2548,23 @@ function openIpamSettings(conn: string, net: string, ipam: IpamInfo) {
       });
       el.remove();
       toast("DHCP & DNS settings saved");
-      if (selectedNet === net) void renderNetPage();
+      if (state.selectedNet === net) void renderNetPage();
     } catch (e) { toast((e as Error).message, "bad"); }
   };
 }
 
 async function renderNetPage() {
-  if (!selectedConn || !selectedNet) return;
-  if (isOffline(selectedConn)) return renderOffline();
+  if (!state.selectedConn || !state.selectedNet) return;
+  if (isOffline(state.selectedConn)) return renderOffline();
   const gen = beginRender();
   syncUrl();
-  const conn = selectedConn; // narrowed copy for nested closures
+  const conn = state.selectedConn; // narrowed copy for nested closures
   const content = $("#content");
-  const name = selectedNet;
+  const name = state.selectedNet;
   try {
-    const netBase = `/proxy/${selectedConn}/networks/${encodeURIComponent(name)}`;
+    const netBase = `/proxy/${state.selectedConn}/networks/${encodeURIComponent(name)}`;
     const [summary, xml, ipamState] = await Promise.all([
-      api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`),
+      api.get<NetworkSummary[]>(`/proxy/${state.selectedConn}/networks`),
       api.get<{ xml: string }>(`${netBase}/xml`),
       // Absent for a network this host does not serve (bridge mode, or no
       // IPv4 subnet): no IPAM section then.
@@ -2609,7 +2594,7 @@ async function renderNetPage() {
     setHtml(content, `
       <div class="dhead dhead-card">
         <span class="dhead-ic">${ic.network(20)}</span>
-        <span class="dtitle">${esc(displayName(treeNets[selectedConn!], name))}</span>
+        <span class="dtitle">${esc(displayName(treeNets[state.selectedConn!], name))}</span>
         <div class="actions" style="margin:0 0 0 auto">
           <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
           <button class="btn primary" id="net-edit">${ic.edit(14)} Edit</button>
@@ -2689,7 +2674,7 @@ async function renderNetPage() {
         }
         try {
           const res = await api.get<{ interfaces: { mac: string | null }[] }>(
-            `/proxy/${selectedConn}/domains/${encodeURIComponent(vmName)}/interfaces`);
+            `/proxy/${state.selectedConn}/domains/${encodeURIComponent(vmName)}/interfaces`);
           const macs = (res.interfaces ?? []).map((x) => x.mac).filter(Boolean) as string[];
           setHtml(nicSel, macs.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("") || `<option value="">No NIC</option>`);
           nicWrap.hidden = false;
@@ -2777,20 +2762,20 @@ async function renderNetPage() {
 const CONTENT_LABEL: Record<string, string> = { iso: "ISO image", vztmpl: "CT template", images: "Disk image" };
 
 async function renderPoolPage() {
-  if (!selectedConn || !selectedPool) return;
-  if (isOffline(selectedConn)) return renderOffline();
+  if (!state.selectedConn || !state.selectedPool) return;
+  if (isOffline(state.selectedConn)) return renderOffline();
   const gen = beginRender();
   syncUrl();
   const content = $("#content");
-  const name = selectedPool;
-  const conn = selectedConn;
+  const name = state.selectedPool;
+  const conn = state.selectedConn;
   try {
     // The single-pool read refreshes the pool before answering, so these
     // figures follow the filesystem; the all-pools list is served from
     // libvirt's cache and would show what was true when the page opened.
     const [p, vols] = await Promise.all([
-      api.get<PoolSummary>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}`),
-      api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(name)}/volumes`),
+      api.get<PoolSummary>(`/proxy/${state.selectedConn}/pools/${encodeURIComponent(name)}`),
+      api.get<VolumeSummary[]>(`/proxy/${state.selectedConn}/pools/${encodeURIComponent(name)}/volumes`),
     ]);
     for (const v of vols) volumeNames[`${name}/${v.name}`] = v.title || v.name;
     // Same guard as the network page: never paint over a newer view.
@@ -2803,7 +2788,7 @@ async function renderPoolPage() {
     setHtml(content, `
       <div class="dhead dhead-card">
         <span class="dhead-ic">${ic.storage(20)}</span>
-        <span class="dtitle">${esc(displayName(treePools[selectedConn!], name))}</span>
+        <span class="dtitle">${esc(displayName(treePools[state.selectedConn!], name))}</span>
         <div class="actions" style="margin:0 0 0 auto">
           <button class="btn" id="pool-upload">${ic.upload(14)} Upload ISO</button>
           <button class="btn" id="pool-fetch">${ic.download(14)} From URL</button>
@@ -2878,14 +2863,14 @@ async function renderPoolPage() {
 // ---------------------------------------------------------------- connection view
 
 async function renderConn() {
-  if (!selectedConn) return;
-  if (isOffline(selectedConn)) return renderOffline();
-  const conn = connections.find((c) => c.id === selectedConn);
+  if (!state.selectedConn) return;
+  if (isOffline(state.selectedConn)) return renderOffline();
+  const conn = connections.find((c) => c.id === state.selectedConn);
   if (!conn) return;
   // Switching away from the Shell tab must close its session. Most navigation
   // goes through leaveCurrentView; the tab-bar handler re-renders directly, so
   // this is the funnel that covers it.
-  if (connTab !== "shell") terminal?.detachTextConsole();
+  if (state.connTab !== "shell") terminal?.detachTextConsole();
   // Server view owns the pane: invalidates any in-flight resource render.
   beginRender();
   syncUrl();
@@ -2894,28 +2879,28 @@ async function renderConn() {
 setHtml(content, `
     <div class="dhead"><span class="dhead-ic">${ic.server(20)}</span><span class="dtitle">${esc(conn.name)}</span></div>
     <div class="tabbar">
-      <button class="tab ${connTab === "dashboard" ? "active" : ""}" data-tab="dashboard">${ic.datacenter(14)} Dashboard</button>
-      <button class="tab ${connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
-      <button class="tab ${connTab === "containers" ? "active" : ""}" data-tab="containers">${ic.container(14)} Containers</button>
-      <button class="tab ${connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
-      <button class="tab ${connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
-      <button class="tab ${connTab === "firewall" ? "active" : ""}" data-tab="firewall">${ic.firewall(14)} Firewall</button>
-      ${canAdmin() ? `<button class="tab ${connTab === "shell" ? "active" : ""}" data-tab="shell">${ic.terminal(14)} Shell</button>` : ""}
+      <button class="tab ${state.connTab === "dashboard" ? "active" : ""}" data-tab="dashboard">${ic.datacenter(14)} Dashboard</button>
+      <button class="tab ${state.connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
+      <button class="tab ${state.connTab === "containers" ? "active" : ""}" data-tab="containers">${ic.container(14)} Containers</button>
+      <button class="tab ${state.connTab === "networks" ? "active" : ""}" data-tab="networks">${ic.network(14)} Networks</button>
+      <button class="tab ${state.connTab === "storage" ? "active" : ""}" data-tab="storage">${ic.storage(14)} Storage</button>
+      <button class="tab ${state.connTab === "firewall" ? "active" : ""}" data-tab="firewall">${ic.firewall(14)} Firewall</button>
+      ${canAdmin() ? `<button class="tab ${state.connTab === "shell" ? "active" : ""}" data-tab="shell">${ic.terminal(14)} Shell</button>` : ""}
       <div class="tabbar-actions">
-        ${connTab === "dashboard" ? `<button class="btn primary" id="create-resource">${ic.plus(14)} Create Resource</button>` : ""}
-        ${connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
-        ${connTab === "containers" ? `<button class="btn primary" id="create-ct">${ic.plus(14)} Create CT</button>` : ""}
-        ${connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create Network</button>` : ""}
-        ${connTab === "storage" ? `<button class="btn primary" id="create-pool">${ic.plus(14)} Create Pool</button>` : ""}
+        ${state.connTab === "dashboard" ? `<button class="btn primary" id="create-resource">${ic.plus(14)} Create Resource</button>` : ""}
+        ${state.connTab === "vms" ? `<button class="btn primary" id="create-vm">${ic.plus(14)} Create VM</button>` : ""}
+        ${state.connTab === "containers" ? `<button class="btn primary" id="create-ct">${ic.plus(14)} Create CT</button>` : ""}
+        ${state.connTab === "networks" ? `<button class="btn primary" id="create-net">${ic.plus(14)} Create Network</button>` : ""}
+        ${state.connTab === "storage" ? `<button class="btn primary" id="create-pool">${ic.plus(14)} Create Pool</button>` : ""}
       </div>
     </div>
     <div id="conn-body"></div>`);
   restoreTabFocus();
   content.querySelectorAll("[data-tab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
-      connTab = (b as HTMLElement).dataset.tab as typeof connTab;
-      // Clear the whole resource selection, not just selectedVm: leaving
-      // selectedNet/selectedPool set made the 1s poll re-render that network
+      state.connTab = (b as HTMLElement).dataset.tab as typeof state.connTab;
+      // Clear the whole resource selection, not just state.selectedVm: leaving
+      // state.selectedNet/state.selectedPool set made the 1s poll re-render that network
       // or pool page about a second after the user switched to a server tab.
       clearResourceSelection();
       renderConn();
@@ -2930,28 +2915,28 @@ setHtml(content, `
 }
 
 async function renderConnBody() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   const body = $("#conn-body");
   // The create buttons live on the tab bar (rendered by renderConn), so the
   // body only carries the list itself.
-  if (connTab === "shell") {
+  if (state.connTab === "shell") {
     // Re-rendering replaces the whole body, stage included; drop any live
     // session first, or its read loop outlives the element it painted into.
     terminal?.detachTextConsole();
-    renderShellTab(body, selectedConn);
-  } else if (connTab === "dashboard") {
+    renderShellTab(body, state.selectedConn);
+  } else if (state.connTab === "dashboard") {
     setHtml(body, `<div id="dash">${skeleton("dashboard")}</div>`);
     await loadDashboard();
-  } else if (connTab === "vms") {
+  } else if (state.connTab === "vms") {
     setHtml(body, `<div id="vms-list" class="card-grid">${skeleton("cards")}</div>`);
     await fastLoad(loadVms);
-  } else if (connTab === "containers") {
+  } else if (state.connTab === "containers") {
     setHtml(body, `<div id="cts-list">${skeleton("cards")}</div>`);
     await fastLoad(loadCts);
-  } else if (connTab === "networks") {
+  } else if (state.connTab === "networks") {
     setHtml(body, `<div id="nets-list" class="card-grid">${skeleton("cards")}</div>`);
     await fastLoad(loadNetworks);
-  } else if (connTab === "storage") {
+  } else if (state.connTab === "storage") {
     setHtml(body, `<div id="pools-list">${skeleton("cards")}</div>`);
     renderedPools = null; // fresh container: force a full render on first load
     await loadPools();
@@ -2987,18 +2972,18 @@ function renderShellTab(body: Element, conn: string) {
 /// Daemon dashboard: host CPU/RAM with sparklines, then counts and summaries
 /// for VMs, networks, and storage pools. Reuses the existing list endpoints.
 async function loadDashboard() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   const body = $("#dash");
   if (!body) return;
   try {
     const [h, nets, pools] = await Promise.all([
-      api.get<HostStats>(`/proxy/${selectedConn}/host/stats`),
-      api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`),
-      api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`),
+      api.get<HostStats>(`/proxy/${state.selectedConn}/host/stats`),
+      api.get<NetworkSummary[]>(`/proxy/${state.selectedConn}/networks`),
+      api.get<PoolSummary[]>(`/proxy/${state.selectedConn}/pools`),
     ]);
-    const vms = treeVms[selectedConn] ?? [];
+    const vms = treeVms[state.selectedConn] ?? [];
     const running = vms.filter((v) => v.active).length;
-    const conn = selectedConn;
+    const conn = state.selectedConn;
     const live1 = addHostSample(`host:${conn}`, h);
     const { cpuNow, memNow } = live1;
     let cpu: (number | null)[] = live1.cpu;
@@ -3009,7 +2994,7 @@ async function loadDashboard() {
       try {
         ({ a: cpu, b: mem, timing } = await loadHistory(api.get, { kind: "host", conn }));
       } catch { /* keep the live minute */ }
-      if (range().key !== shown || selectedConn !== conn || !$("#dash")) return;
+      if (range().key !== shown || state.selectedConn !== conn || !$("#dash")) return;
     }
     const memUsedKib = h.mem_total_kib - h.mem_available_kib;
     const activeNets = nets.filter((n) => n.active).length;
@@ -3061,7 +3046,7 @@ async function loadDashboard() {
       <table class="grid">
         <tr><th>Name</th><th>Subnet</th><th>State</th></tr>
         ${nets.map((n) => `
-          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${selectedConn}"><td>${esc(n.title || n.name)}</td><td>${n.ip ? esc(n.ip) : "—"}</td>
+          <tr class="row-open" tabindex="0" data-dash-net="${esc(n.name)}" data-dash-conn="${state.selectedConn}"><td>${esc(n.title || n.name)}</td><td>${n.ip ? esc(n.ip) : "—"}</td>
           <td><span class="state ${n.active ? "on" : ""}">${n.active ? "Active" : "Inactive"}</span></td></tr>`).join("") || `<tr><td colspan="3" class="empty">No networks.</td></tr>`}
       </table>
     </div>
@@ -3073,7 +3058,7 @@ async function loadDashboard() {
         const cap = p.capacity ?? 0;
         const usedPct = cap > 0 ? Math.max(0, Math.min(100, (used / cap) * 100)) : 0;
         return `
-        <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-dash-pool="${esc(p.name)}" data-dash-conn="${selectedConn}">
+        <div class="storage-card ${p.active ? "ok" : ""}" data-open tabindex="0" data-dash-pool="${esc(p.name)}" data-dash-conn="${state.selectedConn}">
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.title || p.name)}</span>
@@ -3111,11 +3096,11 @@ function bindDashOpeners(root: HTMLElement) {
 /// Per-network firewall editor: rules and NAT port forwards, enforced by the
 /// daemon via nftables. Replaces the old host-wide nwfilter preset list.
 async function loadFilters() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   const list = $("#filters-list");
   if (!list) return;
   try {
-    const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
+    const nets = await api.get<NetworkSummary[]>(`/proxy/${state.selectedConn}/networks`);
     setHtml(list, `
       <table class="grid">
         <tr><th>Network</th><th>Type</th><th>Subnet</th><th class="col-actions"></th></tr>
@@ -3132,7 +3117,7 @@ async function loadFilters() {
           </tr>`).join("") || `<tr><td colspan="4" class="empty">No networks.</td></tr>`}
       </table>
       <div class="actions"><button class="btn al-open" id="fw-tab-logs">${ic.logs(14)} Access Logs</button></div>`);
-    const conn = selectedConn;
+    const conn = state.selectedConn;
     $("#fw-tab-logs", list).onclick = () => openAccessLogs(conn);
     list.querySelectorAll("[data-fwedit]").forEach((b: Element) => {
       (b as HTMLElement).onclick = () => openFirewallEditor((b as HTMLElement).dataset.fwedit!);
@@ -3455,8 +3440,8 @@ function readFwFwdRows(root: Element): FirewallForward[] {
 
 /// Network firewall editor: rules and NAT port forwards, in a wide modal.
 function openFirewallEditor(netName: string) {
-  if (!selectedConn) return;
-  const conn = selectedConn;
+  if (!state.selectedConn) return;
+  const conn = state.selectedConn;
   let rules: FirewallRule[] = [];
   let forwards: FirewallForward[] = [];
   let policy: FirewallPolicy = blankPolicy();
@@ -3544,7 +3529,7 @@ function openFirewallEditor(netName: string) {
   }
 
   api.get<{ rules: FirewallRule[]; forwards: FirewallForward[]; policy: FirewallPolicy }>(
-    `/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`)
+    `/proxy/${state.selectedConn}/networks/${encodeURIComponent(netName)}/firewall`)
     .then(async (fw) => {
       rules = fw.rules ?? [];
       forwards = fw.forwards ?? [];
@@ -3561,7 +3546,7 @@ function openFirewallEditor(netName: string) {
     read();
     if (forwards.some((f) => !f.lan_ip)) return toast("Pick a guest for each port forward", "bad");
     try {
-      await api.put(`/proxy/${selectedConn}/networks/${encodeURIComponent(netName)}/firewall`,
+      await api.put(`/proxy/${state.selectedConn}/networks/${encodeURIComponent(netName)}/firewall`,
         { rules, forwards, policy });
       toast("Firewall applied");
       el.remove();
@@ -3572,9 +3557,9 @@ function openFirewallEditor(netName: string) {
 }
 
 async function loadVms() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   try {
-    const vms = await api.get<DomainSummary[]>(`/proxy/${selectedConn}/domains`);
+    const vms = await api.get<DomainSummary[]>(`/proxy/${state.selectedConn}/domains`);
     const list = $("#vms-list");
     if (!list) return;
     setHtml(list, vms.map((v) => `
@@ -3600,9 +3585,9 @@ async function loadVms() {
     // The whole card opens the guest; action buttons stop propagation.
     list.querySelectorAll("[data-vm-open]").forEach((card: Element) => {
       (card as HTMLElement).onclick = () => {
-        selectedVm = (card as HTMLElement).dataset.vmOpen!;
-        ctMode = false;
-        vmTab = "summary";
+        state.selectedVm = (card as HTMLElement).dataset.vmOpen!;
+        state.ctMode = false;
+        state.vmTab = "summary";
         renderVm();
       };
     });
@@ -3611,7 +3596,7 @@ async function loadVms() {
         e.stopPropagation();
         const n = (b as HTMLElement).dataset.vmToggle!;
         const start = (b as HTMLElement).dataset.vmAction === "start";
-        await act(`/proxy/${selectedConn}/domains/${encodeURIComponent(n)}/${start ? "start" : "shutdown"}`, "POST");
+        await act(`/proxy/${state.selectedConn}/domains/${encodeURIComponent(n)}/${start ? "start" : "shutdown"}`, "POST");
         loadVms();
       };
     });
@@ -3620,9 +3605,9 @@ async function loadVms() {
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
         leaveCurrentView();
-        selectedVm = (b as HTMLElement).dataset.vmConsole!;
-        ctMode = false;
-        vmTab = "console";
+        state.selectedVm = (b as HTMLElement).dataset.vmConsole!;
+        state.ctMode = false;
+        state.vmTab = "console";
         renderTree();
         void renderVm();
       };
@@ -3714,13 +3699,13 @@ function bindCtCards(root: Element) {
 
 /// A server's Containers tab.
 async function loadCts() {
-  if (!selectedConn) return;
-  const conn = selectedConn;
+  if (!state.selectedConn) return;
+  const conn = state.selectedConn;
   try {
     const cts = await api.get<ContainerSummary[]>(`/proxy/${conn}/containers`);
     const list = $("#cts-list");
     // The poll or a click may have moved on while the daemon answered.
-    if (selectedConn !== conn || !list) return;
+    if (state.selectedConn !== conn || !list) return;
     setHtml(list, cts.length
       ? `<div class="card-grid">${cts.map((v) => ctCard(v, conn)).join("")}</div>`
       : emptyState("containers", "Create CT", "ct-create-empty"));
@@ -3729,7 +3714,7 @@ async function loadCts() {
     bindCtCards(list);
   } catch (e) {
     const list = $("#cts-list");
-    if (list && selectedConn === conn) setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
+    if (list && state.selectedConn === conn) setHtml(list, `<div class="empty">${esc((e as Error).message)}</div>`);
   }
 }
 
@@ -3926,7 +3911,7 @@ const TEMPLATE_SECTION: Record<string, string> = {
 /// Proxmox-style template store: browse the catalog, download into a pool.
 /// The download is the daemon's own (the bytes never pass through the web
 /// server), tracked with the pool's other fetches.
-async function openTemplates(pool: string, conn = selectedConn) {
+async function openTemplates(pool: string, conn = state.selectedConn) {
   if (!conn) return;
   const el = openModal(`Templates — ${esc(displayName(treePools[conn], pool))}`,
     `<div id="tpl-body">${skeleton("table")}</div>`, `<button class="btn" id="tpl-close">Close</button>`);
@@ -3989,7 +3974,7 @@ async function openTemplates(pool: string, conn = selectedConn) {
           toast(`Downloading ${t.os} ${t.release}: progress is on the pool page`);
           el.remove();
           void pollFetches(conn);
-          if (selectedConn === conn && selectedPool === pool) void renderPoolPage();
+          if (state.selectedConn === conn && state.selectedPool === pool) void renderPoolPage();
         } catch (e) { toast((e as Error).message, "bad"); }
       };
     });
@@ -4003,7 +3988,7 @@ async function openTemplates(pool: string, conn = selectedConn) {
 /// admin page creating it for someone, who is made its owner, with `after`
 /// repainting that page. The privileged box is shown only to someone who holds
 /// CT.Privileged here (the server checks the same thing).
-async function openCreateCt(conn = selectedConn, forUser?: { owner: string; after: () => void }) {
+async function openCreateCt(conn = state.selectedConn, forUser?: { owner: string; after: () => void }) {
   if (!conn) return withDaemon((id) => void openCreateCt(id, forUser));
   let pools: PoolSummary[] = [];
   let nets: NetworkSummary[] = [];
@@ -4108,10 +4093,10 @@ async function openCreateCt(conn = selectedConn, forUser?: { owner: string; afte
       if (!ok) return;
       await refreshTreeVms();
       if (forUser) forUser.after();
-      else if (selectedConn === conn && connTab === "containers" && !selectedVm) void loadCts();
+      else if (state.selectedConn === conn && state.connTab === "containers" && !state.selectedVm) void loadCts();
       // Created from the Datacenter (or a server that is not open): the view
       // on screen needs the repaint, and it stays where it is.
-      else if (!selectedConn) renderDc();
+      else if (!state.selectedConn) renderDc();
     });
   };
 }
@@ -4134,9 +4119,9 @@ async function deleteCtOn(conn: string, name: string, after: () => void) {
   }, { done: "", notify: toast });
   if (ok) toast(outcome);
   // Its own page was open: land on the list it was in, not on a dead page.
-  if (ok && selectedConn === conn && selectedVm === name && ctMode) {
+  if (ok && state.selectedConn === conn && state.selectedVm === name && state.ctMode) {
     clearResourceSelection();
-    connTab = "containers";
+    state.connTab = "containers";
   }
   await refreshTreeVms();
   after();
@@ -4146,13 +4131,13 @@ async function deleteCtOn(conn: string, name: string, after: () => void) {
 /// the server's Containers tab (the container's own page lands there too) or
 /// the Datacenter.
 function afterCtDelete(conn: string) {
-  if (!selectedConn) { renderDc(); return; }
-  if (selectedConn !== conn || selectedVm || selectedNet || selectedPool) return;
+  if (!state.selectedConn) { renderDc(); return; }
+  if (state.selectedConn !== conn || state.selectedVm || state.selectedNet || state.selectedPool) return;
   renderConn();
 }
 
 async function deleteCt(name: string) {
-  const conn = selectedConn;
+  const conn = state.selectedConn;
   if (!conn) return;
   await deleteCtOn(conn, name, () => afterCtDelete(conn));
 }
@@ -4166,7 +4151,7 @@ async function renameCt(conn: string, name: string) {
     await api.post(`${guestBase(conn, name, true)}/rename`, { name: next });
     toast("Renamed");
     await refreshTreeVms();
-    if (selectedConn === conn && selectedVm === name && ctMode) void renderVm();
+    if (state.selectedConn === conn && state.selectedVm === name && state.ctMode) void renderVm();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
@@ -4200,12 +4185,12 @@ function netCard(n: NetworkSummary, conn: string, server?: string): string {
 }
 
 async function loadNetworks() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   try {
-    const nets = await api.get<NetworkSummary[]>(`/proxy/${selectedConn}/networks`);
+    const nets = await api.get<NetworkSummary[]>(`/proxy/${state.selectedConn}/networks`);
     const list = $("#nets-list");
     if (!list) return;
-    const conn = selectedConn;
+    const conn = state.selectedConn;
     setHtml(list, nets.map((n) => netCard(n, conn)).join("") || emptyState("networks", "Create Network", "net-create-empty"));
     const createBtn = $("#net-create-empty");
     if (createBtn) createBtn.onclick = () => openCreateNetwork();
@@ -4213,7 +4198,7 @@ async function loadNetworks() {
     list.querySelectorAll("[data-net-open]").forEach((card: Element) => {
       (card as HTMLElement).onclick = (e) => {
         if ((e.target as Element).closest?.("button")) return;
-        selectNetRow(selectedConn!, (card as HTMLElement).dataset.netOpen!);
+        selectNetRow(state.selectedConn!, (card as HTMLElement).dataset.netOpen!);
       };
     });
     list.querySelectorAll("[data-net-toggle]").forEach((b: Element) => {
@@ -4227,7 +4212,7 @@ async function loadNetworks() {
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
         const el = b as HTMLElement;
-        selectedConn = el.dataset.netConn!;
+        state.selectedConn = el.dataset.netConn!;
         void openEditNetwork(el.dataset.netEdit!);
       };
     });
@@ -4235,7 +4220,7 @@ async function loadNetworks() {
       (b as HTMLElement).onclick = (e) => {
         e.stopPropagation();
         const el = b as HTMLElement;
-        selectedConn = el.dataset.delnetConn!;
+        state.selectedConn = el.dataset.delnetConn!;
         void deleteNetwork(el.dataset.delnet!);
       };
     });
@@ -4246,37 +4231,37 @@ async function loadNetworks() {
 }
 
 async function netAction(action: "start" | "stop", name: string) {
-  if (!selectedConn) return;
-  await netActionOn(selectedConn, action, name);
+  if (!state.selectedConn) return;
+  await netActionOn(state.selectedConn, action, name);
 }
 
 async function netActionOn(conn: string, action: "start" | "stop", name: string) {
   try {
     await api.post(`/proxy/${conn}/networks/${encodeURIComponent(name)}/${action}`);
-    if (selectedConn === conn) await loadNetworks();
+    if (state.selectedConn === conn) await loadNetworks();
   } catch (e) {
     toast((e as Error).message, "bad");
   }
 }
 
 async function openEditNetwork(name: string) {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   let xml = "";
   try {
-    xml = (await api.get<{ xml: string }>(`/proxy/${selectedConn}/networks/${encodeURIComponent(name)}/xml`)).xml;
+    xml = (await api.get<{ xml: string }>(`/proxy/${state.selectedConn}/networks/${encodeURIComponent(name)}/xml`)).xml;
   } catch (e) {
     return toast((e as Error).message, "bad");
   }
   // `name` is the libvirt name (a UUID, for any network made or migrated
   // since UUIDs); the form edits the display name. Carried separately so an
   // edit keeps the libvirt name and changes only the title.
-  openNetworkForm(networkFormFromXml(xml), networkUuid(xml), selectedConn, undefined, name);
+  openNetworkForm(networkFormFromXml(xml), networkUuid(xml), state.selectedConn, undefined, name);
 }
 
 /// `conn` defaults to the selected server. The admin page passes its own
 /// (with an owner and a callback), so creating a network for a user happens
 /// over the admin page instead of navigating away from it.
-function openCreateNetwork(conn = selectedConn, forUser?: { owner: string; after: () => void }) {
+function openCreateNetwork(conn = state.selectedConn, forUser?: { owner: string; after: () => void }) {
   openNetworkForm(
     { name: "", forward: "nat", bridge: "", ip: "", dhcp_start: "", dhcp_end: "", dns: "", hosts: [] },
     "",
@@ -4292,7 +4277,7 @@ function openCreateNetwork(conn = selectedConn, forUser?: { owner: string; after
 function openNetworkForm(
   initial: NetworkForm,
   uuid: string,
-  conn: string | null = selectedConn,
+  conn: string | null = state.selectedConn,
   forUser?: { owner: string; after: () => void },
   libvirtName = "",
 ) {
@@ -4446,10 +4431,10 @@ function openNetworkForm(
       .then(() => {
         void refreshTreeVms();
         if (forUser) forUser.after();
-        else if (selectedConn === conn && !selectedVm) void renderConn();
+        else if (state.selectedConn === conn && !state.selectedVm) void renderConn();
         // Made on a server that is not the selected one (the Datacenter's
         // Networks tab): repaint the view actually on screen.
-        else if (!selectedConn) renderDc();
+        else if (!state.selectedConn) renderDc();
       });
   };
 
@@ -4488,9 +4473,9 @@ function poolCard(p: PoolSummary, conn: string, opts: { server?: string; volumeT
 }
 
 async function loadPools() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   try {
-    const pools = await api.get<PoolSummary[]>(`/proxy/${selectedConn}/pools`);
+    const pools = await api.get<PoolSummary[]>(`/proxy/${state.selectedConn}/pools`);
     const list = $("#pools-list");
     if (!list) return;
     const names = pools.map((p) => p.name);
@@ -4499,14 +4484,14 @@ async function loadPools() {
       renderedPools = names;
       // A full rebuild wipes the expanded pool's volume table, so the card is
       // the same builder the Datacenter uses and the table is a sibling.
-      setHtml(list, pools.map((p) => poolCard(p, selectedConn!, { volumeTable: true })).join("")
+      setHtml(list, pools.map((p) => poolCard(p, state.selectedConn!, { volumeTable: true })).join("")
         || emptyState("storage pools", "Create Pool", "pool-create-empty"));
       $("#pool-create-empty")?.addEventListener("click", () => openCreatePool());
       // The whole card opens the pool's page; its buttons keep their own jobs.
       list.querySelectorAll("[data-pool-open]").forEach((card: Element) => {
         (card as HTMLElement).onclick = (e) => {
           if ((e.target as Element).closest?.("button")) return;
-          selectPoolRow(selectedConn!, (card as HTMLElement).dataset.poolOpen!);
+          selectPoolRow(state.selectedConn!, (card as HTMLElement).dataset.poolOpen!);
         };
       });
       list.querySelectorAll("[data-vols]").forEach((b: Element) => {
@@ -4563,7 +4548,7 @@ async function loadPools() {
 }
 
 async function loadVolumes(pool: string) {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   const target = $(`#vols-${cssId(pool)}`);
   if (!target) return;
   // Collapsed: clear the table and stop.
@@ -4572,7 +4557,7 @@ async function loadVolumes(pool: string) {
     return;
   }
   try {
-    const vols = await api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
+    const vols = await api.get<VolumeSummary[]>(`/proxy/${state.selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
     for (const v of vols) volumeNames[`${pool}/${v.name}`] = v.title || v.name;
 setHtml(target, `<table class="grid">
       <tr><th>Volume</th><th>Size</th><th>Allocated</th><th class="col-actions"></th></tr>
@@ -4607,8 +4592,8 @@ setHtml(target, `<div class="empty">${esc((e as Error).message)}</div>`);
 /// runs whenever the list changes, which also covers a guest that changes
 /// state on its own (shut down from inside, crashed).
 function syncVmActions() {
-  if (!selectedConn || !selectedVm) return;
-  const guest = guestList(selectedConn)?.find((x) => x.name === selectedVm);
+  if (!state.selectedConn || !state.selectedVm) return;
+  const guest = guestList(state.selectedConn)?.find((x) => x.name === state.selectedVm);
   const running = guest?.active === true;
   // The header is painted before the lists arrive, and a guest named by its
   // UUID (every new one) then shows the UUID; put its title in once known.
@@ -4623,15 +4608,15 @@ function syncVmActions() {
 }
 
 async function renderVm() {
-  if (!selectedConn || !selectedVm) return;
-  if (isOffline(selectedConn)) return renderOffline();
+  if (!state.selectedConn || !state.selectedVm) return;
+  if (isOffline(state.selectedConn)) return renderOffline();
   // VM view owns the pane: invalidates any in-flight resource render.
   beginRender();
   syncUrl();
   const content = $("#content");
-  const vm = selectedVm;
-  const ct = ctMode;
-  const guest = guestList(selectedConn)?.find((x) => x.name === vm);
+  const vm = state.selectedVm;
+  const ct = state.ctMode;
+  const guest = guestList(state.selectedConn)?.find((x) => x.name === vm);
   const title = guest?.title || vm;
   const running = guest?.active === true;
   const privileged = ct && (guest as ContainerSummary | undefined)?.privileged === true;
@@ -4643,12 +4628,12 @@ setHtml(content, `
     <div class="dhead"><span class="dhead-ic">${ct ? ic.container(20) : ic.vm(20)}</span><span class="dtitle">${esc(title)}</span>
       ${privileged ? `<span class="badge bad" title="No user namespace: its root is the host's root">privileged</span>` : ""}</div>
     <div class="tabbar">
-      <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
-      <button class="tab ${vmTab === "console" ? "active" : ""}" data-vmtab="console">${ct ? ic.keyboard(14) : ic.vm(14)} Console</button>
-      <button class="tab ${vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
-      <button class="tab ${vmTab === "options" ? "active" : ""}" data-vmtab="options">${ic.options(14)} Options</button>
-      <button class="tab ${vmTab === "network" ? "active" : ""}" data-vmtab="network">${ic.network(14)} Network</button>
-      <button class="tab ${vmTab === "xml" ? "active" : ""}" data-vmtab="xml">${ic.xml(14)} XML</button>
+      <button class="tab ${state.vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
+      <button class="tab ${state.vmTab === "console" ? "active" : ""}" data-vmtab="console">${ct ? ic.keyboard(14) : ic.vm(14)} Console</button>
+      <button class="tab ${state.vmTab === "hardware" ? "active" : ""}" data-vmtab="hardware">${ic.cpu(14)} Hardware</button>
+      <button class="tab ${state.vmTab === "options" ? "active" : ""}" data-vmtab="options">${ic.options(14)} Options</button>
+      <button class="tab ${state.vmTab === "network" ? "active" : ""}" data-vmtab="network">${ic.network(14)} Network</button>
+      <button class="tab ${state.vmTab === "xml" ? "active" : ""}" data-vmtab="xml">${ic.xml(14)} XML</button>
       <div class="tabbar-actions row-actions">
         <button class="btn icon" id="vm-start" title="Start" ${running ? "disabled" : ""}>${ic.start()}</button>
         <button class="btn icon" id="vm-shutdown" title="Shutdown" ${running ? "" : "disabled"}>${ic.stop()}</button>
@@ -4656,19 +4641,19 @@ setHtml(content, `
         ${ct ? "" : `<button class="btn icon" id="vm-reset" title="Reset" ${running ? "" : "disabled"}>${ic.reset()}</button>`}
         <button class="btn icon" id="vm-destroy" title="Force Stop" ${running ? "" : "disabled"}>${ic.forceStop()}</button>
         ${ct ? "" : `<button class="btn icon" id="vm-vv" title="Open in virt-viewer" ${running ? "" : "disabled"}>${ic.download()}</button>`}
-        ${canShareVm(selectedConn!, vm, ct) ? `<button class="btn icon" id="vm-share" title="Share">${ic.perms()}</button>` : ""}
+        ${canShareVm(state.selectedConn!, vm, ct) ? `<button class="btn icon" id="vm-share" title="Share">${ic.perms()}</button>` : ""}
         <button class="btn danger icon" id="vm-delete" title="Delete">${ic.trash()}</button>
       </div>
     </div>
-    <div id="vm-body">${vmTab === "console" ? "" : skeleton("page")}</div>`);
+    <div id="vm-body">${state.vmTab === "console" ? "" : skeleton("page")}</div>`);
   restoreTabFocus();
   content.querySelectorAll("[data-vmtab]").forEach((b: Element) => {
     (b as HTMLElement).onclick = () => {
-      const next = (b as HTMLElement).dataset.vmtab as typeof vmTab;
+      const next = (b as HTMLElement).dataset.vmtab as typeof state.vmTab;
       // Leaving the console must tear down its WebSocket and observer,
       // otherwise the session keeps streaming in the background.
-      if (vmTab === "console" && next !== "console") closeConsole();
-      vmTab = next;
+      if (state.vmTab === "console" && next !== "console") closeConsole();
+      state.vmTab = next;
       void renderVm();
     };
   });
@@ -4679,7 +4664,7 @@ setHtml(content, `
     renderTree();
     await renderVm();
   };
-  const base = guestBase(selectedConn, vm);
+  const base = guestBase(state.selectedConn, vm);
   $("#vm-start").onclick = () => act(`${base}/start`, "POST").then(refresh);
   $("#vm-shutdown").onclick = () => act(`${base}/shutdown`, "POST").then(refresh);
   const reset = $("#vm-reset");
@@ -4688,14 +4673,14 @@ setHtml(content, `
   $("#vm-reboot").onclick = () => act(`${base}/reboot`, "POST").then(refresh);
   $("#vm-delete").onclick = () => (ct ? deleteCt(vm) : deleteVm(vm));
   const share = $("#vm-share");
-  if (share) share.onclick = () => void openShareVm(selectedConn!, vm, ct);
-  const vvConn = selectedConn;
+  if (share) share.onclick = () => void openShareVm(state.selectedConn!, vm, ct);
+  const vvConn = state.selectedConn;
   const vv = $("#vm-vv");
   if (vv) vv.onclick = () => void downloadVv(vvConn, vm);
   // XML is read-only, so painting a cached answer first is safe. Summary shows
   // live statistics, which must never be painted stale, and the editing tabs
   // load once: a second paint would discard what the user typed meanwhile.
-  if (vmTab === "xml") await fastLoad(() => renderVmBody(vm));
+  if (state.vmTab === "xml") await fastLoad(() => renderVmBody(vm));
   else await renderVmBody(vm);
 }
 
@@ -4712,8 +4697,8 @@ interface IpamHost {
 }
 
 async function renderVmBody(vm: string) {
-  if (!selectedConn) return;
-  const conn = selectedConn; // narrowed copy for the nested closures below
+  if (!state.selectedConn) return;
+  const conn = state.selectedConn; // narrowed copy for the nested closures below
   const body = $("#vm-body");
   // The pane can be gone: the poll may fire this just as a different view
   // replaces the content (or the user navigates mid-render). Bail rather than
@@ -4722,7 +4707,7 @@ async function renderVmBody(vm: string) {
   // Only the Hardware tab stretches to fill the pane; every other tab scrolls
   // normally. Drop the class here and let the hardware branch re-add it.
   body.parentElement?.classList.remove("vm-fill");
-  if (vmTab === "console" && ctMode) {
+  if (state.vmTab === "console" && state.ctMode) {
     // A container's console is a text terminal: its first tty, long-polled
     // through the daemon, with no graphics to zoom or keys to synthesise.
     setHtml(body, `
@@ -4740,15 +4725,15 @@ async function renderVmBody(vm: string) {
     });
     return;
   }
-  if (vmTab === "options" && ctMode) {
+  if (state.vmTab === "options" && state.ctMode) {
     await renderCtOptions(body, conn, vm);
     return;
   }
-  if (vmTab === "hardware" && ctMode) {
+  if (state.vmTab === "hardware" && state.ctMode) {
     await renderCtHardware(body, conn, vm);
     return;
   }
-  if (vmTab === "console") {
+  if (state.vmTab === "console") {
     const zoomLabel = (z: number) => (z === 0 ? "Fit" : "100%");
     setHtml(body, `
       <div class="console-bar">
@@ -4774,9 +4759,9 @@ async function renderVmBody(vm: string) {
     };
 
     try {
-      const g = await api.get<{ graphics: { kind: string } | null }>(`${guestBase(selectedConn!, vm)}/graphics`);
+      const g = await api.get<{ graphics: { kind: string } | null }>(`${guestBase(state.selectedConn!, vm)}/graphics`);
       const kind = g.graphics?.kind ?? "vnc";
-      const base = `${guestBase(selectedConn!, vm)}/console`;
+      const base = `${guestBase(state.selectedConn!, vm)}/console`;
 
       // SPICE is not RFB and has no usable browser client, so hand the guest
       // over to virt-viewer instead of pretending to render it here.
@@ -4876,11 +4861,11 @@ async function renderVmBody(vm: string) {
     }
     return;
   }
-  if (vmTab === "options") {
+  if (state.vmTab === "options") {
     try {
       const [{ xml }, info] = await Promise.all([
-        api.get<{ xml: string }>(`${guestBase(selectedConn!, vm)}/xml`),
-        api.get<any>(`${guestBase(selectedConn!, vm)}`),
+        api.get<{ xml: string }>(`${guestBase(state.selectedConn!, vm)}/xml`),
+        api.get<any>(`${guestBase(state.selectedConn!, vm)}`),
       ]);
       const pick = (re: RegExp, fallback = "—") => xml.match(re)?.[1] ?? fallback;
       const title = unescapeXml(pick(/<title>([^<]*)<\/title>/, ""));
@@ -4895,7 +4880,7 @@ async function renderVmBody(vm: string) {
       const bootVolume = bootSrc.match(/volume=['"]([^'"]+)['"]/)?.[1] ?? bootSrc.match(/file=['"]([^'"]+)['"]/)?.[1]?.split("/").pop();
       const bootPool = bootSrc.match(/pool=['"]([^'"]+)['"]/)?.[1];
       if (bootVolume && bootPool) {
-        const vols = await api.get<VolumeSummary[]>(`/proxy/${selectedConn}/pools/${encodeURIComponent(bootPool)}/volumes`).catch(() => []);
+        const vols = await api.get<VolumeSummary[]>(`/proxy/${state.selectedConn}/pools/${encodeURIComponent(bootPool)}/volumes`).catch(() => []);
         const nickname = vols.find((v) => v.name === bootVolume)?.title;
         if (nickname) bootNames.hd = `${bootNames.hd} — ${nickname}`;
       }
@@ -4906,11 +4891,11 @@ async function renderVmBody(vm: string) {
       // the formatted label, so the substitution does not depend on a
       // delimiter.
       if (bootNames.networkName && bootNames.network) {
-        const bootNet = (treeNets[selectedConn!] ?? []).find((n) =>
+        const bootNet = (treeNets[state.selectedConn!] ?? []).find((n) =>
           n.name === bootNames.networkName || n.bridge === bootNames.networkName);
         bootNames.network = bootNames.network.replace(
           bootNames.networkName,
-          displayName(treeNets[selectedConn!], bootNet?.name ?? bootNames.networkName),
+          displayName(treeNets[state.selectedConn!], bootNet?.name ?? bootNames.networkName),
         );
       }
       const machine = pick(/machine='([^']*)'/);
@@ -5061,9 +5046,9 @@ async function renderVmBody(vm: string) {
           // libvirt requires title/description right after <name>.
           next = next.replace(/(<name>[^<]*<\/name>)/, `$1\n${meta}`);
         }
-        void runTask(`Update options for ${displayName(guestList(selectedConn!), target)}`, async () => {
-          await api.putXml(`${guestBase(selectedConn!, target)}/xml`, next);
-        }, { done: `Options for ${displayName(guestList(selectedConn!), target)} saved`, notify: toast });
+        void runTask(`Update options for ${displayName(guestList(state.selectedConn!), target)}`, async () => {
+          await api.putXml(`${guestBase(state.selectedConn!, target)}/xml`, next);
+        }, { done: `Options for ${displayName(guestList(state.selectedConn!), target)} saved`, notify: toast });
       });
     } catch (e) {
       setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -5071,7 +5056,7 @@ async function renderVmBody(vm: string) {
     return;
   }
 
-  if (vmTab === "network") {
+  if (state.vmTab === "network") {
     // Everything about this guest's networking on one page: its interfaces
     // (hot-added and removed, live), their DHCP reservations and rate limits,
     // and its firewall. Interfaces are read from the live guest each render,
@@ -5126,7 +5111,7 @@ async function renderVmBody(vm: string) {
     // A container's interface is a veth: it has no model, and it is added and
     // removed at its next start (the response says when), so only a VM gets
     // the live/shut-off line.
-    const ct = ctMode;
+    const ct = state.ctMode;
     const liveNote = ct ? "" : running
       ? "Changes apply to the running guest immediately and are kept for its next boot."
       : "The guest is shut off: changes are saved to its definition.";
@@ -5289,7 +5274,7 @@ async function renderVmBody(vm: string) {
     let vmPolicy: FirewallPolicy = blankPolicy();
     try {
       const fw = await api.get<{ rules: FirewallRule[]; policy: FirewallPolicy }>(
-        `${guestBase(selectedConn!, vm)}/firewall`);
+        `${guestBase(state.selectedConn!, vm)}/firewall`);
       vmRules = fw.rules ?? [];
       vmPolicy = fw.policy ?? blankPolicy();
     } catch {
@@ -5327,7 +5312,7 @@ async function renderVmBody(vm: string) {
       $("#vmfw-apply", rulesBody).onclick = async () => {
         readRules();
         try {
-          await api.put(`${guestBase(selectedConn!, vm)}/firewall`, { rules: vmRules, policy: vmPolicy });
+          await api.put(`${guestBase(state.selectedConn!, vm)}/firewall`, { rules: vmRules, policy: vmPolicy });
           toast("Firewall applied");
         } catch (e) {
           toast((e as Error).message, "bad");
@@ -5348,15 +5333,15 @@ async function renderVmBody(vm: string) {
     return;
   }
 
-  if (vmTab === "hardware") {
+  if (state.vmTab === "hardware") {
     // The hardware editor is embedded here — no read-only table and no
     // "Edit Hardware" click. Devices are edited in place and saved.
     await openHardwareEditor({ vm, inline: true });
     return;
   }
-  if (vmTab === "xml") {
+  if (state.vmTab === "xml") {
     try {
-      const { xml } = await api.get<{ xml: string }>(`${guestBase(selectedConn!, vm)}/xml`);
+      const { xml } = await api.get<{ xml: string }>(`${guestBase(state.selectedConn!, vm)}/xml`);
 setHtml(body, `<div class="cmd">${esc(xml)}</div>`);
     } catch (e) {
 setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
@@ -5364,19 +5349,19 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     return;
   }
   // summary: six cards — CPU, Memory, Disks, Network, Firewall, Hardware.
-  const ct = ctMode;
+  const ct = state.ctMode;
   try {
     const [d, s, xr, fw, nic] = await Promise.all([
-      api.get<any>(`${guestBase(selectedConn!, vm)}`),
-      api.get<DomainStats>(`${guestBase(selectedConn!, vm)}/stats`),
+      api.get<any>(`${guestBase(state.selectedConn!, vm)}`),
+      api.get<DomainStats>(`${guestBase(state.selectedConn!, vm)}/stats`),
       // A container's summary reads its rootfs and NICs from the daemon's own
       // records, not from a definition, so it needs no XML.
-      ct ? Promise.resolve({ xml: "" }) : api.get<{ xml: string }>(`${guestBase(selectedConn!, vm)}/xml`),
+      ct ? Promise.resolve({ xml: "" }) : api.get<{ xml: string }>(`${guestBase(state.selectedConn!, vm)}/xml`),
       api.get<{ rules: FirewallRule[]; policy: FirewallPolicy }>(
-        `${guestBase(selectedConn!, vm)}/firewall`)
+        `${guestBase(state.selectedConn!, vm)}/firewall`)
         .catch(() => ({ rules: [] as FirewallRule[], policy: blankPolicy() })),
       api.get<{ interfaces: { dev: string | null; mac: string | null; model: string | null; network?: string | null; rx_bytes: number; tx_bytes: number }[] }>(
-        `${guestBase(selectedConn!, vm)}/interfaces`)
+        `${guestBase(state.selectedConn!, vm)}/interfaces`)
         .catch(() => ({ interfaces: [] })),
     ]);
     const xml = xr.xml;
@@ -5448,7 +5433,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     for (const pool of backingPools) {
       try {
         const vols = await api.get<VolumeSummary[]>(
-          `/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
+          `/proxy/${state.selectedConn}/pools/${encodeURIComponent(pool)}/volumes`);
         for (const v of vols) {
           const u = { capacity: v.capacity ?? 0, allocation: v.allocation ?? 0 };
           volUsage.set(`${pool}/${v.name}`, u);
@@ -5704,7 +5689,7 @@ function deleteOutcomeLines(res: DomainDeleteResult | undefined): { lines: strin
   return { lines, bad: failed.length > 0 };
 }
 
-/// Delete a VM on `conn`. Shared by the guest view (`selectedConn`) and the
+/// Delete a VM on `conn`. Shared by the guest view (`state.selectedConn`) and the
 /// admin panel, so the two cannot drift apart — including stopping a running
 /// guest first, which the daemon does.
 async function deleteVmOn(conn: string, name: string, after: () => void) {
@@ -5728,7 +5713,7 @@ async function deleteVmOn(conn: string, name: string, after: () => void) {
     set("Stopping the guest if it is running…");
     const res = await api.del<DomainDeleteResult>(
       `/proxy/${conn}/domains/${encodeURIComponent(name)}?remove_storage=${removeStorage}`);
-    if (selectedConn === conn && selectedVm === name) selectedVm = null;
+    if (state.selectedConn === conn && state.selectedVm === name) state.selectedVm = null;
     const lines = deleteOutcomeLines(res).lines;
     if (lines.length) outcome = `VM ${shown} deleted\n${lines.join("\n")}`;
   }, { done: "", notify: toast }).then((ok) => {
@@ -5740,25 +5725,25 @@ async function deleteVmOn(conn: string, name: string, after: () => void) {
 }
 
 async function deleteVm(name: string) {
-  if (!selectedConn) return;
-  await deleteVmOn(selectedConn, name, renderConn);
+  if (!state.selectedConn) return;
+  await deleteVmOn(state.selectedConn, name, renderConn);
 }
 
 /// Rename a domain. libvirt can only rename shut-off persistent guests, so
 /// the daemon rejects a running one and the caller surfaces that reason.
 async function renameVm(name: string) {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   const byUuid = isUuid(name);
-  const next = await askText("Rename VM", "New name", displayName(guestList(selectedConn), name), "alpine-worker");
+  const next = await askText("Rename VM", "New name", displayName(guestList(state.selectedConn), name), "alpine-worker");
   if (!next || next === name) return;
   try {
-    await api.post(`/proxy/${selectedConn}/domains/${encodeURIComponent(name)}/rename`, { name: next });
+    await api.post(`/proxy/${state.selectedConn}/domains/${encodeURIComponent(name)}/rename`, { name: next });
     toast("Renamed");
     // A UUID-named guest is renamed by its title; its id (the URL and every
     // stored key) never changes. An older name-keyed guest swaps the name.
-    if (!byUuid && selectedVm === name) selectedVm = next;
+    if (!byUuid && state.selectedVm === name) state.selectedVm = next;
     await refreshTreeVms();
-    if (selectedVm) renderVm();
+    if (state.selectedVm) renderVm();
     else renderConn();
   } catch (e) {
     toast((e as Error).message, "bad");
@@ -5777,8 +5762,8 @@ async function deleteNetworkOn(conn: string, name: string, shown: string, after:
 }
 
 async function deleteNetwork(name: string) {
-  if (!selectedConn) return;
-  await deleteNetworkOn(selectedConn, name, shownNet(name), loadNetworks);
+  if (!state.selectedConn) return;
+  await deleteNetworkOn(state.selectedConn, name, shownNet(name), loadNetworks);
 }
 
 async function deletePoolOn(conn: string, name: string, shown: string, after: () => void) {
@@ -5793,8 +5778,8 @@ async function deletePoolOn(conn: string, name: string, shown: string, after: ()
 }
 
 async function deletePool(name: string) {
-  if (!selectedConn) return;
-  await deletePoolOn(selectedConn, name, shownPool(name), loadPools);
+  if (!state.selectedConn) return;
+  await deletePoolOn(state.selectedConn, name, shownPool(name), loadPools);
 }
 
 async function deleteVolumeOn(conn: string, pool: string, name: string, after: () => void) {
@@ -5814,19 +5799,19 @@ function setVolumeTitle(conn: string, pool: string, name: string, title: string)
 }
 
 async function renameVolume(pool: string, name: string) {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   const title = await askText("Volume Nickname", "Nickname", shownVolume(pool, name) === name ? "" : shownVolume(pool, name));
   if (title == null) return;
   try {
-    await setVolumeTitle(selectedConn, pool, name, title);
+    await setVolumeTitle(state.selectedConn, pool, name, title);
     volumeNames[`${pool}/${name}`] = title.trim() || name;
     toast("Volume nickname saved");
   } catch (e) { toast((e as Error).message, "bad"); }
 }
 
 async function deleteVolume(pool: string, name: string) {
-  if (!selectedConn) return;
-  await deleteVolumeOn(selectedConn, pool, name, () => loadVolumes(pool));
+  if (!state.selectedConn) return;
+  await deleteVolumeOn(state.selectedConn, pool, name, () => loadVolumes(pool));
 }
 
 /// Delete one resource from the admin panel. It routes to the same delete the
@@ -5849,7 +5834,7 @@ async function deleteConnection(id: string) {
   try {
     await api.del(`/connections/${id}`);
     connections = await api.get<Connection[]>("/connections");
-    if (selectedConn === id) selectedConn = null;
+    if (state.selectedConn === id) state.selectedConn = null;
     renderTree();
     // Whatever is on screen: removing a daemon from the admin page stays there.
     renderView();
@@ -6072,7 +6057,7 @@ function openConnectionDialog(editId?: string) {
 async function reloadConnections() {
   connections = await api.get<Connection[]>("/connections");
   renderTree();
-  if (!selectedConn) renderView();
+  if (!state.selectedConn) renderView();
   void refreshTreeVms();
 }
 
@@ -6287,7 +6272,7 @@ async function openHardwareEditor(opts: {
   /// run once it exists (repaint the admin page, which stays open).
   forUser?: { owner: string; after: () => void };
 } = {}) {
-  const conn = opts.conn ?? selectedConn;
+  const conn = opts.conn ?? state.selectedConn;
   if (!conn) return;
   const editing = !!opts.vm;
   const owner = editing ? null : opts.forUser?.owner ?? null;
@@ -7193,7 +7178,7 @@ async function openHardwareEditor(opts: {
             `/proxy/${conn}/domains/${encodeURIComponent(oldName)}/rename`,
             { name: general.name.trim() });
           target = general.name.trim();
-          if (selectedVm === oldName) selectedVm = target;
+          if (state.selectedVm === oldName) state.selectedVm = target;
         }
         set("rebuilding domain definition");
         // Create any "new volume" disks before the XML references them.
@@ -7336,11 +7321,11 @@ async function openHardwareEditor(opts: {
       .then(() => {
         void refreshTreeVms();
         if (opts.forUser) opts.forUser.after();
-        else if (selectedConn === conn && !selectedVm) renderConn();
+        else if (state.selectedConn === conn && !state.selectedVm) renderConn();
         // Created on a server that is not the app's selected one (the
         // Datacenter's tab, which lists every server's guests): the view that
         // is showing needs the repaint, not the server that was never open.
-        else if (!selectedConn) renderDc();
+        else if (!state.selectedConn) renderDc();
       });
   };
 
@@ -7438,11 +7423,11 @@ function bindResourceCards(el: Element, close: () => void) {
 
 /// Run a create flow against a daemon, asking which one when none is selected.
 /// Choosing a daemon here is a choice about the resource, not a navigation: the
-/// id goes into the flow and `selectedConn` is deliberately left alone, so the
+/// id goes into the flow and `state.selectedConn` is deliberately left alone, so the
 /// Datacenter page the user is standing on stays on screen behind the form.
 function withDaemon(run: (conn: string) => void) {
-  if (selectedConn) {
-    run(selectedConn);
+  if (state.selectedConn) {
+    run(state.selectedConn);
     return;
   }
   void pickDaemon().then((id) => {
@@ -7468,7 +7453,7 @@ function openAddResource() {
 /// Dashboard "Create Resource": pick VM / Network / Storage Pool, then hand
 /// off to the existing create flows.
 function openCreateResource() {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   const el = openModal(
     "Create Resource",
     resourceCards(),
@@ -7481,7 +7466,7 @@ function openCreateResource() {
 /// Define a storage pool on `conn`. `after` is the admin panel's repaint, which
 /// also keeps the flow on the admin page; without it the pool's own server view
 /// is refreshed as before.
-function openCreatePool(conn = selectedConn, after?: () => void) {
+function openCreatePool(conn = state.selectedConn, after?: () => void) {
   if (!conn) return;
   const el = openModal(
     "Create Storage Pool",
@@ -7510,13 +7495,13 @@ function openCreatePool(conn = selectedConn, after?: () => void) {
       .then(() => {
         if (after) { after(); return; }
         void refreshTreeVms();
-        if (selectedConn === conn) renderConn(); else renderDc();
+        if (state.selectedConn === conn) renderConn(); else renderDc();
       });
   };
 }
 
 function openCreateVolume(pool: string) {
-  if (!selectedConn) return;
+  if (!state.selectedConn) return;
   let unit: StorageUnit = STORAGE_DEFAULT;
   const el = openModal(
     `New Volume in ${esc(shownPool(pool))}`,
@@ -7548,7 +7533,7 @@ function openCreateVolume(pool: string) {
     if (!name || !(size > 0)) return toast("Name and size required", "bad");
     el.remove();
     void runTask(`Create volume ${name}`, async () => {
-      await api.post(`/proxy/${selectedConn}/pools/${encodeURIComponent(pool)}/volumes`, {
+      await api.post(`/proxy/${state.selectedConn}/pools/${encodeURIComponent(pool)}/volumes`, {
         xml: volumeXml({ name, capacity_gb: size, format }),
       });
     }, { done: `Volume ${name} created`, notify: toast });
@@ -7599,7 +7584,7 @@ let uploadPollSeq = 0;
 let uploadPollApplied = 0;
 
 async function pollUploads() {
-  if (!selectedConn) return stopUploadPoll();
+  if (!state.selectedConn) return stopUploadPoll();
   const seq = ++uploadPollSeq;
   let jobs: StagedUpload[];
   try {
@@ -7618,7 +7603,7 @@ async function pollUploads() {
     if (j.phase === "done") {
       // The daemon's copy is verified and the staged file is gone.
       toast(`${j.name} stored on the daemon`);
-      if (selectedPool === j.pool) void renderPoolPage();
+      if (state.selectedPool === j.pool) void renderPoolPage();
     } else if (j.phase === "failed") {
       toast(`${j.name}: ${j.error ?? "transfer failed"}`, "bad");
     }
@@ -7663,8 +7648,8 @@ function uploadsSection(pool: string): string {
 /// table underneath whoever is using it.
 function refreshUploadBars() {
   const host = document.getElementById("pool-uploads");
-  if (!host || !selectedPool) return;
-  setHtml(host, uploadsSection(selectedPool));
+  if (!host || !state.selectedPool) return;
+  setHtml(host, uploadsSection(state.selectedPool));
   bindUploads();
   syncTransfersTitle();
 }
@@ -7727,8 +7712,8 @@ const liveFetch = (j: FetchJob) => j.phase === "downloading" || j.phase === "ver
 /// Ask the daemon to download an ISO into `pool` itself. The bytes never pass
 /// through this server or the browser, and the job survives closing the tab.
 function openFetch(pool: string) {
-  if (!selectedConn) return;
-  const conn = selectedConn;
+  if (!state.selectedConn) return;
+  const conn = state.selectedConn;
   const el = openModal(
     `Download ISO into ${esc(shownPool(pool))}`,
     `<label class="field"><span>URL</span>
@@ -7798,7 +7783,7 @@ async function pollFetches(conn: string) {
     if (j.phase === "done") {
       toast(`${j.name} downloaded and stored`);
       void api.post("/activity", { label: `Download ${j.name} into pool ${j.pool}`, status: "done", message: j.url }).catch(() => {});
-      if (selectedPool === j.pool && selectedConn === conn) void renderPoolPage();
+      if (state.selectedPool === j.pool && state.selectedConn === conn) void renderPoolPage();
     } else if (j.phase === "failed") {
       toast(`${j.name}: ${j.error ?? "download failed"}`, "bad");
       void api.post("/activity", { label: `Download ${j.name} into pool ${j.pool}`, status: "failed", message: `${j.error ?? ""} (${j.url})` }).catch(() => {});
@@ -7811,8 +7796,8 @@ async function pollFetches(conn: string) {
     fetchTimer = null;
   }
   const host = document.getElementById("pool-fetches");
-  if (host && selectedPool && selectedConn === conn) {
-    setHtml(host, fetchesSection(conn, selectedPool));
+  if (host && state.selectedPool && state.selectedConn === conn) {
+    setHtml(host, fetchesSection(conn, state.selectedPool));
     bindFetches(conn);
     syncTransfersTitle();
   }
@@ -7866,8 +7851,8 @@ function bindFetches(conn: string) {
 }
 
 function openUpload(pool: string) {
-  if (!selectedConn) return;
-  const conn = selectedConn;
+  if (!state.selectedConn) return;
+  const conn = state.selectedConn;
   const el = openModal(
     `Upload ISO to ${esc(shownPool(pool))}`,
     `<label class="field"><span>Volume Name</span>
@@ -8264,25 +8249,25 @@ function pollRound() {
   void refreshHealth();
   // A down server's views show the offline panel; polling its daemon would
   // only fail again and paint the raw error over it.
-  if (isOffline(selectedConn)) return;
+  if (isOffline(state.selectedConn)) return;
   // Keep the sidebar's guest states live regardless of the open pane.
   void refreshTreeVms();
-  if (!selectedConn && !selectedVm && dcTab === "dashboard") {
+  if (!state.selectedConn && !state.selectedVm && state.dcTab === "dashboard") {
     loadDcDashboard();
-  } else if (selectedConn && !selectedVm) {
+  } else if (state.selectedConn && !state.selectedVm) {
     // Resource pages poll their own data; only repaint when they are the
     // view actually on screen.
-    if (selectedNet) renderNetPage();
-    else if (selectedPool) renderPoolPage();
-    else if (connTab === "dashboard") loadDashboard();
-    else if (connTab === "vms") loadVms();
-    else if (connTab === "containers") loadCts();
-    else if (connTab === "networks") loadNetworks();
-    else if (connTab === "storage") loadPools();
+    if (state.selectedNet) renderNetPage();
+    else if (state.selectedPool) renderPoolPage();
+    else if (state.connTab === "dashboard") loadDashboard();
+    else if (state.connTab === "vms") loadVms();
+    else if (state.connTab === "containers") loadCts();
+    else if (state.connTab === "networks") loadNetworks();
+    else if (state.connTab === "storage") loadPools();
     // The shell is a live session, not data to re-read; nothing to poll.
-    else if (connTab === "firewall") loadFilters();
-  } else if (selectedConn && selectedVm && vmTab === "summary") {
-    renderVmBody(selectedVm);
+    else if (state.connTab === "firewall") loadFilters();
+  } else if (state.selectedConn && state.selectedVm && state.vmTab === "summary") {
+    renderVmBody(state.selectedVm);
   }
 }
 
