@@ -116,6 +116,11 @@ fn check(req: &StartReq) -> Result<(reqwest::Url, String, Option<String>), Strin
     if name.contains('/') || name == "." || name == ".." || name.chars().any(char::is_control) {
         return Err(format!("'{name}' is not a usable volume name"));
     }
+    // This endpoint fetches installation media; templates go through `begin`
+    // directly and are not subject to this.
+    if !name.to_ascii_lowercase().ends_with(".iso") {
+        return Err(format!("'{name}' is not an .iso file; only ISO images can be downloaded"));
+    }
     let sha = match req
         .sha256
         .as_deref()
@@ -467,6 +472,14 @@ mod tests {
         assert_eq!(n, "a b.iso", "percent-escapes are decoded");
         let (_, n, _) = check(&req("https://x.org/a.iso", Some("  mine.iso "), None)).unwrap();
         assert_eq!(n, "mine.iso");
+    }
+
+    #[test]
+    fn only_iso_names_are_accepted() {
+        assert!(check(&req("https://x.org/logo.png", None, None)).is_err());
+        assert!(check(&req("https://x.org/favicon.ico", None, None)).is_err());
+        assert!(check(&req("https://x.org/a.iso", Some("pic.png"), None)).is_err());
+        assert!(check(&req("https://x.org/DISC.ISO", None, None)).is_ok());
     }
 
     #[test]
