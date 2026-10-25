@@ -62,6 +62,11 @@ import X from "@phosphor-icons/core/assets/fill/x-fill.svg?raw";
 import ZoomIn from "@phosphor-icons/core/assets/fill/magnifying-glass-plus-fill.svg?raw";
 import ZoomOut from "@phosphor-icons/core/assets/fill/magnifying-glass-minus-fill.svg?raw";
 
+// The one-drive daemon glyph is Phosphor's hard-drives top unit, redrawn at the
+// vertical centre and a little taller: hard-drive-fill is too tall for a server
+// beside the other icons, and the top unit alone sits off-centre.
+const ServerOne = `<svg viewBox="0 0 256 256"><path d="M208,80H48A16,16,0,0,0,32,96v64a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V96A16,16,0,0,0,208,80ZM180,140a12,12,0,1,1,12-12A12,12,0,0,1,180,140Z"/></svg>`;
+
 // Every Phosphor fill icon is one <path> on a 256 grid; keep just its data.
 // Colour is set once in CSS (`.ico > svg`), never per icon.
 const VIEWBOX = "0 0 256 256";
@@ -123,7 +128,9 @@ export const ic = {
   datacenter: svg(LayoutDashboard),
   /// Phone-only: opens the sidebar drawer.
   menu: svg(List),
-  server: svg(Server),
+  // One drive for a daemon, two for the datacenter that holds them.
+  server: svg(ServerOne),
+  dc: svg(Server),
   logs: svg(ListSearch),
   offline: svg(Plugs),
   vm: svg(Monitor),

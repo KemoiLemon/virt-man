@@ -234,8 +234,8 @@ table.grid tr.row-open:hover td:first-child { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
 
 /* ---------------------------------------------------------- chart range */
-.range-bar { display: flex; gap: 4px; justify-content: flex-end; margin-bottom: 10px; }
-.range-btn { padding: 3px 9px; font-size: 11px; }
+/* The dropdown replaces the axis' left label, so it stays small and flush. */
+.chart-axis .select-trigger { width: auto; min-width: 0; padding: 2px 8px; font-size: 11px; }
 .spark { cursor: crosshair; }
 /* Hover readout: fixed, so it floats over the pane and survives the poll's
    re-render of the chart underneath it. */

@@ -33,10 +33,11 @@ export function setRange(key: string): boolean {
   return true;
 }
 
-/// The range buttons, for a dashboard or summary header.
-export function rangeBar(): string {
-  return `<div class="range-bar" role="group" aria-label="Chart Range">${RANGES.map((r) =>
-    `<button class="btn range-btn ${r === current ? "on" : ""}" data-range="${r.key}" aria-pressed="${r === current}">${r.label}</button>`).join("")}</div>`;
+/// The range dropdown that sits in every chart's axis row. The range is one
+/// setting for the whole page, so choosing it on any chart repaints them all.
+export function rangeSelect(): string {
+  return `<select class="range-sel" aria-label="Chart Range">${RANGES.map((r) =>
+    `<option value="${r.key}"${r === current ? " selected" : ""}>${r.label}</option>`).join("")}</select>`;
 }
 
 export interface HistorySeries { a: (number | null)[]; b: (number | null)[]; timing: Timing }

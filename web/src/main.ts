@@ -22,7 +22,7 @@ import { enhanceSelects } from "./listbox";
 import { poolUsed } from "./pool-usage";
 import { addDiskSample, addHostSample, addNetSample, addSample, avgRateKib, fmtBytes, fmtRate, pct, sparkline } from "./stats";
 import type { Timing } from "./stats";
-import { bindChartHover, isLive, loadHistory, range, rangeBar, setRange } from "./history";
+import { bindChartHover, isLive, loadHistory, range, rangeSelect, setRange } from "./history";
 import { DIR_LABEL, GROUP_LABEL, KIND_LABEL, PAGE, defaultFilter, drillDown, fmtWhen, forLive, liveApplies, logQuery, sortMark, toggleSort, withGroup } from "./access";
 import type { FlowDir, Group, Kind, LogFilter } from "./access";
 import type { DomainStats, HostStats } from "./stats";
@@ -91,6 +91,68 @@ function swapAnim(toAdmin: boolean) {
   const b = document.getElementById("admin-btn");
   if (b) replay(b, "turn", 450);
 }
+
+/// Choosing a different sidebar row slides the page in from the direction of
+/// travel: a row further down brings the page up from below, a row further up
+/// brings it down from above (the old page is simply replaced). Keyed on what is selected, not its position, so a
+/// guest appearing above the selection (the poll) does not look like a move.
+let lastSel: { key: string; idx: number; admin: boolean } | null = null;
+function noteTreeSel(tree: Element, admin: boolean) {
+  const sel = tree.querySelector<HTMLElement>(".tree-row.sel");
+  if (!sel) return;
+  const idx = [...tree.querySelectorAll(".tree-row")].indexOf(sel);
+  const key = JSON.stringify({ ...sel.dataset });
+  const prev = lastSel;
+  lastSel = { key, idx, admin };
+  const content = document.getElementById("content");
+  if (!prev || !content || prev.admin !== admin || prev.key === key) return;
+  const down = idx > prev.idx;
+  content.classList.remove("nav-up", "nav-down");
+  replay(content, down ? "nav-down" : "nav-up", 400);
+}
+
+/// Switching tabs slides the new page in sideways, from the side of the tab
+/// that was chosen. Only what is under the tab bar moves, and only what is new:
+/// the observer starts before the tab's own handler runs and slides the nodes
+/// it paints (or, for a body that loads, the nodes that arrive in it). Sliding
+/// what was already there would fade out the old page just before it is
+/// replaced.
+document.addEventListener("click", (e) => {
+  const tab = (e.target as Element | null)?.closest?.("#content .tabbar .tab") as HTMLElement | null;
+  const bar = tab?.closest<HTMLElement>(".tabbar");
+  if (!tab || !bar || tab.classList.contains("active")) return;
+  const tabs = [...bar.querySelectorAll(".tab")];
+  const from = tabs.findIndex((t) => t.classList.contains("active"));
+  if (from < 0) return;
+  const cls = tabs.indexOf(tab) > from ? "tab-in-right" : "tab-in-left";
+  const host = bar.parentElement!;
+  const slide = (n: Element) => {
+    // The skeleton's own rise-in (.sk-reveal) would take over the moment this
+    // slide ends and replay as a second animation, so the slide replaces it.
+    n.classList.remove("tab-in-right", "tab-in-left", "sk-reveal");
+    n.parentElement?.classList.remove("sk-reveal");
+    replay(n, cls, 400);
+  };
+  const obs = new MutationObserver((muts) => {
+    const nb = bar.isConnected ? bar : host.isConnected ? host.querySelector(":scope > .tabbar") : document.querySelector("#content .tabbar");
+    if (!nb) return;
+    const below = new Set<Element>();
+    for (let n = nb.nextElementSibling; n; n = n.nextElementSibling) below.add(n);
+    let done = false;
+    for (const x of muts.flatMap((m) => [...m.addedNodes])) {
+      if (!(x instanceof HTMLElement) || x.classList.contains("skeleton")) continue;
+      // A new page section slides if it has content; an empty one is a body
+      // still loading, and what arrives in it is what slides.
+      if (below.has(x) ? (x.childElementCount > 0 || !!x.textContent?.trim()) && !x.querySelector(":scope > .skeleton") : x.parentElement && below.has(x.parentElement)) {
+        slide(x);
+        done = true;
+      }
+    }
+    if (done) obs.disconnect();
+  });
+  obs.observe(host.isConnected ? host : document.getElementById("content")!, { childList: true, subtree: true });
+  window.setTimeout(() => obs.disconnect(), 3000);
+}, true);
 
 /// The path each container was last painted at; see `setHtml`.
 const painted = new WeakMap<Element, string>();
@@ -461,12 +523,12 @@ function renderOffline() {
     ${offlinePanel(selectedConn)}`);
 }
 
-// Chart range buttons: one delegated handler, since the dashboards re-render
+// Chart range dropdowns: one delegated handler, since the dashboards re-render
 // every second. Only the charts' own views carry the bar, so re-running the
 // current view's poll body repaints exactly them.
-document.addEventListener("click", (e) => {
-  const b = (e.target as Element | null)?.closest?.("[data-range]") as HTMLElement | null;
-  if (!b || !setRange(b.dataset.range!)) return;
+document.addEventListener("change", (e) => {
+  const sel = (e.target as Element | null)?.closest?.(".range-sel") as HTMLSelectElement | null;
+  if (!sel || !setRange(sel.value)) return;
   if (!selectedConn) void loadDcDashboard();
   else if (selectedVm) void renderVmBody(selectedVm);
   else void loadDashboard();
@@ -707,7 +769,7 @@ function openCommandPalette() {
 
   // Navigation. Every page with a URL is reachable, and the hint says where
   // it lives, so typing a server, guest, network or pool name finds it.
-  add("nav-dc", "Datacenter", "Dashboard", ic.datacenter(), toDc("dashboard"));
+  add("nav-dc", "Datacenter", "Dashboard", ic.dc(), toDc("dashboard"));
   add("nav-dc-guests", "Datacenter — Guests", "/guests", ic.vms(), toDc("guests"));
   add("nav-dc-cts", "Datacenter — Containers", "/containers", ic.container(), toDc("containers"));
   const connTabs: [typeof connTab, string, string][] = [
@@ -1096,6 +1158,7 @@ function renderTree() {
     const restore = holdFocus(tree, ".tree-row.sel");
     setHtml(tree, adminTree(adminSection));
     restore();
+    noteTreeSel(tree, true);
     tree.querySelectorAll("[data-admin-section]").forEach((row: Element) => {
       (row as HTMLElement).onclick = () => openAdmin((row as HTMLElement).dataset.adminSection as AdminSection);
     });
@@ -1184,12 +1247,13 @@ function renderTree() {
   const restoreTreeFocus = holdFocus(tree, ".tree-row.sel");
   setHtml(tree, `
     <button class="tree-row tree-root ${selectedConn === null ? "sel" : ""}" id="dc-row">
-      <span class="tree-ic">${ic.datacenter()}</span>
+      <span class="tree-ic">${ic.dc()}</span>
       <span class="tree-label">Datacenter</span>
     </button>
     ${serverRows || ghostRow("tree-group", ic.server(), "No servers")}`);
 
   restoreTreeFocus();
+  noteTreeSel(tree, false);
   $("#dc-row").onclick = () => {
     leaveCurrentView();
     selectedConn = null;
@@ -1200,10 +1264,13 @@ function renderTree() {
   };
   tree.querySelectorAll("[data-conn]").forEach((row: Element) => {
     (row as HTMLElement).onclick = () => {
+      // Another server keeps the tab open on this one; coming from anywhere
+      // else starts at the dashboard.
+      const onServer = selectedConn !== null && !selectedVm && !selectedNet && !selectedPool;
       leaveCurrentView();
       selectedConn = (row as HTMLElement).dataset.conn!;
       clearResourceSelection();
-      connTab = "dashboard";
+      if (!onServer) connTab = "dashboard";
       renderTree();
       renderConn();
       void refreshTreeVms();
@@ -1215,11 +1282,14 @@ function renderTree() {
       // Set the connection first: renderVm() bails out when selectedConn is
       // null, which made guest clicks silently do nothing from the
       // Datacenter view or a different server's branch.
+      // From another guest, stay on the same tab (Hardware stays Hardware).
+      const fromGuest = selectedVm !== null;
       leaveCurrentView();
       selectedConn = el.dataset.vmConn!;
       clearResourceSelection();
       selectedVm = el.dataset.vm!;
-      vmTab = "summary";
+      ctMode = false;
+      if (!fromGuest) vmTab = "summary";
       renderTree();
       void renderVm();
     };
@@ -1280,13 +1350,14 @@ function selectVmRow(conn: string, vm: string, tab?: typeof vmTab) {
 }
 
 /// Select a container (optionally opening one of its tabs).
-function selectCtRow(conn: string, ct: string, tab: typeof vmTab = "summary") {
+function selectCtRow(conn: string, ct: string, tab?: typeof vmTab) {
+  const keep = selectedVm !== null ? vmTab : "summary";
   leaveCurrentView();
   selectedConn = conn;
   clearResourceSelection();
   selectedVm = ct;
   ctMode = true;
-  vmTab = tab;
+  vmTab = tab ?? keep;
   renderTree();
   void renderVm();
 }
@@ -1913,7 +1984,7 @@ function renderDc() {
     body = `<div id="users-area">${skeleton("table")}</div>`;
   }
   const restoreTabFocus = holdFocus(content, ".tab.active");
-setHtml(content, `<div class="dhead"><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
+setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.dc(20)}</span><span class="dtitle">Datacenter</span></div>${tabs}${body}`);
   restoreTabFocus();
 
   if (dcTab === "dashboard") void loadDcDashboard();
@@ -2131,7 +2202,6 @@ async function loadDcDashboard() {
   const byId = new Map(live.map(({ c, h, pools: ps }) => [c.id, { h, pools: ps }] as const));
 
   setHtml(body, `
-    ${rangeBar()}
     <div class="cards">
       <div class="card"><span class="card-ic">${ic.server(20)}</span><div><b>${connections.length}</b><i>SERVERS</i></div></div>
       <div class="card"><span class="card-ic">${ic.vms(20)}</span><div><b>${vms.length}</b><i>GUESTS</i></div></div>
@@ -2150,7 +2220,7 @@ async function loadDcDashboard() {
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(cpu, "", 100, timing)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot"><span>${agg.cpus} cores</span><span>${live.length} servers</span></div>
       </div>
@@ -2164,7 +2234,7 @@ async function loadDcDashboard() {
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(mem, "mem", 100, timing)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(memUsedKib * 1024)} used</span>
@@ -2181,7 +2251,7 @@ async function loadDcDashboard() {
         <div class="meter"><div class="meter-fill ${diskNow > 85 ? "hot" : ""}" style="width:${diskNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(disk, "", 100, diskTiming)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(diskUsed)} used</span>
@@ -2238,8 +2308,7 @@ async function loadDcDashboard() {
           <div class="storage-card-head">
             <span class="storage-card-icon">${ic.storage()}</span>
             <span class="storage-card-title">${esc(p.title || p.name)}<span class="host" style="display:block;font-weight:400">${esc(c.name)}</span></span>
-            <span class="badge ${p.active ? "on" : ""}">${p.active ? "Active" : "Inactive"}</span>
-          </div>
+              </div>
           <div class="metric-value">${usedPct.toFixed(usedPct >= 10 ? 0 : 1)}%</div>
           <div class="meter"><div class="meter-fill ${usedPct > 85 ? "hot" : ""}" style="width:${usedPct.toFixed(1)}%"></div></div>
           <div class="metric-foot">
@@ -2350,16 +2419,31 @@ const adminCtx: AdminCtx = {
   stillCurrent: (gen) => stillCurrent(gen),
 };
 
+let shownAdmin: AdminSection | null = null;
 function renderAdmin() {
   if (!adminSection) return;
   const gen = beginRender();
   syncUrl();
   const content = $("#content");
-  setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.admin(20)}</span>
+  // Moving between sections or tabs keeps the page and the old section on
+  // screen until the new one is ready, then patches it in; rebuilding the shell
+  // blanked the pane for the length of the read.
+  let area = content.querySelector("#admin-area") as HTMLElement | null;
+  if (!area) {
+    setHtml(content, `<div class="dhead"><span class="dhead-ic">${ic.admin(20)}</span>
       <span class="dtitle">${esc(adminTitle(adminSection))}</span>
       <span class="dhead-actions" id="admin-head"></span></div>
     <div id="admin-area"></div>`);
-  void renderAdminSection(adminCtx, $("#admin-area", content), adminSection, gen);
+    area = $("#admin-area", content);
+  } else {
+    const title = content.querySelector(".dtitle");
+    if (title) title.textContent = adminTitle(adminSection);
+    // The old section's buttons must not outlive it: they would act on the
+    // wrong page until the new one paints its own.
+    if (shownAdmin !== adminSection) content.querySelector("#admin-head")?.replaceChildren();
+  }
+  shownAdmin = adminSection;
+  void renderAdminSection(adminCtx, area!, adminSection, gen);
 }
 
 
@@ -2482,7 +2566,6 @@ async function renderNetPage() {
       <div class="dhead">
         <span class="dhead-ic">${ic.network(20)}</span>
         <span class="dtitle">${esc(displayName(treeNets[selectedConn!], name))}</span>
-        <span class="badge ${net.active ? "on" : ""}">${net.active ? "Active" : "Inactive"}</span>
       </div>
       <div class="actions" style="margin-top:12px">
         <button class="btn ${net.active ? "on" : ""}" id="net-toggle">${net.active ? ic.stop(14) : ic.start(14)} ${net.active ? "Stop" : "Start"}</button>
@@ -2763,10 +2846,7 @@ async function renderConn() {
   const content = $("#content");
   const restoreTabFocus = holdFocus(content, ".tab.active");
 setHtml(content, `
-    <div class="dhead"><span class="dtitle">${esc(conn.name)}</span>
-      <span class="badge">daemon</span>
-    </div>
-    <div class="dsub">${esc(conn.url)}${conn.fingerprint ? " · " + conn.fingerprint : ""}</div>
+    <div class="dhead"><span class="dhead-ic">${ic.server(20)}</span><span class="dtitle">${esc(conn.name)}</span></div>
     <div class="tabbar">
       <button class="tab ${connTab === "dashboard" ? "active" : ""}" data-tab="dashboard">${ic.datacenter(14)} Dashboard</button>
       <button class="tab ${connTab === "vms" ? "active" : ""}" data-tab="vms">${ic.vms(14)} VMs</button>
@@ -2890,7 +2970,6 @@ async function loadDashboard() {
     const activePools = pools.filter((p) => p.active).length;
 
     setHtml(body, `
-    ${rangeBar()}
     <div class="cards">
       <div class="card"><span class="card-ic">${ic.vms(20)}</span><div><b>${vms.length}</b><i>VMS</i></div></div>
       <div class="card ${running > 0 ? "ok" : ""}"><span class="card-ic">${ic.start(20)}</span><div><b>${running}</b><i>RUNNING</i></div></div>
@@ -2908,7 +2987,7 @@ async function loadDashboard() {
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(cpu, "", 100, timing)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot"><span>${h.cpus} CPU</span><span>host load</span></div>
       </div>
@@ -2922,7 +3001,7 @@ async function loadDashboard() {
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(mem, "mem", 100, timing)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(memUsedKib * 1024)} used</span>
@@ -4517,7 +4596,6 @@ async function renderVm() {
   const restoreTabFocus = holdFocus(content, ".tab.active");
 setHtml(content, `
     <div class="dhead"><span class="dhead-ic">${ct ? ic.container(20) : ic.vm(20)}</span><span class="dtitle">${esc(title)}</span>
-      ${ct ? `<span class="badge">container</span>` : ""}
       ${privileged ? `<span class="badge bad" title="No user namespace: its root is the host's root">privileged</span>` : ""}</div>
     <div class="tabbar">
       <button class="tab ${vmTab === "summary" ? "active" : ""}" data-vmtab="summary">${ic.datacenter(14)} Summary</button>
@@ -5402,7 +5480,6 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
     ];
 
     setHtml(body, `
-    ${rangeBar()}
     <div class="sumgrid vm-sumgrid vm-top">
       <div class="metric ${running ? "ok" : ""}">
         <div class="metric-head">
@@ -5413,7 +5490,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         <div class="meter"><div class="meter-fill ${cpuNow > 85 ? "hot" : ""}" style="width:${cpuNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(cpu, "", 100, timing)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot"><span>${s.vcpus} vCPU</span><span>${esc(capLabel(d.state))}</span></div>
       </div>
@@ -5427,7 +5504,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         <div class="meter"><div class="meter-fill ${memNow > 85 ? "hot" : ""}" style="width:${memNow.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(mem, "mem", 100, timing)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${fmtBytes(usedKib * 1024)} used</span>
@@ -5447,7 +5524,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
         <div class="meter"><div class="meter-fill ${selPct > 85 ? "hot" : ""}" style="width:${selPct.toFixed(1)}%"></div></div>
         <div class="chart">
           ${sparkline(diskHist, "disk", 100, diskTiming)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${selCap > 0 ? `${fmtBytes(selAlloc)} used` : "usage unknown"}</span>
@@ -5470,7 +5547,7 @@ setHtml(body, `<div class="empty">${esc((e as Error).message)}</div>`);
           <div class="net-legend"><span class="rx">▼ RX ${fmtRate(rxNow)}</span><span class="tx">▲ TX ${fmtRate(txNow)}</span></div>
           ${sparkline(rx, "rx", netMax, netTiming)}
           ${sparkline(tx, "tx", netMax, netTiming)}
-          <div class="chart-axis"><span>${range().axis}</span><span>now</span></div>
+          <div class="chart-axis">${rangeSelect()}<span>now</span></div>
         </div>
         <div class="metric-foot">
           <span>${selNic?.dev ?? "—"}</span>

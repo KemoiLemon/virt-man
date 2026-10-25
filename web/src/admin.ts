@@ -202,7 +202,9 @@ function fmtLimit(n: number | null | undefined, unit = ""): string {
 /// Paint one admin section into `area`. `gen` guards against a slow load
 /// painting over a section the user has since left.
 export async function renderAdminSection(ctx: AdminCtx, area: HTMLElement, section: AdminSection, gen: number) {
-  ctx.setHtml(area, skeleton("table"));
+  // A fresh pane gets the skeleton; one already showing a section keeps it
+  // until the new one is ready (the page is patched in place, not blanked).
+  if (!area.firstElementChild) ctx.setHtml(area, skeleton("table"));
   try {
     await loadMeta(ctx);
     if (!ctx.stillCurrent(gen)) return;
@@ -544,7 +546,9 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
     { path: "/", label: "/" },
     { path: "/nodes", label: "/nodes" },
   ];
-  for (const c of ctx.connections()) {
+  // Daemons are asked at the same time, not one after another.
+  const per = await Promise.all(ctx.connections().map(async (c) => {
+    const out: { path: string; label: string }[] = [];
     const node = `/nodes/${c.id}`;
     // Labelled by the daemon's *name*, the way `pathLabel` reads an existing
     // entry back, so the picker and the table spell a path the same way. The
@@ -578,8 +582,9 @@ async function pathChoices(ctx: AdminCtx): Promise<{ path: string; label: string
     } catch {
       // Offline daemon: its whole-daemon paths are still offered.
     }
-  }
-  return out;
+    return out;
+  }));
+  return [...out, ...per.flat()];
 }
 
 /// A path as a person reads it: daemon ids become names.
@@ -720,6 +725,8 @@ const KIND_NOUN: Record<"vm" | "ct" | "network" | "pool", string> = {
   vm: "VM", ct: "Container", network: "Network", pool: "Storage Pool",
 };
 
+let resCache: AdminResource[] | null = null;
+
 function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
   return async (ctx, area, gen) => {
     const conns = ctx.connections();
@@ -729,8 +736,9 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
       ctx.setHtml(area, `<div class="empty">No daemons yet. Add one under Infrastructure › Daemons.</div>`);
       return;
     }
-    const all = await api.get<AdminResource[]>("/resources");
-    if (!ctx.stillCurrent(gen)) return;
+    // Paint from the last answer at once and again when the fresh one lands, so
+    // moving between daemon tabs does not wait on every daemon each time.
+    const build = (all: AdminResource[]) => {
     // Pools list their volumes beneath them.
     const rows = all.filter((r) => r.conn === conn && (r.kind === kind || (kind === "pool" && r.kind === "volume")));
     const counts = new Map(conns.map((c) => [c.id, all.filter((r) => r.conn === c.id && r.kind === kind).length]));
@@ -855,6 +863,11 @@ function resourcePage(kind: "vm" | "ct" | "network" | "pool"): Painter {
       });
     };
     paint();
+    };
+    if (resCache) build(resCache);
+    resCache = await api.get<AdminResource[]>("/resources");
+    if (!ctx.stillCurrent(gen)) return;
+    build(resCache);
   };
 }
 
@@ -1294,14 +1307,27 @@ export function limitSpecs(
 /// parts -- the card strip, metric panels with meters, spec grids and grid
 /// tables -- so it reads as the same product, split into tabs like every
 /// other multi-part page.
+let dashRes: AdminResource[] | null = null;
+let dashUsage: UsageRow[] | null = null;
+
 const dashboard_: Painter = async (ctx, area, gen) => {
-  const [res, usage, acl, act, keys] = await Promise.all([
-    api.get<AdminResource[]>("/resources"),
-    api.get<UsageRow[]>("/usage"),
+  // Users, groups, grants, keys and the activity log live on this server; VMs,
+  // networks and usage are read from the daemons. The first set paints at once
+  // and the second fills in when the daemons answer (or fail to), so a slow or
+  // dead daemon cannot hold the whole dashboard.
+  const [acl, act, keys] = await Promise.all([
     api.get<AclEntry[]>("/acl"),
     api.get<{ entries: ActivityEntry[] }>("/activity"),
     api.get<ApiKey[]>("/keys"),
   ]);
+  // The daemon-backed figures are kept from the last visit, so switching tab
+  // paints them at once and refreshes behind; each is awaited on its own, so
+  // Usage does not sit behind the resource listing or the other way round.
+  let res: AdminResource[] = dashRes ?? [];
+  let usage: UsageRow[] = dashUsage ?? [];
+  let resWait = !dashRes;
+  let useWait = !dashUsage;
+  const paint = () => {
   if (!ctx.stillCurrent(gen)) return;
   const dashTab = ctx.tab() ?? "overview";
 
@@ -1354,10 +1380,10 @@ const dashboard_: Painter = async (ctx, area, gen) => {
       <div class="sumgrid">
         ${panel(ic.server(), "Daemons", `${online}/${conns.length}`, conns.length ? (online / conns.length) * 100 : 0,
           `${online} online`, `${conns.length - online} offline`, "daemons")}
-        ${panel(ic.vms(), "VMs", String(vms.length), vms.length ? (running / vms.length) * 100 : 0,
-          `${running} running`, `${ownedByUsers} owned by users`, "vms")}
-        ${panel(ic.network(), "Networks", String(nets.length), nets.length ? (activeNets / nets.length) * 100 : 0,
-          `${activeNets} active`, `${vols.length} volumes`, "networks")}
+        ${panel(ic.vms(), "VMs", resWait ? "…" : String(vms.length), vms.length ? (running / vms.length) * 100 : 0,
+          resWait ? "" : `${running} running`, resWait ? "" : `${ownedByUsers} owned by users`, "vms")}
+        ${panel(ic.network(), "Networks", resWait ? "…" : String(nets.length), nets.length ? (activeNets / nets.length) * 100 : 0,
+          resWait ? "" : `${activeNets} active`, resWait ? "" : `${vols.length} volumes`, "networks")}
         ${panel(ic.autostart(), "Activity today", String(today.length),
           today.length ? (failedToday / today.length) * 100 : 0,
           `${today.length - failedToday} done`, `${failedToday} failed`, "activity")}
@@ -1376,9 +1402,13 @@ const dashboard_: Painter = async (ctx, area, gen) => {
             ...act.entries.filter((e) => e.status === "failed").slice(0, 5).map((e) =>
               `<tr class="row-open" tabindex="0" data-go="activity"><td class="tname">Failed: ${esc(e.label)}</td>
                 <td>${esc(e.username)} · ${esc(ctx.relTime(e.at_ms))}</td><td class="task-msg">${esc(e.message || "—")}</td></tr>`),
-          ].join("") || `<tr><td colspan="3" class="empty">Nothing needs attention.</td></tr>`}
+          ].join("") || `<tr><td colspan="3" class="empty">${resWait ? "Checking daemons…" : "Nothing needs attention."}</td></tr>`}
         </table>
       </div>`;
+  } else if (useWait && dashTab === "usage") {
+    body = `<div class="card-grid">${skeleton("cards")}</div>`;
+  } else if (resWait && dashTab === "ownership") {
+    body = skeleton("table");
   } else if (dashTab === "usage") {
     // One card per limited user, each limit its own meter.
     body = limited.length ? `<div class="card-grid">${limited.map((u) => {
@@ -1455,6 +1485,12 @@ const dashboard_: Painter = async (ctx, area, gen) => {
       if (u) openQuota(ctx, u);
     };
   });
+  };
+  paint();
+  await Promise.all([
+    api.get<AdminResource[]>("/resources").catch(() => dashRes ?? []).then((r) => { dashRes = res = r; resWait = false; paint(); }),
+    api.get<UsageRow[]>("/usage").catch(() => dashUsage ?? []).then((u) => { dashUsage = usage = u; useWait = false; paint(); }),
+  ]);
 };
 
 const SECTIONS: Record<AdminSection, Painter> = {

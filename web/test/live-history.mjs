@@ -41,20 +41,22 @@ const cpuChart = () => d.querySelector("#dash .metric svg.spark");
 const values = (svg) => (svg?.dataset.v ?? "").split(",");
 
 await until(() => cpuChart());
-check("the host dashboard has a range bar, Live selected",
-  d.querySelector("#dash .range-bar [data-range=live].on") && d.querySelectorAll("#dash [data-range]").length === 6);
-check("live charts span the last minute", values(cpuChart()).length === 60 && d.querySelector("#dash .chart-axis")?.textContent.includes("-1m"));
+const rangeSel = () => d.querySelector("#dash .range-sel");
+const pick = (key) => { rangeSel().value = key; rangeSel().dispatchEvent(new w.Event("change", { bubbles: true })); };
+check("every chart has a range dropdown, Live selected",
+  rangeSel()?.value === "live" && rangeSel().options.length === 6);
+check("live charts span the last minute", values(cpuChart()).length === 60);
 check("live mode reads no history", !requests.some((u) => u.includes("/history")));
 
-d.querySelector("#dash [data-range='1h']").click();
+pick("1h");
 check("choosing 1h redraws from stored history",
-  await until(() => d.querySelector("#dash [data-range='1h'].on") && values(cpuChart()).length > 60),
+  await until(() => rangeSel()?.value === "1h" && values(cpuChart()).length > 60),
   `${values(cpuChart()).length} points`);
 check("…with the axis labelled -1h", d.querySelector("#dash .chart-axis")?.textContent.includes("-1h"));
 check("…read from /history for this server", requests.some((u) => u.includes("/history") && u.includes("kind=host") && u.includes(`conn=${conn.id}`)));
 const v = values(cpuChart());
 check("the stored hour has samples", v.some((x) => x !== ""), `${v.filter((x) => x !== "").length} non-empty of ${v.length}`);
-check("the choice survives the 1s poll", await wait(2500).then(() => d.querySelector("#dash [data-range='1h'].on") && values(cpuChart()).length > 60));
+check("the choice survives the 1s poll", await wait(2500).then(() => rangeSel()?.value === "1h" && values(cpuChart()).length > 60));
 check("…and is remembered", w.localStorage.getItem("virt-man.range") === "1h");
 
 // Hover: jsdom has no layout, so give the chart a box, then point at the
@@ -73,8 +75,8 @@ check("hovering a point shows its time and value", tip && /^\d\d:\d\d(:\d\d)? ·
 check("…with a marker on that point", Math.abs(parseFloat(d.querySelector(".spark-mark")?.style.left) - clientX) < 0.01);
 // A gap: the 14-day range starts before this server ever sampled (a full
 // hour may have no gap at all once collection is an hour old).
-d.querySelector("#dash [data-range='14d']").click();
-await until(() => d.querySelector("#dash [data-range='14d'].on") && cpuChart()?.dataset.v);
+pick("14d");
+await until(() => rangeSel()?.value === "14d" && cpuChart()?.dataset.v);
 const long = cpuChart();
 long.getBoundingClientRect = () => box;
 const lv = values(long);
@@ -87,7 +89,7 @@ d.body.dispatchEvent(new w.PointerEvent("pointermove", { bubbles: true, clientX:
 check("moving off the chart hides the readout", !d.querySelector(".spark-tip") && !d.querySelector(".spark-mark"));
 
 // Live charts get the readout too.
-d.querySelector("#dash [data-range=live]").click();
+pick("live");
 await until(() => values(cpuChart()).length === 60);
 const live = cpuChart();
 live.getBoundingClientRect = () => box;
