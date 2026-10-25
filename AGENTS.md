@@ -400,18 +400,24 @@ Things that bite:
 - **Ownership is recorded by the proxy** when the daemon accepts a create
   (`guard::after`), and renames carry it and the grants. Anything made outside
   the app belongs to the first administrator.
-- **The admin page is a view** (`/admin/<section>`, `web/src/admin.ts`), not a
-  modal: it replaces the sidebar, and the admin button becomes its return
-  button. Every section has its own path, and a tabbed section its tab too
-  (`/admin/dashboard/usage`; `route.ts` `ADMIN_TABS`); `/admin` is the
-  dashboard. The sidebar groups sections under
-  `ADMIN_GROUPS`, and a new section must go in one. Its sections read on
-  demand; the 1 s poll skips it. Servers are managed there (Daemons), not on
-  the Datacenter, and an old `/servers` link lands on that page. VMs, Networks
-  and Storage Pools are separate sections, each tabbed by daemon
-  (`/admin/vms/<node>`; `route.ts` `DAEMON_TABBED`). Creating one for a user
-  opens the normal form over the admin page with an explicit `conn` and an
-  `after` callback, and never navigates away from it.
+- **The admin panel is a window, not a view** (`web/src/admin.ts`, `main.ts`
+  `openAdmin`/`closeAdmin`). The admin button opens a modal that grows from it
+  over the page that was open; that page keeps its place, polling and URL, and
+  the window has no URL of its own. The button toggles it. Sections are listed
+  in the window's `.admin-nav` (`ADMIN_GROUPS`; a new section must go in one)
+  and paint into `#admin-area`, reading on demand with their own generation
+  (`adminGen`), independent of `beginRender()`. An old `/admin/<section>[/<tab>]`
+  link still parses (`route.ts`) and opens the window over the datacenter.
+  Servers are managed there (Daemons); VMs, Networks and Storage Pools are
+  tabbed by daemon. Creating one for a user opens the normal form above the
+  window with an explicit `conn` and an `after` callback, and never navigates.
+  Tests look for the topmost `.modal-back.open`, since the window is one too.
+  Section changes slide vertically and tab changes sideways (`renderAdmin`).
+  The slide starts from a `MutationObserver` on the first real paint, not when
+  the painter's promise resolves, or a frame shows the page in place before the
+  animation restarts; the pending direction (`adminEnter`, `adminTabDir`) is
+  cleared only when a slide plays; and `sk-reveal` is removed first, since it
+  animates the same transform.
 
 **Guests, networks and pools are named by their UUID.** A new one's
 manager id is its UUID and what the user typed is its `<title>` (a pool has no
