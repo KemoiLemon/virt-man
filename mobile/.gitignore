@@ -1,0 +1,6 @@
+VirtMan.xcodeproj/
+VirtMan/Info.plist
+build/
+DerivedData/
+*.ipa
+__pycache__/

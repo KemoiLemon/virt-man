@@ -1,0 +1,84 @@
+name: VirtMan
+options:
+  bundleIdPrefix: top.kemoi
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_BITCODE: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  VirtMan:
+    type: application
+    platform: iOS
+    sources:
+      - path: VirtMan
+        excludes: ["Info.plist"]
+    info:
+      path: VirtMan/Info.plist
+      properties:
+        CFBundleDisplayName: VirtMan
+        CFBundleName: VirtMan
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleExecutable: "$(EXECUTABLE_NAME)"
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleIconName: AppIcon
+        LSRequiresIPhoneOS: true
+        MinimumOSVersion: "16.0"
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: >-
+          VirtMan connects to the virt-man web server on your local network to
+          list and control virtual machines.
+        NSAppTransportSecurity:
+          # Hosts are user-supplied LAN names/IPs; identity is the pinned leaf
+          # certificate in Trust.swift, not the system CA store.
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.kemoi.virtman
+        PRODUCT_NAME: VirtMan
+        GENERATE_INFOPLIST_FILE: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SUPPORTS_MACCATALYST: "NO"
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+
+  VirtManTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [VirtManTests]
+    dependencies:
+      - target: VirtMan
+    settings:
+      base:
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/VirtMan.app/VirtMan"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  VirtMan:
+    build:
+      targets:
+        VirtMan: all
+        VirtManTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [VirtManTests]
