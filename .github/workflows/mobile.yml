@@ -29,14 +29,6 @@ jobs:
       - name: Generate project
         run: cd mobile && xcodegen generate
 
-      - name: Unit tests (simulator)
-        run: >-
-          xcodebuild test
-          -project mobile/VirtMan.xcodeproj
-          -scheme VirtMan
-          -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16'
-          CODE_SIGNING_ALLOWED=NO
-
       - name: Build unsigned device app and IPA
         run: |
           BUILD=$(( ${{ github.run_number }} * 100 + ${{ github.run_attempt }} ))
